@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-
 import re
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -106,10 +105,10 @@ def main() -> int:
         raise RuntimeError(f"No existe el directorio de entrenamiento: {TRAINING_DIR}")
 
     require_command("graph2mat")
-
     ckpt_path = resolve_ckpt_rel_path()
     cmd = [ckpt_path if token == "__CKPT_PATH__" else token for token in TEST_COMMAND]
     run_command(cmd, cwd=TRAINING_DIR)
+
 
     print("\n=== Testeo completado correctamente ===")
     return 0

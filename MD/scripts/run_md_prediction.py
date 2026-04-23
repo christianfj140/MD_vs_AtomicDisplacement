@@ -58,7 +58,6 @@ def resolve_ckpt_rel_path() -> str:
         "Entrena el modelo primero o ajusta la ruta del checkpoint."
     )
 
-
 PREDICT_COMMAND = [
     "graph2mat",
     "models",
@@ -111,6 +110,7 @@ def main() -> int:
     # Importante: el patrón con '*' se pasa literalmente a graph2mat para que él
     # expanda/gestione la lectura de estructuras, siguiendo command_history.txt.
     run_command(cmd, cwd=TRAINING_DIR)
+
 
     print("\n=== Predicción completada correctamente ===")
     return 0
