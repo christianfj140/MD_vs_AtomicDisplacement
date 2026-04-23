@@ -11,6 +11,7 @@ graph2mat models mace main predict \
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,44 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAINING_DIR = REPO_ROOT / "MD" / "training"
+DEFAULT_CKPT_REL_PATH = "lightning_logs/my_first_model/version_0/checkpoints/best-2040.ckpt"
+
+
+def _best_step(path: Path) -> int:
+    match = re.search(r"best-(\d+)\.ckpt$", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def resolve_ckpt_rel_path() -> str:
+    """Resuelve el checkpoint a usar para test/predict.
+
+    Prioridad:
+    1) Ruta fija original de command_history.txt (best-2040.ckpt).
+    2) Si no existe, elegir automáticamente el best-<step>.ckpt más alto dentro de
+       lightning_logs/*/checkpoints/, siguiendo la pista de command_history_variables.
+    """
+    default_abs = TRAINING_DIR / DEFAULT_CKPT_REL_PATH
+    if default_abs.exists():
+        return DEFAULT_CKPT_REL_PATH
+
+    candidates = sorted(
+        TRAINING_DIR.glob("lightning_logs/**/checkpoints/best-*.ckpt"),
+        key=_best_step,
+    )
+
+    if candidates:
+        selected = candidates[-1]
+        rel = selected.relative_to(TRAINING_DIR).as_posix()
+        print(
+            "[WARN] No existe el checkpoint hardcodeado best-2040.ckpt. "
+            f"Se usará automáticamente: {rel}"
+        )
+        return rel
+
+    raise RuntimeError(
+        "No se encontró ningún checkpoint best-*.ckpt en MD/training/lightning_logs. "
+        "Entrena el modelo primero o ajusta la ruta del checkpoint."
+    )
 
 PREDICT_COMMAND = [
     "graph2mat",
@@ -26,7 +65,7 @@ PREDICT_COMMAND = [
     "main",
     "predict",
     "--ckpt_path",
-    "lightning_logs/my_first_model/version_0/checkpoints/best-2040.ckpt",
+    "__CKPT_PATH__",
     "--data.predict_structs",
     "../dataset/MD_steps/*/RUN.fdf",
     "--trainer.callbacks+",
@@ -63,9 +102,15 @@ def main() -> int:
 
     require_command("graph2mat")
 
+    ckpt_path = resolve_ckpt_rel_path()
+    cmd = [
+        ckpt_path if token == "__CKPT_PATH__" else token for token in PREDICT_COMMAND
+    ]
+
     # Importante: el patrón con '*' se pasa literalmente a graph2mat para que él
     # expanda/gestione la lectura de estructuras, siguiendo command_history.txt.
-    run_command(PREDICT_COMMAND, cwd=TRAINING_DIR)
+    run_command(cmd, cwd=TRAINING_DIR)
+
 
     print("\n=== Predicción completada correctamente ===")
     return 0

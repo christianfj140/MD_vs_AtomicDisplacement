@@ -3,8 +3,10 @@
 
 Orden estricto de ejecución:
 1) generate_md_dataset.py
-2) run_md_testing.py
-3) run_md_prediction.py
+2) run_md_training.py
+3) run_md_testing.py
+4) run_md_prediction.py
+
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 PIPELINE_SCRIPTS = [
     SCRIPTS_DIR / "generate_md_dataset.py",
+    SCRIPTS_DIR / "run_md_training.py",
     SCRIPTS_DIR / "run_md_testing.py",
     SCRIPTS_DIR / "run_md_prediction.py",
 ]
