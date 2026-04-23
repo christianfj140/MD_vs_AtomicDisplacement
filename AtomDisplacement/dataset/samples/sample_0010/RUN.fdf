@@ -20,9 +20,9 @@ LatticeConstant  1.0 Ang
 
 AtomicCoordinatesFormat Ang
 %block AtomicCoordinatesAndAtomicSpecies
- 7.52169482  7.57830923  7.60586169  1  # O
- 7.47978111  8.35209085  7.01241480  2  # H
- 7.52453883  6.78225073  7.04991116  2  # H
+ 7.50159716  7.56047557  7.58760459  1  # O
+ 7.50031600  8.30608618  6.98241190  2  # H
+ 7.51954820  6.79629119  6.98146317  2  # H
 %endblock AtomicCoordinatesAndAtomicSpecies
 
 %block kgrid_Monkhorst_Pack

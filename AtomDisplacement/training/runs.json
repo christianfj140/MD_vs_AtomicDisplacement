@@ -1,0 +1,24 @@
+{
+  "train": [
+    "../dataset/samples/sample_0001/RUN.fdf",
+    "../dataset/samples/sample_0002/RUN.fdf",
+    "../dataset/samples/sample_0003/RUN.fdf",
+    "../dataset/samples/sample_0004/RUN.fdf",
+    "../dataset/samples/sample_0005/RUN.fdf",
+    "../dataset/samples/sample_0006/RUN.fdf",
+    "../dataset/samples/sample_0007/RUN.fdf",
+    "../dataset/samples/sample_0008/RUN.fdf",
+    "../dataset/samples/sample_0009/RUN.fdf",
+    "../dataset/samples/sample_0010/RUN.fdf",
+    "../dataset/samples/sample_0011/RUN.fdf",
+    "../dataset/samples/sample_0012/RUN.fdf",
+    "../dataset/samples/sample_0013/RUN.fdf",
+    "../dataset/samples/sample_0014/RUN.fdf",
+    "../dataset/samples/sample_0015/RUN.fdf",
+    "../dataset/samples/sample_0016/RUN.fdf",
+    "../dataset/samples/sample_0017/RUN.fdf",
+    "../dataset/samples/sample_0018/RUN.fdf",
+    "../dataset/samples/sample_0019/RUN.fdf",
+    "../dataset/samples/sample_0020/RUN.fdf"
+  ]
+}

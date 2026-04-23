@@ -3,7 +3,7 @@ data:
     out_matrix: hamiltonian
     symmetric_matrix: True
     basis_files: ../relaxed/*.ion.xml
-    train_runs: ../dataset/samples/*/RUN.fdf
+    runs_json: runs.json
     batch_size: 10
     store_in_memory: True
 model:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -16,12 +17,22 @@ from atom_displacement_utils import (
 )
 
 CONFIG_PATH = TRAINING_DIR / "config.yaml"
+RUNS_JSON_PATH = TRAINING_DIR / "runs.json"
 MODEL_NAME = "atom_displacement_model"
 FIT_COMMAND = ["graph2mat", "models", "mace", "main", "fit", "-c", "config.yaml"]
 
 
 def relpath_from_training(path: Path) -> str:
     return os.path.relpath(path, TRAINING_DIR).replace("\\", "/")
+
+
+def write_runs_json(sample_dirs: list[Path]) -> str:
+    runs = [relpath_from_training(sample_dir / "RUN.fdf") for sample_dir in sample_dirs]
+    RUNS_JSON_PATH.write_text(
+        json.dumps({"train": runs}, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    return RUNS_JSON_PATH.name
 
 
 def build_config_yaml() -> str:
@@ -32,24 +43,25 @@ def build_config_yaml() -> str:
             "Se necesitan al menos 2 muestras completadas para entrenar. "
             "Ejecuta primero run_single_points.py para generar mas datos validos."
         )
-    if len(sample_dirs) != len(all_sample_dirs):
-        raise RuntimeError(
-            "Hay muestras generadas pero no todas estan completadas. "
-            "Termina primero run_single_points.py para poder usar el patron global de train_runs."
-        )
     if not relaxed_basis_files():
         raise RuntimeError("No se encontraron ficheros .ion.xml en relaxed/")
 
     basis_glob = relpath_from_training(TRAINING_DIR.parent / "relaxed" / "*.ion.xml")
-    train_runs_glob = relpath_from_training(TRAINING_DIR.parent / "dataset" / "samples" / "*" / "RUN.fdf")
+    runs_json = write_runs_json(sample_dirs)
     batch_size = min(10, len(sample_dirs))
+
+    if len(sample_dirs) != len(all_sample_dirs):
+        print(
+            "[WARN] No todas las muestras generadas estan completadas. "
+            f"Se entrenara solo con {len(sample_dirs)} de {len(all_sample_dirs)}."
+        )
 
     return f"""# pytorch_lightning==2.6.1
 data:
     out_matrix: hamiltonian
     symmetric_matrix: True
     basis_files: {basis_glob}
-    train_runs: {train_runs_glob}
+    runs_json: {runs_json}
     batch_size: {batch_size}
     store_in_memory: True
 model:

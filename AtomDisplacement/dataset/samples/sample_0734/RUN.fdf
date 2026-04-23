@@ -1,0 +1,64 @@
+# Single-point calculation for an atom-displaced H2O geometry
+
+SystemName   H2O sample_0734
+SystemLabel  sample_0734
+
+NumberOfSpecies  2
+NumberOfAtoms    3
+
+%block ChemicalSpeciesLabel
+ 1   8  O
+ 2   1  H
+%endblock ChemicalSpeciesLabel
+
+LatticeConstant  1.0 Ang
+%block LatticeVectors
+ 15.00000000  0.00000000  0.00000000
+ 0.00000000  15.00000000  0.00000000
+ 0.00000000  0.00000000  15.00000000
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+ 7.52400524  7.57482665  7.61694858  1  # O
+ 7.49568803  8.32916096  7.02730955  2  # H
+ 7.47582014  6.79450928  6.99361432  2  # H
+%endblock AtomicCoordinatesAndAtomicSpecies
+
+%block kgrid_Monkhorst_Pack
+ 1  0  0  0.0
+ 0  1  0  0.0
+ 0  0  1  0.0
+%endblock kgrid_Monkhorst_Pack
+
+ForceAuxCell       T
+MeshCutoff         200 Ry
+PAO.BasisType      split
+PAO.BasisSize      DZP
+PAO.EnergyShift    0.03 eV
+XC.functional      GGA
+XC.authors         PBE
+MaxSCFIterations   200
+SolutionMethod     diagon
+
+DM.MixingWeight                0.02
+DM.NumberPulay                3
+DM.Tolerance                  1.d-5
+DM.Require.Energy.Convergence T
+DM.Energy.Tolerance           1.e-5 eV
+SCF.MixAfterConvergence       F
+
+SpinPolarized     F
+FixSpin           F
+NonCollinearSpin  F
+DM.InitSpinAF     F
+
+ON.UseSaveLWF     T
+DM.UseSaveDM      F
+UseSaveData       T
+LongOutput        T
+WriteCoorXmol     T
+WriteCoorStep     T
+WriteForces       T
+SaveHS            T
+XML.Write         T

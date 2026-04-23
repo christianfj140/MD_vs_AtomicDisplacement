@@ -43,18 +43,51 @@ def displaced_structure(
     reference: Structure,
     rng: random.Random,
     sigma: float,
+    max_displacement_norm: float,
 ) -> tuple[Structure, list[list[float]], list[float]]:
     displacements: list[list[float]] = []
     norms: list[float] = []
     positions: list[list[float]] = []
     for position in reference.positions_ang:
-        displacement = [rng.gauss(0.0, sigma) for _ in range(3)]
+        displacement = bounded_gaussian_displacement(
+            rng=rng,
+            sigma=sigma,
+            max_displacement_norm=max_displacement_norm,
+        )
         norm = math.sqrt(sum(value * value for value in displacement))
         displacements.append(displacement)
         norms.append(norm)
         positions.append([coordinate + delta for coordinate, delta in zip(position, displacement)])
 
     return structure_with_positions(reference, positions), displacements, norms
+
+
+def bounded_gaussian_displacement(
+    rng: random.Random,
+    sigma: float,
+    max_displacement_norm: float,
+) -> list[float]:
+    """Sample a small random displacement whose norm is always below the threshold.
+
+    We use rejection sampling from a 3D Gaussian and only accept vectors inside the
+    allowed sphere. This keeps the perturbations local around the relaxed geometry
+    while guaranteeing that no atom moves more than the requested limit.
+    """
+    max_attempts = 1000
+    for _ in range(max_attempts):
+        displacement = [rng.gauss(0.0, sigma) for _ in range(3)]
+        norm = math.sqrt(sum(value * value for value in displacement))
+        if norm <= max_displacement_norm:
+            return displacement
+
+    # Extremely defensive fallback: if the truncated Gaussian kept failing, project
+    # the last draw back onto the allowed sphere so we still satisfy the threshold.
+    displacement = [rng.gauss(0.0, sigma) for _ in range(3)]
+    norm = math.sqrt(sum(value * value for value in displacement))
+    if norm == 0.0:
+        return [0.0, 0.0, 0.0]
+    scale = max_displacement_norm / norm
+    return [value * scale for value in displacement]
 
 
 def is_valid_structure(
@@ -101,7 +134,12 @@ def main() -> int:
                 f"No fue posible generar {args.num_samples} muestras validas tras {attempts} intentos."
             )
 
-        candidate, displacements, norms = displaced_structure(reference, rng, args.sigma)
+        candidate, displacements, norms = displaced_structure(
+            reference=reference,
+            rng=rng,
+            sigma=args.sigma,
+            max_displacement_norm=args.max_displacement_norm,
+        )
         is_valid, metrics = is_valid_structure(candidate, norms, args)
         if not is_valid:
             rejected += 1
