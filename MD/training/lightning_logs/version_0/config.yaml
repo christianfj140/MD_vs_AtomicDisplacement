@@ -135,6 +135,6 @@ data:
 multiprocessing_sharing_strategy: ''
 optimizer: null
 lr_scheduler: null
-ckpt_path: lightning_logs/my_first_model/version_0/checkpoints/best-960.ckpt
+ckpt_path: lightning_logs/my_first_model/version_0/checkpoints/best-885.ckpt
 verbose: true
 weights_only: null

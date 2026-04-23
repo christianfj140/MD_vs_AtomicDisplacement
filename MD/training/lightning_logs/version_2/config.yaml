@@ -59,7 +59,7 @@ trainer:
   limit_train_batches: null
   limit_val_batches: null
   limit_test_batches: null
-  limit_predict_batches: 1.0
+  limit_predict_batches: null
   overfit_batches: 0.0
   val_check_interval: null
   check_val_every_n_epoch: 1
@@ -131,5 +131,5 @@ multiprocessing_sharing_strategy: ''
 optimizer: null
 lr_scheduler: null
 return_predictions: null
-ckpt_path: lightning_logs/my_first_model/version_0/checkpoints/best-960.ckpt
+ckpt_path: lightning_logs/my_first_model/version_1/checkpoints/best-995.ckpt
 weights_only: null

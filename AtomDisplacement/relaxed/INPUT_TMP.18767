@@ -1,0 +1,63 @@
+# Relaxation of an isolated water molecule with SIESTA
+SystemName   H2O molecule relaxation
+SystemLabel  h2o_relax
+NumberOfSpecies  2
+NumberOfAtoms    3
+%block ChemicalSpeciesLabel
+ 1   8   O
+ 2   1   H
+%endblock ChemicalSpeciesLabel
+LatticeConstant  1.0 Ang
+%block LatticeVectors
+ 15.00000000   0.00000000   0.00000000
+  0.00000000  15.00000000   0.00000000
+  0.00000000   0.00000000  15.00000000
+%endblock LatticeVectors
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+ 7.50000000  7.50000000  7.61926200  1  # O
+ 7.50000000  8.26323900  7.02295300  2  # H
+ 7.50000000  6.83683900  7.02295300  2  # H
+%endblock AtomicCoordinatesAndAtomicSpecies
+%block kgrid_Monkhorst_Pack
+ 1  0  0  0.0
+ 0  1  0  0.0
+ 0  0  1  0.0
+%endblock kgrid_Monkhorst_Pack
+ForceAuxCell       T
+MeshCutoff         200 Ry
+PAO.BasisType      split
+PAO.BasisSize      DZP
+PAO.EnergyShift    0.03 eV
+XC.functional      GGA
+XC.authors         PBE
+MaxSCFIterations   200
+SolutionMethod     diagon
+DM.MixingWeight                0.02
+DM.NumberPulay                3
+DM.Tolerance                  1.d-5
+DM.Require.Energy.Convergence T
+DM.Energy.Tolerance           1.e-5 eV
+SCF.MixAfterConvergence       F
+MD.TypeOfRun      CG
+MD.NumCGsteps     200
+MD.MaxForceTol    0.04 eV/Ang
+MD.MaxCGDispl     0.03 Bohr
+MD.VariableCell   F
+MD.ConstantVolume T
+MD.UseSaveXV      T
+MD.UseSaveCG      T
+WriteMDHistory    T
+WriteCoorXmol     T
+WriteCoorStep     T
+WriteForces       T
+SpinPolarized     F
+FixSpin           F
+NonCollinearSpin  F
+DM.InitSpinAF     F
+ON.UseSaveLWF     T
+DM.UseSaveDM      T
+UseSaveData       T
+LongOutput        T
+SaveHS            T
+XML.Write         T

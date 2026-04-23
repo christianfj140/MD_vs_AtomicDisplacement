@@ -1,0 +1,2 @@
+sample_name,block_type_mse,block_type_mae,block_type_mape,block_type_mapestdmix,elementwise_mse,node_mse,edge_mse,block_type_mse_threshold,block_type_mapemaemix,block_type_mapemsemix,block_type_mse_sigmoid_thresh,block_type_mae_sigmoid_thresh,normalized_density_error,split,epoch
+sample_0001,1.816581130027771,0.645984411239624,nan,nan,1.0167449712753296,1.5420714616775513,0.27450963854789734,760.5253295898438,nan,nan,760.5252685546875,257.8164978027344,nan,test,0

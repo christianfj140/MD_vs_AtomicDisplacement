@@ -1,0 +1,29 @@
+
+ENTRENAMIENTO
+mkdir dataset
+cd dataset
+graph2mat siesta md setup-store
+cd ..
+crear RUN.fdf
+source /home/christian/graph2mat-env/bin/activate
+siesta < RUN.fdf | tee RUN.out
+cd .. 
+mkdir training
+cd training
+crear config.yaml
+graph2mat models mace main fit -c config.yaml
+(opcional si se quieren ver metricas) tensorboard --logdir lightning_logs
+
+TESTEO
+graph2mat models mace main test \
+   --ckpt_path lightning_logs/my_first_model/version_0/checkpoints/best-2040.ckpt  \
+   --data.test_runs ../dataset/MD_steps/25/RUN.fdf \
+   --trainer.callbacks+ PlotMatrixError --trainer.callbacks.show True \
+   --trainer.callbacks+ SamplewiseMetricsLogger
+   
+   
+PREDICCION
+graph2mat models mace main predict \
+   --ckpt_path lightning_logs/my_first_model/version_0/checkpoints/best-2040.ckpt  \
+   --data.predict_structs "../dataset/MD_steps/*/RUN.fdf" \
+   --trainer.callbacks+ MatrixWriter --trainer.callbacks.output_file ML_prediction.DM

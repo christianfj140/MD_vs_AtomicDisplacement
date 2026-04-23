@@ -42,14 +42,19 @@ trainer:
       every_n_epochs: null
       save_on_train_epoch_end: null
       enable_version_counter: true
-  - class_path: graph2mat.tools.lightning.MatrixWriter
+  - class_path: graph2mat.tools.lightning.PlotMatrixError
     init_args:
-      output_file: ML_prediction.DM
+      split: null
+      show: true
+      store_in_logger: true
+  - class_path: graph2mat.tools.lightning.SamplewiseMetricsLogger
+    init_args:
+      metrics: null
       splits:
       - train
       - val
       - test
-      - predict
+      output_file: sample_metrics.csv
   fast_dev_run: false
   max_epochs: null
   min_epochs: null
@@ -115,8 +120,8 @@ data:
   root_dir: .
   train_runs: ../dataset/MD_steps/*/RUN.fdf
   val_runs: null
-  test_runs: null
-  predict_structs: ../dataset/MD_steps/*/RUN.fdf
+  test_runs: ../dataset/MD_steps/25/RUN.fdf
+  predict_structs: null
   runs_json: null
   symmetric_matrix: true
   sub_point_matrix: true
@@ -130,6 +135,6 @@ data:
 multiprocessing_sharing_strategy: ''
 optimizer: null
 lr_scheduler: null
-return_predictions: null
-ckpt_path: lightning_logs/my_first_model/version_0/checkpoints/best-960.ckpt
+ckpt_path: lightning_logs/my_first_model/version_1/checkpoints/best-995.ckpt
+verbose: true
 weights_only: null

@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""Shared utilities for the H2O atom-displacement dataset pipeline."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import shlex
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+BOHR_TO_ANG = 0.529177210903
+RY_TO_EV = 13.605693009
+DEFAULT_VENV_ACTIVATE = Path("/home/christian/graph2mat-env/bin/activate")
+
+ATOM_ROOT = Path(__file__).resolve().parents[1]
+BASE_DIR = ATOM_ROOT / "base"
+RELAXED_DIR = ATOM_ROOT / "relaxed"
+DATASET_DIR = ATOM_ROOT / "dataset"
+SAMPLES_DIR = DATASET_DIR / "samples"
+COLLECTED_DIR = DATASET_DIR / "collected"
+TRAINING_DIR = ATOM_ROOT / "training"
+
+
+@dataclass
+class Structure:
+    lattice_vectors_ang: list[list[float]]
+    species_labels: dict[int, tuple[int, str]]
+    atom_species: list[int]
+    positions_ang: list[list[float]]
+
+    @property
+    def symbols(self) -> list[str]:
+        return [self.species_labels[index][1] for index in self.atom_species]
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "lattice_vectors_ang": self.lattice_vectors_ang,
+            "species_labels": {
+                str(key): {"atomic_number": value[0], "symbol": value[1]}
+                for key, value in self.species_labels.items()
+            },
+            "atom_species": self.atom_species,
+            "positions_ang": self.positions_ang,
+            "symbols": self.symbols,
+        }
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def require_command(command_name: str) -> None:
+    if shutil.which(command_name) is None:
+        raise RuntimeError(
+            f"No se encontro '{command_name}' en PATH. Activa el entorno correcto."
+        )
+
+
+def run_command(cmd: list[str], cwd: Path) -> None:
+    result = subprocess.run(cmd, cwd=cwd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"El comando fallo con codigo {result.returncode}: {' '.join(cmd)}"
+        )
+
+
+def run_command_printing(cmd: list[str], cwd: Path) -> None:
+    print(f"\n[RUN] {' '.join(cmd)}")
+    run_command(cmd, cwd)
+
+
+def run_command_in_venv(
+    cmd: list[str],
+    cwd: Path,
+    activate_path: Path = DEFAULT_VENV_ACTIVATE,
+) -> None:
+    if not activate_path.exists():
+        raise RuntimeError(
+            f"No se encontro el script de activacion esperado en {activate_path}"
+        )
+
+    quoted_cmd = " ".join(shlex_quote(token) for token in cmd)
+    bash_cmd = f"source '{activate_path}' && {quoted_cmd}"
+    print(f"\n[RUN] bash -lc \"{bash_cmd}\"")
+    result = subprocess.run(["bash", "-lc", bash_cmd], cwd=cwd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"El comando fallo con codigo {result.returncode}: {' '.join(cmd)}"
+        )
+
+
+def run_siesta_in_dir(
+    cwd: Path,
+    run_out_path: Path,
+    activate_path: Path = DEFAULT_VENV_ACTIVATE,
+) -> None:
+    if not activate_path.exists():
+        raise RuntimeError(
+            f"No se encontro el script de activacion esperado en {activate_path}"
+        )
+
+    bash_cmd = f"source '{activate_path}' && siesta < RUN.fdf"
+    with run_out_path.open("w", encoding="utf-8") as run_out:
+        process = subprocess.Popen(
+            ["bash", "-lc", bash_cmd],
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            run_out.write(line)
+
+        return_code = process.wait()
+
+    if return_code != 0:
+        raise RuntimeError(f"siesta termino con codigo {return_code} en {cwd}")
+
+
+def copy_pseudopotentials(src_dir: Path, dst_dir: Path) -> None:
+    ensure_dir(dst_dir)
+    psf_files = sorted(src_dir.glob("*.psf"))
+    if not psf_files:
+        raise RuntimeError(f"No se encontraron pseudopotenciales .psf en {src_dir}")
+
+    for psf in psf_files:
+        shutil.copy2(psf, dst_dir / psf.name)
+
+
+def _read_named_block(lines: list[str], block_name: str) -> list[str]:
+    start = None
+    lower_name = block_name.lower()
+    for index, raw_line in enumerate(lines):
+        if raw_line.strip().lower() == f"%block {lower_name}":
+            start = index + 1
+            break
+
+    if start is None:
+        raise RuntimeError(f"No se encontro el bloque '{block_name}'")
+
+    block: list[str] = []
+    end_marker = f"%endblock {lower_name}"
+    for raw_line in lines[start:]:
+        if raw_line.strip().lower() == end_marker:
+            return block
+        block.append(raw_line)
+
+    raise RuntimeError(f"El bloque '{block_name}' no tiene cierre")
+
+
+def parse_fdf_structure(fdf_path: Path) -> Structure:
+    lines = fdf_path.read_text(encoding="utf-8").splitlines()
+    species_block = _read_named_block(lines, "ChemicalSpeciesLabel")
+    lattice_block = _read_named_block(lines, "LatticeVectors")
+    coords_block = _read_named_block(lines, "AtomicCoordinatesAndAtomicSpecies")
+
+    lattice_constant = 1.0
+    for line in lines:
+        clean = line.split("#", 1)[0].strip()
+        if clean.lower().startswith("latticeconstant"):
+            parts = clean.split()
+            lattice_constant = float(parts[1])
+            break
+
+    species_labels: dict[int, tuple[int, str]] = {}
+    for line in species_block:
+        clean = line.split("#", 1)[0].strip()
+        if not clean:
+            continue
+        index_str, atomic_number_str, symbol = clean.split()[:3]
+        species_labels[int(index_str)] = (int(atomic_number_str), symbol)
+
+    lattice_vectors_ang: list[list[float]] = []
+    for line in lattice_block:
+        clean = line.split("#", 1)[0].strip()
+        if not clean:
+            continue
+        vector = [float(value) * lattice_constant for value in clean.split()[:3]]
+        lattice_vectors_ang.append(vector)
+
+    atom_species: list[int] = []
+    positions_ang: list[list[float]] = []
+    for line in coords_block:
+        clean = line.split("#", 1)[0].strip()
+        if not clean:
+            continue
+        parts = clean.split()
+        positions_ang.append([float(value) for value in parts[:3]])
+        atom_species.append(int(parts[3]))
+
+    return Structure(
+        lattice_vectors_ang=lattice_vectors_ang,
+        species_labels=species_labels,
+        atom_species=atom_species,
+        positions_ang=positions_ang,
+    )
+
+
+def parse_xv_structure(xv_path: Path, species_labels: dict[int, tuple[int, str]]) -> Structure:
+    lines = [line.strip() for line in xv_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lattice_vectors_ang = [
+        [float(value) * BOHR_TO_ANG for value in lines[index].split()[:3]]
+        for index in range(3)
+    ]
+    n_atoms = int(lines[3].split()[0])
+
+    atom_species: list[int] = []
+    positions_ang: list[list[float]] = []
+    for raw_line in lines[4 : 4 + n_atoms]:
+        parts = raw_line.split()
+        atom_species.append(int(parts[0]))
+        positions_ang.append([float(value) * BOHR_TO_ANG for value in parts[2:5]])
+
+    return Structure(
+        lattice_vectors_ang=lattice_vectors_ang,
+        species_labels=species_labels,
+        atom_species=atom_species,
+        positions_ang=positions_ang,
+    )
+
+
+def format_single_point_fdf(structure: Structure, system_label: str, system_name: str) -> str:
+    chemical_species_block = "\n".join(
+        f" {label:>1}  {atomic_number:>2}  {symbol}"
+        for label, (atomic_number, symbol) in sorted(structure.species_labels.items())
+    )
+    lattice_block = "\n".join(
+        f" {vector[0]:.8f}  {vector[1]:.8f}  {vector[2]:.8f}"
+        for vector in structure.lattice_vectors_ang
+    )
+    coords_block = "\n".join(
+        f" {position[0]:.8f}  {position[1]:.8f}  {position[2]:.8f}  {species}"
+        f"  # {structure.species_labels[species][1]}"
+        for position, species in zip(structure.positions_ang, structure.atom_species)
+    )
+    return f"""# Single-point calculation for an atom-displaced H2O geometry
+
+SystemName   {system_name}
+SystemLabel  {system_label}
+
+NumberOfSpecies  {len(structure.species_labels)}
+NumberOfAtoms    {len(structure.atom_species)}
+
+%block ChemicalSpeciesLabel
+{chemical_species_block}
+%endblock ChemicalSpeciesLabel
+
+LatticeConstant  1.0 Ang
+%block LatticeVectors
+{lattice_block}
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+{coords_block}
+%endblock AtomicCoordinatesAndAtomicSpecies
+
+%block kgrid_Monkhorst_Pack
+ 1  0  0  0.0
+ 0  1  0  0.0
+ 0  0  1  0.0
+%endblock kgrid_Monkhorst_Pack
+
+ForceAuxCell       T
+MeshCutoff         200 Ry
+PAO.BasisType      split
+PAO.BasisSize      DZP
+PAO.EnergyShift    0.03 eV
+XC.functional      GGA
+XC.authors         PBE
+MaxSCFIterations   200
+SolutionMethod     diagon
+
+DM.MixingWeight                0.02
+DM.NumberPulay                3
+DM.Tolerance                  1.d-5
+DM.Require.Energy.Convergence T
+DM.Energy.Tolerance           1.e-5 eV
+SCF.MixAfterConvergence       F
+
+SpinPolarized     F
+FixSpin           F
+NonCollinearSpin  F
+DM.InitSpinAF     F
+
+ON.UseSaveLWF     T
+DM.UseSaveDM      F
+UseSaveData       T
+LongOutput        T
+WriteCoorXmol     T
+WriteCoorStep     T
+WriteForces       T
+SaveHS            T
+XML.Write         T
+"""
+
+
+def write_single_point_fdf(path: Path, structure: Structure, sample_id: str) -> None:
+    content = format_single_point_fdf(
+        structure=structure,
+        system_label=sample_id,
+        system_name=f"H2O {sample_id}",
+    )
+    path.write_text(content, encoding="utf-8")
+
+
+def load_reference_structure() -> tuple[Structure, str]:
+    base_structure = parse_fdf_structure(BASE_DIR / "RUN.fdf")
+    xv_files = sorted(RELAXED_DIR.glob("*.XV"))
+    if xv_files:
+        return parse_xv_structure(xv_files[0], base_structure.species_labels), str(xv_files[0])
+    return base_structure, str(BASE_DIR / "RUN.fdf")
+
+
+def distance(point_a: list[float], point_b: list[float]) -> float:
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(point_a, point_b)))
+
+
+def angle_degrees(point_a: list[float], point_b: list[float], point_c: list[float]) -> float:
+    ba = [a - b for a, b in zip(point_a, point_b)]
+    bc = [c - b for c, b in zip(point_c, point_b)]
+    dot = sum(a * c for a, c in zip(ba, bc))
+    norm_ba = math.sqrt(sum(a * a for a in ba))
+    norm_bc = math.sqrt(sum(c * c for c in bc))
+    cosine = dot / (norm_ba * norm_bc)
+    cosine = max(-1.0, min(1.0, cosine))
+    return math.degrees(math.acos(cosine))
+
+
+def compute_water_geometry_metrics(structure: Structure) -> dict[str, float]:
+    symbols = structure.symbols
+    oxygen_indices = [index for index, symbol in enumerate(symbols) if symbol == "O"]
+    hydrogen_indices = [index for index, symbol in enumerate(symbols) if symbol == "H"]
+    if len(oxygen_indices) != 1 or len(hydrogen_indices) != 2:
+        raise RuntimeError("La estructura de referencia no corresponde a una molecula H2O")
+
+    oxygen = oxygen_indices[0]
+    h1, h2 = hydrogen_indices
+    positions = structure.positions_ang
+    oh_1 = distance(positions[oxygen], positions[h1])
+    oh_2 = distance(positions[oxygen], positions[h2])
+    hh = distance(positions[h1], positions[h2])
+    hoh_angle = angle_degrees(positions[h1], positions[oxygen], positions[h2])
+    return {
+        "oh_1_ang": oh_1,
+        "oh_2_ang": oh_2,
+        "hh_ang": hh,
+        "hoh_angle_deg": hoh_angle,
+    }
+
+
+def structure_with_positions(structure: Structure, positions_ang: list[list[float]]) -> Structure:
+    return Structure(
+        lattice_vectors_ang=structure.lattice_vectors_ang,
+        species_labels=structure.species_labels,
+        atom_species=structure.atom_species,
+        positions_ang=positions_ang,
+    )
+
+
+def parse_fa_file(fa_path: Path) -> list[list[float]]:
+    lines = [line.strip() for line in fa_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    n_atoms = int(lines[0].split()[0])
+    forces = []
+    for raw_line in lines[1 : 1 + n_atoms]:
+        parts = raw_line.split()
+        forces.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    return forces
+
+
+def parse_total_energy_ev(sample_dir: Path) -> float | None:
+    outvars_candidates = sorted(sample_dir.glob("OUTVARS*.yml")) + sorted(sample_dir.glob("*.yml"))
+    for outvars_path in outvars_candidates:
+        text = outvars_path.read_text(encoding="utf-8")
+        match = re.search(r"^\s*Etot:\s*([-+0-9.Ee]+)", text, re.MULTILINE)
+        if match:
+            return float(match.group(1)) * RY_TO_EV
+
+    run_out = sample_dir / "RUN.out"
+    if not run_out.exists():
+        return None
+
+    text = run_out.read_text(encoding="utf-8", errors="ignore")
+    match = re.search(r"siesta:\s+Total\s*=\s*([-+0-9.]+)", text)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def sample_run_status(sample_dir: Path) -> dict[str, Any]:
+    run_out = sample_dir / "RUN.out"
+    if not run_out.exists():
+        return {"job_completed": False, "scf_converged": False}
+
+    text = run_out.read_text(encoding="utf-8", errors="ignore")
+    return {
+        "job_completed": "Job completed" in text,
+        "scf_converged": "SCF cycle converged" in text,
+    }
+
+
+def generated_sample_dirs() -> list[Path]:
+    return sorted(path for path in SAMPLES_DIR.glob("sample_*") if path.is_dir())
+
+
+def completed_sample_dirs() -> list[Path]:
+    completed = []
+    for sample_dir in generated_sample_dirs():
+        status = sample_run_status(sample_dir)
+        hsx_path = find_first_output(sample_dir, ".HSX")
+        if status["job_completed"] and status["scf_converged"] and hsx_path is not None:
+            completed.append(sample_dir)
+    return completed
+
+
+def relaxed_basis_files() -> list[Path]:
+    basis_files = sorted(RELAXED_DIR.glob("*.ion.xml"))
+    if not basis_files:
+        raise RuntimeError(
+            f"No se encontraron ficheros .ion.xml en {RELAXED_DIR}. "
+            "Ejecuta primero la relajacion de referencia."
+        )
+    return basis_files
+
+
+def _best_step(path: Path) -> int:
+    match = re.search(r"best-(\d+)\.ckpt$", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def resolve_ckpt_rel_path(training_dir: Path, default_rel_path: str) -> str:
+    default_abs = training_dir / default_rel_path
+    if default_abs.exists():
+        return default_rel_path
+
+    candidates = sorted(
+        training_dir.glob("lightning_logs/**/checkpoints/best-*.ckpt"),
+        key=_best_step,
+    )
+    if candidates:
+        selected = candidates[-1]
+        rel = selected.relative_to(training_dir).as_posix()
+        print(
+            "[WARN] No existe el checkpoint hardcodeado. "
+            f"Se usara automaticamente: {rel}"
+        )
+        return rel
+
+    raise RuntimeError(
+        f"No se encontro ningun checkpoint best-*.ckpt en {training_dir / 'lightning_logs'}."
+    )
+
+
+def find_first_output(sample_dir: Path, suffix: str) -> Path | None:
+    matches = sorted(sample_dir.glob(f"*{suffix}"))
+    return matches[0] if matches else None
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def shlex_quote(value: str) -> str:
+    return shlex.quote(value)

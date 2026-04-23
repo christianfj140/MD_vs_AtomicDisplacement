@@ -1,0 +1,23 @@
+# pytorch_lightning==2.6.1
+data:
+    out_matrix: hamiltonian
+    symmetric_matrix: True
+    basis_files: ../relaxed/*.ion.xml
+    train_runs: ../dataset/samples/*/RUN.fdf
+    batch_size: 10
+    store_in_memory: True
+model:
+    num_interactions: 1
+    correlation: 1
+    max_ell: 2
+    hidden_irreps: 10x0e + 10x1o + 10x2e
+    loss: graph2mat.metrics.block_type_mae
+    optim_lr: 0.005
+trainer:
+    accelerator: cpu
+    logger:
+        class_path: TensorBoardLogger
+        init_args:
+            name: atom_displacement_model
+            save_dir: lightning_logs
+    max_epochs: 200
