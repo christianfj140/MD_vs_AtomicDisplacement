@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pipeline Comparison</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">MD vs AtomDisplacement</p>
+          <h1>Comparison</h1>
+        </div>
+        <nav class="tabs" aria-label="Views">
+          <button class="tab active" data-view="run">Run</button>
+          <button class="tab" data-view="results">Results</button>
+          <button class="tab" data-view="api">API</button>
+        </nav>
+        <div class="status-panel">
+          <span id="global-status-dot" class="status-dot"></span>
+          <span id="global-status-text">Idle</span>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section id="view-run" class="view active">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Execution</p>
+              <h2>Run both pipelines</h2>
+            </div>
+            <div class="button-row">
+              <button id="run-all" class="button primary">Run both</button>
+              <button id="stop-all" class="button danger">Stop</button>
+            </div>
+          </header>
+
+          <div class="grid two">
+            <section class="panel pipeline-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Pipeline</p>
+                  <h3>MD</h3>
+                </div>
+                <span class="inline-status">
+                  <span id="md-status-dot" class="status-dot"></span>
+                  <span id="md-status-text">Idle</span>
+                </span>
+              </div>
+              <pre id="md-log" class="log-output"></pre>
+            </section>
+
+            <section class="panel pipeline-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Pipeline</p>
+                  <h3>AtomDisplacement</h3>
+                </div>
+                <span class="inline-status">
+                  <span id="atom-displacement-status-dot" class="status-dot"></span>
+                  <span id="atom-displacement-status-text">Idle</span>
+                </span>
+              </div>
+              <pre id="atom-displacement-log" class="log-output"></pre>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-results" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Outputs</p>
+              <h2>Comparison inputs</h2>
+            </div>
+            <button id="refresh-results" class="button secondary">Refresh</button>
+          </header>
+          <div id="results-grid" class="grid two"></div>
+        </section>
+
+        <section id="view-api" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Local API</p>
+              <h2>Endpoints</h2>
+            </div>
+          </header>
+          <div class="panel api-list">
+            <code>GET /api/health</code>
+            <code>POST /api/run</code>
+            <code>POST /api/run/stop</code>
+            <code>GET /api/run/status</code>
+            <code>GET /api/run/logs?pipeline=md&amp;since=0</code>
+            <code>GET /api/run/logs?pipeline=atom_displacement&amp;since=0</code>
+            <code>GET /api/results</code>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

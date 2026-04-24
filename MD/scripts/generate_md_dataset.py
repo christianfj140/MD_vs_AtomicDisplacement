@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
-"""Automatiza la generación del dataset de dinámica molecular (fase 1).
-
-Este script replica de forma fiel los pasos de `MD/command_history.txt` para
-la parte de entrenamiento relacionada con la generación del dataset MD:
-
-1) mkdir dataset
-2) cd dataset
-3) graph2mat siesta md setup-store
-4) crear RUN.fdf
-5) source /home/christian/graph2mat-env/bin/activate
-6) siesta < RUN.fdf | tee RUN.out
-
-Notas:
-- Se usan rutas y valores hardcodeados intencionalmente para esta primera fase.
-- Se incluye una estructura en funciones para facilitar parametrización futura.
-"""
+"""Generate the molecular-dynamics dataset from pipeline_config.yaml."""
 
 from __future__ import annotations
 
@@ -23,59 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# -----------------------
-# Hardcoded configuration
-# -----------------------
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DATASET_DIR = REPO_ROOT / "MD" / "dataset"
-RUN_FDF_PATH = DATASET_DIR / "RUN.fdf"
-RUN_OUT_PATH = DATASET_DIR / "RUN.out"
-VENV_ACTIVATE = Path("/home/christian/graph2mat-env/bin/activate")
-
-RUN_FDF_CONTENT = """# Run 50 steps of a verlet MD
-MD.TypeOfRun verlet
-MD.Steps 50
-
-# Use the default Double Zeta Polarized basis.
-PAO.BasisSize DZP
-
-# Save all matrices
-TS.HS.Save t
-TS.DE.Save t
-
-# Specify that we want to use our lua script
-Lua.Script md_store.lua
-
-# ForceAuxCell is not really needed here, but you will need it if you are
-# computing a periodic system only at the Gamma point.
-ForceAuxCell t
-
-# And then the information about the structure
-
-# The lattice is just a box big enough so that periodic images don't interact.
-LatticeConstant 1.0 Ang
-%block LatticeVectors
-10.00000000 0.00000000 0.00000000
-0.00000000 10.00000000 0.00000000
-0.00000000 0.00000000 10.00000000
-%endblock LatticeVectors
-
-# Two species, Oxygen and Hydrogen
-NumberOfSpecies 2
-%block ChemicalSpeciesLabel
-1 8 O
-2 1 H
-%endblock ChemicalSpeciesLabel
-
-# The coordinates of the water molecule
-NumberOfAtoms 3
-AtomicCoordinatesFormat Ang
-%block AtomicCoordinatesAndAtomicSpecies
-5.00000000  5.00000000  0.11926200 1 # 1: O
-5.00000000  5.76323900 -0.47704700 2 # 2: H
-5.00000000  4.33683900 -0.47704700 2 # 3: H
-%endblock AtomicCoordinatesAndAtomicSpecies
-"""
+from md_pipeline_config import command, load_pipeline_config, paths, render_run_fdf
 
 
 def require_command(command_name: str) -> None:
@@ -97,43 +30,43 @@ def run_command(cmd: list[str], cwd: Path) -> None:
         )
 
 
-def ensure_dataset_dir() -> None:
-    DATASET_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def setup_store() -> None:
+def setup_store(config: dict) -> None:
+    pipeline_paths = paths(config)
     # Asumimos que `graph2mat siesta md setup-store` puede re-ejecutarse sobre el
     # mismo directorio. Si el contenido ya existe, el comportamiento depende de
     # graph2mat y se respeta tal cual.
-    run_command(["graph2mat", "siesta", "md", "setup-store"], cwd=DATASET_DIR)
+    run_command(
+        [command(config, "graph2mat"), "siesta", "md", "setup-store"],
+        cwd=pipeline_paths["dataset_dir"],
+    )
 
 
-def write_run_fdf() -> None:
+def write_run_fdf(config: dict) -> None:
+    pipeline_paths = paths(config)
     # Asumimos que queremos un RUN.fdf determinista: lo sobreescribimos siempre.
-    RUN_FDF_PATH.write_text(RUN_FDF_CONTENT, encoding="utf-8")
-    print(f"[OK] RUN.fdf escrito en {RUN_FDF_PATH}")
+    pipeline_paths["run_fdf_path"].write_text(render_run_fdf(config), encoding="utf-8")
+    print(f"[OK] RUN.fdf escrito en {pipeline_paths['run_fdf_path']}")
 
 
-def run_siesta_with_venv() -> None:
-    if not VENV_ACTIVATE.exists():
+def run_siesta_with_venv(config: dict) -> None:
+    pipeline_paths = paths(config)
+    venv_activate = pipeline_paths["venv_activate"]
+    if not venv_activate.exists():
         raise RuntimeError(
             "No se encontró el script de activación del entorno virtual esperado en "
-            f"{VENV_ACTIVATE}."
+            f"{venv_activate}."
         )
 
-    # Mantiene la fidelidad con el flujo original:
-    #   source /home/christian/graph2mat-env/bin/activate
-    #   siesta < RUN.fdf | tee RUN.out
     bash_cmd = (
-        f"source '{VENV_ACTIVATE}' "
-        "&& siesta < RUN.fdf"
+        f"source '{venv_activate}' "
+        f"&& {command(config, 'siesta')} < {pipeline_paths['run_fdf_path'].name}"
     )
 
     print(f"\n[RUN] bash -lc \"{bash_cmd}\"")
-    with RUN_OUT_PATH.open("w", encoding="utf-8") as run_out:
+    with pipeline_paths["run_out_path"].open("w", encoding="utf-8") as run_out:
         process = subprocess.Popen(
-            ["bash", "-lc", bash_cmd],
-            cwd=DATASET_DIR,
+            [command(config, "shell"), "-lc", bash_cmd],
+            cwd=pipeline_paths["dataset_dir"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -149,21 +82,24 @@ def run_siesta_with_venv() -> None:
     if return_code != 0:
         raise RuntimeError(f"siesta terminó con código {return_code}.")
 
-    print(f"[OK] Salida guardada en {RUN_OUT_PATH}")
+    print(f"[OK] Salida guardada en {pipeline_paths['run_out_path']}")
 
 
 def main() -> int:
+    config = load_pipeline_config()
+    pipeline_paths = paths(config)
+
     print("=== Pipeline MD (fase 1): generación de dataset ===")
-    print(f"Repositorio: {REPO_ROOT}")
-    print(f"Dataset dir: {DATASET_DIR}")
+    print(f"Repositorio: {pipeline_paths['dataset_dir'].parent}")
+    print(f"Dataset dir: {pipeline_paths['dataset_dir']}")
 
-    require_command("graph2mat")
-    require_command("bash")
+    require_command(command(config, "graph2mat"))
+    require_command(command(config, "shell"))
 
-    ensure_dataset_dir()
-    setup_store()
-    write_run_fdf()
-    run_siesta_with_venv()
+    pipeline_paths["dataset_dir"].mkdir(parents=True, exist_ok=True)
+    setup_store(config)
+    write_run_fdf(config)
+    run_siesta_with_venv(config)
 
     print("\n=== Pipeline completado correctamente ===")
     return 0

@@ -10,11 +10,7 @@ from graph2mat.core.data.processing import MatrixDataProcessor
 from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
-from atom_displacement_utils import TRAINING_DIR, resolve_ckpt_rel_path
-
-DEFAULT_CKPT_REL_PATH = (
-    "lightning_logs/atom_displacement_model/version_0/checkpoints/best-0.ckpt"
-)
+from atom_displacement_utils import PIPELINE_CONFIG, TRAINING_DIR, resolve_ckpt_rel_path
 
 
 def patch_graph2mat_run_loading() -> None:
@@ -34,20 +30,29 @@ def main() -> int:
     print("=== AtomDisplacement (predict) ===")
     patch_graph2mat_run_loading()
 
-    ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, DEFAULT_CKPT_REL_PATH)
+    ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, "")
     os.chdir(TRAINING_DIR)
 
+    prediction = PIPELINE_CONFIG["prediction"]
+    data = prediction["data"]
+    callbacks_config = prediction["callbacks"]
     model = LitMACEMatrixModel.load_from_checkpoint(str(TRAINING_DIR / ckpt_path))
     datamodule = MatrixDataModule(
-        out_matrix="hamiltonian",
-        symmetric_matrix=True,
-        basis_files="../relaxed/*.ion.xml",
-        predict_structs="../dataset/samples/*/RUN.fdf",
-        store_in_memory=True,
-        n_matrix_components=2,
+        out_matrix=data["out_matrix"],
+        symmetric_matrix=bool(data["symmetric_matrix"]),
+        basis_files=data["basis_files"],
+        predict_structs=data["predict_structs"],
+        store_in_memory=bool(data["store_in_memory"]),
+        n_matrix_components=int(data["n_matrix_components"]),
     )
-    callbacks = [MatrixWriter(output_file="ML_prediction.HSX", splits=["predict"])]
-    trainer = pl.Trainer(accelerator="cpu", logger=False, callbacks=callbacks)
+    callbacks = []
+    if bool(callbacks_config["matrix_writer"]):
+        callbacks.append(MatrixWriter(output_file=callbacks_config["output_file"], splits=["predict"]))
+    trainer = pl.Trainer(
+        accelerator=PIPELINE_CONFIG["training"]["trainer"]["accelerator"],
+        logger=False,
+        callbacks=callbacks,
+    )
 
     trainer.predict(model, datamodule=datamodule, ckpt_path=str(TRAINING_DIR / ckpt_path))
     print("\n=== Prediccion completada correctamente ===")

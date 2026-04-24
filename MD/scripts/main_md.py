@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Script principal para ejecutar el pipeline MD completo en orden.
-
-Orden estricto de ejecución:
-1) generate_md_dataset.py
-2) run_md_training.py
-3) run_md_testing.py
-4) run_md_prediction.py
-"""
+"""Run the full MD pipeline in the order declared in pipeline_config.yaml."""
 
 from __future__ import annotations
 
@@ -14,13 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from md_pipeline_config import load_pipeline_config
+
 SCRIPTS_DIR = Path(__file__).resolve().parent
-PIPELINE_SCRIPTS = [
-    SCRIPTS_DIR / "generate_md_dataset.py",
-    SCRIPTS_DIR / "run_md_training.py",
-    SCRIPTS_DIR / "run_md_testing.py",
-    SCRIPTS_DIR / "run_md_prediction.py",
-]
+SCRIPT_BY_STEP = {
+    "generate_md_dataset": SCRIPTS_DIR / "generate_md_dataset.py",
+    "run_md_training": SCRIPTS_DIR / "run_md_training.py",
+    "run_md_testing": SCRIPTS_DIR / "run_md_testing.py",
+    "run_md_prediction": SCRIPTS_DIR / "run_md_prediction.py",
+}
 
 
 def run_step(script_path: Path) -> None:
@@ -38,8 +33,11 @@ def run_step(script_path: Path) -> None:
 
 
 def main() -> int:
+    config = load_pipeline_config()
+    pipeline_scripts = [SCRIPT_BY_STEP[step] for step in config["pipeline"]["steps"]]
+
     print("=== Pipeline MD completo ===")
-    for step in PIPELINE_SCRIPTS:
+    for step in pipeline_scripts:
         run_step(step)
 
     print("\n=== Pipeline MD completo finalizado correctamente ===")

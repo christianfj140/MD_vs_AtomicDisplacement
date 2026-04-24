@@ -1,0 +1,294 @@
+"""Shared configuration helpers for the AtomDisplacement pipeline."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError as exc:  # pragma: no cover - depends on runtime environment.
+    raise RuntimeError(
+        "PyYAML is required to read pipeline_config.yaml. Install pyyaml in the "
+        "environment used to run these scripts."
+    ) from exc
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "pipeline_config.yaml"
+GENERATED_HEADER = "# Generated from ../pipeline_config.yaml\n"
+
+
+def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
+    path = config_path or DEFAULT_CONFIG_PATH
+    if not path.exists():
+        raise RuntimeError(f"No existe el archivo de configuracion: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise RuntimeError(f"La configuracion debe ser un diccionario YAML: {path}")
+    config["_config_path"] = path
+    config["_config_dir"] = path.parent
+    validate_config(config)
+    return config
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    required = (
+        "paths",
+        "commands",
+        "generation",
+        "structure",
+        "training",
+        "checkpoint",
+        "testing",
+        "prediction",
+        "pipeline",
+    )
+    for section in required:
+        if section not in config:
+            raise RuntimeError(f"Falta la seccion '{section}' en pipeline_config.yaml.")
+    if len(config["structure"]["lattice_vectors"]) != 3:
+        raise RuntimeError("structure.lattice_vectors debe contener exactamente 3 vectores.")
+    if not config["structure"]["species"]:
+        raise RuntimeError("structure.species debe contener al menos una especie.")
+    if not config["structure"]["atoms"]:
+        raise RuntimeError("structure.atoms debe contener al menos un atomo.")
+    if int(config["generation"]["num_samples"]) <= 0:
+        raise RuntimeError("generation.num_samples debe ser mayor que cero.")
+
+
+def config_dir(config: dict[str, Any]) -> Path:
+    return Path(config["_config_dir"])
+
+
+def resolve_path(config: dict[str, Any], value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return config_dir(config) / path
+
+
+def paths(config: dict[str, Any]) -> dict[str, Path]:
+    raw = config["paths"]
+    base_dir = resolve_path(config, raw["base_dir"])
+    relaxed_dir = resolve_path(config, raw["relaxed_dir"])
+    dataset_dir = resolve_path(config, raw["dataset_dir"])
+    samples_dir = resolve_path(config, raw["samples_dir"])
+    collected_dir = resolve_path(config, raw["collected_dir"])
+    training_dir = resolve_path(config, raw["training_dir"])
+    return {
+        "base_dir": base_dir,
+        "relaxed_dir": relaxed_dir,
+        "dataset_dir": dataset_dir,
+        "samples_dir": samples_dir,
+        "collected_dir": collected_dir,
+        "training_dir": training_dir,
+        "base_run_fdf_path": base_dir / raw["run_fdf_name"],
+        "relaxed_run_fdf_path": relaxed_dir / raw["run_fdf_name"],
+        "relaxed_run_out_path": relaxed_dir / raw["run_out_name"],
+        "training_config_path": training_dir / raw["training_config_name"],
+        "runs_json_path": training_dir / raw["runs_json_name"],
+        "samples_manifest_path": dataset_dir / raw["samples_manifest_name"],
+        "run_summary_path": dataset_dir / raw["run_summary_name"],
+        "collected_json_path": collected_dir / raw["collected_json_name"],
+        "collected_csv_path": collected_dir / raw["collected_csv_name"],
+        "venv_activate": resolve_path(config, raw["venv_activate"]),
+    }
+
+
+def command(config: dict[str, Any], name: str) -> str:
+    return str(config["commands"][name])
+
+
+def _format_float(value: Any) -> str:
+    return f"{float(value):.8f}"
+
+
+def _format_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "T" if value else "F"
+    return str(value)
+
+
+def _species_map(config: dict[str, Any]) -> dict[int, tuple[int, str]]:
+    return {
+        int(item["index"]): (int(item["atomic_number"]), str(item["symbol"]))
+        for item in config["structure"]["species"]
+    }
+
+
+def render_fdf(
+    config: dict[str, Any],
+    *,
+    positions_ang: list[list[float]] | None = None,
+    atom_species: list[int] | None = None,
+    system_label: str | None = None,
+    system_name: str | None = None,
+    include_relaxation: bool,
+    header: str,
+) -> str:
+    structure = config["structure"]
+    species = _species_map(config)
+    atoms = structure["atoms"]
+    positions = positions_ang or [atom["position"] for atom in atoms]
+    atom_species = atom_species or [int(atom["species_index"]) for atom in atoms]
+    system_label = system_label or structure["relaxation"]["system_label"]
+    system_name = system_name or structure["relaxation"]["system_name"]
+
+    lines = [
+        GENERATED_HEADER.rstrip(),
+        f"# {header}",
+        "",
+        f"SystemName   {system_name}",
+        f"SystemLabel  {system_label}",
+        "",
+        f"NumberOfSpecies  {len(species)}",
+        f"NumberOfAtoms    {len(atom_species)}",
+        "",
+        "%block ChemicalSpeciesLabel",
+    ]
+    for index, (atomic_number, symbol) in sorted(species.items()):
+        lines.append(f" {index:>1}  {atomic_number:>2}  {symbol}")
+    lines.extend(
+        [
+            "%endblock ChemicalSpeciesLabel",
+            "",
+            f"LatticeConstant  {structure['lattice_constant']['value']} {structure['lattice_constant']['unit']}",
+            "%block LatticeVectors",
+        ]
+    )
+    for vector in structure["lattice_vectors"]:
+        lines.append(f" {_format_float(vector[0])}   {_format_float(vector[1])}   {_format_float(vector[2])}")
+    lines.extend(
+        [
+            "%endblock LatticeVectors",
+            "",
+            f"AtomicCoordinatesFormat {structure['coordinates_format']}",
+            "%block AtomicCoordinatesAndAtomicSpecies",
+        ]
+    )
+    for position, species_index in zip(positions, atom_species):
+        lines.append(
+            f" {_format_float(position[0])}  {_format_float(position[1])}  "
+            f"{_format_float(position[2])}  {species_index}  # {species[species_index][1]}"
+        )
+    lines.extend(["%endblock AtomicCoordinatesAndAtomicSpecies", "", "%block kgrid_Monkhorst_Pack"])
+    for row in structure["kgrid_monkhorst_pack"]:
+        lines.append(f" {row[0]}  {row[1]}  {row[2]}  {row[3]}")
+    lines.extend(["%endblock kgrid_Monkhorst_Pack", ""])
+
+    siesta = dict(structure["siesta"])
+    if not include_relaxation:
+        siesta.update(structure.get("single_point_overrides", {}))
+    for key, value in siesta.items():
+        lines.append(f"{key:<32} {_format_value(value)}")
+    if include_relaxation:
+        lines.append("")
+        for key, value in structure["relaxation_md"].items():
+            lines.append(f"{key:<32} {_format_value(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def render_relaxation_fdf(config: dict[str, Any]) -> str:
+    return render_fdf(
+        config,
+        include_relaxation=True,
+        header="Relaxation of an isolated water molecule with SIESTA",
+    )
+
+
+def render_single_point_fdf(
+    config: dict[str, Any],
+    positions_ang: list[list[float]],
+    atom_species: list[int],
+    sample_id: str,
+) -> str:
+    single_point = config["structure"]["single_point"]
+    return render_fdf(
+        config,
+        positions_ang=positions_ang,
+        atom_species=atom_species,
+        system_label=sample_id,
+        system_name=single_point["system_name_template"].format(sample_id=sample_id),
+        include_relaxation=False,
+        header=single_point["title"],
+    )
+
+
+def render_training_config(config: dict[str, Any]) -> str:
+    training_config = {
+        "data": config["training"]["data"],
+        "model": config["training"]["model"],
+        "trainer": config["training"]["trainer"],
+    }
+    return GENERATED_HEADER + yaml.safe_dump(
+        training_config,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=False,
+    )
+
+
+def write_generated_inputs(config: dict[str, Any]) -> None:
+    pipeline_paths = paths(config)
+    pipeline_paths["base_dir"].mkdir(parents=True, exist_ok=True)
+    pipeline_paths["relaxed_dir"].mkdir(parents=True, exist_ok=True)
+    pipeline_paths["training_dir"].mkdir(parents=True, exist_ok=True)
+    content = render_relaxation_fdf(config)
+    pipeline_paths["base_run_fdf_path"].write_text(content, encoding="utf-8")
+    pipeline_paths["relaxed_run_fdf_path"].write_text(content, encoding="utf-8")
+    pipeline_paths["training_config_path"].write_text(
+        render_training_config(config),
+        encoding="utf-8",
+    )
+
+
+def checkpoint_version(path: Path) -> int:
+    for part in path.parts:
+        match = re.fullmatch(r"version_(\d+)", part)
+        if match:
+            return int(match.group(1))
+    return -1
+
+
+def resolve_checkpoint(config: dict[str, Any]) -> str:
+    training_dir = paths(config)["training_dir"]
+    checkpoint_config = config["checkpoint"]
+    configured_path = checkpoint_config.get("path")
+    if configured_path:
+        configured_path = str(configured_path)
+        configured_abs = Path(configured_path)
+        if not configured_abs.is_absolute():
+            configured_abs = training_dir / configured_abs
+        if configured_abs.exists():
+            return configured_path
+        raise RuntimeError(f"checkpoint.path no existe: {configured_abs}")
+
+    if bool(checkpoint_config.get("auto_best", True)):
+        candidates = sorted(training_dir.glob(str(checkpoint_config["search_glob"])))
+        if candidates:
+            if str(checkpoint_config.get("selection", "latest_version")) != "latest_version":
+                raise RuntimeError("checkpoint.selection solo soporta 'latest_version'.")
+            latest_version = max(checkpoint_version(path) for path in candidates)
+            latest_candidates = [
+                path for path in candidates if checkpoint_version(path) == latest_version
+            ]
+            if len(latest_candidates) != 1:
+                rel_candidates = "\n".join(
+                    f"  - {path.relative_to(training_dir).as_posix()}"
+                    for path in latest_candidates
+                )
+                raise RuntimeError(
+                    "Se encontro mas de un checkpoint best-*.ckpt dentro de "
+                    f"version_{latest_version}. Define checkpoint.path con uno "
+                    f"de estos valores:\n{rel_candidates}"
+                )
+            selected = latest_candidates[0].relative_to(training_dir).as_posix()
+            print(f"[INFO] Checkpoint seleccionado automaticamente: {selected}")
+            return selected
+
+    raise RuntimeError(
+        "No se encontro ningun checkpoint best-*.ckpt valido. Ajusta "
+        "checkpoint.path o checkpoint.search_glob en pipeline_config.yaml."
+    )

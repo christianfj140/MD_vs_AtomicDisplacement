@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 
 from atom_displacement_utils import (
+    PIPELINE_CONFIG,
+    PIPELINE_PATHS,
     TRAINING_DIR,
     completed_sample_dirs,
     ensure_dir,
@@ -15,11 +17,10 @@ from atom_displacement_utils import (
     relaxed_basis_files,
     run_command_in_venv,
 )
+from pipeline_config_utils import command, render_training_config
 
-CONFIG_PATH = TRAINING_DIR / "config.yaml"
-RUNS_JSON_PATH = TRAINING_DIR / "runs.json"
-MODEL_NAME = "atom_displacement_model"
-FIT_COMMAND = ["graph2mat", "models", "mace", "main", "fit", "-c", "config.yaml"]
+CONFIG_PATH = PIPELINE_PATHS["training_config_path"]
+RUNS_JSON_PATH = PIPELINE_PATHS["runs_json_path"]
 
 
 def relpath_from_training(path: Path) -> str:
@@ -27,7 +28,8 @@ def relpath_from_training(path: Path) -> str:
 
 
 def write_runs_json(sample_dirs: list[Path]) -> str:
-    runs = [relpath_from_training(sample_dir / "RUN.fdf") for sample_dir in sample_dirs]
+    run_fdf_name = PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    runs = [relpath_from_training(sample_dir / run_fdf_name) for sample_dir in sample_dirs]
     RUNS_JSON_PATH.write_text(
         json.dumps({"train": runs}, indent=2, ensure_ascii=True) + "\n",
         encoding="utf-8",
@@ -38,17 +40,22 @@ def write_runs_json(sample_dirs: list[Path]) -> str:
 def build_config_yaml() -> str:
     sample_dirs = completed_sample_dirs()
     all_sample_dirs = generated_sample_dirs()
-    if len(sample_dirs) < 2:
+    min_completed = int(PIPELINE_CONFIG["training"]["min_completed_samples"])
+    if len(sample_dirs) < min_completed:
         raise RuntimeError(
-            "Se necesitan al menos 2 muestras completadas para entrenar. "
+            f"Se necesitan al menos {min_completed} muestras completadas para entrenar. "
             "Ejecuta primero run_single_points.py para generar mas datos validos."
         )
     if not relaxed_basis_files():
         raise RuntimeError("No se encontraron ficheros .ion.xml en relaxed/")
 
-    basis_glob = relpath_from_training(TRAINING_DIR.parent / "relaxed" / "*.ion.xml")
     runs_json = write_runs_json(sample_dirs)
-    batch_size = min(10, len(sample_dirs))
+    configured_batch_size = int(PIPELINE_CONFIG["training"]["data"]["batch_size"])
+    PIPELINE_CONFIG["training"]["data"]["batch_size"] = min(
+        configured_batch_size,
+        len(sample_dirs),
+    )
+    PIPELINE_CONFIG["training"]["data"]["runs_json"] = runs_json
 
     if len(sample_dirs) != len(all_sample_dirs):
         print(
@@ -56,30 +63,7 @@ def build_config_yaml() -> str:
             f"Se entrenara solo con {len(sample_dirs)} de {len(all_sample_dirs)}."
         )
 
-    return f"""# pytorch_lightning==2.6.1
-data:
-    out_matrix: hamiltonian
-    symmetric_matrix: True
-    basis_files: {basis_glob}
-    runs_json: {runs_json}
-    batch_size: {batch_size}
-    store_in_memory: True
-model:
-    num_interactions: 1
-    correlation: 1
-    max_ell: 2
-    hidden_irreps: 10x0e + 10x1o + 10x2e
-    loss: graph2mat.metrics.block_type_mae
-    optim_lr: 0.005
-trainer:
-    accelerator: cpu
-    logger:
-        class_path: TensorBoardLogger
-        init_args:
-            name: {MODEL_NAME}
-            save_dir: lightning_logs
-    max_epochs: 200
-"""
+    return render_training_config(PIPELINE_CONFIG)
 
 
 def main() -> int:
@@ -87,8 +71,9 @@ def main() -> int:
     ensure_dir(TRAINING_DIR)
     CONFIG_PATH.write_text(build_config_yaml(), encoding="utf-8")
     print(f"[OK] Config escrito en {CONFIG_PATH}")
-    run_command_in_venv(FIT_COMMAND, cwd=TRAINING_DIR)
-    print("[INFO] Si quieres ver metricas: tensorboard --logdir lightning_logs")
+    fit_command = [command(PIPELINE_CONFIG, "graph2mat"), *PIPELINE_CONFIG["training"]["fit_args"]]
+    run_command_in_venv(fit_command, cwd=TRAINING_DIR)
+    print(f"[INFO] Si quieres ver metricas: {PIPELINE_CONFIG['training']['tensorboard_hint']}")
     print("\n=== Entrenamiento completado correctamente ===")
     return 0
 

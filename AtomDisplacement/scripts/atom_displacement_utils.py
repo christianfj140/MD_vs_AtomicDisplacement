@@ -13,17 +13,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_config_utils import (
+    command,
+    load_pipeline_config,
+    paths,
+    render_single_point_fdf,
+)
+
 BOHR_TO_ANG = 0.529177210903
 RY_TO_EV = 13.605693009
-DEFAULT_VENV_ACTIVATE = Path("/home/christian/graph2mat-env/bin/activate")
-
 ATOM_ROOT = Path(__file__).resolve().parents[1]
-BASE_DIR = ATOM_ROOT / "base"
-RELAXED_DIR = ATOM_ROOT / "relaxed"
-DATASET_DIR = ATOM_ROOT / "dataset"
-SAMPLES_DIR = DATASET_DIR / "samples"
-COLLECTED_DIR = DATASET_DIR / "collected"
-TRAINING_DIR = ATOM_ROOT / "training"
+PIPELINE_CONFIG = load_pipeline_config()
+PIPELINE_PATHS = paths(PIPELINE_CONFIG)
+DEFAULT_VENV_ACTIVATE = PIPELINE_PATHS["venv_activate"]
+
+BASE_DIR = PIPELINE_PATHS["base_dir"]
+RELAXED_DIR = PIPELINE_PATHS["relaxed_dir"]
+DATASET_DIR = PIPELINE_PATHS["dataset_dir"]
+SAMPLES_DIR = PIPELINE_PATHS["samples_dir"]
+COLLECTED_DIR = PIPELINE_PATHS["collected_dir"]
+TRAINING_DIR = PIPELINE_PATHS["training_dir"]
 
 
 @dataclass
@@ -85,9 +94,10 @@ def run_command_in_venv(
         )
 
     quoted_cmd = " ".join(shlex_quote(token) for token in cmd)
-    bash_cmd = f"source '{activate_path}' && {quoted_cmd}"
-    print(f"\n[RUN] bash -lc \"{bash_cmd}\"")
-    result = subprocess.run(["bash", "-lc", bash_cmd], cwd=cwd, check=False)
+    shell = command(PIPELINE_CONFIG, "shell")
+    bash_cmd = f"source {shlex.quote(str(activate_path))} && {quoted_cmd}"
+    print(f"\n[RUN] {shell} -lc \"{bash_cmd}\"")
+    result = subprocess.run([shell, "-lc", bash_cmd], cwd=cwd, check=False)
     if result.returncode != 0:
         raise RuntimeError(
             f"El comando fallo con codigo {result.returncode}: {' '.join(cmd)}"
@@ -104,10 +114,16 @@ def run_siesta_in_dir(
             f"No se encontro el script de activacion esperado en {activate_path}"
         )
 
-    bash_cmd = f"source '{activate_path}' && siesta < RUN.fdf"
+    shell = command(PIPELINE_CONFIG, "shell")
+    siesta = command(PIPELINE_CONFIG, "siesta")
+    run_fdf_name = PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    bash_cmd = (
+        f"source {shlex.quote(str(activate_path))} "
+        f"&& {shlex.quote(siesta)} < {shlex.quote(str(run_fdf_name))}"
+    )
     with run_out_path.open("w", encoding="utf-8") as run_out:
         process = subprocess.Popen(
-            ["bash", "-lc", bash_cmd],
+            [shell, "-lc", bash_cmd],
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -228,79 +244,12 @@ def parse_xv_structure(xv_path: Path, species_labels: dict[int, tuple[int, str]]
 
 
 def format_single_point_fdf(structure: Structure, system_label: str, system_name: str) -> str:
-    chemical_species_block = "\n".join(
-        f" {label:>1}  {atomic_number:>2}  {symbol}"
-        for label, (atomic_number, symbol) in sorted(structure.species_labels.items())
+    return render_single_point_fdf(
+        PIPELINE_CONFIG,
+        positions_ang=structure.positions_ang,
+        atom_species=structure.atom_species,
+        sample_id=system_label,
     )
-    lattice_block = "\n".join(
-        f" {vector[0]:.8f}  {vector[1]:.8f}  {vector[2]:.8f}"
-        for vector in structure.lattice_vectors_ang
-    )
-    coords_block = "\n".join(
-        f" {position[0]:.8f}  {position[1]:.8f}  {position[2]:.8f}  {species}"
-        f"  # {structure.species_labels[species][1]}"
-        for position, species in zip(structure.positions_ang, structure.atom_species)
-    )
-    return f"""# Single-point calculation for an atom-displaced H2O geometry
-
-SystemName   {system_name}
-SystemLabel  {system_label}
-
-NumberOfSpecies  {len(structure.species_labels)}
-NumberOfAtoms    {len(structure.atom_species)}
-
-%block ChemicalSpeciesLabel
-{chemical_species_block}
-%endblock ChemicalSpeciesLabel
-
-LatticeConstant  1.0 Ang
-%block LatticeVectors
-{lattice_block}
-%endblock LatticeVectors
-
-AtomicCoordinatesFormat Ang
-%block AtomicCoordinatesAndAtomicSpecies
-{coords_block}
-%endblock AtomicCoordinatesAndAtomicSpecies
-
-%block kgrid_Monkhorst_Pack
- 1  0  0  0.0
- 0  1  0  0.0
- 0  0  1  0.0
-%endblock kgrid_Monkhorst_Pack
-
-ForceAuxCell       T
-MeshCutoff         200 Ry
-PAO.BasisType      split
-PAO.BasisSize      DZP
-PAO.EnergyShift    0.03 eV
-XC.functional      GGA
-XC.authors         PBE
-MaxSCFIterations   200
-SolutionMethod     diagon
-
-DM.MixingWeight                0.02
-DM.NumberPulay                3
-DM.Tolerance                  1.d-5
-DM.Require.Energy.Convergence T
-DM.Energy.Tolerance           1.e-5 eV
-SCF.MixAfterConvergence       F
-
-SpinPolarized     F
-FixSpin           F
-NonCollinearSpin  F
-DM.InitSpinAF     F
-
-ON.UseSaveLWF     T
-DM.UseSaveDM      F
-UseSaveData       T
-LongOutput        T
-WriteCoorXmol     T
-WriteCoorStep     T
-WriteForces       T
-SaveHS            T
-XML.Write         T
-"""
 
 
 def write_single_point_fdf(path: Path, structure: Structure, sample_id: str) -> None:
@@ -313,11 +262,11 @@ def write_single_point_fdf(path: Path, structure: Structure, sample_id: str) -> 
 
 
 def load_reference_structure() -> tuple[Structure, str]:
-    base_structure = parse_fdf_structure(BASE_DIR / "RUN.fdf")
+    base_structure = parse_fdf_structure(PIPELINE_PATHS["base_run_fdf_path"])
     xv_files = sorted(RELAXED_DIR.glob("*.XV"))
     if xv_files:
         return parse_xv_structure(xv_files[0], base_structure.species_labels), str(xv_files[0])
-    return base_structure, str(BASE_DIR / "RUN.fdf")
+    return base_structure, str(PIPELINE_PATHS["base_run_fdf_path"])
 
 
 def distance(point_a: list[float], point_b: list[float]) -> float:
@@ -431,32 +380,10 @@ def relaxed_basis_files() -> list[Path]:
     return basis_files
 
 
-def _best_step(path: Path) -> int:
-    match = re.search(r"best-(\d+)\.ckpt$", path.name)
-    return int(match.group(1)) if match else -1
-
-
 def resolve_ckpt_rel_path(training_dir: Path, default_rel_path: str) -> str:
-    default_abs = training_dir / default_rel_path
-    if default_abs.exists():
-        return default_rel_path
+    from pipeline_config_utils import resolve_checkpoint
 
-    candidates = sorted(
-        training_dir.glob("lightning_logs/**/checkpoints/best-*.ckpt"),
-        key=_best_step,
-    )
-    if candidates:
-        selected = candidates[-1]
-        rel = selected.relative_to(training_dir).as_posix()
-        print(
-            "[WARN] No existe el checkpoint hardcodeado. "
-            f"Se usara automaticamente: {rel}"
-        )
-        return rel
-
-    raise RuntimeError(
-        f"No se encontro ningun checkpoint best-*.ckpt en {training_dir / 'lightning_logs'}."
-    )
+    return resolve_checkpoint(PIPELINE_CONFIG)
 
 
 def find_first_output(sample_dir: Path, suffix: str) -> Path | None:

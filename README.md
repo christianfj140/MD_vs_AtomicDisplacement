@@ -173,3 +173,13 @@ Actualmente el flujo `AtomDisplacement` ya fue ejecutado con una prueba de 20 mu
 
 - En `AtomDisplacement/scripts/` todavia existen algunos scripts `run_md_*` heredados del flujo antiguo. No forman parte del pipeline nuevo de desplazamientos atomicos.
 - Si se quiere un modelo mas util fisicamente, conviene aumentar el numero de muestras antes de sacar conclusiones del entrenamiento.
+
+## UI de comparacion
+
+Para lanzar `MD` y `AtomDisplacement` con un solo click:
+
+```bash
+python3 Comparison/scripts/pipeline_ui.py
+```
+
+Abre `http://127.0.0.1:8770`. La pantalla ejecuta ambos pipelines, muestra logs separados y resume los artefactos que se usaran para comparar resultados.

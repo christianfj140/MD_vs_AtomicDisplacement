@@ -9,6 +9,8 @@ from pathlib import Path
 
 from atom_displacement_utils import (
     COLLECTED_DIR,
+    PIPELINE_CONFIG,
+    PIPELINE_PATHS,
     SAMPLES_DIR,
     compute_water_geometry_metrics,
     ensure_dir,
@@ -31,7 +33,9 @@ def load_metadata(sample_dir: Path) -> dict:
 
 def collect_sample(sample_dir: Path) -> dict:
     metadata = load_metadata(sample_dir)
-    input_structure = parse_fdf_structure(sample_dir / "RUN.fdf")
+    run_fdf_path = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    run_out_path = sample_dir / PIPELINE_CONFIG["paths"]["run_out_name"]
+    input_structure = parse_fdf_structure(run_fdf_path)
     status = sample_run_status(sample_dir)
     energy_ev = parse_total_energy_ev(sample_dir)
     fa_path = find_first_output(sample_dir, ".FA")
@@ -57,7 +61,7 @@ def collect_sample(sample_dir: Path) -> dict:
         "displacement_norms_ang": metadata.get("displacement_norms_ang"),
         "files": {
             "run_fdf": str(sample_dir / "RUN.fdf"),
-            "run_out": str(sample_dir / "RUN.out"),
+            "run_out": str(run_out_path),
             "fa": str(fa_path) if fa_path else None,
             "xv": str(xv_path) if xv_path else None,
         },
@@ -101,8 +105,8 @@ def main() -> int:
         "num_converged": sum(1 for row in dataset_rows if row["status"]["scf_converged"]),
         "samples": dataset_rows,
     }
-    json_path = COLLECTED_DIR / "water_atom_displacement_dataset.json"
-    csv_path = COLLECTED_DIR / "water_atom_displacement_summary.csv"
+    json_path = PIPELINE_PATHS["collected_json_path"]
+    csv_path = PIPELINE_PATHS["collected_csv_path"]
     write_json(json_path, payload)
     write_summary_csv(dataset_rows, csv_path)
 

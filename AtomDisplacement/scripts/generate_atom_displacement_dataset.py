@@ -11,6 +11,8 @@ from pathlib import Path
 from atom_displacement_utils import (
     BASE_DIR,
     DATASET_DIR,
+    PIPELINE_CONFIG,
+    PIPELINE_PATHS,
     SAMPLES_DIR,
     Structure,
     compute_water_geometry_metrics,
@@ -24,18 +26,20 @@ from atom_displacement_utils import (
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
+    generation = PIPELINE_CONFIG["generation"]
+    filters = generation["filters"]
     parser = argparse.ArgumentParser(
         description="Genera muestras H2O deformadas con desplazamientos atomicos pequenos."
     )
-    parser.add_argument("--num-samples", type=int, default=100)
-    parser.add_argument("--sigma", type=float, default=0.02, help="Desviacion tipica en Ang")
-    parser.add_argument("--seed", type=int, default=12345)
-    parser.add_argument("--max-displacement-norm", type=float, default=0.05)
-    parser.add_argument("--min-oh", type=float, default=0.7)
-    parser.add_argument("--max-oh", type=float, default=1.2)
-    parser.add_argument("--min-hh", type=float, default=1.0)
-    parser.add_argument("--min-angle", type=float, default=80.0)
-    parser.add_argument("--max-angle", type=float, default=130.0)
+    parser.add_argument("--num-samples", type=int, default=int(generation["num_samples"]))
+    parser.add_argument("--sigma", type=float, default=float(generation["sigma_ang"]), help="Desviacion tipica en Ang")
+    parser.add_argument("--seed", type=int, default=int(generation["seed"]))
+    parser.add_argument("--max-displacement-norm", type=float, default=float(generation["max_displacement_norm_ang"]))
+    parser.add_argument("--min-oh", type=float, default=float(filters["min_oh_ang"]))
+    parser.add_argument("--max-oh", type=float, default=float(filters["max_oh_ang"]))
+    parser.add_argument("--min-hh", type=float, default=float(filters["min_hh_ang"]))
+    parser.add_argument("--min-angle", type=float, default=float(filters["min_angle_deg"]))
+    parser.add_argument("--max-angle", type=float, default=float(filters["max_angle_deg"]))
     return parser
 
 
@@ -118,7 +122,11 @@ def main() -> int:
     rng = random.Random(args.seed)
     accepted_samples = []
     rejected = 0
-    max_attempts = max(args.num_samples * 100, 1000)
+    generation = PIPELINE_CONFIG["generation"]
+    max_attempts = max(
+        args.num_samples * int(generation["max_attempts_factor"]),
+        int(generation["min_attempts"]),
+    )
 
     print("=== AtomDisplacement dataset generation ===")
     print(f"[INFO] Geometria de referencia: {source_path}")
@@ -145,11 +153,15 @@ def main() -> int:
             rejected += 1
             continue
 
-        sample_id = f"sample_{sample_index:04d}"
+        sample_id = generation["sample_id_format"].format(index=sample_index)
         sample_dir = SAMPLES_DIR / sample_id
         ensure_dir(sample_dir)
         copy_pseudopotentials(BASE_DIR, sample_dir)
-        write_single_point_fdf(sample_dir / "RUN.fdf", candidate, sample_id)
+        write_single_point_fdf(
+            sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"],
+            candidate,
+            sample_id,
+        )
 
         metadata = {
             "id": sample_id,
@@ -180,7 +192,7 @@ def main() -> int:
         },
         "samples": accepted_samples,
     }
-    write_json(DATASET_DIR / "samples_manifest.json", manifest)
+    write_json(PIPELINE_PATHS["samples_manifest_path"], manifest)
     print(f"[OK] Muestras generadas en {SAMPLES_DIR}")
     print(f"[OK] Rechazadas antes de calcular: {rejected}")
     return 0

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AtomDisplacement Pipeline</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">AtomDisplacement</p>
+          <h1>Pipeline</h1>
+        </div>
+        <nav class="tabs" aria-label="Views">
+          <button class="tab active" data-view="overview">Overview</button>
+          <button class="tab" data-view="generation">Generacion</button>
+          <button class="tab" data-view="training">Entrenamiento</button>
+          <button class="tab" data-view="test">Test/prediccion</button>
+          <button class="tab" data-view="run">Run</button>
+          <button class="tab" data-view="yaml">YAML</button>
+          <button class="tab" data-view="api">API</button>
+        </nav>
+        <div class="status-panel">
+          <span id="status-dot" class="status-dot"></span>
+          <span id="status-text">Idle</span>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section id="view-overview" class="view active">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Configuration</p>
+              <h2>pipeline_config.yaml</h2>
+            </div>
+            <div class="button-row">
+              <button id="reload-config" class="button secondary">Reload</button>
+              <button class="button save-form">Save</button>
+            </div>
+          </header>
+          <div class="grid two">
+            <div class="panel">
+              <h3>Paths</h3>
+              <div id="paths-form" class="form-grid"></div>
+            </div>
+            <div class="panel">
+              <h3>Checkpoint</h3>
+              <div id="checkpoint-form" class="form-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-generation" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Dataset</p>
+              <h2>Generacion y estructura</h2>
+            </div>
+            <button class="button save-form">Save</button>
+          </header>
+          <div class="grid three">
+            <div class="panel">
+              <h3>Muestras</h3>
+              <div id="generation-form" class="form-grid"></div>
+            </div>
+            <div class="panel">
+              <h3>Filtros</h3>
+              <div id="filters-form" class="form-grid"></div>
+            </div>
+            <div class="panel">
+              <h3>SIESTA</h3>
+              <div id="siesta-form" class="form-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-training" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Graph2Mat</p>
+              <h2>MACE training</h2>
+            </div>
+            <button class="button save-form">Save</button>
+          </header>
+          <div class="grid three">
+            <div class="panel">
+              <h3>Data</h3>
+              <div id="training-data-form" class="form-grid"></div>
+            </div>
+            <div class="panel">
+              <h3>Model</h3>
+              <div id="training-model-form" class="form-grid"></div>
+            </div>
+            <div class="panel">
+              <h3>Trainer</h3>
+              <div id="training-trainer-form" class="form-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-test" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Evaluation</p>
+              <h2>Test y prediccion</h2>
+            </div>
+            <button class="button save-form">Save</button>
+          </header>
+          <div class="grid two">
+            <div class="panel">
+              <h3>Test</h3>
+              <div id="testing-form" class="form-grid"></div>
+            </div>
+            <div class="panel">
+              <h3>Prediction</h3>
+              <div id="prediction-form" class="form-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-run" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Execution</p>
+              <h2>main_atdisp.py</h2>
+            </div>
+            <div class="button-row">
+              <button id="run-pipeline" class="button primary">Run</button>
+              <button id="stop-pipeline" class="button danger">Stop</button>
+            </div>
+          </header>
+          <div class="panel log-panel">
+            <pre id="log-output"></pre>
+          </div>
+        </section>
+
+        <section id="view-yaml" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Raw</p>
+              <h2>YAML editor</h2>
+            </div>
+            <button id="save-yaml" class="button primary">Save YAML</button>
+          </header>
+          <textarea id="yaml-editor" spellcheck="false"></textarea>
+        </section>
+
+        <section id="view-api" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Local API</p>
+              <h2>Endpoints</h2>
+            </div>
+          </header>
+          <div class="panel api-list">
+            <code>GET /api/health</code>
+            <code>GET /api/config</code>
+            <code>PUT /api/config</code>
+            <code>PATCH /api/config</code>
+            <code>POST /api/run</code>
+            <code>POST /api/run/stop</code>
+            <code>GET /api/run/status</code>
+            <code>GET /api/run/logs?since=0</code>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

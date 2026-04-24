@@ -7,12 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pipeline_config_utils import load_pipeline_config, write_generated_inputs
+
 SCRIPTS_DIR = Path(__file__).resolve().parent
-PIPELINE_SCRIPTS = [
-    SCRIPTS_DIR / "run_atdisp_training.py",
-    SCRIPTS_DIR / "run_atdisp_testing.py",
-    SCRIPTS_DIR / "run_atdisp_prediction.py",
-]
+STEP_SCRIPTS = {
+    "run_relaxation": SCRIPTS_DIR / "run_relaxation.py",
+    "generate_atom_displacement_dataset": SCRIPTS_DIR / "generate_atom_displacement_dataset.py",
+    "run_single_points": SCRIPTS_DIR / "run_single_points.py",
+    "collect_atom_displacement_dataset": SCRIPTS_DIR / "collect_atom_displacement_dataset.py",
+    "run_atdisp_training": SCRIPTS_DIR / "run_atdisp_training.py",
+    "run_atdisp_testing": SCRIPTS_DIR / "run_atdisp_testing.py",
+    "run_atdisp_prediction": SCRIPTS_DIR / "run_atdisp_prediction.py",
+}
 
 
 def run_step(script_path: Path) -> None:
@@ -29,9 +35,16 @@ def run_step(script_path: Path) -> None:
 
 
 def main() -> int:
-    print("=== Pipeline AtomDisplacement: train + test + predict ===")
-    for step in PIPELINE_SCRIPTS:
-        run_step(step)
+    config = load_pipeline_config()
+    print("=== Pipeline AtomDisplacement ===")
+    for step in config["pipeline"]["steps"]:
+        if step == "render_inputs":
+            write_generated_inputs(config)
+            print("[OK] Archivos derivados sincronizados desde pipeline_config.yaml")
+            continue
+        if step not in STEP_SCRIPTS:
+            raise RuntimeError(f"Paso de pipeline desconocido: {step}")
+        run_step(STEP_SCRIPTS[step])
 
     print("\n=== Pipeline AtomDisplacement completado correctamente ===")
     return 0
