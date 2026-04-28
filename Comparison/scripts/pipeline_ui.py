@@ -695,11 +695,13 @@ class ExperimentRunner:
             )
             for size in md_sizes:
                 self._ensure_not_stopped()
+                self._restore_original_config("md", original_configs)
                 result = self._run_one("md", size, run_id)
                 with self._lock:
                     self._results.append(result)
             for size in atom_sizes:
                 self._ensure_not_stopped()
+                self._restore_original_config("atom_displacement", original_configs)
                 result = self._run_one("atom_displacement", size, run_id)
                 with self._lock:
                     self._results.append(result)
@@ -716,6 +718,9 @@ class ExperimentRunner:
                 self._returncode = returncode
                 self._finished_at = time.time()
             self._append("[UI] Configuraciones originales restauradas.\n")
+
+    def _restore_original_config(self, key: str, original_configs: dict[str, str]) -> None:
+        PIPELINES[key].config_path.write_text(original_configs[key], encoding="utf-8")
 
     def _ensure_not_stopped(self) -> None:
         with self._lock:
@@ -1101,7 +1106,7 @@ class ExperimentRunner:
         copy_if_exists(dataset_dir / "samples_manifest.json", result_dir / "samples_manifest.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_dataset.json", result_dir / "water_atom_displacement_dataset.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_summary.csv", result_dir / "water_atom_displacement_summary.csv")
-        eigenvalues = self._extract_eigenvalues(key, config, result_dir)
+        evaluation_metrics = self._evaluate_hamiltonian_metrics(key, config, result_dir)
         manifest = {
             "pipeline": key,
             "dataset_size": size,
@@ -1112,7 +1117,7 @@ class ExperimentRunner:
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
             "metrics": read_metrics_summary(result_dir / "sample_metrics.csv"),
-            "eigenvalues": eigenvalues,
+            "hamiltonian_evaluation": evaluation_metrics,
         }
         (result_dir / "manifest.json").write_text(
             json.dumps(json_safe(manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
@@ -1124,7 +1129,7 @@ class ExperimentRunner:
         )
         return manifest
 
-    def _extract_eigenvalues(
+    def _evaluate_hamiltonian_metrics(
         self,
         key: str,
         config: dict[str, Any],
@@ -1135,9 +1140,9 @@ class ExperimentRunner:
         python = venv_activate.parent / "python"
         if not python.exists():
             python = Path(sys.executable)
-        script = COMPARISON_ROOT / "scripts" / "extract_eigenvalues.py"
+        script = COMPARISON_ROOT / "scripts" / "evaluate_hamiltonian_metrics.py"
         command = [str(python), str(script), str(result_dir)]
-        self._append(f"[UI] Calculando autovalores: {' '.join(command)}\n")
+        self._append(f"[UI] Calculando metricas sparse/espectro/DOS: {' '.join(command)}\n")
         result = subprocess.run(
             command,
             cwd=REPO_ROOT,
@@ -1161,12 +1166,12 @@ class ExperimentRunner:
         summary["returncode"] = result.returncode
         if result.returncode == 0:
             self._append(
-                "[UI] Autovalores archivados: "
+                "[UI] Metricas Hamiltonianas archivadas: "
                 f"{summary.get('samples_compared', 0)} muestras comparadas.\n"
             )
         else:
             self._append(
-                "[WARN] Extraccion de autovalores termino con codigo "
+                "[WARN] Evaluacion Hamiltoniana termino con codigo "
                 f"{result.returncode}. Revisa {manifest_path}.\n"
             )
         return summary
