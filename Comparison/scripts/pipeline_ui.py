@@ -1101,6 +1101,7 @@ class ExperimentRunner:
         copy_if_exists(dataset_dir / "samples_manifest.json", result_dir / "samples_manifest.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_dataset.json", result_dir / "water_atom_displacement_dataset.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_summary.csv", result_dir / "water_atom_displacement_summary.csv")
+        eigenvalues = self._extract_eigenvalues(key, config, result_dir)
         manifest = {
             "pipeline": key,
             "dataset_size": size,
@@ -1111,6 +1112,7 @@ class ExperimentRunner:
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
             "metrics": read_metrics_summary(result_dir / "sample_metrics.csv"),
+            "eigenvalues": eigenvalues,
         }
         (result_dir / "manifest.json").write_text(
             json.dumps(json_safe(manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
@@ -1121,6 +1123,53 @@ class ExperimentRunner:
             f"predichos: {prediction_count} | siesta: {reference_count}\n"
         )
         return manifest
+
+    def _extract_eigenvalues(
+        self,
+        key: str,
+        config: dict[str, Any],
+        result_dir: Path,
+    ) -> dict[str, Any]:
+        spec = PIPELINES[key]
+        venv_activate = resolve_pipeline_path(spec, config["paths"]["venv_activate"])
+        python = venv_activate.parent / "python"
+        if not python.exists():
+            python = Path(sys.executable)
+        script = COMPARISON_ROOT / "scripts" / "extract_eigenvalues.py"
+        command = [str(python), str(script), str(result_dir)]
+        self._append(f"[UI] Calculando autovalores: {' '.join(command)}\n")
+        result = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.stdout.strip():
+            self._append(result.stdout.strip() + "\n")
+        if result.stderr.strip():
+            self._append(result.stderr.strip() + "\n")
+
+        manifest_path = result_dir / "eigenvalues" / "manifest.json"
+        if manifest_path.exists():
+            try:
+                summary = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                summary = {"exists": True, "error": str(exc)}
+        else:
+            summary = {"exists": False}
+        summary["returncode"] = result.returncode
+        if result.returncode == 0:
+            self._append(
+                "[UI] Autovalores archivados: "
+                f"{summary.get('samples_compared', 0)} muestras comparadas.\n"
+            )
+        else:
+            self._append(
+                "[WARN] Extraccion de autovalores termino con codigo "
+                f"{result.returncode}. Revisa {manifest_path}.\n"
+            )
+        return summary
 
 
 EXPERIMENT_RUNNER = ExperimentRunner()

@@ -194,4 +194,4 @@ Cada tamaño se ejecuta en un workspace aislado dentro de `Comparison/workspaces
 - `Comparison/results/results_md/dataset_<N>/run_<timestamp>/`
 - `Comparison/results/results_atomdisp/dataset_<N>/run_<timestamp>/`
 
-Cada carpeta de resultados guarda `structures/`, `predicted_hamiltonians/`, `siesta_hamiltonians/`, `sample_metrics.csv` cuando existe, `pipeline_config.yaml`, `run.log` y `manifest.json`.
+Cada carpeta de resultados guarda `structures/`, `predicted_hamiltonians/`, `siesta_hamiltonians/`, `sample_metrics.csv` cuando existe, `pipeline_config.yaml`, `run.log` y `manifest.json`. Tambien calcula autovalores desde los Hamiltonianos archivados y guarda `eigenvalues/siesta/`, `eigenvalues/predicted/`, `eigenvalues/band_errors/`, `eigenvalues/eigenvalue_metrics.csv` y `eigenvalues/overlap_summary.csv`. El calculo usa la matriz de solape almacenada en los archivos `HSX/TSHS` cuando esta disponible.
