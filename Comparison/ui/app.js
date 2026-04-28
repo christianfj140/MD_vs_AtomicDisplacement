@@ -11,6 +11,7 @@ const pipelines = [
 
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
+  experimentOffset: 0,
   polling: null,
 };
 
@@ -34,9 +35,24 @@ async function request(path, options = {}) {
 }
 
 function statusText(status) {
-  if (status.running) return "Running";
+  if (status.running) {
+    const elapsed = status.elapsed_seconds == null ? "" : ` · ${formatDuration(status.elapsed_seconds)}`;
+    const eta = status.eta_seconds == null ? "" : ` · ETA ${formatDuration(status.eta_seconds)}`;
+    return `Running${elapsed}${eta}`;
+  }
   if (status.returncode == null || status.returncode === 0) return "Idle";
   return `Exit ${status.returncode}`;
+}
+
+function formatDuration(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "sin estimacion";
+  const total = Math.max(0, Math.round(Number(value)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
 }
 
 function updatePipelineStatus(status) {
@@ -102,6 +118,80 @@ async function pollLogs() {
     }),
   );
   await pollStatus();
+  await pollExperimentLogs();
+}
+
+function parseSizesInput(id) {
+  return document
+    .getElementById(id)
+    .value.split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => Number(item));
+}
+
+function updateExperimentStatus(status) {
+  const text = document.getElementById("experiment-status-text");
+  const root = document.getElementById("experiment-results-root");
+  if (status.running && status.current) {
+    const elapsed = formatDuration(status.current.elapsed_seconds);
+    const eta = formatDuration(status.current.eta_seconds);
+    text.textContent = `${status.current.pipeline} dataset_${status.current.size} · ${elapsed} · ETA ${eta}`;
+  } else if (status.running) {
+    text.textContent = "Running";
+  } else if (status.returncode == null || status.returncode === 0) {
+    text.textContent = "Idle";
+  } else {
+    text.textContent = `Exit ${status.returncode}`;
+  }
+  root.textContent = status.results_root || "Comparison/results";
+  renderExperimentResults(status.results || []);
+}
+
+function renderExperimentResults(results) {
+  const container = document.getElementById("experiment-results");
+  container.innerHTML = "";
+  for (const result of results) {
+    const item = document.createElement("div");
+    item.className = "result-pill";
+    item.innerHTML = `
+      <strong>${result.pipeline} dataset_${result.dataset_size}</strong>
+      <span>${result.predicted_hamiltonians} predicted Hamiltonians</span>
+      <span>${result.siesta_hamiltonians} SIESTA Hamiltonians</span>
+      <code>${result.result_dir}</code>
+    `;
+    container.appendChild(item);
+  }
+}
+
+async function runExperiment() {
+  const mdSizes = parseSizesInput("md-sizes");
+  const atomSizes = parseSizesInput("atom-sizes");
+  state.experimentOffset = 0;
+  document.getElementById("experiment-log").textContent = "";
+  const payload = await request("/api/experiment", {
+    method: "POST",
+    body: JSON.stringify({ md_sizes: mdSizes, atom_sizes: atomSizes }),
+  });
+  updateExperimentStatus(payload);
+  showToast("Experiment started");
+}
+
+async function stopExperiment() {
+  const payload = await request("/api/experiment/stop", { method: "POST", body: "{}" });
+  updateExperimentStatus(payload);
+  showToast("Experiment stop requested");
+}
+
+async function pollExperimentLogs() {
+  const payload = await request(`/api/experiment/logs?since=${state.experimentOffset}`);
+  state.experimentOffset = payload.offset;
+  updateExperimentStatus(payload.status);
+  if (payload.lines.length) {
+    const output = document.getElementById("experiment-log");
+    output.textContent += payload.lines.join("");
+    output.scrollTop = output.scrollHeight;
+  }
 }
 
 async function loadResults() {
@@ -121,6 +211,21 @@ async function loadResults() {
       <p><strong>Metrics:</strong> ${data.metrics_exists ? "available" : "missing"}</p>
       <code>${data.metrics}</code>
       <code>${data.prediction_glob}</code>
+    `;
+    grid.appendChild(panel);
+  }
+  const archived = results.archived || {};
+  for (const pipeline of pipelines) {
+    const items = archived[pipeline.key] || [];
+    const panel = document.createElement("section");
+    panel.className = "panel result-row";
+    panel.innerHTML = `
+      <div>
+        <p class="eyebrow">Archived</p>
+        <h3>${pipeline.label}</h3>
+      </div>
+      <p><strong>${items.length}</strong> archived experiment runs</p>
+      <code>Comparison/results/${pipeline.key === "md" ? "results_md" : "results_atomdisp"}</code>
     `;
     grid.appendChild(panel);
   }
@@ -149,6 +254,12 @@ function setupEvents() {
   });
   document.getElementById("refresh-results").addEventListener("click", () => {
     loadResults().then(() => showToast("Results refreshed")).catch((error) => showToast(error.message));
+  });
+  document.getElementById("run-experiment").addEventListener("click", () => {
+    runExperiment().catch((error) => showToast(error.message));
+  });
+  document.getElementById("stop-experiment").addEventListener("click", () => {
+    stopExperiment().catch((error) => showToast(error.message));
   });
 }
 

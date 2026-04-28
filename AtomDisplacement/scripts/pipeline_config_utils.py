@@ -54,8 +54,11 @@ def validate_config(config: dict[str, Any]) -> None:
         raise RuntimeError("structure.species debe contener al menos una especie.")
     if not config["structure"]["atoms"]:
         raise RuntimeError("structure.atoms debe contener al menos un atomo.")
-    if int(config["generation"]["num_samples"]) <= 0:
-        raise RuntimeError("generation.num_samples debe ser mayor que cero.")
+    if not config["generation"].get("sample_id_format"):
+        raise RuntimeError("generation.sample_id_format no puede estar vacio.")
+    force_constants = config["structure"].get("force_constants", {})
+    if force_constants and int(force_constants.get("first_atom", 1)) <= 0:
+        raise RuntimeError("structure.force_constants.first_atom debe ser mayor que cero.")
 
 
 def config_dir(config: dict[str, Any]) -> Path:
@@ -187,6 +190,26 @@ def render_fdf(
         lines.append("")
         for key, value in structure["relaxation_md"].items():
             lines.append(f"{key:<32} {_format_value(value)}")
+    elif bool(structure.get("force_constants", {}).get("enabled", False)):
+        force_constants = dict(structure["force_constants"])
+        first_atom = int(force_constants.get("first_atom", 1))
+        last_atom = force_constants.get("last_atom")
+        if last_atom is None:
+            last_atom = len(atom_species)
+        lines.append("")
+        if "lua_script" in force_constants:
+            lines.append(f"{'Lua.Script':<32} {force_constants['lua_script']}")
+        lines.append(f"{'TS.HS.Save':<32} {_format_value(force_constants.get('save_tshs', True))}")
+        lines.append(f"{'TS.DE.Save':<32} {_format_value(force_constants.get('save_tsde', True))}")
+        lines.append(f"{'MD.TypeOfRun':<32} FC")
+        lines.append(f"{'FC.Displacement':<32} {force_constants['displacement']}")
+        lines.append(f"{'FC.First':<32} {first_atom}")
+        lines.append(f"{'FC.Last':<32} {int(last_atom)}")
+        lines.append(f"{'FC.Save.dHS':<32} {_format_value(force_constants.get('save_dhs', True))}")
+        if "dHdR_tolerance" in force_constants:
+            lines.append(f"{'FC.dHdR.Tolerance':<32} {force_constants['dHdR_tolerance']}")
+        if "dSdR_tolerance" in force_constants:
+            lines.append(f"{'FC.dSdR.Tolerance':<32} {force_constants['dSdR_tolerance']}")
     return "\n".join(lines) + "\n"
 
 

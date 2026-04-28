@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 
 from atom_displacement_utils import (
+    ATDIS_STEPS_DIR_NAME,
+    DATASET_DIR,
     PIPELINE_CONFIG,
     PIPELINE_PATHS,
-    SAMPLES_DIR,
+    generated_sample_dirs,
     require_command,
     run_siesta_in_dir,
     sample_run_status,
@@ -30,7 +33,12 @@ def main() -> int:
     require_command(command(PIPELINE_CONFIG, "shell"))
     require_command(command(PIPELINE_CONFIG, "siesta"))
 
-    sample_dirs = sorted(path for path in SAMPLES_DIR.glob("sample_*") if path.is_dir())
+    if args.rerun:
+        atdis_steps_dir = DATASET_DIR / ATDIS_STEPS_DIR_NAME
+        if atdis_steps_dir.exists():
+            shutil.rmtree(atdis_steps_dir)
+
+    sample_dirs = generated_sample_dirs()
     if args.limit is not None:
         sample_dirs = sample_dirs[: args.limit]
 

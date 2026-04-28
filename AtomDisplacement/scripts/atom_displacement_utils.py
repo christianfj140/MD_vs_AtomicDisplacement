@@ -22,6 +22,7 @@ from pipeline_config_utils import (
 
 BOHR_TO_ANG = 0.529177210903
 RY_TO_EV = 13.605693009
+ATDIS_STEPS_DIR_NAME = "AtDis_steps"
 ATOM_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_CONFIG = load_pipeline_config()
 PIPELINE_PATHS = paths(PIPELINE_CONFIG)
@@ -348,6 +349,9 @@ def sample_run_status(sample_dir: Path) -> dict[str, Any]:
     run_out = sample_dir / "RUN.out"
     if not run_out.exists():
         return {"job_completed": False, "scf_converged": False}
+    run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    if run_fdf.exists() and run_out.stat().st_mtime < run_fdf.stat().st_mtime:
+        return {"job_completed": False, "scf_converged": False}
 
     text = run_out.read_text(encoding="utf-8", errors="ignore")
     return {
@@ -357,15 +361,53 @@ def sample_run_status(sample_dir: Path) -> dict[str, Any]:
 
 
 def generated_sample_dirs() -> list[Path]:
-    return sorted(path for path in SAMPLES_DIR.glob("sample_*") if path.is_dir())
+    manifest_path = PIPELINE_PATHS["samples_manifest_path"]
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("generation_mode") == "siesta_fc_single_run":
+            atdis_steps_dir = DATASET_DIR / ATDIS_STEPS_DIR_NAME
+            if atdis_steps_dir.exists():
+                return sorted(
+                    (
+                        path
+                        for path in atdis_steps_dir.iterdir()
+                        if path.is_dir() and path.name.isdigit()
+                    ),
+                    key=lambda path: int(path.name),
+                )
+            return [DATASET_DIR]
+        sample_ids = [
+            sample["id"]
+            for sample in manifest.get("samples", [])
+            if isinstance(sample, dict) and sample.get("id")
+        ]
+        if sample_ids:
+            return [
+                SAMPLES_DIR / sample_id
+                for sample_id in sample_ids
+                if (SAMPLES_DIR / sample_id).is_dir()
+            ]
+    sample_dirs = sorted(path for path in SAMPLES_DIR.glob("sample_*") if path.is_dir())
+    if sample_dirs:
+        return sample_dirs
+    return sorted(
+        path
+        for path in SAMPLES_DIR.iterdir()
+        if path.is_dir() and (path / PIPELINE_CONFIG["paths"]["run_fdf_name"]).exists()
+    )
 
 
 def completed_sample_dirs() -> list[Path]:
     completed = []
     for sample_dir in generated_sample_dirs():
-        status = sample_run_status(sample_dir)
         hsx_path = find_first_output(sample_dir, ".HSX")
-        if status["job_completed"] and status["scf_converged"] and hsx_path is not None:
+        tshs_path = find_first_output(sample_dir, ".TSHS")
+        run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
+        if run_fdf.exists() and tshs_path:
+            completed.append(sample_dir)
+            continue
+        status = sample_run_status(sample_dir)
+        if status["job_completed"] and status["scf_converged"] and (hsx_path or tshs_path):
             completed.append(sample_dir)
     return completed
 

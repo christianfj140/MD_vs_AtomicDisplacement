@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -85,6 +86,114 @@ def run_siesta_with_venv(config: dict) -> None:
     print(f"[OK] Salida guardada en {pipeline_paths['run_out_path']}")
 
 
+def _split_counts(total: int) -> tuple[int, int, int]:
+    train = int(total * 0.8)
+    validation = int(total * 0.1)
+    test = total - train - validation
+    if total >= 3 and test == 0:
+        test = 1
+        train = max(1, train - 1)
+    return train, validation, test
+
+
+def _select_spread(items: list[Path], count: int) -> list[Path]:
+    if count <= 0:
+        return []
+    if count >= len(items):
+        return list(items)
+
+    used: set[int] = set()
+    selected: list[int] = []
+    for index in range(count):
+        target = min(len(items) - 1, int((index + 0.5) * len(items) / count))
+        if target in used:
+            target = min(
+                (candidate for candidate in range(len(items)) if candidate not in used),
+                key=lambda candidate: abs(candidate - target),
+            )
+        used.add(target)
+        selected.append(target)
+    return [items[index] for index in sorted(selected)]
+
+
+def _split_spread(items: list[Path], train_count: int, validation_count: int, test_count: int) -> dict[str, list[Path]]:
+    test = _select_spread(items, test_count)
+    remaining = [item for item in items if item not in set(test)]
+    validation = _select_spread(remaining, validation_count)
+    train = [item for item in remaining if item not in set(validation)]
+    if len(train) > train_count:
+        train = _select_spread(train, train_count)
+    return {"train": train, "validation": validation, "test": test}
+
+
+def _sample_names(samples: list[Path]) -> str:
+    return ", ".join(path.name for path in samples) if samples else "-"
+
+
+def _link_or_copy_file(src: Path, dst: Path) -> None:
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    try:
+        os.symlink(os.path.relpath(src, dst.parent), dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _prepare_split_sample(src_dir: Path, dst_dir: Path) -> None:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for src in src_dir.iterdir():
+        if src.is_file():
+            _link_or_copy_file(src, dst_dir / src.name)
+
+
+def prepare_dataset_splits(config: dict) -> None:
+    split_config = config.get("splits", {})
+    if not bool(split_config.get("enabled", False)):
+        return
+
+    pipeline_paths = paths(config)
+    steps_dir = pipeline_paths["dataset_dir"] / "MD_steps"
+    split_root = pipeline_paths["dataset_dir"] / "splits"
+    step_dirs = sorted(
+        (path for path in steps_dir.iterdir() if path.is_dir() and path.name.isdigit()),
+        key=lambda path: int(path.name),
+    )
+    total = int(config["md"]["steps"])
+    if len(step_dirs) < total:
+        raise RuntimeError(
+            f"Se esperaban {total} muestras MD, pero solo hay {len(step_dirs)} en {steps_dir}."
+        )
+
+    default_train, default_validation, default_test = _split_counts(total)
+    train_count = int(split_config.get("train", default_train))
+    validation_count = int(split_config.get("validation", default_validation))
+    test_count = int(split_config.get("test", default_test))
+    requested = train_count + validation_count + test_count
+    if requested > len(step_dirs):
+        raise RuntimeError(
+            "El split MD pide mas muestras de las disponibles: "
+            f"{requested} > {len(step_dirs)}."
+        )
+
+    if split_root.exists():
+        shutil.rmtree(split_root)
+
+    selected = _select_spread(step_dirs, requested)
+    split_ranges = _split_spread(selected, train_count, validation_count, test_count)
+    for split_name, samples in split_ranges.items():
+        for sample_dir in samples:
+            _prepare_split_sample(sample_dir, split_root / split_name / sample_dir.name)
+
+    print(
+        "[OK] Split MD preparado: "
+        f"{train_count} train, {test_count} test, {validation_count} validation "
+        f"en {split_root}"
+    )
+    print(f"[INFO] MD train samples: {_sample_names(split_ranges['train'])}")
+    print(f"[INFO] MD test samples: {_sample_names(split_ranges['test'])}")
+    print(f"[INFO] MD validation samples: {_sample_names(split_ranges['validation'])}")
+
+
 def main() -> int:
     config = load_pipeline_config()
     pipeline_paths = paths(config)
@@ -100,6 +209,7 @@ def main() -> int:
     setup_store(config)
     write_run_fdf(config)
     run_siesta_with_venv(config)
+    prepare_dataset_splits(config)
 
     print("\n=== Pipeline completado correctamente ===")
     return 0

@@ -1,200 +1,102 @@
 #!/usr/bin/env python3
-"""Generate single-point H2O samples around a relaxed reference geometry."""
+"""Generate the SIESTA FC input used for the atom-displacement dataset."""
 
 from __future__ import annotations
 
-import argparse
-import math
-import random
-from pathlib import Path
+import shutil
 
 from atom_displacement_utils import (
     BASE_DIR,
     DATASET_DIR,
     PIPELINE_CONFIG,
     PIPELINE_PATHS,
-    SAMPLES_DIR,
-    Structure,
     compute_water_geometry_metrics,
     copy_pseudopotentials,
     ensure_dir,
     load_reference_structure,
-    structure_with_positions,
+    run_command_in_venv,
     write_json,
     write_single_point_fdf,
 )
+from pipeline_config_utils import command
 
 
-def build_argument_parser() -> argparse.ArgumentParser:
-    generation = PIPELINE_CONFIG["generation"]
-    filters = generation["filters"]
-    parser = argparse.ArgumentParser(
-        description="Genera muestras H2O deformadas con desplazamientos atomicos pequenos."
+STORE_DIR_NAME = "AtDis_steps"
+
+
+def setup_lua_store() -> None:
+    run_command_in_venv(
+        [command(PIPELINE_CONFIG, "graph2mat"), "siesta", "md", "setup-store"],
+        cwd=DATASET_DIR,
     )
-    parser.add_argument("--num-samples", type=int, default=int(generation["num_samples"]))
-    parser.add_argument("--sigma", type=float, default=float(generation["sigma_ang"]), help="Desviacion tipica en Ang")
-    parser.add_argument("--seed", type=int, default=int(generation["seed"]))
-    parser.add_argument("--max-displacement-norm", type=float, default=float(generation["max_displacement_norm_ang"]))
-    parser.add_argument("--min-oh", type=float, default=float(filters["min_oh_ang"]))
-    parser.add_argument("--max-oh", type=float, default=float(filters["max_oh_ang"]))
-    parser.add_argument("--min-hh", type=float, default=float(filters["min_hh_ang"]))
-    parser.add_argument("--min-angle", type=float, default=float(filters["min_angle_deg"]))
-    parser.add_argument("--max-angle", type=float, default=float(filters["max_angle_deg"]))
-    return parser
-
-
-def displaced_structure(
-    reference: Structure,
-    rng: random.Random,
-    sigma: float,
-    max_displacement_norm: float,
-) -> tuple[Structure, list[list[float]], list[float]]:
-    displacements: list[list[float]] = []
-    norms: list[float] = []
-    positions: list[list[float]] = []
-    for position in reference.positions_ang:
-        displacement = bounded_gaussian_displacement(
-            rng=rng,
-            sigma=sigma,
-            max_displacement_norm=max_displacement_norm,
-        )
-        norm = math.sqrt(sum(value * value for value in displacement))
-        displacements.append(displacement)
-        norms.append(norm)
-        positions.append([coordinate + delta for coordinate, delta in zip(position, displacement)])
-
-    return structure_with_positions(reference, positions), displacements, norms
-
-
-def bounded_gaussian_displacement(
-    rng: random.Random,
-    sigma: float,
-    max_displacement_norm: float,
-) -> list[float]:
-    """Sample a small random displacement whose norm is always below the threshold.
-
-    We use rejection sampling from a 3D Gaussian and only accept vectors inside the
-    allowed sphere. This keeps the perturbations local around the relaxed geometry
-    while guaranteeing that no atom moves more than the requested limit.
-    """
-    max_attempts = 1000
-    for _ in range(max_attempts):
-        displacement = [rng.gauss(0.0, sigma) for _ in range(3)]
-        norm = math.sqrt(sum(value * value for value in displacement))
-        if norm <= max_displacement_norm:
-            return displacement
-
-    # Extremely defensive fallback: if the truncated Gaussian kept failing, project
-    # the last draw back onto the allowed sphere so we still satisfy the threshold.
-    displacement = [rng.gauss(0.0, sigma) for _ in range(3)]
-    norm = math.sqrt(sum(value * value for value in displacement))
-    if norm == 0.0:
-        return [0.0, 0.0, 0.0]
-    scale = max_displacement_norm / norm
-    return [value * scale for value in displacement]
-
-
-def is_valid_structure(
-    structure: Structure,
-    displacement_norms: list[float],
-    args: argparse.Namespace,
-) -> tuple[bool, dict[str, float]]:
-    metrics = compute_water_geometry_metrics(structure)
-    if any(norm > args.max_displacement_norm for norm in displacement_norms):
-        return False, metrics
-    if not (args.min_oh <= metrics["oh_1_ang"] <= args.max_oh):
-        return False, metrics
-    if not (args.min_oh <= metrics["oh_2_ang"] <= args.max_oh):
-        return False, metrics
-    if metrics["hh_ang"] < args.min_hh:
-        return False, metrics
-    if not (args.min_angle <= metrics["hoh_angle_deg"] <= args.max_angle):
-        return False, metrics
-    return True, metrics
+    lua_script = DATASET_DIR / PIPELINE_CONFIG["structure"]["force_constants"]["lua_script"]
+    text = lua_script.read_text(encoding="utf-8")
+    text = text.replace('local store_dir = "MD_steps"', f'local store_dir = "{STORE_DIR_NAME}"')
+    lua_script.write_text(text, encoding="utf-8")
 
 
 def main() -> int:
-    args = build_argument_parser().parse_args()
     ensure_dir(DATASET_DIR)
-    ensure_dir(SAMPLES_DIR)
+    atdis_steps_dir = DATASET_DIR / STORE_DIR_NAME
+    if atdis_steps_dir.exists():
+        shutil.rmtree(atdis_steps_dir)
 
     reference, source_path = load_reference_structure()
-    rng = random.Random(args.seed)
-    accepted_samples = []
-    rejected = 0
-    generation = PIPELINE_CONFIG["generation"]
-    max_attempts = max(
-        args.num_samples * int(generation["max_attempts_factor"]),
-        int(generation["min_attempts"]),
-    )
+    metrics = compute_water_geometry_metrics(reference)
+    force_constants = PIPELINE_CONFIG["structure"]["force_constants"]
+    last_atom = force_constants.get("last_atom") or len(reference.atom_species)
 
     print("=== AtomDisplacement dataset generation ===")
     print(f"[INFO] Geometria de referencia: {source_path}")
-    print(f"[INFO] Numero de muestras objetivo: {args.num_samples}")
-    print(f"[INFO] Sigma de desplazamiento: {args.sigma:.4f} Ang")
+    print("[INFO] Modo de desplazamiento: SIESTA MD.TypeOfRun FC")
+    print(f"[INFO] FC.Displacement: {force_constants['displacement']}")
+    print(f"[INFO] Rango de atomos FC: {force_constants.get('first_atom', 1)}-{last_atom}")
+    print(f"[INFO] Lua store: {force_constants['lua_script']}")
 
-    sample_index = 1
-    attempts = 0
-    while sample_index <= args.num_samples:
-        attempts += 1
-        if attempts > max_attempts:
-            raise RuntimeError(
-                f"No fue posible generar {args.num_samples} muestras validas tras {attempts} intentos."
-            )
+    force_constants_metadata = {
+        "md_type_of_run": "FC",
+        "displacement": force_constants["displacement"],
+        "first_atom": int(force_constants.get("first_atom", 1)),
+        "last_atom": int(last_atom),
+        "lua_script": force_constants.get("lua_script"),
+        "save_tshs": bool(force_constants.get("save_tshs", True)),
+        "save_tsde": bool(force_constants.get("save_tsde", True)),
+        "save_dhs": bool(force_constants.get("save_dhs", True)),
+        "dHdR_tolerance": force_constants.get("dHdR_tolerance"),
+        "dSdR_tolerance": force_constants.get("dSdR_tolerance"),
+    }
 
-        candidate, displacements, norms = displaced_structure(
-            reference=reference,
-            rng=rng,
-            sigma=args.sigma,
-            max_displacement_norm=args.max_displacement_norm,
-        )
-        is_valid, metrics = is_valid_structure(candidate, norms, args)
-        if not is_valid:
-            rejected += 1
-            continue
+    system_label = "fc_dataset"
+    setup_lua_store()
+    copy_pseudopotentials(BASE_DIR, DATASET_DIR)
+    write_single_point_fdf(
+        DATASET_DIR / PIPELINE_CONFIG["paths"]["run_fdf_name"],
+        reference,
+        system_label,
+    )
 
-        sample_id = generation["sample_id_format"].format(index=sample_index)
-        sample_dir = SAMPLES_DIR / sample_id
-        ensure_dir(sample_dir)
-        copy_pseudopotentials(BASE_DIR, sample_dir)
-        write_single_point_fdf(
-            sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"],
-            candidate,
-            sample_id,
-        )
-
-        metadata = {
-            "id": sample_id,
-            "reference_source": source_path,
-            "positions_ang": candidate.positions_ang,
-            "displacements_ang": displacements,
-            "displacement_norms_ang": norms,
-            "geometry_metrics": metrics,
-        }
-        write_json(sample_dir / "metadata.json", metadata)
-        accepted_samples.append(metadata)
-        sample_index += 1
+    metadata = {
+        "id": system_label,
+        "generation_mode": "siesta_fc_single_run",
+        "reference_source": source_path,
+        "positions_ang": reference.positions_ang,
+        "geometry_metrics": metrics,
+        "force_constants": force_constants_metadata,
+        "expected_outputs": {
+            "force_constants": "FC",
+            "hamiltonian_derivatives": f"{system_label}.dHSdR.nc",
+        },
+    }
+    write_json(DATASET_DIR / "metadata.json", metadata)
 
     manifest = {
+        "generation_mode": "siesta_fc_single_run",
         "reference_source": source_path,
-        "num_requested": args.num_samples,
-        "num_generated": len(accepted_samples),
-        "num_rejected": rejected,
-        "sigma_ang": args.sigma,
-        "seed": args.seed,
-        "filters": {
-            "max_displacement_norm_ang": args.max_displacement_norm,
-            "min_oh_ang": args.min_oh,
-            "max_oh_ang": args.max_oh,
-            "min_hh_ang": args.min_hh,
-            "min_angle_deg": args.min_angle,
-            "max_angle_deg": args.max_angle,
-        },
-        "samples": accepted_samples,
+        "force_constants": force_constants_metadata,
+        "run": metadata,
     }
     write_json(PIPELINE_PATHS["samples_manifest_path"], manifest)
-    print(f"[OK] Muestras generadas en {SAMPLES_DIR}")
-    print(f"[OK] Rechazadas antes de calcular: {rejected}")
+    print(f"[OK] Entrada FC generada en {DATASET_DIR / PIPELINE_CONFIG['paths']['run_fdf_name']}")
     return 0
 
 

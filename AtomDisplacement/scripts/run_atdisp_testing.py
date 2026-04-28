@@ -33,20 +33,23 @@ def patch_graph2mat_run_loading() -> None:
 
 def main() -> int:
     print("=== AtomDisplacement (test) ===")
-    sample_dirs = completed_sample_dirs()
-    if not sample_dirs:
-        raise RuntimeError(
-            "No hay muestras completadas para testear. Ejecuta primero run_single_points.py."
-        )
-
     patch_graph2mat_run_loading()
 
     ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, "")
-    sample_index = int(PIPELINE_CONFIG["testing"]["sample_index"])
-    test_run = os.path.relpath(
-        sample_dirs[sample_index] / PIPELINE_CONFIG["paths"]["run_fdf_name"],
-        TRAINING_DIR,
-    ).replace("\\", "/")
+    configured_test_runs = PIPELINE_CONFIG["testing"].get("test_runs")
+    if configured_test_runs:
+        test_run = str(configured_test_runs)
+    else:
+        sample_dirs = completed_sample_dirs()
+        if not sample_dirs:
+            raise RuntimeError(
+                "No hay muestras completadas para testear. Ejecuta primero run_single_points.py."
+            )
+        sample_index = int(PIPELINE_CONFIG["testing"]["sample_index"])
+        test_run = os.path.relpath(
+            sample_dirs[sample_index] / PIPELINE_CONFIG["paths"]["run_fdf_name"],
+            TRAINING_DIR,
+        ).replace("\\", "/")
     os.chdir(TRAINING_DIR)
 
     testing = PIPELINE_CONFIG["testing"]

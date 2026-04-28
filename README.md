@@ -183,3 +183,15 @@ python3 Comparison/scripts/pipeline_ui.py
 ```
 
 Abre `http://127.0.0.1:8770`. La pantalla ejecuta ambos pipelines, muestra logs separados y resume los artefactos que se usaran para comparar resultados.
+
+La pestaña `Experiment` permite barrer tamaños de dataset, por ejemplo:
+
+- `MD`: `50, 100, 200, 500`
+- `AtomDisplacement`: `100, 1000, 10000`
+
+Cada tamaño se ejecuta en un workspace aislado dentro de `Comparison/workspaces/` y se archiva en:
+
+- `Comparison/results/results_md/dataset_<N>/run_<timestamp>/`
+- `Comparison/results/results_atomdisp/dataset_<N>/run_<timestamp>/`
+
+Cada carpeta de resultados guarda `structures/`, `predicted_hamiltonians/`, `siesta_hamiltonians/`, `sample_metrics.csv` cuando existe, `pipeline_config.yaml`, `run.log` y `manifest.json`.

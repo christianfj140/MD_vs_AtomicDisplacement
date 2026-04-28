@@ -25,18 +25,6 @@ commands:
   python: python
 
 generation:
-  num_samples: 100
-  sigma_ang: 0.02
-  seed: 12345
-  max_displacement_norm_ang: 0.05
-  max_attempts_factor: 100
-  min_attempts: 1000
-  filters:
-    min_oh_ang: 0.7
-    max_oh_ang: 1.2
-    min_hh_ang: 1.0
-    min_angle_deg: 80.0
-    max_angle_deg: 130.0
   sample_id_format: sample_{index:04d}
 
 structure:
@@ -46,7 +34,18 @@ structure:
     system_label: h2o_relax
   single_point:
     system_name_template: H2O {sample_id}
-    title: Single-point calculation for an atom-displaced H2O geometry
+    title: Force-constant calculation for H2O atom displacements
+  force_constants:
+    enabled: true
+    displacement: 0.05 Ang
+    first_atom: 1
+    last_atom: null
+    lua_script: md_store.lua
+    save_tshs: true
+    save_tsde: true
+    save_dhs: true
+    dHdR_tolerance: -1 Ry/Bohr
+    dSdR_tolerance: -1 1/Bohr
   lattice_constant:
     value: 1.0
     unit: Ang
@@ -103,7 +102,7 @@ structure:
     WriteCoorXmol: T
     WriteCoorStep: T
     WriteForces: T
-    SaveHS: T
+    Save.HS: T
     XML.Write: T
   relaxation_md:
     MD.TypeOfRun: CG
@@ -126,7 +125,7 @@ training:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
-    basis_files: ../relaxed/*.ion.xml
+    basis_files: ../dataset/AtDis_steps/basis/*.ion.xml
     runs_json: runs.json
     batch_size: 10
     store_in_memory: true
@@ -166,7 +165,7 @@ testing:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
-    basis_files: ../relaxed/*.ion.xml
+    basis_files: ../dataset/AtDis_steps/basis/*.ion.xml
     store_in_memory: true
     n_matrix_components: 2
   callbacks:
@@ -180,8 +179,8 @@ prediction:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
-    basis_files: ../relaxed/*.ion.xml
-    predict_structs: ../dataset/samples/*/RUN.fdf
+    basis_files: ../dataset/AtDis_steps/basis/*.ion.xml
+    predict_structs: ../dataset/AtDis_steps/*/RUN.fdf
     store_in_memory: true
     n_matrix_components: 2
   callbacks:

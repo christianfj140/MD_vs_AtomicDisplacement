@@ -24,7 +24,8 @@ body {
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-button {
+button,
+input {
   font: inherit;
 }
 
@@ -188,6 +189,34 @@ h3 {
   padding: 18px;
 }
 
+.compact-grid {
+  margin-bottom: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+  padding: 8px 10px;
+}
+
+.field input:focus {
+  outline: 3px solid var(--focus);
+  border-color: var(--accent);
+}
+
 .pipeline-panel {
   min-height: calc(100vh - 132px);
   display: flex;
@@ -207,6 +236,15 @@ h3 {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.experiment-status {
+  display: grid;
+  gap: 14px;
+}
+
+.experiment-log {
+  min-height: 420px;
 }
 
 .button-row {
@@ -250,6 +288,27 @@ h3 {
   gap: 10px;
   color: var(--muted);
   font-size: 14px;
+}
+
+.result-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.result-pill {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.result-pill strong {
+  color: var(--ink);
 }
 
 .result-row strong {
@@ -310,6 +369,10 @@ h3 {
   }
 
   .grid.two {
+    grid-template-columns: 1fr;
+  }
+
+  .result-list {
     grid-template-columns: 1fr;
   }
 

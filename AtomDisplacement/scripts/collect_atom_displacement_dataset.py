@@ -11,10 +11,10 @@ from atom_displacement_utils import (
     COLLECTED_DIR,
     PIPELINE_CONFIG,
     PIPELINE_PATHS,
-    SAMPLES_DIR,
     compute_water_geometry_metrics,
     ensure_dir,
     find_first_output,
+    generated_sample_dirs,
     parse_fa_file,
     parse_fdf_structure,
     parse_total_energy_ev,
@@ -40,6 +40,10 @@ def collect_sample(sample_dir: Path) -> dict:
     energy_ev = parse_total_energy_ev(sample_dir)
     fa_path = find_first_output(sample_dir, ".FA")
     xv_path = find_first_output(sample_dir, ".XV")
+    fc_path = sample_dir / "FC"
+    dhsdr_path = find_first_output(sample_dir, ".dHSdR.nc")
+    tshs_path = find_first_output(sample_dir, ".TSHS")
+    tsde_path = find_first_output(sample_dir, ".TSDE")
     forces = parse_fa_file(fa_path) if fa_path is not None else None
     output_structure = (
         parse_xv_structure(xv_path, input_structure.species_labels) if xv_path is not None else None
@@ -47,7 +51,7 @@ def collect_sample(sample_dir: Path) -> dict:
     metrics = compute_water_geometry_metrics(input_structure)
 
     return {
-        "id": sample_dir.name,
+        "id": metadata.get("id", sample_dir.name),
         "status": status,
         "species": input_structure.symbols,
         "positions_ang": input_structure.positions_ang,
@@ -57,13 +61,16 @@ def collect_sample(sample_dir: Path) -> dict:
         "forces_ev_ang": forces,
         "geometry_metrics": metrics,
         "reference_source": metadata.get("reference_source"),
-        "displacements_ang": metadata.get("displacements_ang"),
-        "displacement_norms_ang": metadata.get("displacement_norms_ang"),
+        "force_constants": metadata.get("force_constants"),
         "files": {
             "run_fdf": str(sample_dir / "RUN.fdf"),
             "run_out": str(run_out_path),
             "fa": str(fa_path) if fa_path else None,
             "xv": str(xv_path) if xv_path else None,
+            "fc": str(fc_path) if fc_path.exists() else None,
+            "dhsdr": str(dhsdr_path) if dhsdr_path else None,
+            "tshs": str(tshs_path) if tshs_path else None,
+            "tsde": str(tsde_path) if tsde_path else None,
         },
     }
 
@@ -96,7 +103,7 @@ def write_summary_csv(rows: list[dict], csv_path: Path) -> None:
 
 def main() -> int:
     ensure_dir(COLLECTED_DIR)
-    sample_dirs = sorted(path for path in SAMPLES_DIR.glob("sample_*") if path.is_dir())
+    sample_dirs = generated_sample_dirs()
     dataset_rows = [collect_sample(sample_dir) for sample_dir in sample_dirs]
 
     payload = {
