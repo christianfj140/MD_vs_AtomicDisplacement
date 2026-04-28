@@ -13,6 +13,8 @@ const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
   polling: null,
+  plotsEnabled: false,
+  plotData: null,
 };
 
 function showToast(message) {
@@ -229,6 +231,217 @@ async function loadResults() {
     `;
     grid.appendChild(panel);
   }
+  if (state.plotsEnabled) {
+    await loadPlots();
+  }
+}
+
+function metricValue(run, group, metric) {
+  const value = run?.means?.[group]?.[metric];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function sampleMetricValues(run, group, metric) {
+  return (run?.samples?.[group] || [])
+    .map((row) => row[metric])
+    .filter((value) => typeof value === "number" && Number.isFinite(value));
+}
+
+function groupedRuns(runs) {
+  const groups = new Map();
+  for (const run of runs) {
+    if (!groups.has(run.pipeline)) {
+      groups.set(run.pipeline, []);
+    }
+    groups.get(run.pipeline).push(run);
+  }
+  for (const items of groups.values()) {
+    items.sort((a, b) => a.dataset_size - b.dataset_size || String(a.run_id).localeCompare(String(b.run_id)));
+  }
+  return groups;
+}
+
+function lineTraces(runs, group, metrics) {
+  const traces = [];
+  for (const [pipeline, items] of groupedRuns(runs)) {
+    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    for (const metric of metrics) {
+      const points = items
+        .map((run) => ({ x: run.dataset_size, y: metricValue(run, group, metric.key), text: run.run_id }))
+        .filter((point) => point.y != null);
+      if (!points.length) continue;
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        name: metrics.length > 1 ? `${label} · ${metric.label}` : label,
+        x: points.map((point) => point.x),
+        y: points.map((point) => point.y),
+        text: points.map((point) => point.text),
+        hovertemplate: "dataset %{x}<br>%{y:.4g}<br>run %{text}<extra>%{fullData.name}</extra>",
+      });
+    }
+  }
+  return traces;
+}
+
+function plotLayout(title, yTitle, extra = {}) {
+  return {
+    title: { text: title, x: 0.02, xanchor: "left", font: { size: 15 } },
+    margin: { l: 56, r: 18, t: 46, b: 48 },
+    paper_bgcolor: "#ffffff",
+    plot_bgcolor: "#ffffff",
+    xaxis: { title: "Dataset size", gridcolor: "#edf1f4", zeroline: false },
+    yaxis: { title: yTitle, gridcolor: "#edf1f4", zeroline: false },
+    legend: { orientation: "h", y: -0.25 },
+    font: { family: "Inter, sans-serif", color: "#17202a" },
+    ...extra,
+  };
+}
+
+function renderLinePlot(id, runs, group, metrics, title, yTitle) {
+  const traces = lineTraces(runs, group, metrics);
+  Plotly.react(id, traces, plotLayout(title, yTitle), { responsive: true, displaylogo: false });
+}
+
+function renderBoxPlot(id, runs) {
+  const traces = [];
+  for (const run of runs) {
+    const spectral = sampleMetricValues(run, "spectral", "fermi_window_rmse_eV");
+    if (!spectral.length) continue;
+    traces.push({
+      type: "box",
+      name: `${run.label} ${run.dataset_size}`,
+      y: spectral,
+      boxpoints: "all",
+      jitter: 0.35,
+      pointpos: 0,
+      hovertemplate: "%{y:.4g} eV<extra>%{fullData.name}</extra>",
+    });
+  }
+  Plotly.react(
+    id,
+    traces,
+    plotLayout("Distribucion por muestra: RMSE cerca de Fermi", "RMSE eV", {
+      xaxis: { title: "", tickangle: -25 },
+      showlegend: false,
+    }),
+    { responsive: true, displaylogo: false },
+  );
+}
+
+function renderScatterPlot(id, runs) {
+  const traces = [];
+  for (const [pipeline, items] of groupedRuns(runs)) {
+    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const x = [];
+    const y = [];
+    const text = [];
+    for (const run of items) {
+      const sparseRows = run.samples?.sparse || [];
+      const spectralRows = run.samples?.spectral || [];
+      const spectralBySample = new Map(spectralRows.map((row) => [String(row.sample), row]));
+      for (const row of sparseRows) {
+        const spectral = spectralBySample.get(String(row.sample));
+        const xValue = row.relative_frobenius_union;
+        const yValue = spectral?.fermi_window_rmse_eV;
+        if (typeof xValue !== "number" || typeof yValue !== "number") continue;
+        x.push(xValue);
+        y.push(yValue);
+        text.push(`dataset_${run.dataset_size} · sample ${row.sample}`);
+      }
+    }
+    if (!x.length) continue;
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      name: label,
+      x,
+      y,
+      text,
+      marker: { size: 9, opacity: 0.78 },
+      hovertemplate: "%{text}<br>Frobenius %{x:.4g}<br>Fermi RMSE %{y:.4g} eV<extra>%{fullData.name}</extra>",
+    });
+  }
+  Plotly.react(
+    id,
+    traces,
+    plotLayout("Relacion matriz-espectro", "Fermi window RMSE eV", {
+      xaxis: { title: "Relative Frobenius error", gridcolor: "#edf1f4", zeroline: false },
+      legend: { orientation: "h", y: -0.25 },
+    }),
+    { responsive: true, displaylogo: false },
+  );
+}
+
+function renderHeatmap(id, runs) {
+  const metrics = [
+    ["sparse", "mae_ref_eV", "MAE ref"],
+    ["sparse", "relative_frobenius_union", "Frobenius rel."],
+    ["sparse", "support_f1", "Support F1"],
+    ["spectral", "fermi_window_rmse_eV", "Fermi RMSE"],
+    ["spectral", "gap_abs_error_eV", "Gap error"],
+    ["dos", "dos_wasserstein_eV", "DOS W1"],
+  ];
+  const rows = runs
+    .filter((run) => metrics.some(([group, metric]) => metricValue(run, group, metric) != null))
+    .sort((a, b) => a.pipeline.localeCompare(b.pipeline) || a.dataset_size - b.dataset_size);
+  const z = rows.map((run) =>
+    metrics.map(([group, metric]) => {
+      const value = metricValue(run, group, metric);
+      return value == null ? null : value;
+    }),
+  );
+  Plotly.react(
+    id,
+    [
+      {
+        type: "heatmap",
+        z,
+        x: metrics.map((item) => item[2]),
+        y: rows.map((run) => `${run.label} ${run.dataset_size}`),
+        colorscale: "Viridis",
+        hoverongaps: false,
+        hovertemplate: "%{y}<br>%{x}: %{z:.4g}<extra></extra>",
+      },
+    ],
+    {
+      title: { text: "Resumen compacto de metricas", x: 0.02, xanchor: "left", font: { size: 15 } },
+      margin: { l: 120, r: 18, t: 46, b: 72 },
+      paper_bgcolor: "#ffffff",
+      plot_bgcolor: "#ffffff",
+      font: { family: "Inter, sans-serif", color: "#17202a" },
+    },
+    { responsive: true, displaylogo: false },
+  );
+}
+
+function renderPlots(payload) {
+  const panel = document.getElementById("plots-panel");
+  const status = document.getElementById("plots-status");
+  panel.classList.toggle("hidden", !state.plotsEnabled);
+  if (!state.plotsEnabled) {
+    status.textContent = "Plots disabled";
+    return;
+  }
+  if (!window.Plotly) {
+    status.textContent = "Plotly no esta disponible";
+    return;
+  }
+  const runs = payload?.runs || [];
+  status.textContent = runs.length ? `${runs.length} runs con metricas` : "No hay metricas archivadas";
+  renderLinePlot("plot-fermi", runs, "spectral", [{ key: "fermi_window_rmse_eV", label: "Fermi RMSE" }], "Error cerca del Fermi", "RMSE eV");
+  renderLinePlot("plot-sparse", runs, "sparse", [{ key: "relative_frobenius_union", label: "Frobenius rel." }], "Error sparse matricial", "Relative Frobenius");
+  renderLinePlot("plot-dos", runs, "dos", [{ key: "dos_wasserstein_eV", label: "Wasserstein" }], "Distancia DOS total", "Wasserstein eV");
+  renderLinePlot("plot-gap", runs, "spectral", [{ key: "gap_abs_error_eV", label: "Gap error" }], "Error de gap", "Abs error eV");
+  renderBoxPlot("plot-box", runs);
+  renderScatterPlot("plot-scatter", runs);
+  renderHeatmap("plot-heatmap", runs);
+}
+
+async function loadPlots() {
+  const payload = await request("/api/plots");
+  state.plotData = payload;
+  renderPlots(payload);
 }
 
 function setupTabs() {
@@ -254,6 +467,14 @@ function setupEvents() {
   });
   document.getElementById("refresh-results").addEventListener("click", () => {
     loadResults().then(() => showToast("Results refreshed")).catch((error) => showToast(error.message));
+  });
+  document.getElementById("show-plots").addEventListener("change", (event) => {
+    state.plotsEnabled = event.target.checked;
+    if (state.plotsEnabled) {
+      loadPlots().catch((error) => showToast(error.message));
+    } else {
+      renderPlots(state.plotData);
+    }
   });
   document.getElementById("run-experiment").addEventListener("click", () => {
     runExperiment().catch((error) => showToast(error.message));

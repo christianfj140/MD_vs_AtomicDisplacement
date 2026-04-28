@@ -249,7 +249,29 @@ h3 {
 
 .button-row {
   display: flex;
+  align-items: center;
   gap: 10px;
+}
+
+.toggle-field {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.toggle-field input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
 }
 
 .button {
@@ -315,6 +337,51 @@ h3 {
   color: var(--ink);
 }
 
+.plots-panel {
+  margin-top: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px;
+}
+
+.plots-panel.hidden {
+  display: none;
+}
+
+.muted-text {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.plot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.plot-card {
+  min-height: 330px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.plot-card.wide,
+.plot-card.full {
+  grid-column: 1 / -1;
+}
+
+.plot-card.wide {
+  min-height: 390px;
+}
+
+.plot-card.full {
+  min-height: 430px;
+}
+
 .api-list {
   display: grid;
   gap: 10px;
@@ -374,6 +441,20 @@ h3 {
 
   .result-list {
     grid-template-columns: 1fr;
+  }
+
+  .plot-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .content-header,
+  .panel-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .button-row {
+    flex-wrap: wrap;
   }
 
   .content {

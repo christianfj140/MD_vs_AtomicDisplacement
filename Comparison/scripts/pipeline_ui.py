@@ -577,6 +577,86 @@ def read_metrics_summary(path: Path) -> dict[str, Any]:
     return {"exists": True, "rows": len(rows), "means": means}
 
 
+def read_csv_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            parsed: dict[str, Any] = {}
+            for key, value in row.items():
+                if value in (None, ""):
+                    parsed[key] = None
+                    continue
+                try:
+                    parsed[key] = float(value)
+                except ValueError:
+                    parsed[key] = value
+            rows.append(parsed)
+    return rows
+
+
+def numeric_means(rows: list[dict[str, Any]]) -> dict[str, float]:
+    columns: dict[str, list[float]] = {}
+    for row in rows:
+        for key, value in row.items():
+            if key == "sample" or not isinstance(value, (int, float)):
+                continue
+            number = float(value)
+            if math.isfinite(number):
+                columns.setdefault(key, []).append(number)
+    return {
+        key: sum(values) / len(values)
+        for key, values in columns.items()
+        if values
+    }
+
+
+def plot_data_summary() -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    groups = {
+        "md": RESULTS_ROOT / "results_md",
+        "atom_displacement": RESULTS_ROOT / "results_atomdisp",
+    }
+    for key, root in groups.items():
+        if not root.exists():
+            continue
+        for manifest_path in sorted(root.glob("dataset_*/run_*/manifest.json")):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            result_dir = Path(manifest.get("result_dir", manifest_path.parent))
+            if not result_dir.is_absolute():
+                result_dir = manifest_path.parent
+            sparse_rows = read_csv_rows(result_dir / "metrics" / "sparse_metrics.csv")
+            spectral_rows = read_csv_rows(result_dir / "metrics" / "spectral_metrics.csv")
+            dos_rows = read_csv_rows(result_dir / "metrics" / "dos_metrics.csv")
+            if not sparse_rows and not spectral_rows and not dos_rows:
+                continue
+            runs.append(
+                {
+                    "pipeline": key,
+                    "label": PIPELINES[key].label,
+                    "dataset_size": int(manifest.get("dataset_size", 0)),
+                    "run_id": str(manifest.get("run_id", manifest_path.parent.name.removeprefix("run_"))),
+                    "result_dir": str(result_dir),
+                    "means": {
+                        "sparse": numeric_means(sparse_rows),
+                        "spectral": numeric_means(spectral_rows),
+                        "dos": numeric_means(dos_rows),
+                    },
+                    "samples": {
+                        "sparse": sparse_rows,
+                        "spectral": spectral_rows,
+                        "dos": dos_rows,
+                    },
+                }
+            )
+    runs.sort(key=lambda item: (item["pipeline"], item["dataset_size"], item["run_id"]))
+    return {"runs": runs}
+
+
 class ExperimentRunner:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -1308,6 +1388,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, RUNNERS[key].logs(since=since))
             elif path == "/api/results":
                 json_response(self, result_summary())
+            elif path == "/api/plots":
+                json_response(self, plot_data_summary())
             elif path == "/api/experiment/status":
                 json_response(self, EXPERIMENT_RUNNER.status())
             elif path == "/api/experiment/logs":

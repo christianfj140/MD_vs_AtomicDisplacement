@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pipeline Comparison</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -118,9 +119,33 @@
               <p class="eyebrow">Outputs</p>
               <h2>Comparison inputs</h2>
             </div>
-            <button id="refresh-results" class="button secondary">Refresh</button>
+            <div class="button-row">
+              <label class="toggle-field">
+                <input id="show-plots" type="checkbox" />
+                <span>Show plots</span>
+              </label>
+              <button id="refresh-results" class="button secondary">Refresh</button>
+            </div>
           </header>
           <div id="results-grid" class="grid two"></div>
+          <section id="plots-panel" class="plots-panel hidden">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Post-processing metrics</p>
+                <h3>Visual comparison</h3>
+              </div>
+              <span id="plots-status" class="muted-text">Plots disabled</span>
+            </div>
+            <div class="plot-grid">
+              <div id="plot-fermi" class="plot-card"></div>
+              <div id="plot-sparse" class="plot-card"></div>
+              <div id="plot-dos" class="plot-card"></div>
+              <div id="plot-gap" class="plot-card"></div>
+              <div id="plot-box" class="plot-card wide"></div>
+              <div id="plot-scatter" class="plot-card wide"></div>
+              <div id="plot-heatmap" class="plot-card full"></div>
+            </div>
+          </section>
         </section>
 
         <section id="view-api" class="view">
@@ -138,6 +163,7 @@
             <code>GET /api/run/logs?pipeline=md&amp;since=0</code>
             <code>GET /api/run/logs?pipeline=atom_displacement&amp;since=0</code>
             <code>GET /api/results</code>
+            <code>GET /api/plots</code>
             <code>POST /api/experiment</code>
             <code>POST /api/experiment/stop</code>
             <code>GET /api/experiment/status</code>
