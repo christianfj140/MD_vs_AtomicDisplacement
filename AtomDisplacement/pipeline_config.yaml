@@ -38,6 +38,9 @@ structure:
   force_constants:
     enabled: true
     displacement: 0.05 Ang
+    target_count: null
+    expand_amplitudes: true
+    allow_missing_matrix: true
     first_atom: 1
     last_atom: null
     lua_script: md_store.lua
@@ -125,10 +128,11 @@ training:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
-    basis_files: ../dataset/AtDis_steps/basis/*.ion.xml
+    basis_files: ../dataset/FC_steps/basis/*.ion.xml
     runs_json: runs.json
     batch_size: 10
     store_in_memory: true
+    n_matrix_components: 2
   model:
     num_interactions: 1
     correlation: 1
@@ -165,7 +169,7 @@ testing:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
-    basis_files: ../dataset/AtDis_steps/basis/*.ion.xml
+    basis_files: ../dataset/FC_steps/basis/*.ion.xml
     store_in_memory: true
     n_matrix_components: 2
   callbacks:
@@ -179,8 +183,8 @@ prediction:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
-    basis_files: ../dataset/AtDis_steps/basis/*.ion.xml
-    predict_structs: ../dataset/AtDis_steps/*/RUN.fdf
+    basis_files: ../dataset/FC_steps/basis/*.ion.xml
+    predict_structs: ../dataset/FC_steps/*/RUN.fdf
     store_in_memory: true
     n_matrix_components: 2
   callbacks:

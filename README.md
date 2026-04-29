@@ -3,7 +3,8 @@
 Repositorio para comparar las predicciones de `graph2mat` entrenado con dos tipos de datasets sobre la misma molecula de agua:
 
 1. `MD/`: dataset generado a partir de dinamica molecular.
-2. `AtomDisplacement/`: dataset generado a partir de pequeñas perturbaciones aleatorias alrededor de una geometria relajada.
+2. `AtomDisplacement/`: dataset generado con SIESTA `MD.TypeOfRun FC`
+   (frozen phonons / force constants) alrededor de una geometria relajada.
 
 El objetivo es estudiar como cambia la calidad de las predicciones del Hamiltoniano cuando el modelo se entrena con trayectorias MD frente a un muestreo local del entorno geometrico de equilibrio.
 
@@ -65,16 +66,17 @@ La carpeta `AtomDisplacement/` contiene un pipeline nuevo para construir un data
 ### Idea general
 
 1. relajar una molecula de agua de referencia
-2. generar muchas copias con pequeños desplazamientos aleatorios
-3. correr SIESTA en single-point sobre cada geometria
-4. recolectar las salidas
+2. ejecutar SIESTA con `MD.TypeOfRun FC`, `FC.First`, `FC.Last` y `FC.Displacement`
+3. conservar el output raw de fonones (`*.FC`) y Hamiltonianos por desplazamiento
+4. normalizar cada desplazamiento en `dataset/FC_steps/<step>/RUN.fdf`
 5. entrenar, testear y predecir con `graph2mat`
 
 ## Carpetas importantes en `AtomDisplacement`
 
 - `base/`: entrada base de relajacion y pseudopotenciales
 - `relaxed/`: salida de la relajacion de referencia
-- `dataset/samples/`: una carpeta por muestra generada
+- `dataset/AtDis_steps/`: snapshots raw copiados durante el run FC de SIESTA
+- `dataset/FC_steps/`: una carpeta normalizada por desplazamiento FC
 - `dataset/collected/`: resumen del dataset en JSON y CSV
 - `training/`: artefactos de entrenamiento y test
 
@@ -101,22 +103,27 @@ python3 AtomDisplacement/scripts/main_atom_displacement.py
 
 ```bash
 python3 AtomDisplacement/scripts/run_relaxation.py
-python3 AtomDisplacement/scripts/generate_atom_displacement_dataset.py --num-samples 100
+python3 AtomDisplacement/scripts/generate_atom_displacement_dataset.py
 python3 AtomDisplacement/scripts/run_single_points.py
+python3 AtomDisplacement/scripts/normalize_fc_steps.py
 python3 AtomDisplacement/scripts/collect_atom_displacement_dataset.py
 ```
 
 ## Variables importantes del dataset de `AtomDisplacement`
 
-La mayoria de parametros de generacion se definen en [generate_atom_displacement_dataset.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/generate_atom_displacement_dataset.py):
+Los parametros FC estan en `structure.force_constants` dentro de
+[pipeline_config.yaml](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/pipeline_config.yaml):
 
-- `--num-samples`: numero de estructuras a generar
-- `--sigma`: amplitud del desplazamiento aleatorio en angstrom
-- `--seed`: semilla aleatoria
-- `--max-displacement-norm`: desplazamiento maximo por atomo
-- `--min-oh`, `--max-oh`: filtro de distancia O-H
-- `--min-hh`: filtro de distancia H-H
-- `--min-angle`, `--max-angle`: filtro del angulo H-O-H
+- `displacement`: amplitud del desplazamiento, por ejemplo `0.04 Bohr` o `0.05 Ang`
+- `first_atom`: primer atomo desplazado por SIESTA FC
+- `last_atom`: ultimo atomo desplazado; si es `null`, se usa el ultimo atomo de la molecula
+
+Para H2O con 3 atomos desplazados, el numero esperado de estructuras FC es
+`1 + 6 * 3 = 19`, contando la geometria de referencia.
+Si se pide un dataset mayor, el pipeline mantiene ese FC canonico para fonones
+y expande el dataset con amplitudes adicionales del mismo patron cartesiano
+(`2 * displacement`, `3 * displacement`, ...). Esas geometrías extra se calculan
+como single-points SIESTA para obtener Hamiltonianos compatibles con Graph2Mat.
 
 Los parametros del `.fdf` base de relajacion estan en [RUN.fdf](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/base/RUN.fdf).
 
@@ -195,3 +202,15 @@ Cada tamaño se ejecuta en un workspace aislado dentro de `Comparison/workspaces
 - `Comparison/results/results_atomdisp/dataset_<N>/run_<timestamp>/`
 
 Cada carpeta de resultados guarda `structures/`, `predicted_hamiltonians/`, `siesta_hamiltonians/`, `sample_metrics.csv` cuando existe, `pipeline_config.yaml`, `run.log` y `manifest.json`. Tambien ejecuta una evaluacion post-procesado con metricas sparse, espectrales y DOS total. Las salidas principales son `metrics/sparse_metrics.csv`, `metrics/spectral_metrics.csv`, `metrics/dos_metrics.csv`, `eigenvalues/siesta/`, `eigenvalues/predicted/`, `eigenvalues/band_errors/`, `dos/` y `eigenvalues/overlap_summary.csv`. El espectro de los Hamiltonianos predichos se calcula con la matriz de solape de referencia SIESTA para evaluar el error de `H` en el problema generalizado `Hc = ESc`. En la pestaña `Results`, la casilla `Show plots` despliega graficas Plotly para comparar error espectral, error sparse, DOS, gap, distribuciones por muestra, relacion matriz-espectro y un heatmap resumen.
+
+Scripts auxiliares de comparacion:
+
+```bash
+python3 Comparison/scripts/verify_dataset_integrity.py
+python3 Comparison/scripts/analyze_phonons.py --fc-run-dir AtomDisplacement/dataset
+python3 Comparison/scripts/evaluate_cross.py
+```
+
+`evaluate_cross.py` escribe `Comparison/results/comparison/metrics.csv`. Si se le pasan
+resultados cruzados explicitos (`--md-on-fc`, `--fc-on-md`, etc.), rellena tambien
+las celdas Modelo/Test correspondientes.

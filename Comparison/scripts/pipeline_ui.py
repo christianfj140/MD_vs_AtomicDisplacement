@@ -347,6 +347,48 @@ def split_counts(size: int) -> dict[str, int]:
     return {"train": train, "validation": validation, "test": test}
 
 
+def atom_fc_sample_limit(config: dict[str, Any]) -> int | None:
+    structure = config.get("structure", {})
+    force_constants = structure.get("force_constants") or {}
+    if not bool(force_constants.get("enabled", False)):
+        return None
+
+    atoms = structure.get("atoms") or []
+    first_atom = int(force_constants.get("first_atom", 1))
+    last_atom = force_constants.get("last_atom")
+    last_atom = len(atoms) if last_atom is None else int(last_atom)
+    if first_atom < 1 or last_atom < first_atom or last_atom > len(atoms):
+        raise RuntimeError(
+            "AtomDisplacement: rango FC invalido. "
+            f"FC.First={first_atom}, FC.Last={last_atom}, NumberOfAtoms={len(atoms)}."
+        )
+    displaced_atoms = last_atom - first_atom + 1
+    return 1 + 6 * displaced_atoms
+
+
+def validate_atom_sizes_for_fc(atom_sizes: list[int]) -> None:
+    config = load_config(PIPELINES["atom_displacement"].config_path)
+    force_constants = config.get("structure", {}).get("force_constants", {})
+    if bool(force_constants.get("expand_amplitudes", False)):
+        return
+    limit = atom_fc_sample_limit(config)
+    if limit is None:
+        return
+    too_large = [size for size in atom_sizes if size > limit]
+    if not too_large:
+        return
+    raise RuntimeError(
+        "AtomDisplacement usa SIESTA MD.TypeOfRun FC, que no genera un numero "
+        "arbitrario de estructuras. Con la configuracion actual "
+        f"({len(config['structure']['atoms'])} atomos, FC.First="
+        f"{config['structure']['force_constants'].get('first_atom', 1)}, "
+        f"FC.Last={config['structure']['force_constants'].get('last_atom') or len(config['structure']['atoms'])}) "
+        f"el maximo es {limit} estructuras: 1 referencia + 6 desplazamientos por atomo. "
+        f"Tamanos invalidos: {too_large}. Ajusta AtomDisplacement sizes a <= {limit} "
+        "o cambia la configuracion FC/estructura antes de lanzar el sweep."
+    )
+
+
 def select_spread(items: list[Path], count: int) -> list[Path]:
     if count <= 0:
         return []
@@ -430,6 +472,9 @@ def is_completed_atom_sample(sample_dir: Path) -> bool:
 
 def atom_source_samples_dir(spec: PipelineSpec, config: dict[str, Any]) -> Path:
     dataset_dir = resolve_pipeline_path(spec, config["paths"]["dataset_dir"])
+    fc_steps_dir = dataset_dir / "FC_steps"
+    if fc_steps_dir.exists():
+        return fc_steps_dir
     atdis_steps_dir = dataset_dir / "AtDis_steps"
     if atdis_steps_dir.exists():
         return atdis_steps_dir
@@ -443,12 +488,9 @@ def atom_source_samples_dir(spec: PipelineSpec, config: dict[str, Any]) -> Path:
 
 
 def completed_atom_samples(source_samples_dir: Path) -> list[Path]:
-    if source_samples_dir.name == "AtDis_steps":
-        base_sample = source_samples_dir.parent
-        base_samples = [base_sample] if is_completed_atom_sample(base_sample) else []
+    if source_samples_dir.name in {"AtDis_steps", "FC_steps"}:
         return sorted(
-            base_samples
-            + [
+            [
                 path
                 for path in source_samples_dir.iterdir()
                 if path.is_dir() and path.name.isdigit() and is_completed_atom_sample(path)
@@ -466,12 +508,9 @@ def completed_atom_samples(source_samples_dir: Path) -> list[Path]:
 
 
 def generated_atom_samples(source_samples_dir: Path) -> list[Path]:
-    if source_samples_dir.name == "AtDis_steps":
-        base_sample = source_samples_dir.parent
-        base_samples = [base_sample] if (base_sample / "RUN.fdf").exists() else []
+    if source_samples_dir.name in {"AtDis_steps", "FC_steps"}:
         return sorted(
-            base_samples
-            + [
+            [
                 path
                 for path in source_samples_dir.iterdir()
                 if path.is_dir() and path.name.isdigit()
@@ -638,7 +677,24 @@ def plot_data_summary() -> dict[str, Any]:
                 {
                     "pipeline": key,
                     "label": PIPELINES[key].label,
-                    "dataset_size": int(manifest.get("dataset_size", 0)),
+                    "dataset_size": int(
+                        manifest.get(
+                            "requested_dataset_size",
+                            manifest.get("dataset_size", 0),
+                        )
+                    ),
+                    "effective_dataset_size": int(
+                        manifest.get(
+                            "effective_dataset_size",
+                            manifest.get("dataset_size", 0),
+                        )
+                    ),
+                    "requested_dataset_size": int(
+                        manifest.get(
+                            "requested_dataset_size",
+                            manifest.get("dataset_size", 0),
+                        )
+                    ),
                     "run_id": str(manifest.get("run_id", manifest_path.parent.name.removeprefix("run_"))),
                     "result_dir": str(result_dir),
                     "means": {
@@ -676,6 +732,7 @@ class ExperimentRunner:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
+            validate_atom_sizes_for_fc(atom_sizes)
             self._logs = []
             self._started_at = time.time()
             self._finished_at = None
@@ -827,18 +884,46 @@ class ExperimentRunner:
         prepare_metadata: dict[str, Any] = {}
         if key == "md":
             self._prepare_md_config(config, workspace, size)
-        else:
-            prepare_metadata = self._prepare_atom_config(config, workspace, size)
-        write_yaml(spec.config_path, config)
-        self._append("[UI] Config temporal escrita; se restaurara al finalizar el experimento.\n")
-        if key == "atom_displacement" and prepare_metadata.get("test_needs_siesta"):
-            self._run_atom_test_single_points(spec, config, Path(prepare_metadata["test_samples_dir"]))
             write_yaml(spec.config_path, config)
-            self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
-        returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+            self._append("[UI] Config temporal escrita; se restaurara al finalizar el experimento.\n")
+            returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+        else:
+            self._prepare_atom_generation_config(config, workspace, size)
+            write_yaml(spec.config_path, config)
+            self._append(
+                "[UI] Config temporal FC escrita; SIESTA generara AtDis_steps en el workspace.\n"
+            )
+            generation_returncode = self._run_pipeline_process(
+                spec,
+                key=key,
+                size=size,
+                started_at=started_at,
+            )
+            if generation_returncode != 0:
+                raise RuntimeError(
+                    f"{spec.label} dataset_{size} fallo generando FC con codigo "
+                    f"{generation_returncode}."
+                )
+            prepare_metadata = self._prepare_atom_config(config, workspace, size)
+            write_yaml(spec.config_path, config)
+            self._append("[UI] Config temporal de entrenamiento escrita tras FC.\n")
+            if prepare_metadata.get("test_needs_siesta"):
+                self._run_atom_test_single_points(spec, config, Path(prepare_metadata["test_samples_dir"]))
+                write_yaml(spec.config_path, config)
+                self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
+            returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         with self._lock:
             run_log = "".join(self._logs[log_start:])
-        archive = self._archive_outputs(key, size, run_id, workspace, config, returncode, run_log)
+        archive = self._archive_outputs(
+            key,
+            size,
+            run_id,
+            workspace,
+            config,
+            returncode,
+            run_log,
+            prepare_metadata,
+        )
         elapsed = time.time() - started_at
         self._update_rate(key, size, elapsed, returncode)
         if returncode != 0:
@@ -895,6 +980,46 @@ class ExperimentRunner:
         self._append(f"[UI] MD train_runs: {config['training']['data']['train_runs']}\n")
         self._append(f"[UI] MD test_runs: {config['testing']['test_runs']}\n")
 
+    def _prepare_atom_generation_config(self, config: dict[str, Any], workspace: Path, size: int) -> None:
+        dataset_dir = workspace / "dataset"
+        training_dir = workspace / "training"
+        base_dir = workspace / "base"
+        relaxed_dir = workspace / "relaxed"
+        pseudo_count = copy_pseudopotentials(PIPELINES["atom_displacement"].root / "base", base_dir)
+        relaxed_counts = copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
+
+        config["paths"]["base_dir"] = str(base_dir)
+        config["paths"]["relaxed_dir"] = str(relaxed_dir)
+        config["paths"]["dataset_dir"] = str(dataset_dir)
+        config["paths"]["samples_dir"] = str(dataset_dir / "samples")
+        config["paths"]["collected_dir"] = str(dataset_dir / "collected")
+        config["paths"]["training_dir"] = str(training_dir)
+        config["single_points"]["limit"] = None
+        config["single_points"]["rerun"] = True
+        config["structure"]["force_constants"]["target_count"] = size
+        config["structure"]["force_constants"]["allow_missing_matrix"] = True
+        config["pipeline"]["steps"] = [
+            "render_inputs",
+            "generate_atom_displacement_dataset",
+            "run_single_points",
+            "normalize_fc_steps",
+            "run_single_points",
+            "collect_atom_displacement_dataset",
+        ]
+        self._append(f"[UI] AtomDisplacement FC dataset_dir: {dataset_dir}\n")
+        self._append(f"[UI] AtomDisplacement FC base_dir: {base_dir}\n")
+        self._append(f"[UI] AtomDisplacement FC relaxed_dir: {relaxed_dir}\n")
+        self._append(f"[UI] AtomDisplacement training_dir: {training_dir}\n")
+        self._append(f"[UI] AtomDisplacement pseudopotenciales copiados: {pseudo_count}\n")
+        self._append(
+            "[UI] AtomDisplacement relaxed copiado: "
+            f"{relaxed_counts['basis_files']} basis .ion.xml, {relaxed_counts['xv_files']} XV.\n"
+        )
+        self._append(
+            "[UI] AtomDisplacement generara FC raw y normalizara FC_steps antes del split.\n"
+        )
+        self._append(f"[UI] AtomDisplacement FC steps: {', '.join(config['pipeline']['steps'])}\n")
+
     def _prepare_atom_config(self, config: dict[str, Any], workspace: Path, size: int) -> dict[str, Any]:
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
@@ -903,15 +1028,21 @@ class ExperimentRunner:
         validation_samples_dir = dataset_dir / "validation_samples"
         test_samples_dir = dataset_dir / "test_samples"
         basis_dir = dataset_dir / "basis"
-        relaxed_counts = copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
-        source_samples_dir = atom_source_samples_dir(PIPELINES["atom_displacement"], config)
+        source_samples_dir = dataset_dir / "FC_steps"
+        if not source_samples_dir.exists():
+            source_samples_dir = atom_source_samples_dir(PIPELINES["atom_displacement"], config)
         basis_count = copy_basis_files(source_samples_dir, basis_dir)
         all_samples = generated_atom_samples(source_samples_dir)
         completed_samples = completed_atom_samples(source_samples_dir)
+        if not all_samples:
+            raise RuntimeError(
+                "AtomDisplacement: SIESTA FC no genero muestras normalizadas en FC_steps. "
+                f"Revisa {dataset_dir / 'run_summary.json'}."
+            )
         if len(all_samples) < size:
             raise RuntimeError(
-                f"AtomDisplacement: se pidieron {size} estructuras, pero solo hay "
-                f"{len(all_samples)} muestras generadas."
+                "AtomDisplacement: SIESTA FC genero menos estructuras de las pedidas "
+                f"({len(all_samples)} < {size}). Revisa FC.First/FC.Last y {dataset_dir / 'run_summary.json'}."
             )
         counts = split_counts(size)
         train_needed = counts["train"]
@@ -930,8 +1061,7 @@ class ExperimentRunner:
                 "AtomDisplacement: no puedo entrenar ese tamano sin recalcular SIESTA "
                 f"en train. Para dataset_{size}, el split 80/10/10 necesita "
                 f"{train_needed} muestras de train con Hamiltoniano SIESTA; faltan "
-                f"{len(incomplete_train)} en el split espaciado. Puedo limitar nuevos "
-                "SIESTA al 10% de test, pero train tambien necesita referencias ya existentes."
+                f"{len(incomplete_train)} en el split espaciado."
             )
         if len(test_samples) < test_needed or len(validation_samples) < validation_needed:
             raise RuntimeError(
@@ -947,16 +1077,17 @@ class ExperimentRunner:
             for path in test_samples_dir.iterdir()
             if path.is_dir() and (path / "RUN.fdf").exists()
         )
-        config["paths"]["relaxed_dir"] = str(relaxed_dir)
         config["paths"]["dataset_dir"] = str(dataset_dir)
         config["paths"]["samples_dir"] = str(train_samples_dir)
         config["paths"]["validation_samples_dir"] = str(validation_samples_dir)
         config["paths"]["test_samples_dir"] = str(test_samples_dir)
         config["paths"]["collected_dir"] = str(dataset_dir / "collected")
         config["paths"]["training_dir"] = str(training_dir)
+        config["paths"]["relaxed_dir"] = str(relaxed_dir)
         config["single_points"]["rerun"] = False
         basis_files_pattern = "../dataset/basis/*.ion.xml" if basis_count else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
+        config["training"]["data"]["n_matrix_components"] = 2
         config["prediction"]["data"]["basis_files"] = basis_files_pattern
         config["testing"]["data"]["basis_files"] = basis_files_pattern
         config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
@@ -975,14 +1106,11 @@ class ExperimentRunner:
         self._append(f"[UI] AtomDisplacement training_dir: {training_dir}\n")
         self._append(f"[UI] AtomDisplacement relaxed_dir: {relaxed_dir}\n")
         self._append(f"[UI] AtomDisplacement source_samples_dir: {source_samples_dir}\n")
-        self._append(
-            "[UI] AtomDisplacement relaxed copiado: "
-            f"{relaxed_counts['basis_files']} basis .ion.xml, {relaxed_counts['xv_files']} XV.\n"
-        )
         self._append(f"[UI] AtomDisplacement basis dataset copiados: {basis_count}\n")
         self._append(
-            f"[UI] AtomDisplacement disponibles: {len(all_samples)} generadas, "
-            f"{len(completed_samples)} con referencia SIESTA.\n"
+            f"[UI] AtomDisplacement FC raw disponibles: {len(all_samples)} generadas, "
+            f"{len(completed_samples)} con referencia SIESTA; "
+            f"seleccionadas para dataset_{size}: {len(selected_samples)}.\n"
         )
         self._append(
             "[UI] AtomDisplacement split: "
@@ -998,7 +1126,16 @@ class ExperimentRunner:
             self._append("[UI] AtomDisplacement reutiliza referencias SIESTA ya existentes para test.\n")
         self._append(f"[UI] AtomDisplacement test_runs: {config['testing']['test_runs']}\n")
         self._append(f"[UI] AtomDisplacement steps: {', '.join(config['pipeline']['steps'])}\n")
-        return {"test_samples_dir": str(test_samples_dir), "test_needs_siesta": test_needs_siesta}
+        return {
+            "test_samples_dir": str(test_samples_dir),
+            "test_needs_siesta": test_needs_siesta,
+            "requested_size": size,
+            "effective_size": size,
+            "generated_samples": len(selected_samples),
+            "completed_samples": sum(1 for path in selected_samples if is_completed_atom_sample(path)),
+            "fc_generated_samples": len(all_samples),
+            "fc_completed_samples": len(completed_samples),
+        }
 
     def _run_pipeline_process(
         self,
@@ -1099,7 +1236,9 @@ class ExperimentRunner:
         config: dict[str, Any],
         returncode: int,
         run_log: str,
+        prepare_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        prepare_metadata = prepare_metadata or {}
         result_group = "results_md" if key == "md" else "results_atomdisp"
         result_dir = RESULTS_ROOT / result_group / f"dataset_{size}" / f"run_{run_id}"
         result_dir.mkdir(parents=True, exist_ok=True)
@@ -1187,15 +1326,22 @@ class ExperimentRunner:
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_dataset.json", result_dir / "water_atom_displacement_dataset.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_summary.csv", result_dir / "water_atom_displacement_summary.csv")
         evaluation_metrics = self._evaluate_hamiltonian_metrics(key, config, result_dir)
+        effective_size = int(prepare_metadata.get("effective_size", size))
         manifest = {
             "pipeline": key,
             "dataset_size": size,
+            "requested_dataset_size": size,
+            "effective_dataset_size": effective_size,
             "run_id": run_id,
             "returncode": returncode,
             "workspace": str(workspace),
             "result_dir": str(result_dir),
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
+            "generated_samples": prepare_metadata.get("generated_samples"),
+            "completed_samples": prepare_metadata.get("completed_samples"),
+            "fc_generated_samples": prepare_metadata.get("fc_generated_samples"),
+            "fc_completed_samples": prepare_metadata.get("fc_completed_samples"),
             "metrics": read_metrics_summary(result_dir / "sample_metrics.csv"),
             "hamiltonian_evaluation": evaluation_metrics,
         }
@@ -1417,8 +1563,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, stop_all(), status=HTTPStatus.ACCEPTED)
             elif path == "/api/experiment":
                 payload = read_json_body(self)
-                md_sizes = parse_sizes(payload.get("md_sizes"), [50, 100, 200, 500])
-                atom_sizes = parse_sizes(payload.get("atom_sizes"), [100, 1000, 10000])
+                md_sizes = parse_sizes(payload.get("md_sizes"), [5, 10])
+                atom_sizes = parse_sizes(payload.get("atom_sizes"), [5, 10])
                 json_response(
                     self,
                     EXPERIMENT_RUNNER.start(md_sizes, atom_sizes),

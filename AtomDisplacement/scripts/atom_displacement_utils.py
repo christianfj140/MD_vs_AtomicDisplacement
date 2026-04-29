@@ -23,6 +23,7 @@ from pipeline_config_utils import (
 BOHR_TO_ANG = 0.529177210903
 RY_TO_EV = 13.605693009
 ATDIS_STEPS_DIR_NAME = "AtDis_steps"
+FC_STEPS_DIR_NAME = "FC_steps"
 ATOM_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_CONFIG = load_pipeline_config()
 PIPELINE_PATHS = paths(PIPELINE_CONFIG)
@@ -361,6 +362,25 @@ def sample_run_status(sample_dir: Path) -> dict[str, Any]:
 
 
 def generated_sample_dirs() -> list[Path]:
+    configured_sample_dirs = sorted(
+        path
+        for path in SAMPLES_DIR.iterdir()
+        if path.is_dir() and (path / PIPELINE_CONFIG["paths"]["run_fdf_name"]).exists()
+    ) if SAMPLES_DIR.exists() else []
+    if configured_sample_dirs:
+        return sorted(configured_sample_dirs, key=lambda path: path.name)
+
+    fc_steps_dir = DATASET_DIR / FC_STEPS_DIR_NAME
+    if fc_steps_dir.exists():
+        return sorted(
+            (
+                path
+                for path in fc_steps_dir.iterdir()
+                if path.is_dir() and path.name.isdigit()
+            ),
+            key=lambda path: int(path.name),
+        )
+
     manifest_path = PIPELINE_PATHS["samples_manifest_path"]
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

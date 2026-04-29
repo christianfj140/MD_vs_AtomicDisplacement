@@ -14,6 +14,7 @@ STEP_SCRIPTS = {
     "run_relaxation": SCRIPTS_DIR / "run_relaxation.py",
     "generate_atom_displacement_dataset": SCRIPTS_DIR / "generate_atom_displacement_dataset.py",
     "run_single_points": SCRIPTS_DIR / "run_single_points.py",
+    "normalize_fc_steps": SCRIPTS_DIR / "normalize_fc_steps.py",
     "collect_atom_displacement_dataset": SCRIPTS_DIR / "collect_atom_displacement_dataset.py",
     "run_atdisp_training": SCRIPTS_DIR / "run_atdisp_training.py",
     "run_atdisp_testing": SCRIPTS_DIR / "run_atdisp_testing.py",
