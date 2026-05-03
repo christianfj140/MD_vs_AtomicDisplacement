@@ -48,11 +48,13 @@ structure:
       method: spread
       seed: 0
     random_seed: 42
-    # Aligned FC interface for the comparison UI:
-    # each displacement maps to its own structure-count list. Lists must have
-    # the same length. Dataset i uses the ith count from every displacement
-    # list; no Cartesian product is generated. Every count must be <=
-    # 6 * n_displaced_atoms (+1 reference if include_reference).
+    # FC comparison UI interface:
+    # - aligned: lists must have the same length; dataset i uses the ith count
+    #   from every displacement list.
+    # - cartesian: every possible count combination is generated.
+    # Every count must be <= 6 * n_displaced_atoms (+1 reference if
+    # include_reference).
+    combination_mode: aligned
     max_datasets: 100
     displacements:
       "0.02 Ang": [5, 7, 9]

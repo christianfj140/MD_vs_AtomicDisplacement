@@ -26,7 +26,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -183,6 +184,10 @@ h3 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -203,8 +208,17 @@ h3 {
   font-weight: 700;
 }
 
+.field small,
+.field-help {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line);
@@ -225,7 +239,8 @@ h3 {
 }
 
 .field input:focus,
-.field textarea:focus {
+.field textarea:focus,
+.field select:focus {
   outline: 3px solid var(--focus);
   border-color: var(--accent);
 }
@@ -258,6 +273,96 @@ h3 {
 
 .fc-panel {
   margin-bottom: 18px;
+}
+
+.fc-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 1.15fr) minmax(280px, 0.85fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.fc-options-field,
+.fc-controls .field:first-child {
+  margin-top: 0;
+}
+
+.fc-controls {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.split-grid {
+  gap: 10px;
+}
+
+.split-grid .field {
+  margin-top: 0;
+}
+
+.fc-mode-note {
+  margin: 14px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: #eef6f3;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.fc-mode-note strong {
+  color: var(--ink);
+}
+
+.preview-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.dataset-preview {
+  max-height: 280px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.preview-row {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(90px, auto) 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #f8fafb;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.preview-row strong {
+  color: var(--ink);
+}
+
+.preview-row code {
+  overflow-wrap: anywhere;
+  color: var(--code);
+}
+
+.muted-preview {
+  display: block;
 }
 
 .experiment-log {
@@ -452,7 +557,9 @@ h3 {
     flex: 0 0 auto;
   }
 
-  .grid.two {
+  .grid.two,
+  .grid.three,
+  .fc-layout {
     grid-template-columns: 1fr;
   }
 

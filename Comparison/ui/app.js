@@ -178,11 +178,20 @@ function parseFcDisplacementOptionsText() {
         `Displacement options: la magnitud "${displacement}" esta repetida; usa una sola fila por magnitud.`,
       );
     }
-    const counts = parts
+    const rawCounts = parts
       .join(":")
       .split(/[;,]/)
-      .map((item) => Number(item.trim()))
-      .filter((value) => Number.isInteger(value) && value > 0);
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const counts = rawCounts.map((item) => {
+      const value = Number(item);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(
+          `Displacement options: "${item}" en la fila ${index + 1} no es un entero positivo.`,
+        );
+      }
+      return value;
+    });
     if (!counts.length) {
       throw new Error(
         `Displacement options: la fila ${index + 1} no tiene enteros positivos (ej. 2, 3, 4).`,
@@ -199,39 +208,137 @@ function formatFcDisplacementOptions(options) {
     .join("\n");
 }
 
-function fcAlignedSpecs() {
+function displacementSortValue(value) {
+  const match = String(value).match(/[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
+  return match ? Number(match[0]) : Number.POSITIVE_INFINITY;
+}
+
+function sortedFcEntries(options) {
+  return Object.entries(options).sort(
+    ([left], [right]) =>
+      displacementSortValue(left) - displacementSortValue(right) || String(left).localeCompare(String(right)),
+  );
+}
+
+function currentCombinationMode() {
+  return document.getElementById("fc-combination-mode")?.value || "aligned";
+}
+
+function cartesianProduct(arrays) {
+  return arrays.reduce(
+    (acc, values) => acc.flatMap((prefix) => values.map((value) => [...prefix, value])),
+    [[]],
+  );
+}
+
+function fcDatasetSpecs() {
   const options = parseFcDisplacementOptionsText();
-  const entries = Object.entries(options);
+  const entries = sortedFcEntries(options);
   if (!entries.length) return [];
-  const lengths = entries.map(([, counts]) => counts.length);
-  const uniqueLengths = new Set(lengths);
-  if (uniqueLengths.size !== 1) {
-    return [];
-  }
-  const total = lengths[0] || 0;
+  const mode = currentCombinationMode();
   const specs = [];
-  for (let index = 0; index < total; index += 1) {
+  if (mode === "aligned") {
+    const lengths = entries.map(([, counts]) => counts.length);
+    const uniqueLengths = new Set(lengths);
+    if (uniqueLengths.size !== 1) {
+      throw new Error(
+        `Aligned mode requires equal list lengths. Lengths: ${entries
+          .map(([displacement, counts]) => `${displacement}=${counts.length}`)
+          .join(", ")}.`,
+      );
+    }
+    const total = lengths[0] || 0;
+    for (let index = 0; index < total; index += 1) {
+      const displacements = entries.map(([displacement, counts]) => ({
+        value: displacement,
+        n_structures: counts[index],
+      }));
+      specs.push({
+        mode,
+        index,
+        size: displacements.reduce((sum, item) => sum + item.n_structures, 0),
+        displacements,
+      });
+    }
+    return specs;
+  }
+  if (mode !== "cartesian") {
+    throw new Error(`Unsupported combination mode: ${mode}`);
+  }
+  const combinations = cartesianProduct(entries.map(([, counts]) => counts));
+  for (const [index, combo] of combinations.entries()) {
+    const displacements = entries.map(([displacement], displacementIndex) => ({
+      value: displacement,
+      n_structures: combo[displacementIndex],
+    }));
     specs.push({
-      size: entries.reduce((sum, [, counts]) => sum + counts[index], 0),
+      mode,
+      index,
+      size: displacements.reduce((sum, item) => sum + item.n_structures, 0),
+      displacements,
     });
   }
   return specs;
 }
 
+function validateFcPreviewSpecs(specs) {
+  const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
+  if (Number.isInteger(maxDatasets) && maxDatasets > 0 && specs.length > maxDatasets) {
+    throw new Error(`The plan creates ${specs.length} datasets but max_datasets is ${maxDatasets}.`);
+  }
+  if (state.fcMaxPerDisplacement != null) {
+    for (const spec of specs) {
+      for (const entry of spec.displacements) {
+        if (entry.n_structures > state.fcMaxPerDisplacement) {
+          throw new Error(
+            `${entry.value} requests ${entry.n_structures} structures, above the FC limit ${state.fcMaxPerDisplacement}.`,
+          );
+        }
+      }
+    }
+  }
+}
+
+function renderFcPreview(specs) {
+  const preview = document.getElementById("fc-dataset-preview");
+  if (!preview) return;
+  preview.innerHTML = "";
+  const limit = 18;
+  for (const spec of specs.slice(0, limit)) {
+    const item = document.createElement("div");
+    item.className = "preview-row";
+    const details = spec.displacements
+      .map((entry) => `${entry.value}: ${entry.n_structures}`)
+      .join(" | ");
+    item.innerHTML = `<strong>dataset_${spec.index}</strong><span>${spec.size} structures</span><code>${details}</code>`;
+    preview.appendChild(item);
+  }
+  if (specs.length > limit) {
+    const item = document.createElement("div");
+    item.className = "preview-row muted-preview";
+    item.textContent = `... ${specs.length - limit} more datasets not shown`;
+    preview.appendChild(item);
+  }
+}
+
 function updateAtomSizesFromFcPlan() {
   try {
-    const specs = fcAlignedSpecs();
+    const specs = fcDatasetSpecs();
+    validateFcPreviewSpecs(specs);
     const sizes = specs.map((spec) => spec.size);
     const sizesText = sizes.join(", ");
     document.getElementById("atom-sizes").value = sizesText;
-    document.getElementById("md-sizes").value = sizesText;
+    document.getElementById("md-sizes").value = [...new Set(sizes)].join(", ");
+    renderFcPreview(specs);
+    const modeLabel = currentCombinationMode() === "cartesian" ? "cartesian datasets" : "aligned datasets";
     document.getElementById("atom-combination-count").value = specs.length
-      ? `${specs.length} aligned datasets`
-      : "invalid aligned lists";
-  } catch (_error) {
+      ? `${specs.length} ${modeLabel}`
+      : "invalid plan";
+  } catch (error) {
     document.getElementById("atom-sizes").value = "";
     document.getElementById("md-sizes").value = "";
-    document.getElementById("atom-combination-count").value = "invalid aligned lists";
+    document.getElementById("atom-combination-count").value = `invalid plan: ${error.message}`;
+    renderFcPreview([]);
   }
 }
 
@@ -246,6 +353,7 @@ async function loadFcConfig() {
   document.getElementById("fc-displacement-options").value = formatFcDisplacementOptions(
     config.displacement_options || { "0.05 Ang": [2, 4, 6] },
   );
+  document.getElementById("fc-combination-mode").value = config.combination_mode || "aligned";
   document.getElementById("fc-max-datasets").value = config.max_datasets ?? 100;
   document.getElementById("fc-random-seed").value = config.random_seed ?? 42;
   document.getElementById("split-train").value = config.splits?.train ?? 0.8;
@@ -296,7 +404,9 @@ async function runExperiment() {
   if (!Object.keys(fcDisplacementOptions).length) {
     throw new Error("Define al menos una magnitud FC con opciones.");
   }
-  const badDatasets = fcAlignedSpecs()
+  const specs = fcDatasetSpecs();
+  validateFcPreviewSpecs(specs);
+  const badDatasets = specs
     .map((spec) => spec.size)
     .filter((size) => !Number.isInteger(size) || size < 3);
   if (badDatasets.length) {
@@ -316,6 +426,7 @@ async function runExperiment() {
       md_sizes: mdSizes,
       atom_sizes: atomSizes,
       fc_displacement_options: fcDisplacementOptions,
+      combination_mode: currentCombinationMode(),
       sync_md_sizes: true,
       splits: splitRatios,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
@@ -705,6 +816,11 @@ function setupEvents() {
     stopExperiment().catch((error) => showToast(error.message));
   });
   document.getElementById("fc-displacement-options").addEventListener("input", updateAtomSizesFromFcPlan);
+  document.getElementById("fc-combination-mode").addEventListener("change", updateAtomSizesFromFcPlan);
+  document.getElementById("fc-max-datasets").addEventListener("input", updateAtomSizesFromFcPlan);
+  document.getElementById("split-train").addEventListener("input", updateAtomSizesFromFcPlan);
+  document.getElementById("split-validation").addEventListener("input", updateAtomSizesFromFcPlan);
+  document.getElementById("split-test").addEventListener("input", updateAtomSizesFromFcPlan);
 }
 
 async function boot() {

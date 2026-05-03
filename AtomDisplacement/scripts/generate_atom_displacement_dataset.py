@@ -91,8 +91,9 @@ def configured_displacements(force_constants: dict[str, Any]) -> list[dict[str, 
             {
                 "value": displacement,
                 # Standalone generation prepares enough selected FC steps for
-                # the largest aligned option. The comparison UI expands exact
-                # per-dataset aligned combinations before this script is called.
+                # the largest requested option. The comparison UI expands exact
+                # per-dataset aligned/cartesian combinations before this script
+                # is called.
                 "n_structures": max_requested_count(counts),
             }
             for displacement, counts in sorted(

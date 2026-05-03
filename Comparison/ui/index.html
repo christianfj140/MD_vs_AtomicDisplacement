@@ -82,9 +82,10 @@
             </div>
           </header>
 
-          <div class="grid two compact-grid">
+          <div class="grid two compact-grid experiment-inputs">
             <section class="panel">
               <h3>MD sizes</h3>
+              <p class="field-help">MD baselines are generated once per unique dataset size.</p>
               <label class="field">
                 <span>Structures</span>
                 <input id="md-sizes" type="text" value="10, 20, 30" />
@@ -93,6 +94,7 @@
 
             <section class="panel">
               <h3>AtomDisplacement sizes</h3>
+              <p class="field-help">Computed from the FC displacement plan below.</p>
               <label class="field">
                 <span>Generated structures</span>
                 <input id="atom-sizes" type="text" value="10, 20, 30" readonly />
@@ -105,42 +107,68 @@
               <div>
                 <p class="eyebrow">SIESTA FC</p>
                 <h3>AtomDisplacement displacements</h3>
+                <p class="field-help">Choose how per-displacement structure counts are combined into datasets.</p>
               </div>
               <div class="button-row">
                 <span id="fc-limit" class="muted-text">Max per displacement: -</span>
               </div>
             </div>
-            <div class="grid two compact-grid">
-              <label class="field">
+            <div class="fc-layout">
+              <label class="field fc-options-field">
                 <span>Displacement options</span>
+                <small>One displacement per line: magnitude followed by structure-count choices.</small>
                 <textarea id="fc-displacement-options" rows="6">0.02 Ang: 5, 7, 9
 0.03 Ang: 4, 6, 8
 0.05 Ang: 2, 10, 13</textarea>
               </label>
-              <label class="field">
-                <span>Generated datasets</span>
-                <input id="atom-combination-count" type="text" value="3 aligned datasets" readonly />
-              </label>
-              <label class="field">
-                <span>Train split</span>
-                <input id="split-train" type="number" step="0.01" min="0.01" max="0.98" value="0.8" />
-              </label>
-              <label class="field">
-                <span>Validation split</span>
-                <input id="split-validation" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
-              </label>
-              <label class="field">
-                <span>Test split</span>
-                <input id="split-test" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
-              </label>
-              <label class="field">
-                <span>Random seed</span>
-                <input id="fc-random-seed" type="number" step="1" value="42" />
-              </label>
-              <label class="field">
-                <span>Max datasets</span>
-                <input id="fc-max-datasets" type="number" step="1" min="1" value="100" />
-              </label>
+              <div class="fc-controls">
+                <label class="field">
+                  <span>Combination mode</span>
+                  <select id="fc-combination-mode" title="Aligned matches list positions. Cartesian expands every possible count combination.">
+                    <option value="aligned">Aligned combinations</option>
+                    <option value="cartesian">Cartesian product combinations</option>
+                  </select>
+                  <small>Aligned uses index 0 with index 0, index 1 with index 1. Cartesian generates every possible combination.</small>
+                </label>
+                <label class="field">
+                  <span>Generated datasets</span>
+                  <input id="atom-combination-count" type="text" value="3 aligned datasets" readonly />
+                </label>
+                <div class="grid three split-grid">
+                  <label class="field">
+                    <span>Train</span>
+                    <input id="split-train" type="number" step="0.01" min="0.01" max="0.98" value="0.8" />
+                  </label>
+                  <label class="field">
+                    <span>Validation</span>
+                    <input id="split-validation" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
+                  </label>
+                  <label class="field">
+                    <span>Test</span>
+                    <input id="split-test" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
+                  </label>
+                </div>
+                <div class="grid two split-grid">
+                  <label class="field">
+                    <span>Random seed</span>
+                    <input id="fc-random-seed" type="number" step="1" value="42" />
+                  </label>
+                  <label class="field">
+                    <span>Max datasets</span>
+                    <input id="fc-max-datasets" type="number" step="1" min="1" value="100" />
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="fc-mode-note">
+              <strong>Aligned</strong> creates one dataset per list index. <strong>Cartesian</strong> creates one dataset for every product of the count lists.
+            </div>
+            <div>
+              <div class="preview-heading">
+                <span>Dataset preview</span>
+                <span class="muted-text">first entries shown before running</span>
+              </div>
+              <div id="fc-dataset-preview" class="dataset-preview"></div>
             </div>
           </section>
 

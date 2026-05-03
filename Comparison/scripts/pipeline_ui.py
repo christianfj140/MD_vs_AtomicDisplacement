@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import math
 import os
 import pty
@@ -524,13 +525,12 @@ def _displacement_slug(value: str) -> str:
 
 
 def parse_fc_displacement_options(value: Any) -> dict[str, list[int]] | None:
-    """Parse the aligned FC mapping: displacement -> user-defined counts.
+    """Parse the FC mapping: displacement -> user-defined counts.
 
     The API accepts a JSON object such as ``{"0.02 Ang": [5, 7], "0.05 Ang": [2]}``.
     Keeping the mapping separate from ``structures_per_displacement`` preserves
-    backward compatibility with the older uniform grid while enabling strict
-    index-based alignment. Lists must have the same length; dataset i uses the
-    ith count from every displacement list. No Cartesian expansion is performed.
+    backward compatibility with the older uniform grid. The mapping can be
+    consumed in strict index-based ``aligned`` mode or opt-in ``cartesian`` mode.
     """
 
     if value is None:
@@ -556,6 +556,28 @@ def parse_max_datasets(value: Any, default: int = 100) -> int:
     if limit <= 0:
         raise RuntimeError("max_datasets debe ser mayor que cero.")
     return limit
+
+
+def parse_combination_mode(value: Any) -> str:
+    mode = "aligned" if value in (None, "") else str(value).strip().lower()
+    if mode not in {"aligned", "cartesian"}:
+        raise RuntimeError(
+            "combination_mode debe ser 'aligned' o 'cartesian' "
+            f"(recibido: {value!r})."
+        )
+    return mode
+
+
+def unique_ints_preserve_order(values: list[int]) -> list[int]:
+    seen: set[int] = set()
+    unique: list[int] = []
+    for value in values:
+        number = int(value)
+        if number in seen:
+            continue
+        seen.add(number)
+        unique.append(number)
+    return unique
 
 
 def parse_bool(value: Any, default: bool = False) -> bool:
@@ -643,6 +665,80 @@ def build_fc_aligned_dataset_specs(
         seen_labels.add(label)
         specs.append({"label": label, "size": size, "displacements": entries})
     return specs
+
+
+def build_fc_cartesian_dataset_specs(
+    displacement_options: dict[str, list[int]],
+    *,
+    per_displacement_limit: int,
+    split_ratios: dict[str, float],
+    max_datasets: int,
+) -> list[dict[str, Any]]:
+    """Build one dataset per Cartesian product of displacement-count options.
+
+    Counts are expanded across sorted displacement keys. With
+    ``{"0.03": [5, 7], "0.04": [6, 8]}``, four datasets are created:
+    ``(5, 6)``, ``(5, 8)``, ``(7, 6)``, and ``(7, 8)``. This mode is explicit
+    and opt-in because the number of datasets grows multiplicatively.
+    """
+
+    keys = list(displacement_options)
+    if not keys:
+        raise RuntimeError("Cartesian FC requiere al menos una magnitud.")
+    n_datasets = math.prod(len(displacement_options[key]) for key in keys)
+    if n_datasets > max_datasets:
+        raise RuntimeError(
+            "La configuracion FC genera demasiados datasets: "
+            f"{n_datasets} datasets cartesianos > max_datasets={max_datasets}. "
+            "Reduce opciones o aumenta max_datasets."
+        )
+
+    specs: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for dataset_index, combo in enumerate(
+        itertools.product(*(displacement_options[key] for key in keys))
+    ):
+        entries = []
+        for displacement, count in zip(keys, combo):
+            if count > per_displacement_limit:
+                raise RuntimeError(
+                    f"{displacement}: pide {count} estructuras, pero el limite FC "
+                    f"por magnitud es {per_displacement_limit}."
+                )
+            entries.append({"value": displacement, "n_structures": int(count)})
+        size = sum(int(entry["n_structures"]) for entry in entries)
+        label = f"dataset_{dataset_index}_" + make_aligned_dataset_label(entries).removeprefix("dataset_")
+        validate_split_sizes(size, split_ratios, label=label)
+        if label in seen_labels:
+            raise RuntimeError(f"Nombre de dataset duplicado: {label}.")
+        seen_labels.add(label)
+        specs.append({"label": label, "size": size, "displacements": entries})
+    return specs
+
+
+def build_fc_dataset_specs_from_options(
+    displacement_options: dict[str, list[int]],
+    *,
+    combination_mode: str,
+    per_displacement_limit: int,
+    split_ratios: dict[str, float],
+    max_datasets: int,
+) -> list[dict[str, Any]]:
+    if combination_mode == "aligned":
+        return build_fc_aligned_dataset_specs(
+            displacement_options,
+            per_displacement_limit=per_displacement_limit,
+            split_ratios=split_ratios,
+            max_datasets=max_datasets,
+        )
+    if combination_mode == "cartesian":
+        return build_fc_cartesian_dataset_specs(
+            displacement_options,
+            per_displacement_limit=per_displacement_limit,
+            split_ratios=split_ratios,
+            max_datasets=max_datasets,
+        )
+    raise RuntimeError(f"combination_mode no soportado: {combination_mode!r}.")
 
 
 def build_fc_dataset_specs(
@@ -744,6 +840,36 @@ def validate_atom_sizes_for_fc(
         f"{displacement_count} magnitudes, la capacidad total es {total_limit}. "
         f"Tamanos invalidos: {too_large}. Anade magnitudes FC o reduce el tamano."
     )
+
+
+def validate_atom_dataset_specs_for_fc(
+    specs: list[dict[str, Any]],
+    split_ratios: dict[str, float],
+) -> None:
+    config = load_config(PIPELINES["atom_displacement"].config_path)
+    limit = atom_fc_sample_limit(config)
+    if limit is None:
+        return
+    for spec in specs:
+        label = str(spec.get("label") or f"dataset_{spec.get('size')}")
+        size = int(spec["size"])
+        validate_split_sizes(size, split_ratios, label=f"AtomDisplacement {label}")
+        entries = spec.get("displacements") or []
+        if not entries:
+            raise RuntimeError(f"AtomDisplacement {label}: no tiene magnitudes FC.")
+        for entry in entries:
+            requested = int(entry.get("n_structures") or 0)
+            if requested <= 0:
+                raise RuntimeError(
+                    f"AtomDisplacement {label}: {entry.get('value')} pide "
+                    f"{requested} estructuras; debe ser un entero positivo."
+                )
+            if requested > limit:
+                raise RuntimeError(
+                    "AtomDisplacement: una magnitud FC pide mas estructuras de "
+                    f"las que permite FC. {label}, {entry.get('value')} pide "
+                    f"{requested}, maximo {limit}."
+                )
 
 
 def select_spread(items: list[Path], count: int) -> list[Path]:
@@ -1174,6 +1300,7 @@ def atom_fc_ui_config() -> dict[str, Any]:
         ),
         "structures_per_displacement": structures_per_displacement or [2, 4, 6],
         "displacement_options": displacement_options,
+        "combination_mode": parse_combination_mode(force_constants.get("combination_mode", "aligned")),
         "max_datasets": force_constants.get("max_datasets", 100),
         "splits": split_ratios_from_config(config),
         "displacements": normalized,
@@ -1213,11 +1340,7 @@ class ExperimentRunner:
                 validate_split_sizes(size, ratios, label=f"MD dataset_{size}")
             if atom_dataset_specs:
                 atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
-                validate_atom_sizes_for_fc(
-                    atom_sizes,
-                    {int(spec["size"]): spec["displacements"] for spec in atom_dataset_specs},
-                    ratios,
-                )
+                validate_atom_dataset_specs_for_fc(atom_dataset_specs, ratios)
             else:
                 validate_atom_sizes_for_fc(atom_sizes, fc_dataset_specs, ratios)
             self._logs = []
@@ -1337,7 +1460,7 @@ class ExperimentRunner:
             )
             if atom_dataset_specs:
                 self._append(
-                    "[UI] AtomDisplacement FC aligned plan: "
+                    "[UI] AtomDisplacement FC plan: "
                     + "; ".join(
                         f"{spec['label']}: "
                         + ", ".join(
@@ -2219,30 +2342,37 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 random_seed = payload.get("random_seed")
                 random_seed = None if random_seed in (None, "") else int(random_seed)
                 max_datasets = parse_max_datasets(payload.get("max_datasets"))
-                requested_atom_sizes = parse_sizes(payload.get("atom_sizes"), [10])
+                combination_mode = parse_combination_mode(payload.get("combination_mode"))
+                raw_atom_sizes = payload.get("atom_sizes")
                 atom_config = load_config(PIPELINES["atom_displacement"].config_path)
                 force_constants = atom_config.get("structure", {}).get("force_constants", {}) or {}
                 if payload.get("max_datasets") in (None, ""):
                     max_datasets = parse_max_datasets(force_constants.get("max_datasets"), 100)
+                if payload.get("combination_mode") in (None, ""):
+                    combination_mode = parse_combination_mode(
+                        force_constants.get("combination_mode", "aligned")
+                    )
                 limit = atom_fc_sample_limit(atom_config)
                 if limit is None:
                     raise RuntimeError("AtomDisplacement: FC no esta habilitado en la configuracion.")
                 atom_dataset_specs = None
                 if displacement_options:
-                    atom_dataset_specs = build_fc_aligned_dataset_specs(
+                    atom_dataset_specs = build_fc_dataset_specs_from_options(
                         displacement_options,
+                        combination_mode=combination_mode,
                         per_displacement_limit=limit,
                         split_ratios=split_ratios,
                         max_datasets=max_datasets,
                     )
                     atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
                     if parse_bool(payload.get("sync_md_sizes"), True):
-                        md_sizes = list(atom_sizes)
+                        md_sizes = unique_ints_preserve_order(atom_sizes)
                     else:
                         md_sizes = parse_sizes(raw_md_sizes, atom_sizes)
                     fc_dataset_specs = None
                 else:
                     md_sizes = parse_sizes(raw_md_sizes, [10, 20])
+                    requested_atom_sizes = parse_sizes(raw_atom_sizes, [10])
                     atom_sizes, fc_dataset_specs = build_fc_dataset_specs(
                         requested_atom_sizes,
                         fc_displacements,
