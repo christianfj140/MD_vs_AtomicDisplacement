@@ -24,6 +24,7 @@ BOHR_TO_ANG = 0.529177210903
 RY_TO_EV = 13.605693009
 ATDIS_STEPS_DIR_NAME = "AtDis_steps"
 FC_STEPS_DIR_NAME = "FC_steps"
+FC_RUNS_DIR_NAME = "FC_runs"
 ATOM_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_CONFIG = load_pipeline_config()
 PIPELINE_PATHS = paths(PIPELINE_CONFIG)
@@ -63,6 +64,39 @@ class Structure:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def compute_max_fc_structures(n_atoms: int, include_reference: bool = True) -> int:
+    """Return the finite-difference FC structure limit for ``n_atoms``.
+
+    SIESTA FC displaces every selected atom along the three Cartesian axes with
+    both signs. This gives ``2 * 3 * n_atoms == 6N`` displaced structures. Some
+    workflows also keep the undisplaced reference geometry, represented by the
+    optional ``+1``.
+    """
+
+    n_atoms = int(n_atoms)
+    if n_atoms <= 0:
+        raise ValueError(f"n_atoms must be positive for FC generation: {n_atoms}")
+    return 6 * n_atoms + (1 if include_reference else 0)
+
+
+def fc_displaced_atom_count(
+    total_atoms: int,
+    first_atom: int = 1,
+    last_atom: int | None = None,
+) -> int:
+    """Validate an FC atom range and return the number of displaced atoms."""
+
+    total_atoms = int(total_atoms)
+    first_atom = int(first_atom)
+    last_atom = total_atoms if last_atom is None else int(last_atom)
+    if first_atom < 1 or last_atom < first_atom or last_atom > total_atoms:
+        raise ValueError(
+            "Invalid FC atom range: "
+            f"FC.First={first_atom}, FC.Last={last_atom}, NumberOfAtoms={total_atoms}"
+        )
+    return last_atom - first_atom + 1
 
 
 def require_command(command_name: str) -> None:
@@ -384,6 +418,23 @@ def generated_sample_dirs() -> list[Path]:
     manifest_path = PIPELINE_PATHS["samples_manifest_path"]
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("generation_mode") == "siesta_fc_multi_run":
+            run_dirs = [
+                Path(run["run_dir"])
+                for run in manifest.get("runs", [])
+                if isinstance(run, dict) and run.get("run_dir")
+            ]
+            run_dirs = [
+                path if path.is_absolute() else DATASET_DIR / path
+                for path in run_dirs
+            ]
+            existing_runs = [
+                path
+                for path in run_dirs
+                if path.is_dir() and (path / PIPELINE_CONFIG["paths"]["run_fdf_name"]).exists()
+            ]
+            if existing_runs:
+                return sorted(existing_runs, key=lambda path: path.name)
         if manifest.get("generation_mode") == "siesta_fc_single_run":
             atdis_steps_dir = DATASET_DIR / ATDIS_STEPS_DIR_NAME
             if atdis_steps_dir.exists():

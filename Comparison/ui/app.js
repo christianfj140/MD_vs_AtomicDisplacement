@@ -15,6 +15,7 @@ const state = {
   polling: null,
   plotsEnabled: false,
   plotData: null,
+  fcMaxPerDisplacement: null,
 };
 
 function showToast(message) {
@@ -132,13 +133,135 @@ function parseSizesInput(id) {
     .map((item) => Number(item));
 }
 
+function parseTextListInput(id) {
+  return document
+    .getElementById(id)
+    .value.split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parsePositiveIntegerListInput(id) {
+  return parseTextListInput(id)
+    .map((item) => Number(item))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+function parseSplitRatios() {
+  return {
+    train: Number(document.getElementById("split-train").value),
+    validation: Number(document.getElementById("split-validation").value),
+    test: Number(document.getElementById("split-test").value),
+  };
+}
+
+function parseFcDisplacementOptionsText() {
+  const rows = document
+    .getElementById("fc-displacement-options")
+    .value.split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const options = {};
+  for (const [index, row] of rows.entries()) {
+    const parts = row.split(":");
+    if (parts.length < 2) {
+      throw new Error(
+        `Displacement options: la fila ${index + 1} no tiene el formato "magnitud: n1, n2, ...".`,
+      );
+    }
+    const displacement = parts.shift().trim();
+    if (!displacement) {
+      throw new Error(`Displacement options: la fila ${index + 1} tiene la magnitud vacia.`);
+    }
+    if (Object.prototype.hasOwnProperty.call(options, displacement)) {
+      throw new Error(
+        `Displacement options: la magnitud "${displacement}" esta repetida; usa una sola fila por magnitud.`,
+      );
+    }
+    const counts = parts
+      .join(":")
+      .split(/[;,]/)
+      .map((item) => Number(item.trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    if (!counts.length) {
+      throw new Error(
+        `Displacement options: la fila ${index + 1} no tiene enteros positivos (ej. 2, 3, 4).`,
+      );
+    }
+    options[displacement] = counts;
+  }
+  return options;
+}
+
+function formatFcDisplacementOptions(options) {
+  return Object.entries(options || {})
+    .map(([displacement, counts]) => `${displacement}: ${(counts || []).join(", ")}`)
+    .join("\n");
+}
+
+function fcAlignedSpecs() {
+  const options = parseFcDisplacementOptionsText();
+  const entries = Object.entries(options);
+  if (!entries.length) return [];
+  const lengths = entries.map(([, counts]) => counts.length);
+  const uniqueLengths = new Set(lengths);
+  if (uniqueLengths.size !== 1) {
+    return [];
+  }
+  const total = lengths[0] || 0;
+  const specs = [];
+  for (let index = 0; index < total; index += 1) {
+    specs.push({
+      size: entries.reduce((sum, [, counts]) => sum + counts[index], 0),
+    });
+  }
+  return specs;
+}
+
+function updateAtomSizesFromFcPlan() {
+  try {
+    const specs = fcAlignedSpecs();
+    const sizes = specs.map((spec) => spec.size);
+    const sizesText = sizes.join(", ");
+    document.getElementById("atom-sizes").value = sizesText;
+    document.getElementById("md-sizes").value = sizesText;
+    document.getElementById("atom-combination-count").value = specs.length
+      ? `${specs.length} aligned datasets`
+      : "invalid aligned lists";
+  } catch (_error) {
+    document.getElementById("atom-sizes").value = "";
+    document.getElementById("md-sizes").value = "";
+    document.getElementById("atom-combination-count").value = "invalid aligned lists";
+  }
+}
+
+async function loadFcConfig() {
+  const config = await request("/api/atom-fc-config");
+  state.fcMaxPerDisplacement = config.max_per_displacement;
+  const limit = document.getElementById("fc-limit");
+  limit.textContent =
+    config.max_per_displacement == null
+      ? "Max per displacement: -"
+      : `Max per displacement: ${config.max_per_displacement}`;
+  document.getElementById("fc-displacement-options").value = formatFcDisplacementOptions(
+    config.displacement_options || { "0.05 Ang": [2, 4, 6] },
+  );
+  document.getElementById("fc-max-datasets").value = config.max_datasets ?? 100;
+  document.getElementById("fc-random-seed").value = config.random_seed ?? 42;
+  document.getElementById("split-train").value = config.splits?.train ?? 0.8;
+  document.getElementById("split-validation").value = config.splits?.validation ?? 0.1;
+  document.getElementById("split-test").value = config.splits?.test ?? 0.1;
+  updateAtomSizesFromFcPlan();
+}
+
 function updateExperimentStatus(status) {
   const text = document.getElementById("experiment-status-text");
   const root = document.getElementById("experiment-results-root");
   if (status.running && status.current) {
     const elapsed = formatDuration(status.current.elapsed_seconds);
     const eta = formatDuration(status.current.eta_seconds);
-    text.textContent = `${status.current.pipeline} dataset_${status.current.size} · ${elapsed} · ETA ${eta}`;
+    const label = status.current.dataset_label || `dataset_${status.current.size}`;
+    text.textContent = `${status.current.pipeline} ${label} · ${elapsed} · ETA ${eta}`;
   } else if (status.running) {
     text.textContent = "Running";
   } else if (status.returncode == null || status.returncode === 0) {
@@ -156,8 +279,9 @@ function renderExperimentResults(results) {
   for (const result of results) {
     const item = document.createElement("div");
     item.className = "result-pill";
+    const label = result.dataset_label || `dataset_${result.dataset_size}`;
     item.innerHTML = `
-      <strong>${result.pipeline} dataset_${result.dataset_size}</strong>
+      <strong>${result.pipeline} ${label}</strong>
       <span>${result.predicted_hamiltonians} predicted Hamiltonians</span>
       <span>${result.siesta_hamiltonians} SIESTA Hamiltonians</span>
       <code>${result.result_dir}</code>
@@ -168,12 +292,35 @@ function renderExperimentResults(results) {
 
 async function runExperiment() {
   const mdSizes = parseSizesInput("md-sizes");
+  const fcDisplacementOptions = parseFcDisplacementOptionsText();
+  if (!Object.keys(fcDisplacementOptions).length) {
+    throw new Error("Define al menos una magnitud FC con opciones.");
+  }
+  const badDatasets = fcAlignedSpecs()
+    .map((spec) => spec.size)
+    .filter((size) => !Number.isInteger(size) || size < 3);
+  if (badDatasets.length) {
+    throw new Error(
+      `Con train/validation/test se requieren datasets >= 3. Tamaños invalidos: ${badDatasets.join(", ")}.`,
+    );
+  }
   const atomSizes = parseSizesInput("atom-sizes");
+  const splitRatios = parseSplitRatios();
+  const randomSeed = Number(document.getElementById("fc-random-seed").value);
+  const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
   state.experimentOffset = 0;
   document.getElementById("experiment-log").textContent = "";
   const payload = await request("/api/experiment", {
     method: "POST",
-    body: JSON.stringify({ md_sizes: mdSizes, atom_sizes: atomSizes }),
+    body: JSON.stringify({
+      md_sizes: mdSizes,
+      atom_sizes: atomSizes,
+      fc_displacement_options: fcDisplacementOptions,
+      sync_md_sizes: true,
+      splits: splitRatios,
+      random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
+      max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
+    }),
   });
   updateExperimentStatus(payload);
   showToast("Experiment started");
@@ -482,11 +629,13 @@ function setupEvents() {
   document.getElementById("stop-experiment").addEventListener("click", () => {
     stopExperiment().catch((error) => showToast(error.message));
   });
+  document.getElementById("fc-displacement-options").addEventListener("input", updateAtomSizesFromFcPlan);
 }
 
 async function boot() {
   setupTabs();
   setupEvents();
+  await loadFcConfig();
   await pollLogs();
   await loadResults();
   state.polling = setInterval(() => {

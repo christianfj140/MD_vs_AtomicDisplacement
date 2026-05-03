@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 
 import pytorch_lightning as pl
 from graph2mat.core.data.processing import MatrixDataProcessor
@@ -37,14 +38,17 @@ def main() -> int:
     data = prediction["data"]
     callbacks_config = prediction["callbacks"]
     model = LitMACEMatrixModel.load_from_checkpoint(str(TRAINING_DIR / ckpt_path))
-    datamodule = MatrixDataModule(
-        out_matrix=data["out_matrix"],
-        symmetric_matrix=bool(data["symmetric_matrix"]),
-        basis_files=data["basis_files"],
-        predict_structs=data["predict_structs"],
-        store_in_memory=bool(data["store_in_memory"]),
-        n_matrix_components=int(data["n_matrix_components"]),
-    )
+    datamodule_kwargs = {
+        "out_matrix": data["out_matrix"],
+        "symmetric_matrix": bool(data["symmetric_matrix"]),
+        "sub_point_matrix": bool(data.get("sub_point_matrix", False)),
+        "basis_files": data["basis_files"],
+        "predict_structs": data["predict_structs"],
+        "store_in_memory": bool(data["store_in_memory"]),
+    }
+    if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["n_matrix_components"] = int(data["n_matrix_components"])
+    datamodule = MatrixDataModule(**datamodule_kwargs)
     callbacks = []
     if bool(callbacks_config["matrix_writer"]):
         callbacks.append(MatrixWriter(output_file=callbacks_config["output_file"], splits=["predict"]))

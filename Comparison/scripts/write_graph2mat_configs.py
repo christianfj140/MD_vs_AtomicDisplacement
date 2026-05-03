@@ -61,7 +61,13 @@ def force_shared_hyperparams(md_block: dict[str, Any], fc_block: dict[str, Any])
     fc_block["trainer"] = copy.deepcopy(md_block["trainer"])
     fc_block["trainer"]["logger"]["init_args"]["name"] = fc_logger
 
-    for key in ("out_matrix", "symmetric_matrix", "batch_size", "store_in_memory"):
+    for key in (
+        "out_matrix",
+        "symmetric_matrix",
+        "sub_point_matrix",
+        "batch_size",
+        "store_in_memory",
+    ):
         if key in md_block["data"]:
             fc_data[key] = copy.deepcopy(md_block["data"][key])
     fc_block["data"] = fc_data

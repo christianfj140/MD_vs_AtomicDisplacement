@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 
 import pytorch_lightning as pl
 from graph2mat.core.data.processing import MatrixDataProcessor
@@ -56,14 +57,17 @@ def main() -> int:
     data = testing["data"]
     callbacks_config = testing["callbacks"]
     model = LitMACEMatrixModel.load_from_checkpoint(str(TRAINING_DIR / ckpt_path))
-    datamodule = MatrixDataModule(
-        out_matrix=data["out_matrix"],
-        symmetric_matrix=bool(data["symmetric_matrix"]),
-        basis_files=data["basis_files"],
-        test_runs=test_run,
-        store_in_memory=bool(data["store_in_memory"]),
-        n_matrix_components=int(data["n_matrix_components"]),
-    )
+    datamodule_kwargs = {
+        "out_matrix": data["out_matrix"],
+        "symmetric_matrix": bool(data["symmetric_matrix"]),
+        "sub_point_matrix": bool(data.get("sub_point_matrix", False)),
+        "basis_files": data["basis_files"],
+        "test_runs": test_run,
+        "store_in_memory": bool(data["store_in_memory"]),
+    }
+    if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["n_matrix_components"] = int(data["n_matrix_components"])
+    datamodule = MatrixDataModule(**datamodule_kwargs)
     callbacks = []
     if bool(callbacks_config["plot_matrix_error"]):
         callbacks.append(

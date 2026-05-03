@@ -337,14 +337,81 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
     return count
 
 
-def split_counts(size: int) -> dict[str, int]:
-    train = int(size * 0.8)
-    validation = int(size * 0.1)
-    test = size - train - validation
-    if size >= 2 and test == 0:
-        test = 1
-        train = max(1, train - 1)
-    return {"train": train, "validation": validation, "test": test}
+DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
+
+
+def split_ratios_from_config(config: dict[str, Any]) -> dict[str, float]:
+    raw = config.get("split_ratios") or config.get("splits") or {}
+    ratios = {
+        "train": float(raw.get("train", DEFAULT_SPLIT_RATIOS["train"])),
+        "validation": float(
+            raw.get("validation", raw.get("val", DEFAULT_SPLIT_RATIOS["validation"]))
+        ),
+        "test": float(raw.get("test", DEFAULT_SPLIT_RATIOS["test"])),
+    }
+    if any(value <= 0 or value >= 1 for value in ratios.values()):
+        return dict(DEFAULT_SPLIT_RATIOS)
+    return ratios
+
+
+def parse_split_ratios(value: Any) -> dict[str, float] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RuntimeError("Los splits deben enviarse como un objeto.")
+    ratios = {
+        "train": float(value.get("train", DEFAULT_SPLIT_RATIOS["train"])),
+        "validation": float(
+            value.get("validation", value.get("val", DEFAULT_SPLIT_RATIOS["validation"]))
+        ),
+        "test": float(value.get("test", DEFAULT_SPLIT_RATIOS["test"])),
+    }
+    return ratios
+
+
+def validate_split_sizes(
+    dataset_size: int,
+    splits: dict[str, float],
+    *,
+    label: str = "dataset",
+) -> dict[str, int]:
+    if dataset_size < 3:
+        raise RuntimeError(
+            f"{label}: el dataset debe tener al menos 3 estructuras para que train, "
+            "validation y test no queden vacios."
+        )
+    ratios = {
+        "train": float(splits["train"]),
+        "validation": float(splits.get("validation", splits.get("val", 0.0))),
+        "test": float(splits["test"]),
+    }
+    if any(value <= 0 for value in ratios.values()):
+        raise RuntimeError("Los ratios de split deben ser positivos.")
+    if not math.isclose(sum(ratios.values()), 1.0, rel_tol=1e-6, abs_tol=1e-6):
+        raise RuntimeError(
+            "Los ratios de split deben sumar 1.0 "
+            f"(recibido: {sum(ratios.values()):.6g})."
+        )
+
+    raw = {key: dataset_size * ratio for key, ratio in ratios.items()}
+    counts = {key: int(math.floor(value)) for key, value in raw.items()}
+    remainder = dataset_size - sum(counts.values())
+    order = sorted(
+        counts,
+        key=lambda key: (raw[key] - counts[key], ratios[key]),
+        reverse=True,
+    )
+    for key in order[:remainder]:
+        counts[key] += 1
+
+    empty = [key for key, count in counts.items() if count < 1]
+    if empty:
+        raise RuntimeError(
+            f"{label}: split invalido; cada particion debe tener al menos 1 estructura. "
+            f"dataset_size={dataset_size}, ratios={ratios}, counts={counts}, "
+            f"vacios={empty}."
+        )
+    return counts
 
 
 def atom_fc_sample_limit(config: dict[str, Any]) -> int | None:
@@ -363,18 +430,308 @@ def atom_fc_sample_limit(config: dict[str, Any]) -> int | None:
             f"FC.First={first_atom}, FC.Last={last_atom}, NumberOfAtoms={len(atoms)}."
         )
     displaced_atoms = last_atom - first_atom + 1
-    return 1 + 6 * displaced_atoms
+    include_reference = bool(force_constants.get("include_reference", True))
+    return (1 if include_reference else 0) + 6 * displaced_atoms
 
 
-def validate_atom_sizes_for_fc(atom_sizes: list[int]) -> None:
+def atom_fc_displacement_entries(config: dict[str, Any]) -> list[dict[str, Any]]:
+    force_constants = config.get("structure", {}).get("force_constants", {}) or {}
+    entries = force_constants.get("displacements")
+    if isinstance(entries, dict):
+        return [
+            {"value": key, "structure_options": value}
+            for key, value in sorted(entries.items(), key=lambda item: _sort_displacement_key(item[0]))
+        ]
+    if entries:
+        return [entry if isinstance(entry, dict) else {"value": entry} for entry in entries]
+    return [{"value": force_constants.get("displacement", "0.05 Ang")}]
+
+
+def parse_fc_displacements(value: Any) -> list[dict[str, Any]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise RuntimeError("Las magnitudes FC deben enviarse como una lista.")
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, dict):
+            displacement = str(item.get("value", "")).strip()
+            entry = {"value": displacement}
+            if item.get("label"):
+                entry["label"] = str(item["label"])
+            if item.get("n_structures") not in (None, ""):
+                entry["n_structures"] = int(item["n_structures"])
+        else:
+            displacement = str(item).strip()
+            entry = {"value": displacement}
+        if not displacement:
+            raise RuntimeError(f"La magnitud FC #{index} no tiene valor.")
+        entries.append(entry)
+    return entries or None
+
+
+def parse_structures_per_displacement(value: Any) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raise RuntimeError("structures_per_displacement debe ser lista o texto separado por comas.")
+    counts: list[int] = []
+    for item in raw_items:
+        if item == "":
+            continue
+        count = int(item)
+        if count <= 0:
+            raise RuntimeError("structures_per_displacement solo acepta enteros positivos.")
+        counts.append(count)
+    return counts or None
+
+
+def _sort_displacement_key(value: str) -> tuple[float, str]:
+    text = str(value).strip()
+    number = ""
+    for char in text:
+        if char.isdigit() or char in ".-+Ee":
+            number += char
+        elif number:
+            break
+    try:
+        return (float(number), text)
+    except ValueError:
+        return (math.inf, text)
+
+
+def _displacement_slug(value: str) -> str:
+    text = str(value).strip()
+    number = ""
+    for char in text:
+        if char.isdigit() or char in ".-+Ee":
+            number += char
+        elif number:
+            break
+    text = number or text
+    slug = (
+        text.replace("+", "")
+        .replace("-", "m")
+        .replace(".", "p")
+        .replace(" ", "")
+        .replace("/", "_")
+    )
+    return "".join(char if char.isalnum() else "_" for char in slug).strip("_") or "disp"
+
+
+def parse_fc_displacement_options(value: Any) -> dict[str, list[int]] | None:
+    """Parse the aligned FC mapping: displacement -> user-defined counts.
+
+    The API accepts a JSON object such as ``{"0.02 Ang": [5, 7], "0.05 Ang": [2]}``.
+    Keeping the mapping separate from ``structures_per_displacement`` preserves
+    backward compatibility with the older uniform grid while enabling strict
+    index-based alignment. Lists must have the same length; dataset i uses the
+    ith count from every displacement list. No Cartesian expansion is performed.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RuntimeError("displacement_options debe ser un objeto displacement -> lista.")
+    parsed: dict[str, list[int]] = {}
+    for raw_key, raw_counts in value.items():
+        displacement = str(raw_key).strip()
+        if not displacement:
+            raise RuntimeError("displacement_options contiene una magnitud vacia.")
+        counts = parse_structures_per_displacement(raw_counts)
+        if not counts:
+            raise RuntimeError(f"{displacement}: define al menos un numero de estructuras.")
+        parsed[displacement] = list(counts)
+    return dict(sorted(parsed.items(), key=lambda item: _sort_displacement_key(item[0])))
+
+
+def parse_max_datasets(value: Any, default: int = 100) -> int:
+    if value in (None, ""):
+        return default
+    limit = int(value)
+    if limit <= 0:
+        raise RuntimeError("max_datasets debe ser mayor que cero.")
+    return limit
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+
+
+def distribute_fc_counts(total: int, n_displacements: int, per_displacement_limit: int) -> list[int]:
+    if n_displacements <= 0:
+        raise RuntimeError("AtomDisplacement: define al menos una magnitud FC.")
+    capacity = n_displacements * per_displacement_limit
+    if total > capacity:
+        raise RuntimeError(
+            "AtomDisplacement: el tamano pedido excede la capacidad FC configurada. "
+            f"Pedido={total}, capacidad={capacity} ({n_displacements} magnitudes x "
+            f"{per_displacement_limit} estructuras/magnitud)."
+        )
+    counts = [0 for _ in range(n_displacements)]
+    remaining = total
+    index = 0
+    while remaining:
+        if counts[index] < per_displacement_limit:
+            counts[index] += 1
+            remaining -= 1
+        index = (index + 1) % n_displacements
+    return counts
+
+
+def make_aligned_dataset_label(entries: list[dict[str, Any]]) -> str:
+    parts = [
+        f"d{_displacement_slug(str(entry['value']))}_{int(entry['n_structures'])}"
+        for entry in entries
+    ]
+    return "dataset_" + "__".join(parts)
+
+
+def build_fc_aligned_dataset_specs(
+    displacement_options: dict[str, list[int]],
+    *,
+    per_displacement_limit: int,
+    split_ratios: dict[str, float],
+    max_datasets: int,
+) -> list[dict[str, Any]]:
+    """Build one independent dataset spec per index-aligned combination.
+
+    Counts are zipped across sorted displacement keys. With
+    ``{"0.03": [5, 7], "0.04": [6, 8]}``, only two datasets are created:
+    ``(5, 6)`` and ``(7, 8)``. This deliberately avoids Cartesian products so
+    the user controls exactly which combinations are generated.
+    """
+
+    keys = list(displacement_options)
+    lengths = {key: len(displacement_options[key]) for key in keys}
+    if len(set(lengths.values())) != 1:
+        raise RuntimeError(
+            "Todas las listas de displacement_options deben tener la misma longitud. "
+            f"Longitudes recibidas: {lengths}."
+        )
+    n_datasets = next(iter(lengths.values()), 0)
+    if n_datasets > max_datasets:
+        raise RuntimeError(
+            "La configuracion FC genera demasiados datasets: "
+            f"{n_datasets} datasets alineados > max_datasets={max_datasets}. "
+            "Reduce filas o aumenta max_datasets."
+        )
+    specs: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for dataset_index, combo in enumerate(zip(*(displacement_options[key] for key in keys))):
+        entries = []
+        for displacement, count in zip(keys, combo):
+            if count > per_displacement_limit:
+                raise RuntimeError(
+                    f"{displacement}: pide {count} estructuras, pero el limite FC "
+                    f"por magnitud es {per_displacement_limit}."
+                )
+            entries.append({"value": displacement, "n_structures": int(count)})
+        size = sum(int(entry["n_structures"]) for entry in entries)
+        label = f"dataset_{dataset_index}_" + make_aligned_dataset_label(entries).removeprefix("dataset_")
+        validate_split_sizes(size, split_ratios, label=label)
+        if label in seen_labels:
+            raise RuntimeError(f"Nombre de dataset duplicado: {label}.")
+        seen_labels.add(label)
+        specs.append({"label": label, "size": size, "displacements": entries})
+    return specs
+
+
+def build_fc_dataset_specs(
+    atom_sizes: list[int],
+    fc_displacements: list[dict[str, Any]] | None,
+    structures_per_displacement: list[int] | None,
+    *,
+    per_displacement_limit: int,
+    split_ratios: dict[str, float],
+) -> tuple[list[int], dict[int, list[dict[str, Any]]] | None]:
+    if structures_per_displacement:
+        if not fc_displacements:
+            raise RuntimeError(
+                "Define magnitudes FC para usar structures_per_displacement."
+            )
+        specs: dict[int, list[dict[str, Any]]] = {}
+        generated_sizes: list[int] = []
+        for count in structures_per_displacement:
+            if count > per_displacement_limit:
+                raise RuntimeError(
+                    "AtomDisplacement: structures_per_displacement excede el limite FC. "
+                    f"Pedido={count}, maximo por magnitud={per_displacement_limit}."
+                )
+            size = count * len(fc_displacements)
+            validate_split_sizes(size, split_ratios, label=f"AtomDisplacement dataset_{size}")
+            if size in specs:
+                raise RuntimeError(
+                    "Dos entradas de structures_per_displacement producen el mismo "
+                    f"dataset_size={size}."
+                )
+            generated_sizes.append(size)
+            specs[size] = [
+                {**entry, "n_structures": count}
+                for entry in fc_displacements
+            ]
+        return generated_sizes, specs
+
+    if fc_displacements and all("n_structures" in entry for entry in fc_displacements):
+        explicit_total = sum(int(entry["n_structures"]) for entry in fc_displacements)
+        for entry in fc_displacements:
+            requested = int(entry["n_structures"])
+            if requested > per_displacement_limit:
+                raise RuntimeError(
+                    "AtomDisplacement: una magnitud FC pide mas estructuras de las que "
+                    f"permite FC. {entry.get('value')} pide {requested}, "
+                    f"maximo {per_displacement_limit}."
+                )
+        validate_split_sizes(
+            explicit_total,
+            split_ratios,
+            label=f"AtomDisplacement dataset_{explicit_total}",
+        )
+        return [explicit_total], {explicit_total: fc_displacements}
+
+    return atom_sizes, None
+
+
+def validate_atom_sizes_for_fc(
+    atom_sizes: list[int],
+    fc_dataset_specs: dict[int, list[dict[str, Any]]] | None = None,
+    split_ratios: dict[str, float] | None = None,
+) -> None:
     config = load_config(PIPELINES["atom_displacement"].config_path)
-    force_constants = config.get("structure", {}).get("force_constants", {})
-    if bool(force_constants.get("expand_amplitudes", False)):
-        return
     limit = atom_fc_sample_limit(config)
     if limit is None:
         return
-    too_large = [size for size in atom_sizes if size > limit]
+    ratios = split_ratios or split_ratios_from_config(config)
+    displacement_entries = (
+        next(iter(fc_dataset_specs.values()))
+        if fc_dataset_specs
+        else atom_fc_displacement_entries(config)
+    )
+    displacement_count = len(displacement_entries)
+    if fc_dataset_specs:
+        for size, entries in fc_dataset_specs.items():
+            validate_split_sizes(size, ratios, label=f"AtomDisplacement dataset_{size}")
+            for entry in entries:
+                requested = int(entry.get("n_structures") or 0)
+                if requested > limit:
+                    raise RuntimeError(
+                        "AtomDisplacement: una magnitud FC pide mas estructuras de "
+                        f"las que permite FC. {entry.get('value')} pide {requested}, "
+                        f"maximo {limit}."
+                    )
+    else:
+        for size in atom_sizes:
+            validate_split_sizes(size, ratios, label=f"AtomDisplacement dataset_{size}")
+    total_limit = limit * displacement_count
+    too_large = [size for size in atom_sizes if size > total_limit]
     if not too_large:
         return
     raise RuntimeError(
@@ -383,9 +740,9 @@ def validate_atom_sizes_for_fc(atom_sizes: list[int]) -> None:
         f"({len(config['structure']['atoms'])} atomos, FC.First="
         f"{config['structure']['force_constants'].get('first_atom', 1)}, "
         f"FC.Last={config['structure']['force_constants'].get('last_atom') or len(config['structure']['atoms'])}) "
-        f"el maximo es {limit} estructuras: 1 referencia + 6 desplazamientos por atomo. "
-        f"Tamanos invalidos: {too_large}. Ajusta AtomDisplacement sizes a <= {limit} "
-        "o cambia la configuracion FC/estructura antes de lanzar el sweep."
+        f"el maximo por magnitud es {limit} estructuras. Con "
+        f"{displacement_count} magnitudes, la capacidad total es {total_limit}. "
+        f"Tamanos invalidos: {too_large}. Anade magnitudes FC o reduce el tamano."
     )
 
 
@@ -713,6 +1070,53 @@ def plot_data_summary() -> dict[str, Any]:
     return {"runs": runs}
 
 
+def atom_fc_ui_config() -> dict[str, Any]:
+    config = load_config(PIPELINES["atom_displacement"].config_path)
+    limit = atom_fc_sample_limit(config)
+    force_constants = config.get("structure", {}).get("force_constants", {}) or {}
+    entries = atom_fc_displacement_entries(config)
+    normalized = []
+    for entry in entries:
+        normalized.append(
+            {
+                "value": entry.get("value", entry.get("displacement", "")),
+                "n_structures": entry.get("n_structures") or "",
+                "label": entry.get("label", ""),
+            }
+        )
+    structures_per_displacement = force_constants.get("structures_per_displacement")
+    if not structures_per_displacement:
+        structures_per_displacement = [
+            entry.get("n_structures")
+            for entry in entries
+            if entry.get("n_structures") not in (None, "")
+        ]
+    displacement_options = force_constants.get("displacement_options")
+    if displacement_options is None and isinstance(force_constants.get("displacements"), dict):
+        displacement_options = force_constants.get("displacements")
+    if displacement_options is None:
+        option_counts = structures_per_displacement or [2, 4, 6]
+        displacement_options = {
+            str(entry["value"]): option_counts
+            for entry in entries
+            if entry.get("value")
+        }
+    return {
+        "max_per_displacement": limit,
+        "include_reference": bool(force_constants.get("include_reference", True)),
+        "subsampling": force_constants.get("subsampling", {}),
+        "random_seed": force_constants.get(
+            "random_seed",
+            (force_constants.get("subsampling") or {}).get("seed", 0),
+        ),
+        "structures_per_displacement": structures_per_displacement or [2, 4, 6],
+        "displacement_options": displacement_options,
+        "max_datasets": force_constants.get("max_datasets", 100),
+        "splits": split_ratios_from_config(config),
+        "displacements": normalized,
+    }
+
+
 class ExperimentRunner:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -728,11 +1132,31 @@ class ExperimentRunner:
         self._run_id: str | None = None
         self._rate_seconds_per_structure: dict[str, float] = {}
 
-    def start(self, md_sizes: list[int], atom_sizes: list[int]) -> dict[str, Any]:
+    def start(
+        self,
+        md_sizes: list[int],
+        atom_sizes: list[int],
+        fc_dataset_specs: dict[int, list[dict[str, Any]]] | None = None,
+        atom_dataset_specs: list[dict[str, Any]] | None = None,
+        split_ratios: dict[str, float] | None = None,
+        random_seed: int | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
-            validate_atom_sizes_for_fc(atom_sizes)
+            md_config = load_config(PIPELINES["md"].config_path)
+            ratios = split_ratios or split_ratios_from_config(md_config)
+            for size in md_sizes:
+                validate_split_sizes(size, ratios, label=f"MD dataset_{size}")
+            if atom_dataset_specs:
+                atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
+                validate_atom_sizes_for_fc(
+                    atom_sizes,
+                    {int(spec["size"]): spec["displacements"] for spec in atom_dataset_specs},
+                    ratios,
+                )
+            else:
+                validate_atom_sizes_for_fc(atom_sizes, fc_dataset_specs, ratios)
             self._logs = []
             self._started_at = time.time()
             self._finished_at = None
@@ -744,7 +1168,15 @@ class ExperimentRunner:
             self._rate_seconds_per_structure = {}
             self._thread = threading.Thread(
                 target=self._run,
-                args=(md_sizes, atom_sizes, self._run_id),
+                args=(
+                    md_sizes,
+                    atom_sizes,
+                    self._run_id,
+                    fc_dataset_specs,
+                    atom_dataset_specs,
+                    ratios,
+                    random_seed,
+                ),
                 daemon=True,
             )
             self._thread.start()
@@ -803,6 +1235,7 @@ class ExperimentRunner:
         pipeline: str,
         size: int,
         *,
+        dataset_label: str | None = None,
         started_at: float | None = None,
         eta_seconds: float | None = None,
     ) -> None:
@@ -810,11 +1243,21 @@ class ExperimentRunner:
             self._current = {
                 "pipeline": pipeline,
                 "size": size,
+                "dataset_label": dataset_label or f"dataset_{size}",
                 "started_at": started_at,
                 "eta_seconds": eta_seconds,
             }
 
-    def _run(self, md_sizes: list[int], atom_sizes: list[int], run_id: str) -> None:
+    def _run(
+        self,
+        md_sizes: list[int],
+        atom_sizes: list[int],
+        run_id: str,
+        fc_dataset_specs: dict[int, list[dict[str, Any]]] | None = None,
+        atom_dataset_specs: list[dict[str, Any]] | None = None,
+        split_ratios: dict[str, float] | None = None,
+        random_seed: int | None = None,
+    ) -> None:
         original_configs = {
             key: spec.config_path.read_text(encoding="utf-8")
             for key, spec in PIPELINES.items()
@@ -824,6 +1267,37 @@ class ExperimentRunner:
             self._append(f"[UI] Comparacion {run_id} iniciada.\n")
             self._append(f"[UI] MD sizes: {md_sizes}\n")
             self._append(f"[UI] AtomDisplacement sizes: {atom_sizes}\n")
+            self._append(
+                "[UI] Split ratios: "
+                f"{split_ratios['train']} train, {split_ratios['validation']} validation, "
+                f"{split_ratios['test']} test.\n"
+            )
+            if atom_dataset_specs:
+                self._append(
+                    "[UI] AtomDisplacement FC aligned plan: "
+                    + "; ".join(
+                        f"{spec['label']}: "
+                        + ", ".join(
+                            f"{entry['value']} -> {entry['n_structures']}"
+                            for entry in spec["displacements"]
+                        )
+                        for spec in atom_dataset_specs
+                    )
+                    + "\n"
+                )
+            elif fc_dataset_specs:
+                self._append(
+                    "[UI] AtomDisplacement FC plan: "
+                    + "; ".join(
+                        f"dataset_{size}: "
+                        + ", ".join(
+                            f"{entry['value']} -> {entry['n_structures']}"
+                            for entry in entries
+                        )
+                        for size, entries in fc_dataset_specs.items()
+                    )
+                    + "\n"
+                )
             self._append(f"[UI] Workspaces: {WORKSPACES_ROOT / run_id}\n")
             self._append(f"[UI] Results root: {RESULTS_ROOT}\n")
             self._append(
@@ -833,13 +1307,30 @@ class ExperimentRunner:
             for size in md_sizes:
                 self._ensure_not_stopped()
                 self._restore_original_config("md", original_configs)
-                result = self._run_one("md", size, run_id)
+                result = self._run_one("md", size, run_id, split_ratios=split_ratios)
                 with self._lock:
                     self._results.append(result)
-            for size in atom_sizes:
+            atom_runs = atom_dataset_specs or [
+                {
+                    "label": f"dataset_{size}",
+                    "size": size,
+                    "displacements": fc_dataset_specs.get(size) if fc_dataset_specs else None,
+                }
+                for size in atom_sizes
+            ]
+            for atom_spec in atom_runs:
                 self._ensure_not_stopped()
                 self._restore_original_config("atom_displacement", original_configs)
-                result = self._run_one("atom_displacement", size, run_id)
+                size = int(atom_spec["size"])
+                result = self._run_one(
+                    "atom_displacement",
+                    size,
+                    run_id,
+                    dataset_label=str(atom_spec["label"]),
+                    fc_displacements=atom_spec.get("displacements"),
+                    split_ratios=split_ratios,
+                    random_seed=random_seed,
+                )
                 with self._lock:
                     self._results.append(result)
             self._append("\n[UI] Comparacion experimental finalizada correctamente.\n")
@@ -864,17 +1355,33 @@ class ExperimentRunner:
             if self._stop_requested:
                 raise RuntimeError("Experimento detenido por el usuario.")
 
-    def _run_one(self, key: str, size: int, run_id: str) -> dict[str, Any]:
+    def _run_one(
+        self,
+        key: str,
+        size: int,
+        run_id: str,
+        dataset_label: str | None = None,
+        fc_displacements: list[dict[str, Any]] | None = None,
+        split_ratios: dict[str, float] | None = None,
+        random_seed: int | None = None,
+    ) -> dict[str, Any]:
         spec = PIPELINES[key]
+        dataset_label = dataset_label or f"dataset_{size}"
         started_at = time.time()
         eta_seconds = self._estimated_seconds(key, size)
-        self._set_current(key, size, started_at=started_at, eta_seconds=eta_seconds)
-        self._append(f"\n[UI] === {spec.label} dataset_{size} ===\n")
+        self._set_current(
+            key,
+            size,
+            dataset_label=dataset_label,
+            started_at=started_at,
+            eta_seconds=eta_seconds,
+        )
+        self._append(f"\n[UI] === {spec.label} {dataset_label} ===\n")
         self._append(f"[UI] ETA inicial: {format_duration(eta_seconds)}\n")
         config = load_config(spec.config_path)
-        workspace = WORKSPACES_ROOT / run_id / key / f"dataset_{size}"
+        workspace = WORKSPACES_ROOT / run_id / key / dataset_label
         result_group = "results_md" if key == "md" else "results_atomdisp"
-        result_dir = RESULTS_ROOT / result_group / f"dataset_{size}" / f"run_{run_id}"
+        result_dir = RESULTS_ROOT / result_group / dataset_label / f"run_{run_id}"
         workspace.mkdir(parents=True, exist_ok=True)
         self._append(f"[UI] Workspace: {workspace}\n")
         self._append(f"[UI] Result dir previsto: {result_dir}\n")
@@ -883,12 +1390,18 @@ class ExperimentRunner:
             log_start = len(self._logs)
         prepare_metadata: dict[str, Any] = {}
         if key == "md":
-            self._prepare_md_config(config, workspace, size)
+            self._prepare_md_config(config, workspace, size, split_ratios)
             write_yaml(spec.config_path, config)
             self._append("[UI] Config temporal escrita; se restaurara al finalizar el experimento.\n")
             returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         else:
-            self._prepare_atom_generation_config(config, workspace, size)
+            self._prepare_atom_generation_config(
+                config,
+                workspace,
+                size,
+                fc_displacements,
+                random_seed=random_seed,
+            )
             write_yaml(spec.config_path, config)
             self._append(
                 "[UI] Config temporal FC escrita; SIESTA generara AtDis_steps en el workspace.\n"
@@ -904,7 +1417,7 @@ class ExperimentRunner:
                     f"{spec.label} dataset_{size} fallo generando FC con codigo "
                     f"{generation_returncode}."
                 )
-            prepare_metadata = self._prepare_atom_config(config, workspace, size)
+            prepare_metadata = self._prepare_atom_config(config, workspace, size, split_ratios)
             write_yaml(spec.config_path, config)
             self._append("[UI] Config temporal de entrenamiento escrita tras FC.\n")
             if prepare_metadata.get("test_needs_siesta"):
@@ -923,6 +1436,7 @@ class ExperimentRunner:
             returncode,
             run_log,
             prepare_metadata,
+            dataset_label=dataset_label,
         )
         elapsed = time.time() - started_at
         self._update_rate(key, size, elapsed, returncode)
@@ -950,10 +1464,17 @@ class ExperimentRunner:
             f"{self._rate_seconds_per_structure[key]:.2f}s/estructura.\n"
         )
 
-    def _prepare_md_config(self, config: dict[str, Any], workspace: Path, size: int) -> None:
+    def _prepare_md_config(
+        self,
+        config: dict[str, Any],
+        workspace: Path,
+        size: int,
+        split_ratios: dict[str, float] | None = None,
+    ) -> None:
         dataset_dir = workspace / "dataset"
         pseudo_count = copy_pseudopotentials(PIPELINES["md"].root / "dataset", dataset_dir)
-        counts = split_counts(size)
+        ratios = split_ratios or split_ratios_from_config(config)
+        counts = validate_split_sizes(size, ratios, label=f"MD dataset_{size}")
         config["paths"]["dataset_dir"] = str(dataset_dir)
         config["paths"]["training_dir"] = str(workspace / "training")
         config["md"]["steps"] = size
@@ -966,6 +1487,10 @@ class ExperimentRunner:
         }
         config["training"]["data"]["train_runs"] = "../dataset/splits/train/*/RUN.fdf"
         config["testing"]["test_runs"] = "../dataset/splits/test/*/RUN.fdf"
+        config["testing"].setdefault("callbacks", {})
+        config["testing"]["callbacks"]["plot_matrix_error"] = False
+        config["testing"]["callbacks"]["show_plot"] = False
+        config["testing"]["callbacks"]["samplewise_metrics_logger"] = False
         config["prediction"]["predict_structs"] = "../dataset/splits/test/*/RUN.fdf"
         config["checkpoint"]["path"] = None
         self._append(f"[UI] MD dataset_dir: {dataset_dir}\n")
@@ -975,12 +1500,20 @@ class ExperimentRunner:
         self._append(
             "[UI] MD split: "
             f"{counts['train']} train, {counts['test']} test, "
-            f"{counts['validation']} validation; seleccion espaciada.\n"
+            f"{counts['validation']} validation; ratios "
+            f"{ratios['train']}/{ratios['validation']}/{ratios['test']}.\n"
         )
         self._append(f"[UI] MD train_runs: {config['training']['data']['train_runs']}\n")
         self._append(f"[UI] MD test_runs: {config['testing']['test_runs']}\n")
 
-    def _prepare_atom_generation_config(self, config: dict[str, Any], workspace: Path, size: int) -> None:
+    def _prepare_atom_generation_config(
+        self,
+        config: dict[str, Any],
+        workspace: Path,
+        size: int,
+        fc_displacements: list[dict[str, Any]] | None = None,
+        random_seed: int | None = None,
+    ) -> None:
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
         base_dir = workspace / "base"
@@ -995,8 +1528,31 @@ class ExperimentRunner:
         config["paths"]["collected_dir"] = str(dataset_dir / "collected")
         config["paths"]["training_dir"] = str(training_dir)
         config["single_points"]["limit"] = None
-        config["single_points"]["rerun"] = True
-        config["structure"]["force_constants"]["target_count"] = size
+        config["single_points"]["rerun"] = False
+        force_constants = config["structure"]["force_constants"]
+        limit = atom_fc_sample_limit(config)
+        if limit is None:
+            raise RuntimeError("AtomDisplacement: FC no esta habilitado en la configuracion.")
+        if fc_displacements:
+            requested_total = sum(int(entry["n_structures"]) for entry in fc_displacements)
+            if requested_total != size:
+                raise RuntimeError(
+                    "AtomDisplacement: la suma de estructuras FC "
+                    f"({requested_total}) no coincide con dataset_{size}."
+                )
+            force_constants["displacements"] = list(fc_displacements)
+        else:
+            displacement_entries = atom_fc_displacement_entries(config)
+            counts = distribute_fc_counts(size, len(displacement_entries), limit)
+            force_constants["displacements"] = [
+                {**entry, "n_structures": count}
+                for entry, count in zip(displacement_entries, counts)
+                if count > 0
+            ]
+        if random_seed is not None:
+            force_constants["random_seed"] = int(random_seed)
+            force_constants.setdefault("subsampling", {})["seed"] = int(random_seed)
+        force_constants["target_count"] = None
         config["structure"]["force_constants"]["allow_missing_matrix"] = True
         config["pipeline"]["steps"] = [
             "render_inputs",
@@ -1018,9 +1574,23 @@ class ExperimentRunner:
         self._append(
             "[UI] AtomDisplacement generara FC raw y normalizara FC_steps antes del split.\n"
         )
+        self._append(
+            "[UI] AtomDisplacement FC magnitudes: "
+            + ", ".join(
+                f"{entry.get('value')} -> {entry.get('n_structures')}"
+                for entry in force_constants["displacements"]
+            )
+            + f" (limite {limit} por magnitud).\n"
+        )
         self._append(f"[UI] AtomDisplacement FC steps: {', '.join(config['pipeline']['steps'])}\n")
 
-    def _prepare_atom_config(self, config: dict[str, Any], workspace: Path, size: int) -> dict[str, Any]:
+    def _prepare_atom_config(
+        self,
+        config: dict[str, Any],
+        workspace: Path,
+        size: int,
+        split_ratios: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
         relaxed_dir = workspace / "relaxed"
@@ -1044,7 +1614,8 @@ class ExperimentRunner:
                 "AtomDisplacement: SIESTA FC genero menos estructuras de las pedidas "
                 f"({len(all_samples)} < {size}). Revisa FC.First/FC.Last y {dataset_dir / 'run_summary.json'}."
             )
-        counts = split_counts(size)
+        ratios = split_ratios or split_ratios_from_config(config)
+        counts = validate_split_sizes(size, ratios, label=f"AtomDisplacement dataset_{size}")
         train_needed = counts["train"]
         validation_needed = counts["validation"]
         test_needed = counts["test"]
@@ -1059,14 +1630,14 @@ class ExperimentRunner:
         if incomplete_train:
             raise RuntimeError(
                 "AtomDisplacement: no puedo entrenar ese tamano sin recalcular SIESTA "
-                f"en train. Para dataset_{size}, el split 80/10/10 necesita "
+                f"en train. Para dataset_{size}, el split configurado necesita "
                 f"{train_needed} muestras de train con Hamiltoniano SIESTA; faltan "
                 f"{len(incomplete_train)} en el split espaciado."
             )
         if len(test_samples) < test_needed or len(validation_samples) < validation_needed:
             raise RuntimeError(
                 "AtomDisplacement: no hay suficientes muestras para completar el split "
-                f"80/10/10 ({len(train_samples)} train, {len(test_samples)} test, "
+                f"configurado ({len(train_samples)} train, {len(test_samples)} test, "
                 f"{len(validation_samples)} validation)."
             )
         copy_sample_dirs(train_samples, train_samples_dir)
@@ -1087,7 +1658,7 @@ class ExperimentRunner:
         config["single_points"]["rerun"] = False
         basis_files_pattern = "../dataset/basis/*.ion.xml" if basis_count else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
-        config["training"]["data"]["n_matrix_components"] = 2
+        config["training"]["data"].pop("n_matrix_components", None)
         config["prediction"]["data"]["basis_files"] = basis_files_pattern
         config["testing"]["data"]["basis_files"] = basis_files_pattern
         config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
@@ -1115,7 +1686,8 @@ class ExperimentRunner:
         self._append(
             "[UI] AtomDisplacement split: "
             f"{len(train_samples)} train, {len(test_samples)} test, "
-            f"{len(validation_samples)} validation; seleccion espaciada.\n"
+            f"{len(validation_samples)} validation; ratios "
+            f"{ratios['train']}/{ratios['validation']}/{ratios['test']}.\n"
         )
         self._append(f"[UI] AtomDisplacement train samples: {sample_names(train_samples)}\n")
         self._append(f"[UI] AtomDisplacement test samples: {sample_names(test_samples)}\n")
@@ -1237,10 +1809,12 @@ class ExperimentRunner:
         returncode: int,
         run_log: str,
         prepare_metadata: dict[str, Any] | None = None,
+        dataset_label: str | None = None,
     ) -> dict[str, Any]:
         prepare_metadata = prepare_metadata or {}
+        dataset_label = dataset_label or f"dataset_{size}"
         result_group = "results_md" if key == "md" else "results_atomdisp"
-        result_dir = RESULTS_ROOT / result_group / f"dataset_{size}" / f"run_{run_id}"
+        result_dir = RESULTS_ROOT / result_group / dataset_label / f"run_{run_id}"
         result_dir.mkdir(parents=True, exist_ok=True)
         self._append(f"[UI] Archivando salidas en {result_dir}\n")
         write_yaml(result_dir / "pipeline_config.yaml", config)
@@ -1329,6 +1903,7 @@ class ExperimentRunner:
         effective_size = int(prepare_metadata.get("effective_size", size))
         manifest = {
             "pipeline": key,
+            "dataset_label": dataset_label,
             "dataset_size": size,
             "requested_dataset_size": size,
             "effective_dataset_size": effective_size,
@@ -1536,6 +2111,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, result_summary())
             elif path == "/api/plots":
                 json_response(self, plot_data_summary())
+            elif path == "/api/atom-fc-config":
+                json_response(self, atom_fc_ui_config())
             elif path == "/api/experiment/status":
                 json_response(self, EXPERIMENT_RUNNER.status())
             elif path == "/api/experiment/logs":
@@ -1563,11 +2140,59 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, stop_all(), status=HTTPStatus.ACCEPTED)
             elif path == "/api/experiment":
                 payload = read_json_body(self)
-                md_sizes = parse_sizes(payload.get("md_sizes"), [5, 10])
-                atom_sizes = parse_sizes(payload.get("atom_sizes"), [5, 10])
+                raw_md_sizes = payload.get("md_sizes")
+                displacement_options = parse_fc_displacement_options(
+                    payload.get("fc_displacement_options")
+                )
+                fc_displacements = parse_fc_displacements(payload.get("fc_displacements"))
+                structures_per_displacement = parse_structures_per_displacement(
+                    payload.get("structures_per_displacement")
+                )
+                split_ratios = parse_split_ratios(payload.get("splits")) or dict(DEFAULT_SPLIT_RATIOS)
+                random_seed = payload.get("random_seed")
+                random_seed = None if random_seed in (None, "") else int(random_seed)
+                max_datasets = parse_max_datasets(payload.get("max_datasets"))
+                requested_atom_sizes = parse_sizes(payload.get("atom_sizes"), [10])
+                atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+                force_constants = atom_config.get("structure", {}).get("force_constants", {}) or {}
+                if payload.get("max_datasets") in (None, ""):
+                    max_datasets = parse_max_datasets(force_constants.get("max_datasets"), 100)
+                limit = atom_fc_sample_limit(atom_config)
+                if limit is None:
+                    raise RuntimeError("AtomDisplacement: FC no esta habilitado en la configuracion.")
+                atom_dataset_specs = None
+                if displacement_options:
+                    atom_dataset_specs = build_fc_aligned_dataset_specs(
+                        displacement_options,
+                        per_displacement_limit=limit,
+                        split_ratios=split_ratios,
+                        max_datasets=max_datasets,
+                    )
+                    atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
+                    if parse_bool(payload.get("sync_md_sizes"), True):
+                        md_sizes = list(atom_sizes)
+                    else:
+                        md_sizes = parse_sizes(raw_md_sizes, atom_sizes)
+                    fc_dataset_specs = None
+                else:
+                    md_sizes = parse_sizes(raw_md_sizes, [10, 20])
+                    atom_sizes, fc_dataset_specs = build_fc_dataset_specs(
+                        requested_atom_sizes,
+                        fc_displacements,
+                        structures_per_displacement,
+                        per_displacement_limit=limit,
+                        split_ratios=split_ratios,
+                    )
                 json_response(
                     self,
-                    EXPERIMENT_RUNNER.start(md_sizes, atom_sizes),
+                    EXPERIMENT_RUNNER.start(
+                        md_sizes,
+                        atom_sizes,
+                        fc_dataset_specs,
+                        atom_dataset_specs,
+                        split_ratios,
+                        random_seed,
+                    ),
                     status=HTTPStatus.ACCEPTED,
                 )
             elif path == "/api/experiment/stop":

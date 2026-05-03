@@ -1,22 +1,17 @@
-# Central configuration for the MD -> Graph2Mat/MACE pipeline.
-# Paths are relative to this file unless they are absolute.
-
 paths:
-  dataset_dir: dataset
-  training_dir: training
+  dataset_dir: /mnt/c/Users/usuario/Desktop/CINN/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260501_015442/md/dataset_10/dataset
+  training_dir: /mnt/c/Users/usuario/Desktop/CINN/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260501_015442/md/dataset_10/training
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
-  venv_activate: /home/christian/graph2mat-env/bin/activate
-
+  venv_activate: /home/usuario/graph2mat-env/bin/activate
 commands:
   graph2mat: graph2mat
   siesta: siesta
   shell: bash
-
 md:
   type_of_run: verlet
-  steps: 50
+  steps: 10
   basis_size: DZP
   save_hs: true
   save_de: true
@@ -26,34 +21,49 @@ md:
     value: 1.0
     unit: Ang
   lattice_vectors:
-    - [10.0, 0.0, 0.0]
-    - [0.0, 10.0, 0.0]
-    - [0.0, 0.0, 10.0]
+  - - 10.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 10.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 10.0
   species:
-    - index: 1
-      atomic_number: 8
-      symbol: O
-    - index: 2
-      atomic_number: 1
-      symbol: H
+  - index: 1
+    atomic_number: 8
+    symbol: O
+  - index: 2
+    atomic_number: 1
+    symbol: H
   coordinates_format: Ang
   atoms:
-    - label: O
-      species_index: 1
-      position: [5.0, 5.0, 0.119262]
-    - label: H
-      species_index: 2
-      position: [5.0, 5.763239, -0.477047]
-    - label: H
-      species_index: 2
-      position: [5.0, 4.336839, -0.477047]
-
+  - label: O
+    species_index: 1
+    position:
+    - 5.0
+    - 5.0
+    - 0.119262
+  - label: H
+    species_index: 2
+    position:
+    - 5.0
+    - 5.763239
+    - -0.477047
+  - label: H
+    species_index: 2
+    position:
+    - 5.0
+    - 4.336839
+    - -0.477047
 training:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
+    sub_point_matrix: false
     basis_files: ../dataset/MD_steps/basis/*.ion.xml
-    train_runs: ../dataset/MD_steps/*/RUN.fdf
+    train_runs: ../dataset/splits/train/*/RUN.fdf
     batch_size: 10
     store_in_memory: true
   model:
@@ -71,29 +81,31 @@ training:
         name: my_first_model
         save_dir: lightning_logs
     max_epochs: 200
-
 checkpoint:
   path: null
   auto_best: true
   search_glob: lightning_logs/**/checkpoints/best-*.ckpt
   selection: latest_version
-
 testing:
-  test_runs: ../dataset/MD_steps/25/RUN.fdf
+  test_runs: ../dataset/splits/test/*/RUN.fdf
   callbacks:
-    plot_matrix_error: true
-    show_plot: true
-    samplewise_metrics_logger: true
-
+    plot_matrix_error: false
+    show_plot: false
+    samplewise_metrics_logger: false
 prediction:
-  predict_structs: ../dataset/MD_steps/*/RUN.fdf
+  predict_structs: ../dataset/splits/test/*/RUN.fdf
   output_file: ML_prediction.HSX
   callbacks:
     matrix_writer: true
-
 pipeline:
   steps:
-    - generate_md_dataset
-    - run_md_training
-    - run_md_testing
-    - run_md_prediction
+  - generate_md_dataset
+  - run_md_training
+  - run_md_testing
+  - run_md_prediction
+splits:
+  enabled: true
+  strategy: spread
+  train: 8
+  validation: 1
+  test: 1

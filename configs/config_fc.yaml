@@ -2,10 +2,10 @@
 data:
   out_matrix: hamiltonian
   symmetric_matrix: true
+  sub_point_matrix: false
   basis_files: ../AtomDisplacement/dataset/FC_steps/basis/*.ion.xml
   batch_size: 10
   store_in_memory: true
-  n_matrix_components: 2
   train_runs: ../AtomDisplacement/dataset/FC_steps/*/RUN.fdf
 model:
   num_interactions: 1

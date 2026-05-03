@@ -25,7 +25,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -202,7 +203,8 @@ h3 {
   font-weight: 700;
 }
 
-.field input {
+.field input,
+.field textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line);
@@ -212,7 +214,18 @@ h3 {
   padding: 8px 10px;
 }
 
-.field input:focus {
+.field textarea {
+  min-height: 140px;
+  resize: vertical;
+}
+
+.field input[readonly] {
+  background: #eef3f1;
+  color: var(--muted);
+}
+
+.field input:focus,
+.field textarea:focus {
   outline: 3px solid var(--focus);
   border-color: var(--accent);
 }
@@ -241,6 +254,10 @@ h3 {
 .experiment-status {
   display: grid;
   gap: 14px;
+}
+
+.fc-panel {
+  margin-bottom: 18px;
 }
 
 .experiment-log {

@@ -12,6 +12,7 @@ from atom_displacement_utils import (
     PIPELINE_CONFIG,
     PIPELINE_PATHS,
     generated_sample_dirs,
+    find_first_output,
     require_command,
     run_siesta_in_dir,
     sample_run_status,
@@ -48,6 +49,14 @@ def main() -> int:
     summary = []
     for sample_dir in sample_dirs:
         status = sample_run_status(sample_dir)
+        has_reference_matrix = (
+            find_first_output(sample_dir, ".TSHS") is not None
+            or find_first_output(sample_dir, ".HSX") is not None
+        )
+        if has_reference_matrix and not args.rerun:
+            print(f"[SKIP] {sample_dir.name} ya tiene Hamiltoniano de referencia")
+            summary.append({"id": sample_dir.name, "status": "skipped_existing_matrix"})
+            continue
         if status["job_completed"] and not args.rerun:
             print(f"[SKIP] {sample_dir.name} ya completada")
             summary.append({"id": sample_dir.name, "status": "skipped_completed"})

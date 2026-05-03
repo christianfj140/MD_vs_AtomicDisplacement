@@ -16,7 +16,7 @@ paths:
   run_summary_name: run_summary.json
   collected_json_name: water_atom_displacement_dataset.json
   collected_csv_name: water_atom_displacement_summary.csv
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: /home/usuario/graph2mat-env/bin/activate
 
 commands:
   graph2mat: graph2mat
@@ -39,7 +39,25 @@ structure:
     enabled: true
     displacement: 0.05 Ang
     target_count: null
-    expand_amplitudes: true
+    # FC generates +/- displacements along x/y/z for each selected atom:
+    # max_structures = 6 * n_displaced_atoms (+1 if include_reference).
+    include_reference: true
+    expand_amplitudes: false
+    # "spread" is deterministic; "random" uses the fixed seed below.
+    subsampling:
+      method: spread
+      seed: 0
+    random_seed: 42
+    # Aligned FC interface for the comparison UI:
+    # each displacement maps to its own structure-count list. Lists must have
+    # the same length. Dataset i uses the ith count from every displacement
+    # list; no Cartesian product is generated. Every count must be <=
+    # 6 * n_displaced_atoms (+1 reference if include_reference).
+    max_datasets: 100
+    displacements:
+      "0.02 Ang": [5, 7, 9]
+      "0.03 Ang": [4, 6, 8]
+      "0.05 Ang": [2, 10, 13]
     allow_missing_matrix: true
     first_atom: 1
     last_atom: null
@@ -120,6 +138,11 @@ structure:
   single_point_overrides:
     DM.UseSaveDM: F
 
+splits:
+  train: 0.8
+  validation: 0.1
+  test: 0.1
+
 single_points:
   limit: null
   rerun: false
@@ -128,11 +151,11 @@ training:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
+    sub_point_matrix: false
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     runs_json: runs.json
     batch_size: 10
     store_in_memory: true
-    n_matrix_components: 2
   model:
     num_interactions: 1
     correlation: 1
@@ -169,6 +192,7 @@ testing:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
+    sub_point_matrix: false
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     store_in_memory: true
     n_matrix_components: 2
@@ -183,6 +207,7 @@ prediction:
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
+    sub_point_matrix: false
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     predict_structs: ../dataset/FC_steps/*/RUN.fdf
     store_in_memory: true

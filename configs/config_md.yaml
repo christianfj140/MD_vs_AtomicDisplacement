@@ -2,6 +2,7 @@
 data:
   out_matrix: hamiltonian
   symmetric_matrix: true
+  sub_point_matrix: false
   basis_files: ../MD/dataset/MD_steps/basis/*.ion.xml
   train_runs: ../MD/dataset/MD_steps/*/RUN.fdf
   batch_size: 10

@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
-import subprocess
 import sys
-from pathlib import Path
+
+import pytorch_lightning as pl
+from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
+from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
 from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint
 
@@ -14,17 +17,8 @@ from md_pipeline_config import command, load_pipeline_config, paths, resolve_che
 def require_command(command_name: str) -> None:
     if shutil.which(command_name) is None:
         raise RuntimeError(
-            f"No se encontró '{command_name}' en PATH. "
+            f"No se encontro '{command_name}' en PATH. "
             "Activa tu entorno antes de ejecutar este script."
-        )
-
-
-def run_command(cmd: list[str], cwd: Path) -> None:
-    print(f"\n[RUN] {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"El comando falló con código {result.returncode}: {' '.join(cmd)}"
         )
 
 
@@ -32,7 +26,7 @@ def main() -> int:
     config = load_pipeline_config()
     pipeline_paths = paths(config)
 
-    print("=== Pipeline MD (fase predicción): inferencia del modelo ===")
+    print("=== Pipeline MD (fase prediccion): inferencia del modelo ===")
     print(f"Repositorio: {pipeline_paths['training_dir'].parent}")
     print(f"Training dir: {pipeline_paths['training_dir']}")
 
@@ -42,31 +36,43 @@ def main() -> int:
         )
 
     require_command(command(config, "graph2mat"))
-
     ckpt_path = resolve_checkpoint(config)
-    cmd = [
-        command(config, "graph2mat"),
-        "models",
-        "mace",
-        "main",
-        "predict",
-        "--ckpt_path",
-        ckpt_path,
-        "--data.predict_structs",
-        str(config["prediction"]["predict_structs"]),
-    ]
-    if config["prediction"]["callbacks"].get("matrix_writer", True):
-        cmd.extend(
-            [
-                "--trainer.callbacks+",
-                "MatrixWriter",
-                "--trainer.callbacks.output_file",
-                str(config["prediction"]["output_file"]),
-            ]
+    os.chdir(pipeline_paths["training_dir"])
+
+    training_data = config["training"]["data"]
+    prediction = config["prediction"]
+    model = LitMACEMatrixModel.load_from_checkpoint(
+        str(pipeline_paths["training_dir"] / ckpt_path)
+    )
+    datamodule = MatrixDataModule(
+        out_matrix=training_data["out_matrix"],
+        symmetric_matrix=bool(training_data["symmetric_matrix"]),
+        sub_point_matrix=bool(training_data.get("sub_point_matrix", False)),
+        basis_files=training_data["basis_files"],
+        predict_structs=str(prediction["predict_structs"]),
+        store_in_memory=bool(training_data.get("store_in_memory", True)),
+    )
+
+    callbacks = []
+    if prediction["callbacks"].get("matrix_writer", True):
+        callbacks.append(
+            MatrixWriter(
+                output_file=str(prediction["output_file"]),
+                splits=["predict"],
+            )
         )
 
-    run_command(cmd, cwd=pipeline_paths["training_dir"])
-    print("\n=== Predicción completada correctamente ===")
+    trainer = pl.Trainer(
+        accelerator=config["training"]["trainer"]["accelerator"],
+        logger=False,
+        callbacks=callbacks,
+    )
+    trainer.predict(
+        model,
+        datamodule=datamodule,
+        ckpt_path=str(pipeline_paths["training_dir"] / ckpt_path),
+    )
+    print("\n=== Prediccion completada correctamente ===")
     return 0
 
 
