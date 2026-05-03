@@ -1008,6 +1008,44 @@ def numeric_means(rows: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
+def finite_metric_count(rows: list[dict[str, Any]], metric: str) -> int:
+    count = 0
+    for row in rows:
+        value = row.get(metric)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            count += 1
+    return count
+
+
+def metric_diagnostics(
+    spectral_rows: list[dict[str, Any]],
+    relationship_rows: list[dict[str, Any]],
+    errors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    missing_fermi_errors = [
+        error
+        for error in errors
+        if error.get("kind") == "missing_fermi_level"
+    ]
+    unavailable_fermi_rows = [
+        row
+        for row in spectral_rows
+        if row.get("fermi_level_source") == "unavailable"
+    ]
+    return {
+        "spectral_samples": len(spectral_rows),
+        "fermi_window_samples": finite_metric_count(spectral_rows, "fermi_window_rmse_eV"),
+        "matrix_spectrum_samples": len(relationship_rows),
+        "matrix_spectrum_fermi_samples": finite_metric_count(
+            relationship_rows,
+            "fermi_window_rmse_eV",
+        ),
+        "missing_fermi_level_samples": len(missing_fermi_errors),
+        "unavailable_fermi_source_samples": len(unavailable_fermi_rows),
+        "errors": errors,
+    }
+
+
 def plot_data_summary() -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     groups = {
@@ -1024,12 +1062,23 @@ def plot_data_summary() -> dict[str, Any]:
                 continue
             result_dir = Path(manifest.get("result_dir", manifest_path.parent))
             if not result_dir.is_absolute():
-                result_dir = manifest_path.parent
+                result_dir = manifest_path.parent / result_dir
+            if not result_dir.exists():
+                raise RuntimeError(
+                    "Manifest points to a missing result_dir. "
+                    f"manifest={manifest_path}, result_dir={result_dir}"
+                )
             sparse_rows = read_csv_rows(result_dir / "metrics" / "sparse_metrics.csv")
             spectral_rows = read_csv_rows(result_dir / "metrics" / "spectral_metrics.csv")
             dos_rows = read_csv_rows(result_dir / "metrics" / "dos_metrics.csv")
-            if not sparse_rows and not spectral_rows and not dos_rows:
+            relationship_rows = read_csv_rows(
+                result_dir / "metrics" / "matrix_spectrum_relationship.csv"
+            )
+            if not sparse_rows and not spectral_rows and not dos_rows and not relationship_rows:
                 continue
+            errors = manifest.get("errors", [])
+            if not isinstance(errors, list):
+                errors = []
             runs.append(
                 {
                     "pipeline": key,
@@ -1054,16 +1103,30 @@ def plot_data_summary() -> dict[str, Any]:
                     ),
                     "run_id": str(manifest.get("run_id", manifest_path.parent.name.removeprefix("run_"))),
                     "result_dir": str(result_dir),
+                    "pipeline_elapsed_seconds": manifest.get("pipeline_elapsed_seconds"),
                     "means": {
+                        "run": {
+                            "pipeline_elapsed_seconds": manifest.get("pipeline_elapsed_seconds"),
+                        }
+                        if isinstance(manifest.get("pipeline_elapsed_seconds"), (int, float))
+                        else {},
                         "sparse": numeric_means(sparse_rows),
                         "spectral": numeric_means(spectral_rows),
                         "dos": numeric_means(dos_rows),
+                        "matrix_spectrum": numeric_means(relationship_rows),
                     },
                     "samples": {
                         "sparse": sparse_rows,
                         "spectral": spectral_rows,
                         "dos": dos_rows,
+                        "matrix_spectrum": relationship_rows,
                     },
+                    "diagnostics": metric_diagnostics(
+                        spectral_rows,
+                        relationship_rows,
+                        errors,
+                    ),
+                    "summary": manifest.get("summary", {}),
                 }
             )
     runs.sort(key=lambda item: (item["pipeline"], item["dataset_size"], item["run_id"]))
@@ -1427,6 +1490,7 @@ class ExperimentRunner:
             returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         with self._lock:
             run_log = "".join(self._logs[log_start:])
+        pipeline_elapsed = time.time() - started_at
         archive = self._archive_outputs(
             key,
             size,
@@ -1437,6 +1501,7 @@ class ExperimentRunner:
             run_log,
             prepare_metadata,
             dataset_label=dataset_label,
+            pipeline_elapsed_seconds=pipeline_elapsed,
         )
         elapsed = time.time() - started_at
         self._update_rate(key, size, elapsed, returncode)
@@ -1810,6 +1875,7 @@ class ExperimentRunner:
         run_log: str,
         prepare_metadata: dict[str, Any] | None = None,
         dataset_label: str | None = None,
+        pipeline_elapsed_seconds: float | None = None,
     ) -> dict[str, Any]:
         prepare_metadata = prepare_metadata or {}
         dataset_label = dataset_label or f"dataset_{size}"
@@ -1909,6 +1975,7 @@ class ExperimentRunner:
             "effective_dataset_size": effective_size,
             "run_id": run_id,
             "returncode": returncode,
+            "pipeline_elapsed_seconds": pipeline_elapsed_seconds,
             "workspace": str(workspace),
             "result_dir": str(result_dir),
             "predicted_hamiltonians": prediction_count,

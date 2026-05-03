@@ -30,6 +30,7 @@ class MatrixData:
     overlap: sparse.csr_matrix | None
     own_eigenvalues: np.ndarray
     fermi_level: float | None
+    fermi_level_source: str | None
     orthogonal: bool
     has_overlap: bool
     overlap_error: str | None
@@ -114,14 +115,17 @@ def read_matrix(path: Path) -> MatrixData:
         own_eigenvalues = np.asarray([], dtype=float)
     try:
         fermi_level = float(sile.read_fermi_level())
+        fermi_level_source = "siesta_file"
     except Exception:
         fermi_level = None
+        fermi_level_source = "unavailable"
     return MatrixData(
         path=path,
         hamiltonian=hamiltonian,
         overlap=overlap,
         own_eigenvalues=own_eigenvalues,
         fermi_level=fermi_level,
+        fermi_level_source=fermi_level_source,
         orthogonal=bool(getattr(hamiltonian_obj, "orthogonal", False)),
         has_overlap=has_overlap,
         overlap_error=overlap_error,
@@ -167,11 +171,13 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
     false_zeros = ref_support - pred_support
     false_nonzeros = pred_support - ref_support
     deltas_ref = [pred_values.get(index, 0.0) - ref_values[index] for index in ref_support]
+    deltas_pred = [pred_values[index] - ref_values.get(index, 0.0) for index in pred_support]
     deltas_union = [
         pred_values.get(index, 0.0) - ref_values.get(index, 0.0)
         for index in union_support
     ]
     ref_fro = float(np.sqrt(sum(abs(value) ** 2 for value in ref_values.values())))
+    ref_pattern_fro = float(np.sqrt(sum(abs(value) ** 2 for value in deltas_ref)))
     union_fro = float(np.sqrt(sum(abs(value) ** 2 for value in deltas_union)))
     ref_l1 = float(sum(abs(value) for value in ref_values.values()))
     union_l1 = float(sum(abs(value) for value in deltas_union))
@@ -194,9 +200,12 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "pred_density": len(pred_support) / n_entries if n_entries else math.nan,
         "mae_ref_eV": mean_abs(deltas_ref),
         "rmse_ref_eV": rmse(deltas_ref),
+        "mae_pred_eV": mean_abs(deltas_pred),
+        "rmse_pred_eV": rmse(deltas_pred),
         "mae_union_eV": mean_abs(deltas_union),
         "rmse_union_eV": rmse(deltas_union),
         "max_abs_error_union_eV": float(max((abs(value) for value in deltas_union), default=math.nan)),
+        "relative_frobenius_ref": ref_pattern_fro / ref_fro if ref_fro else math.nan,
         "relative_frobenius_union": union_fro / ref_fro if ref_fro else math.nan,
         "relative_l1_union": union_l1 / ref_l1 if ref_l1 else math.nan,
         "support_precision": precision,
@@ -204,6 +213,8 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "support_f1": f1,
         "false_zeros": len(false_zeros),
         "false_nonzeros": len(false_nonzeros),
+        "false_zero_rate": len(false_zeros) / len(ref_support) if ref_support else math.nan,
+        "false_nonzero_rate": len(false_nonzeros) / len(pred_support) if pred_support else math.nan,
         "weighted_false_zeros_eV": float(sum(abs(ref_values[index]) for index in false_zeros)),
         "weighted_false_nonzeros_eV": float(sum(abs(pred_values[index]) for index in false_nonzeros)),
         "hermiticity_ref": hermiticity_defect(reference.hamiltonian),
@@ -251,6 +262,7 @@ def eigen_error_metrics(
     reference: np.ndarray,
     predicted: np.ndarray,
     fermi_level: float | None,
+    fermi_level_source: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     n_bands = min(reference.size, predicted.size)
     reference = reference[:n_bands]
@@ -287,6 +299,7 @@ def eigen_error_metrics(
     metrics = {
         "n_compared_bands": n_bands,
         "fermi_ref_eV": fermi_level,
+        "fermi_level_source": fermi_level_source,
         "global_mae_eV": float(np.mean(np.abs(errors))) if n_bands else math.nan,
         "global_rmse_eV": float(np.sqrt(np.mean(errors**2))) if n_bands else math.nan,
         "global_max_abs_error_eV": float(np.max(np.abs(errors))) if n_bands else math.nan,
@@ -394,6 +407,73 @@ def summarize_numeric(rows: list[dict[str, Any]], skip: set[str]) -> dict[str, d
     }
 
 
+def pearson_correlation(rows: list[dict[str, Any]], x_key: str, y_key: str) -> float:
+    pairs: list[tuple[float, float]] = []
+    for row in rows:
+        try:
+            x = float(row[x_key])
+            y = float(row[y_key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            pairs.append((x, y))
+    if len(pairs) < 2:
+        return math.nan
+    x_values = np.asarray([pair[0] for pair in pairs], dtype=float)
+    y_values = np.asarray([pair[1] for pair in pairs], dtype=float)
+    if float(np.std(x_values)) == 0.0 or float(np.std(y_values)) == 0.0:
+        return math.nan
+    return float(np.corrcoef(x_values, y_values)[0, 1])
+
+
+def matrix_spectrum_rows(
+    sparse_rows: list[dict[str, Any]],
+    spectral_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    spectral_by_sample = {str(row["sample"]): row for row in spectral_rows}
+    rows: list[dict[str, Any]] = []
+    for sparse_row in sparse_rows:
+        spectral_row = spectral_by_sample.get(str(sparse_row["sample"]))
+        if spectral_row is None:
+            continue
+        rows.append(
+            {
+                "sample": sparse_row["sample"],
+                "mae_ref_eV": sparse_row.get("mae_ref_eV"),
+                "rmse_ref_eV": sparse_row.get("rmse_ref_eV"),
+                "rmse_union_eV": sparse_row.get("rmse_union_eV"),
+                "relative_frobenius_union": sparse_row.get("relative_frobenius_union"),
+                "support_f1": sparse_row.get("support_f1"),
+                "global_rmse_eV": spectral_row.get("global_rmse_eV"),
+                "fermi_window_rmse_eV": spectral_row.get("fermi_window_rmse_eV"),
+                "gap_abs_error_eV": spectral_row.get("gap_abs_error_eV"),
+                "fermi_level_source": spectral_row.get("fermi_level_source"),
+                "fermi_metric_available": spectral_row.get("fermi_level_source") == "siesta_file",
+            }
+        )
+    return rows
+
+
+def matrix_spectrum_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    fermi_rows = [
+        row
+        for row in rows
+        if row.get("fermi_level_source") == "siesta_file"
+    ]
+    return {
+        "samples": len(rows),
+        "fermi_samples": len(fermi_rows),
+        "corr_mae_ref_vs_global_rmse": pearson_correlation(rows, "mae_ref_eV", "global_rmse_eV"),
+        "corr_rmse_ref_vs_global_rmse": pearson_correlation(rows, "rmse_ref_eV", "global_rmse_eV"),
+        "corr_frobenius_vs_fermi_rmse": pearson_correlation(
+            fermi_rows,
+            "relative_frobenius_union",
+            "fermi_window_rmse_eV",
+        ),
+        "corr_support_f1_vs_fermi_rmse": pearson_correlation(fermi_rows, "support_f1", "fermi_window_rmse_eV"),
+    }
+
+
 def extract(result_dir: Path) -> dict[str, Any]:
     prediction_root = result_dir / "predicted_hamiltonians"
     reference_root = result_dir / "siesta_hamiltonians"
@@ -454,7 +534,27 @@ def extract(result_dir: Path) -> dict[str, Any]:
             pred_eig = generalized_eigenvalues(predicted.hamiltonian, reference.overlap)
             write_csv(eigen_root / "siesta" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(ref_eig))
             write_csv(eigen_root / "predicted" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(pred_eig))
-            band_rows, spectral_metrics = eigen_error_metrics(ref_eig, pred_eig, reference.fermi_level)
+            fermi_level = reference.fermi_level
+            fermi_source = reference.fermi_level_source or "unavailable"
+            if fermi_level is None or not math.isfinite(fermi_level):
+                errors.append(
+                    {
+                        "sample": sample,
+                        "kind": "missing_fermi_level",
+                        "error": (
+                            "SIESTA reference does not provide a Fermi level; "
+                            "near-Fermi, occupied-band, and gap metrics were left unavailable."
+                        ),
+                    }
+                )
+                fermi_level = None
+                fermi_source = "unavailable"
+            band_rows, spectral_metrics = eigen_error_metrics(
+                ref_eig,
+                pred_eig,
+                fermi_level,
+                fermi_source,
+            )
             write_csv(
                 eigen_root / "band_errors" / f"{sample}.csv",
                 ["band", "siesta_eV", "predicted_eV", "error_eV", "abs_error_eV", "siesta_minus_fermi_eV"],
@@ -491,9 +591,12 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "pred_density",
         "mae_ref_eV",
         "rmse_ref_eV",
+        "mae_pred_eV",
+        "rmse_pred_eV",
         "mae_union_eV",
         "rmse_union_eV",
         "max_abs_error_union_eV",
+        "relative_frobenius_ref",
         "relative_frobenius_union",
         "relative_l1_union",
         "support_precision",
@@ -501,6 +604,8 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "support_f1",
         "false_zeros",
         "false_nonzeros",
+        "false_zero_rate",
+        "false_nonzero_rate",
         "weighted_false_zeros_eV",
         "weighted_false_nonzeros_eV",
         "hermiticity_ref",
@@ -514,6 +619,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "hamiltonian_symmetrized_for_spectrum",
         "n_compared_bands",
         "fermi_ref_eV",
+        "fermi_level_source",
         "global_mae_eV",
         "global_rmse_eV",
         "global_max_abs_error_eV",
@@ -528,6 +634,20 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "gap_ref_eV",
         "gap_pred_eV",
         "gap_abs_error_eV",
+    ]
+    relationship_rows = matrix_spectrum_rows(sparse_rows, spectral_rows)
+    relationship_fields = [
+        "sample",
+        "mae_ref_eV",
+        "rmse_ref_eV",
+        "rmse_union_eV",
+        "relative_frobenius_union",
+        "support_f1",
+        "global_rmse_eV",
+        "fermi_window_rmse_eV",
+        "gap_abs_error_eV",
+        "fermi_level_source",
+        "fermi_metric_available",
     ]
     dos_fields = [
         "sample",
@@ -553,6 +673,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
     write_csv(metrics_root / "sparse_metrics.csv", sparse_fields, sparse_rows)
     write_csv(metrics_root / "spectral_metrics.csv", spectral_fields, spectral_rows)
     write_csv(metrics_root / "dos_metrics.csv", dos_fields, dos_rows)
+    write_csv(metrics_root / "matrix_spectrum_relationship.csv", relationship_fields, relationship_rows)
     write_csv(eigen_root / "eigenvalue_metrics.csv", spectral_fields, spectral_rows)
     write_csv(eigen_root / "overlap_summary.csv", overlap_fields, overlap_rows)
 
@@ -560,6 +681,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "sparse": summarize_numeric(sparse_rows, {"sample"}),
         "spectral": summarize_numeric(spectral_rows, {"sample", "overlap_source", "hamiltonian_symmetrized_for_spectrum"}),
         "dos": summarize_numeric(dos_rows, {"sample"}),
+        "matrix_spectrum": matrix_spectrum_summary(relationship_rows),
     }
     manifest = {
         "result_dir": str(result_dir),
@@ -579,6 +701,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
             "sparse_metrics": str(metrics_root / "sparse_metrics.csv"),
             "spectral_metrics": str(metrics_root / "spectral_metrics.csv"),
             "dos_metrics": str(metrics_root / "dos_metrics.csv"),
+            "matrix_spectrum_relationship": str(metrics_root / "matrix_spectrum_relationship.csv"),
             "eigenvalues_siesta": str(eigen_root / "siesta"),
             "eigenvalues_predicted": str(eigen_root / "predicted"),
             "band_errors": str(eigen_root / "band_errors"),

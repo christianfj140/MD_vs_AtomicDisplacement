@@ -394,6 +394,30 @@ function sampleMetricValues(run, group, metric) {
     .filter((value) => typeof value === "number" && Number.isFinite(value));
 }
 
+function missingFermiSummary(runs) {
+  const pieces = [];
+  for (const [pipeline, items] of groupedRuns(runs)) {
+    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const missing = items.reduce(
+      (sum, run) => sum + Number(run.diagnostics?.missing_fermi_level_samples || 0),
+      0,
+    );
+    const unavailable = items.reduce(
+      (sum, run) => sum + Number(run.diagnostics?.unavailable_fermi_source_samples || 0),
+      0,
+    );
+    const available = items.reduce(
+      (sum, run) => sum + Number(run.diagnostics?.fermi_window_samples || 0),
+      0,
+    );
+    const totalMissing = Math.max(missing, unavailable);
+    if (totalMissing > 0) {
+      pieces.push(`${label}: ${totalMissing} samples sin Fermi SIESTA (${available} con metrica Fermi)`);
+    }
+  }
+  return pieces.length ? ` | ${pieces.join(" | ")}` : "";
+}
+
 function groupedRuns(runs) {
   const groups = new Map();
   for (const run of runs) {
@@ -445,9 +469,25 @@ function plotLayout(title, yTitle, extra = {}) {
   };
 }
 
+function emptyPlotAnnotation(message) {
+  return {
+    text: message,
+    xref: "paper",
+    yref: "paper",
+    x: 0.5,
+    y: 0.5,
+    showarrow: false,
+    font: { size: 13, color: "#6b7280" },
+  };
+}
+
 function renderLinePlot(id, runs, group, metrics, title, yTitle) {
   const traces = lineTraces(runs, group, metrics);
-  Plotly.react(id, traces, plotLayout(title, yTitle), { responsive: true, displaylogo: false });
+  const layout = plotLayout(title, yTitle);
+  if (!traces.length) {
+    layout.annotations = [emptyPlotAnnotation("No hay valores finitos para esta metrica.")];
+  }
+  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function renderBoxPlot(id, runs) {
@@ -465,13 +505,19 @@ function renderBoxPlot(id, runs) {
       hovertemplate: "%{y:.4g} eV<extra>%{fullData.name}</extra>",
     });
   }
+  const layout = plotLayout("Distribucion por muestra: RMSE cerca de Fermi", "RMSE eV", {
+    xaxis: { title: "", tickangle: -25 },
+    showlegend: false,
+  });
+  if (!traces.length) {
+    layout.annotations = [
+      emptyPlotAnnotation("No hay RMSE cerca de Fermi con Fermi real de SIESTA."),
+    ];
+  }
   Plotly.react(
     id,
     traces,
-    plotLayout("Distribucion por muestra: RMSE cerca de Fermi", "RMSE eV", {
-      xaxis: { title: "", tickangle: -25 },
-      showlegend: false,
-    }),
+    layout,
     { responsive: true, displaylogo: false },
   );
 }
@@ -484,17 +530,37 @@ function renderScatterPlot(id, runs) {
     const y = [];
     const text = [];
     for (const run of items) {
-      const sparseRows = run.samples?.sparse || [];
-      const spectralRows = run.samples?.spectral || [];
-      const spectralBySample = new Map(spectralRows.map((row) => [String(row.sample), row]));
-      for (const row of sparseRows) {
-        const spectral = spectralBySample.get(String(row.sample));
+      let relationshipRows = run.samples?.matrix_spectrum || [];
+      if (!relationshipRows.length) {
+        const sparseRows = run.samples?.sparse || [];
+        const spectralRows = run.samples?.spectral || [];
+        const spectralBySample = new Map(spectralRows.map((row) => [String(row.sample), row]));
+        relationshipRows = sparseRows.map((row) => {
+          const spectral = spectralBySample.get(String(row.sample)) || {};
+          return {
+            sample: row.sample,
+            relative_frobenius_union: row.relative_frobenius_union,
+            global_rmse_eV: spectral.global_rmse_eV,
+            fermi_window_rmse_eV: spectral.fermi_window_rmse_eV,
+            fermi_level_source: spectral.fermi_level_source,
+          };
+        });
+      }
+      for (const row of relationshipRows) {
         const xValue = row.relative_frobenius_union;
-        const yValue = spectral?.fermi_window_rmse_eV;
+        const yValue = row.global_rmse_eV;
         if (typeof xValue !== "number" || typeof yValue !== "number") continue;
         x.push(xValue);
         y.push(yValue);
-        text.push(`dataset_${run.dataset_size} · sample ${row.sample}`);
+        const fermiValue =
+          typeof row.fermi_window_rmse_eV === "number" && Number.isFinite(row.fermi_window_rmse_eV)
+            ? `${row.fermi_window_rmse_eV.toPrecision(4)} eV`
+            : "no disponible";
+        text.push(
+          `dataset_${run.dataset_size} - sample ${row.sample}<br>` +
+            `Fermi source: ${row.fermi_level_source || "unknown"}<br>` +
+            `Fermi RMSE: ${fermiValue}`,
+        );
       }
     }
     if (!x.length) continue;
@@ -506,16 +572,22 @@ function renderScatterPlot(id, runs) {
       y,
       text,
       marker: { size: 9, opacity: 0.78 },
-      hovertemplate: "%{text}<br>Frobenius %{x:.4g}<br>Fermi RMSE %{y:.4g} eV<extra>%{fullData.name}</extra>",
+      hovertemplate: "%{text}<br>Frobenius %{x:.4g}<br>Global spectral RMSE %{y:.4g} eV<extra>%{fullData.name}</extra>",
     });
+  }
+  const layout = plotLayout("Relacion matriz-espectro", "Global spectral RMSE eV", {
+    xaxis: { title: "Relative Frobenius error", gridcolor: "#edf1f4", zeroline: false },
+    legend: { orientation: "h", y: -0.25 },
+  });
+  if (!traces.length) {
+    layout.annotations = [
+      emptyPlotAnnotation("No hay pares matriz-espectro comparables."),
+    ];
   }
   Plotly.react(
     id,
     traces,
-    plotLayout("Relacion matriz-espectro", "Fermi window RMSE eV", {
-      xaxis: { title: "Relative Frobenius error", gridcolor: "#edf1f4", zeroline: false },
-      legend: { orientation: "h", y: -0.25 },
-    }),
+    layout,
     { responsive: true, displaylogo: false },
   );
 }
@@ -528,6 +600,7 @@ function renderHeatmap(id, runs) {
     ["spectral", "fermi_window_rmse_eV", "Fermi RMSE"],
     ["spectral", "gap_abs_error_eV", "Gap error"],
     ["dos", "dos_wasserstein_eV", "DOS W1"],
+    ["run", "pipeline_elapsed_seconds", "Time s"],
   ];
   const rows = runs
     .filter((run) => metrics.some(([group, metric]) => metricValue(run, group, metric) != null))
@@ -575,7 +648,9 @@ function renderPlots(payload) {
     return;
   }
   const runs = payload?.runs || [];
-  status.textContent = runs.length ? `${runs.length} runs con metricas` : "No hay metricas archivadas";
+  status.textContent = runs.length
+    ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
+    : "No hay metricas archivadas";
   renderLinePlot("plot-fermi", runs, "spectral", [{ key: "fermi_window_rmse_eV", label: "Fermi RMSE" }], "Error cerca del Fermi", "RMSE eV");
   renderLinePlot("plot-sparse", runs, "sparse", [{ key: "relative_frobenius_union", label: "Frobenius rel." }], "Error sparse matricial", "Relative Frobenius");
   renderLinePlot("plot-dos", runs, "dos", [{ key: "dos_wasserstein_eV", label: "Wasserstein" }], "Distancia DOS total", "Wasserstein eV");
