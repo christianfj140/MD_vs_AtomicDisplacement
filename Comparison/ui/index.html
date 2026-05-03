@@ -77,7 +77,7 @@
               <h2>Accuracy experiment</h2>
             </div>
             <div class="button-row">
-              <button id="run-experiment" class="button primary">Run sweep</button>
+              <button id="run-experiment" class="button primary">Run one-click experiment</button>
               <button id="stop-experiment" class="button danger">Stop</button>
             </div>
           </header>
@@ -101,6 +101,50 @@
               </label>
             </section>
           </div>
+
+          <section class="panel comparison-design-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Scientific comparison</p>
+                <h3>Common-test workflow</h3>
+              </div>
+            </div>
+            <div class="grid four split-grid">
+              <label class="field">
+                <span>MD split mode</span>
+                <select id="split-mode">
+                  <option value="block">Block split</option>
+                  <option value="spread">Spread split</option>
+                </select>
+                <small>Block avoids interleaving adjacent MD frames across train/test.</small>
+              </label>
+              <label class="field">
+                <span>Primary metric</span>
+                <select id="primary-metric">
+                  <option value="global_rmse_eV">Global spectral RMSE</option>
+                  <option value="fermi_window_rmse_eV">Frontier/Fermi-window RMSE</option>
+                  <option value="relative_frobenius_union">Relative Frobenius</option>
+                  <option value="mae_ref_eV">Sparse MAE on SIESTA support</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Compute-budget mode</span>
+                <select id="compute-budget-mode">
+                  <option value="both">Both</option>
+                  <option value="equal_sample_count">Equal sample count</option>
+                  <option value="equal_siesta_budget">Equal SIESTA budget</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Common test sets</span>
+                <select id="test-sets" multiple size="3">
+                  <option value="test_md" selected>MD test</option>
+                  <option value="test_atomdisp" selected>AtomDisplacement test</option>
+                  <option value="test_mixed" selected>Mixed test</option>
+                </select>
+              </label>
+            </div>
+          </section>
 
           <section class="panel fc-panel">
             <div class="panel-heading">
@@ -216,6 +260,10 @@
               <div id="plot-box" class="plot-card wide"></div>
               <div id="plot-scatter" class="plot-card wide"></div>
               <div id="plot-heatmap" class="plot-card full"></div>
+              <div id="plot-cross-heatmap" class="plot-card full"></div>
+              <div id="plot-learning" class="plot-card wide"></div>
+              <div id="plot-compute" class="plot-card wide"></div>
+              <div id="plot-winner" class="plot-card full"></div>
             </div>
           </section>
         </section>

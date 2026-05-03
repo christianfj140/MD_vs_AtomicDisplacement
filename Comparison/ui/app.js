@@ -224,6 +224,10 @@ function currentCombinationMode() {
   return document.getElementById("fc-combination-mode")?.value || "aligned";
 }
 
+function selectedTestSets() {
+  return Array.from(document.getElementById("test-sets")?.selectedOptions || []).map((option) => option.value);
+}
+
 function cartesianProduct(arrays) {
   return arrays.reduce(
     (acc, values) => acc.flatMap((prefix) => values.map((value) => [...prefix, value])),
@@ -429,6 +433,10 @@ async function runExperiment() {
       combination_mode: currentCombinationMode(),
       sync_md_sizes: true,
       splits: splitRatios,
+      split_mode: document.getElementById("split-mode").value,
+      test_sets: selectedTestSets(),
+      primary_metric: document.getElementById("primary-metric").value,
+      compute_budget_mode: document.getElementById("compute-budget-mode").value,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
     }),
@@ -746,6 +754,152 @@ function renderHeatmap(id, runs) {
   );
 }
 
+function latestCrossExperiment(payload) {
+  const experiments = payload?.cross_experiments || [];
+  return experiments.length ? experiments[experiments.length - 1] : null;
+}
+
+function primaryCrossMetric(experiment) {
+  return experiment?.recommendation?.primary_metric || experiment?.manifest?.selected_metrics?.primary_metric || "global_rmse_eV";
+}
+
+function groupedCrossMeans(rows, metric) {
+  const groups = new Map();
+  for (const row of rows || []) {
+    const value = row[metric];
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    const key = [row.dataset_size, row.train_method, row.test_set].join("||");
+    if (!groups.has(key)) {
+      groups.set(key, { dataset_size: row.dataset_size, train_method: row.train_method, test_set: row.test_set, values: [], times: [] });
+    }
+    groups.get(key).values.push(value);
+    if (typeof row.total_time_seconds === "number" && Number.isFinite(row.total_time_seconds)) {
+      groups.get(key).times.push(row.total_time_seconds);
+    }
+  }
+  return Array.from(groups.values()).map((group) => ({
+    dataset_size: Number(group.dataset_size),
+    train_method: group.train_method,
+    test_set: group.test_set,
+    mean: group.values.reduce((sum, value) => sum + value, 0) / group.values.length,
+    time:
+      group.times.length > 0
+        ? group.times.reduce((sum, value) => sum + value, 0) / group.times.length
+        : null,
+  }));
+}
+
+function renderCrossHeatmap(id, experiment) {
+  const metric = primaryCrossMetric(experiment);
+  const means = groupedCrossMeans(experiment?.metrics || [], metric);
+  const trainMethods = ["md", "atom_displacement"];
+  const testSets = ["test_md", "test_atomdisp", "test_mixed"];
+  const latestSize = Math.max(...means.map((row) => row.dataset_size).filter(Number.isFinite), -Infinity);
+  const filtered = Number.isFinite(latestSize) ? means.filter((row) => row.dataset_size === latestSize) : [];
+  const z = trainMethods.map((method) =>
+    testSets.map((testSet) => {
+      const row = filtered.find((item) => item.train_method === method && item.test_set === testSet);
+      return row ? row.mean : null;
+    }),
+  );
+  const layout = plotLayout(`Cross-evaluation heatmap (${metric})`, metric, {
+    xaxis: { title: "Frozen test set", gridcolor: "#edf1f4", zeroline: false },
+    yaxis: { title: "Training method", gridcolor: "#edf1f4", zeroline: false },
+  });
+  if (!means.length) {
+    layout.annotations = [emptyPlotAnnotation("No hay tabla cross_evaluation_metrics.csv completa.")];
+  }
+  Plotly.react(
+    id,
+    [{ type: "heatmap", z, x: testSets, y: trainMethods, colorscale: "Viridis", hoverongaps: false }],
+    layout,
+    { responsive: true, displaylogo: false },
+  );
+}
+
+function renderCrossLearning(id, experiment) {
+  const metric = primaryCrossMetric(experiment);
+  const means = groupedCrossMeans(experiment?.metrics || [], metric);
+  const traces = [];
+  for (const method of ["md", "atom_displacement"]) {
+    for (const testSet of ["test_md", "test_atomdisp", "test_mixed"]) {
+      const points = means
+        .filter((row) => row.train_method === method && row.test_set === testSet)
+        .sort((a, b) => a.dataset_size - b.dataset_size);
+      if (!points.length) continue;
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        name: `${method} on ${testSet}`,
+        x: points.map((row) => row.dataset_size),
+        y: points.map((row) => row.mean),
+        hovertemplate: "dataset %{x}<br>%{y:.4g}<extra>%{fullData.name}</extra>",
+      });
+    }
+  }
+  const layout = plotLayout(`Learning curves (${metric})`, metric);
+  if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay curvas cruzadas disponibles.")];
+  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function renderCrossCompute(id, experiment) {
+  const metric = primaryCrossMetric(experiment);
+  const means = groupedCrossMeans(experiment?.metrics || [], metric).filter((row) => row.time != null);
+  const traces = [];
+  for (const method of ["md", "atom_displacement"]) {
+    const points = means.filter((row) => row.train_method === method).sort((a, b) => a.time - b.time);
+    if (!points.length) continue;
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      name: method,
+      x: points.map((row) => row.time),
+      y: points.map((row) => row.mean),
+      text: points.map((row) => `${row.test_set}, dataset_${row.dataset_size}`),
+      hovertemplate: "%{text}<br>%{x:.2f}s<br>%{y:.4g}<extra>%{fullData.name}</extra>",
+    });
+  }
+  const layout = plotLayout(`Metric vs total compute time (${metric})`, metric, {
+    xaxis: { title: "Total compute seconds", gridcolor: "#edf1f4", zeroline: false },
+  });
+  if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay timing cruzado disponible.")];
+  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function renderWinnerMap(id, experiment) {
+  const metric = primaryCrossMetric(experiment);
+  const means = groupedCrossMeans(experiment?.metrics || [], metric);
+  const keys = Array.from(new Set(means.map((row) => `${row.dataset_size}||${row.test_set}`))).sort();
+  const datasetLabels = keys.map((key) => key.split("||")[0]);
+  const testSetLabels = keys.map((key) => key.split("||")[1]);
+  const z = keys.map((key) => {
+    const [datasetSize, testSet] = key.split("||");
+    const md = means.find((row) => String(row.dataset_size) === datasetSize && row.test_set === testSet && row.train_method === "md");
+    const atom = means.find((row) => String(row.dataset_size) === datasetSize && row.test_set === testSet && row.train_method === "atom_displacement");
+    if (!md || !atom) return null;
+    if (Math.abs(md.mean - atom.mean) < 1e-12) return 0;
+    return atom.mean < md.mean ? 1 : -1;
+  });
+  const layout = plotLayout(`Winner map (${metric})`, "Winner", {
+    xaxis: { title: "Dataset size", tickvals: keys.map((_, index) => index), ticktext: datasetLabels },
+    yaxis: { title: "", tickvals: [0], ticktext: ["winner"] },
+    annotations: keys.map((key, index) => ({
+      x: index,
+      y: 0,
+      text: testSetLabels[index],
+      showarrow: false,
+      font: { size: 11, color: "#17202a" },
+    })),
+  });
+  if (!keys.length) layout.annotations = [emptyPlotAnnotation("No hay pares MD/AtomDisplacement en el mismo test set.")];
+  Plotly.react(
+    id,
+    [{ type: "heatmap", z: [z], x: keys.map((_, index) => index), y: ["winner"], colorscale: [[0, "#4b6f8f"], [0.5, "#d7dee5"], [1, "#2a7f62"]], showscale: false }],
+    layout,
+    { responsive: true, displaylogo: false },
+  );
+}
+
 function renderPlots(payload) {
   const panel = document.getElementById("plots-panel");
   const status = document.getElementById("plots-status");
@@ -759,9 +913,13 @@ function renderPlots(payload) {
     return;
   }
   const runs = payload?.runs || [];
+  const crossExperiment = latestCrossExperiment(payload);
+  const recommendation = crossExperiment?.recommendation;
+  const crossText = recommendation?.status ? ` | cross: ${recommendation.status} - ${recommendation.reason || ""}` : "";
   status.textContent = runs.length
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
     : "No hay metricas archivadas";
+  status.textContent += crossText;
   renderLinePlot("plot-fermi", runs, "spectral", [{ key: "fermi_window_rmse_eV", label: "Fermi RMSE" }], "Error cerca del Fermi", "RMSE eV");
   renderLinePlot("plot-sparse", runs, "sparse", [{ key: "relative_frobenius_union", label: "Frobenius rel." }], "Error sparse matricial", "Relative Frobenius");
   renderLinePlot("plot-dos", runs, "dos", [{ key: "dos_wasserstein_eV", label: "Wasserstein" }], "Distancia DOS total", "Wasserstein eV");
@@ -769,6 +927,10 @@ function renderPlots(payload) {
   renderBoxPlot("plot-box", runs);
   renderScatterPlot("plot-scatter", runs);
   renderHeatmap("plot-heatmap", runs);
+  renderCrossHeatmap("plot-cross-heatmap", crossExperiment);
+  renderCrossLearning("plot-learning", crossExperiment);
+  renderCrossCompute("plot-compute", crossExperiment);
+  renderWinnerMap("plot-winner", crossExperiment);
 }
 
 async function loadPlots() {

@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import math
 import os
-import pty
 import json
 import select
 import shutil
@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from http import HTTPStatus
@@ -26,6 +27,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+
+try:
+    import pty
+except Exception:  # pragma: no cover - Windows fallback.
+    pty = None
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
@@ -113,7 +119,31 @@ def stream_process_output(
 ) -> int:
     if master_fd is None:
         assert process.stdout is not None
-        fd = process.stdout.fileno()
+        started_at = time.time()
+        last_output = started_at
+        last_heartbeat = last_output
+        while True:
+            line = process.stdout.readline()
+            if line:
+                last_output = time.time()
+                append(line)
+            elif process.poll() is not None:
+                break
+
+            now = time.time()
+            if process.poll() is not None:
+                break
+            if now - last_output >= LOG_HEARTBEAT_SECONDS and now - last_heartbeat >= LOG_HEARTBEAT_SECONDS:
+                eta_seconds = eta_provider() if eta_provider is not None else None
+                append(
+                    "[UI] "
+                    f"{label} sigue ejecutandose | PID {process.pid} | "
+                    f"elapsed {format_duration(now - started_at)} | "
+                    f"sin nueva salida {format_duration(now - last_output)} | "
+                    f"ETA {format_duration(eta_seconds)}\n"
+                )
+                last_heartbeat = now
+        return process.wait()
     else:
         fd = master_fd
 
@@ -195,16 +225,28 @@ class PipelineRunner:
             self._finished_at = None
             self._returncode = None
             self._command = [shell, "-lc", shell_command]
-            master_fd, slave_fd = pty.openpty()
-            self._process = subprocess.Popen(
-                self._command,
-                cwd=self.spec.root,
-                stdin=subprocess.DEVNULL,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            )
-            os.close(slave_fd)
+            master_fd: int | None = None
+            if pty is not None:
+                master_fd, slave_fd = pty.openpty()
+                self._process = subprocess.Popen(
+                    self._command,
+                    cwd=self.spec.root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+                os.close(slave_fd)
+            else:
+                self._process = subprocess.Popen(
+                    self._command,
+                    cwd=self.spec.root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
             process = self._process
             self._logs.append(f"[UI] PID: {process.pid}\n")
             self._logs.append(f"[RUN] {' '.join(self._command)}\n")
@@ -221,7 +263,7 @@ class PipelineRunner:
             self._logs.append("\n[UI] Solicitud de parada enviada.\n")
         return self.status()
 
-    def _collect_output(self, process: subprocess.Popen[str], master_fd: int) -> None:
+    def _collect_output(self, process: subprocess.Popen[str], master_fd: int | None) -> None:
         try:
             returncode = stream_process_output(
                 process,
@@ -230,7 +272,8 @@ class PipelineRunner:
                 master_fd=master_fd,
             )
         finally:
-            os.close(master_fd)
+            if master_fd is not None:
+                os.close(master_fd)
         with self._lock:
             self._returncode = returncode
             self._finished_at = time.time()
@@ -318,6 +361,46 @@ def write_yaml(path: Path, config: dict[str, Any]) -> None:
     )
 
 
+def write_csv_dicts(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if fieldnames is None:
+        fieldnames = sorted({key for row in rows for key in row})
+    if not fieldnames:
+        fieldnames = ["sample_id", "status"]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def file_sha256(path: Path) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def files_digest(paths_to_hash: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted({path.resolve() for path in paths_to_hash if path.exists() and path.is_file()}):
+        digest.update(str(path).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update((file_sha256(path) or "").encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def experiment_root(run_id: str) -> Path:
+    return RESULTS_ROOT / run_id
+
+
+def experiment_manifest_path(run_id: str) -> Path:
+    return experiment_root(run_id) / "experiment_manifest.yaml"
+
+
 def copy_if_exists(src: Path, dst: Path) -> bool:
     if not src.exists():
         return False
@@ -339,6 +422,21 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
 
 
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
+DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
+SPLIT_MANIFEST_FIELDS = [
+    "sample_id",
+    "method",
+    "source_run",
+    "frame_index",
+    "displacement_amplitude",
+    "displacement_family",
+    "structure_path",
+    "hamiltonian_path",
+    "run_out_path",
+    "metadata_path",
+    "status",
+    "sample_dir",
+]
 
 
 def split_ratios_from_config(config: dict[str, Any]) -> dict[str, float]:
@@ -563,6 +661,43 @@ def parse_combination_mode(value: Any) -> str:
     if mode not in {"aligned", "cartesian"}:
         raise RuntimeError(
             "combination_mode debe ser 'aligned' o 'cartesian' "
+            f"(recibido: {value!r})."
+        )
+    return mode
+
+
+def parse_split_mode(value: Any) -> str:
+    mode = "block" if value in (None, "") else str(value).strip().lower()
+    if mode not in {"block", "spread"}:
+        raise RuntimeError(
+            "split_mode debe ser 'block' o 'spread' "
+            f"(recibido: {value!r})."
+        )
+    return mode
+
+
+def parse_test_sets(value: Any) -> list[str]:
+    if value in (None, ""):
+        return list(DEFAULT_COMMON_TEST_SETS)
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raise RuntimeError("test_sets debe ser lista o texto separado por comas.")
+    selected = [item for item in raw_items if item]
+    unknown = sorted(set(selected) - set(DEFAULT_COMMON_TEST_SETS))
+    if unknown:
+        raise RuntimeError(f"test_sets contiene valores no soportados: {unknown}.")
+    return selected or list(DEFAULT_COMMON_TEST_SETS)
+
+
+def parse_compute_budget_mode(value: Any) -> str:
+    mode = "both" if value in (None, "") else str(value).strip().lower()
+    allowed = {"equal_sample_count", "equal_siesta_budget", "both"}
+    if mode not in allowed:
+        raise RuntimeError(
+            "compute_budget_mode debe ser equal_sample_count, equal_siesta_budget o both "
             f"(recibido: {value!r})."
         )
     return mode
@@ -938,8 +1073,97 @@ def read_system_label(run_fdf: Path) -> str:
     return "siesta"
 
 
+def find_reference_matrix(sample_dir: Path) -> Path | None:
+    run_fdf = sample_dir / "RUN.fdf"
+    if run_fdf.exists():
+        system_label = read_system_label(run_fdf)
+        for candidate in (sample_dir / f"{system_label}.TSHS", sample_dir / f"{system_label}.HSX"):
+            if candidate.exists():
+                return candidate
+    for candidate in (sample_dir / "siesta.TSHS", sample_dir / "siesta.HSX"):
+        if candidate.exists():
+            return candidate
+    candidates = sorted(
+        [
+            path
+            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
+            if path.name != "ML_prediction.HSX"
+        ],
+        key=natural_matrix_sort_key,
+    )
+    return candidates[0] if candidates else None
+
+
+def load_sample_metadata(sample_dir: Path) -> dict[str, Any]:
+    metadata_path = sample_dir / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def atom_displacement_family(metadata: dict[str, Any]) -> str:
+    parts = [
+        metadata.get("generation_mode"),
+        metadata.get("raw_displacement_run_id"),
+        metadata.get("matrix_label"),
+        metadata.get("direction"),
+        metadata.get("sign"),
+    ]
+    return "|".join(str(part) for part in parts if part not in (None, ""))
+
+
+def write_atom_split_manifests(
+    dataset_dir: Path,
+    split_samples: dict[str, list[Path]],
+) -> dict[str, Path]:
+    split_root = dataset_dir / "splits"
+    split_root.mkdir(parents=True, exist_ok=True)
+    paths_by_split: dict[str, Path] = {}
+    for split_name, sample_dirs in split_samples.items():
+        rows: list[dict[str, Any]] = []
+        for sample_dir in sample_dirs:
+            copied_dir = {
+                "train": dataset_dir / "train_samples",
+                "validation": dataset_dir / "validation_samples",
+                "test": dataset_dir / "test_samples",
+            }[split_name] / sample_dir.name
+            metadata = load_sample_metadata(copied_dir)
+            structure_path = copied_dir / "RUN.fdf"
+            hamiltonian_path = find_reference_matrix(copied_dir)
+            run_out_path = copied_dir / "RUN.out"
+            if not run_out_path.exists() and metadata.get("raw_fc_run_dir"):
+                raw_run_out = Path(str(metadata["raw_fc_run_dir"])) / "RUN.out"
+                if raw_run_out.exists():
+                    run_out_path = raw_run_out
+            metadata_path = copied_dir / "metadata.json"
+            rows.append(
+                {
+                    "sample_id": f"atomdisp_{sample_dir.name}",
+                    "method": "atom_displacement",
+                    "source_run": str(metadata.get("raw_fc_run_dir") or sample_dir.parent),
+                    "frame_index": "",
+                    "displacement_amplitude": metadata.get("displacement_ang", ""),
+                    "displacement_family": atom_displacement_family(metadata),
+                    "structure_path": str(structure_path),
+                    "hamiltonian_path": str(hamiltonian_path or ""),
+                    "run_out_path": str(run_out_path) if run_out_path.exists() else "",
+                    "metadata_path": str(metadata_path) if metadata_path.exists() else "",
+                    "status": "completed" if structure_path.exists() and hamiltonian_path else "incomplete",
+                    "sample_dir": str(copied_dir),
+                }
+            )
+        manifest_path = split_root / f"{split_name}_manifest.csv"
+        write_csv_dicts(manifest_path, rows, SPLIT_MANIFEST_FIELDS)
+        paths_by_split[split_name] = manifest_path
+    return paths_by_split
+
+
 def is_completed_atom_sample(sample_dir: Path) -> bool:
-    if (sample_dir / "RUN.fdf").exists() and any(sample_dir.glob("*.TSHS")):
+    if (sample_dir / "RUN.fdf").exists() and find_reference_matrix(sample_dir):
         return True
     run_out = sample_dir / "RUN.out"
     if not run_out.exists():
@@ -1099,6 +1323,25 @@ def read_metrics_summary(path: Path) -> dict[str, Any]:
     return {"exists": True, "rows": len(rows), "means": means}
 
 
+def find_latest_checkpoint(training_dir: Path, config: dict[str, Any]) -> Path | None:
+    configured = config.get("checkpoint", {}).get("path")
+    if configured:
+        candidate = Path(str(configured))
+        if not candidate.is_absolute():
+            candidate = training_dir / candidate
+        if candidate.exists():
+            return candidate
+    search_glob = str(config.get("checkpoint", {}).get("search_glob", "lightning_logs/**/checkpoints/*.ckpt"))
+    candidates = sorted(
+        [path for path in training_dir.glob(search_glob) if path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+    )
+    if candidates:
+        return candidates[-1]
+    fallback = sorted(training_dir.rglob("*.ckpt"), key=lambda path: path.stat().st_mtime)
+    return fallback[-1] if fallback else None
+
+
 def read_csv_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -1190,10 +1433,7 @@ def plot_data_summary() -> dict[str, Any]:
             if not result_dir.is_absolute():
                 result_dir = manifest_path.parent / result_dir
             if not result_dir.exists():
-                raise RuntimeError(
-                    "Manifest points to a missing result_dir. "
-                    f"manifest={manifest_path}, result_dir={result_dir}"
-                )
+                result_dir = manifest_path.parent
             sparse_rows = read_csv_rows(result_dir / "metrics" / "sparse_metrics.csv")
             spectral_rows = read_csv_rows(result_dir / "metrics" / "spectral_metrics.csv")
             dos_rows = read_csv_rows(result_dir / "metrics" / "dos_metrics.csv")
@@ -1256,7 +1496,39 @@ def plot_data_summary() -> dict[str, Any]:
                 }
             )
     runs.sort(key=lambda item: (item["pipeline"], item["dataset_size"], item["run_id"]))
-    return {"runs": runs}
+    cross_experiments: list[dict[str, Any]] = []
+    for metrics_path in sorted(RESULTS_ROOT.glob("*/summary/cross_evaluation_metrics.csv")):
+        experiment_dir = metrics_path.parents[1]
+        rows = read_csv_rows(metrics_path)
+        recommendation_path = experiment_dir / "summary" / "recommendation.json"
+        manifest_path = experiment_dir / "experiment_manifest.yaml"
+        recommendation: dict[str, Any] = {}
+        if recommendation_path.exists():
+            try:
+                recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                recommendation = {"error": str(exc)}
+        manifest: dict[str, Any] = {}
+        if manifest_path.exists():
+            try:
+                manifest = load_config(manifest_path)
+            except Exception as exc:
+                manifest = {"error": str(exc)}
+        cross_experiments.append(
+            {
+                "experiment_id": experiment_dir.name,
+                "metrics": rows,
+                "recommendation": recommendation,
+                "manifest": manifest,
+                "outputs": {
+                    "cross_evaluation_metrics": str(metrics_path),
+                    "winner_summary": str(experiment_dir / "summary" / "winner_summary.csv"),
+                    "winner_by_dataset_size": str(experiment_dir / "summary" / "winner_by_dataset_size.csv"),
+                    "winner_by_compute_budget": str(experiment_dir / "summary" / "winner_by_compute_budget.csv"),
+                },
+            }
+        )
+    return {"runs": runs, "cross_experiments": cross_experiments}
 
 
 def atom_fc_ui_config() -> dict[str, Any]:
@@ -1330,6 +1602,10 @@ class ExperimentRunner:
         atom_dataset_specs: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
+        split_mode: str = "block",
+        test_sets: list[str] | None = None,
+        primary_metric: str = "global_rmse_eV",
+        compute_budget_mode: str = "both",
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -1362,6 +1638,10 @@ class ExperimentRunner:
                     atom_dataset_specs,
                     ratios,
                     random_seed,
+                    split_mode,
+                    test_sets or list(DEFAULT_COMMON_TEST_SETS),
+                    primary_metric,
+                    compute_budget_mode,
                 ),
                 daemon=True,
             )
@@ -1416,6 +1696,95 @@ class ExperimentRunner:
         with self._lock:
             self._logs.append(line)
 
+    def _initial_experiment_manifest(
+        self,
+        run_id: str,
+        md_sizes: list[int],
+        atom_sizes: list[int],
+        split_ratios: dict[str, float],
+        random_seed: int | None,
+        split_mode: str,
+        atom_dataset_specs: list[dict[str, Any]] | None,
+        test_sets: list[str],
+        primary_metric: str,
+        compute_budget_mode: str,
+    ) -> dict[str, Any]:
+        md_config = load_config(PIPELINES["md"].config_path)
+        atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+        files_to_hash = [
+            PIPELINES["md"].config_path,
+            PIPELINES["atom_displacement"].config_path,
+            PIPELINES["md"].root / "dataset" / "RUN.fdf",
+            PIPELINES["atom_displacement"].root / "base" / "RUN.fdf",
+            *sorted((PIPELINES["md"].root / "dataset").glob("*.psf")),
+            *sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf")),
+            *sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml")),
+        ]
+        basis_and_pseudos = [
+            {
+                "path": str(path),
+                "sha256": file_sha256(path),
+            }
+            for path in files_to_hash
+            if path.exists() and path.suffix in {".psf", ".xml", ".fdf"}
+        ]
+        system_name = (
+            md_config.get("md", {}).get("system_name")
+            or atom_config.get("structure", {}).get("system_name")
+            or "unknown"
+        )
+        return {
+            "experiment_id": run_id,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "molecule_system_name": system_name,
+            "siesta_settings_hash": files_digest(files_to_hash),
+            "basis_pseudopotential_info": basis_and_pseudos,
+            "train_methods": ["md", "atom_displacement"],
+            "dataset_sizes": {
+                "md": md_sizes,
+                "atom_displacement": atom_sizes,
+            },
+            "atom_displacement_dataset_specs": atom_dataset_specs or [],
+            "seeds": [random_seed] if random_seed is not None else [],
+            "split_ratios": split_ratios,
+            "split_mode": split_mode,
+            "test_sets": list(test_sets),
+            "training_hyperparameters": {
+                "md": md_config.get("training", {}),
+                "atom_displacement": atom_config.get("training", {}),
+            },
+            "selected_metrics": {
+                "sparse": True,
+                "spectral": True,
+                "dos": True,
+                "primary_metric": primary_metric,
+            },
+            "compute_budget_mode": compute_budget_mode,
+            "output_directories": {
+                "experiment_root": str(experiment_root(run_id)),
+                "manifest": str(experiment_manifest_path(run_id)),
+                "common_tests": str(experiment_root(run_id) / "common_tests"),
+                "cross_evaluations": str(experiment_root(run_id) / "cross_evaluations"),
+                "summary": str(experiment_root(run_id) / "summary"),
+            },
+            "timing": {
+                "md_siesta_generation_seconds": None,
+                "atom_displacement_siesta_generation_seconds": None,
+                "training_seconds": {},
+                "prediction_seconds": {},
+                "evaluation_seconds": {},
+                "total_seconds": None,
+            },
+            "runs": [],
+            "warnings": [],
+            "cross_evaluation": {},
+        }
+
+    def _write_experiment_manifest(self, manifest: dict[str, Any]) -> None:
+        path = experiment_manifest_path(str(manifest["experiment_id"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_yaml(path, json_safe(manifest))
+
     def _set_current(
         self,
         pipeline: str,
@@ -1443,11 +1812,30 @@ class ExperimentRunner:
         atom_dataset_specs: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
+        split_mode: str = "block",
+        test_sets: list[str] | None = None,
+        primary_metric: str = "global_rmse_eV",
+        compute_budget_mode: str = "both",
     ) -> None:
         original_configs = {
             key: spec.config_path.read_text(encoding="utf-8")
             for key, spec in PIPELINES.items()
         }
+        split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
+        manifest = self._initial_experiment_manifest(
+            run_id,
+            md_sizes,
+            atom_sizes,
+            split_ratios,
+            random_seed,
+            split_mode,
+            atom_dataset_specs,
+            test_sets or list(DEFAULT_COMMON_TEST_SETS),
+            primary_metric,
+            compute_budget_mode,
+        )
+        experiment_root(run_id).mkdir(parents=True, exist_ok=True)
+        self._write_experiment_manifest(manifest)
         returncode = 0
         try:
             self._append(f"[UI] Comparacion {run_id} iniciada.\n")
@@ -1458,6 +1846,9 @@ class ExperimentRunner:
                 f"{split_ratios['train']} train, {split_ratios['validation']} validation, "
                 f"{split_ratios['test']} test.\n"
             )
+            self._append(f"[UI] Split mode MD: {split_mode}\n")
+            self._append(f"[UI] Common test sets: {', '.join(test_sets or DEFAULT_COMMON_TEST_SETS)}\n")
+            self._append(f"[UI] Primary metric: {primary_metric}; compute mode: {compute_budget_mode}\n")
             if atom_dataset_specs:
                 self._append(
                     "[UI] AtomDisplacement FC plan: "
@@ -1493,9 +1884,11 @@ class ExperimentRunner:
             for size in md_sizes:
                 self._ensure_not_stopped()
                 self._restore_original_config("md", original_configs)
-                result = self._run_one("md", size, run_id, split_ratios=split_ratios)
+                result = self._run_one("md", size, run_id, split_ratios=split_ratios, split_mode=split_mode)
                 with self._lock:
                     self._results.append(result)
+                manifest["runs"].append(result)
+                self._write_experiment_manifest(manifest)
             atom_runs = atom_dataset_specs or [
                 {
                     "label": f"dataset_{size}",
@@ -1516,13 +1909,20 @@ class ExperimentRunner:
                     fc_displacements=atom_spec.get("displacements"),
                     split_ratios=split_ratios,
                     random_seed=random_seed,
+                    split_mode=split_mode,
                 )
                 with self._lock:
                     self._results.append(result)
+                manifest["runs"].append(result)
+                self._write_experiment_manifest(manifest)
+            manifest["cross_evaluation"] = self._run_cross_evaluation(run_id, manifest)
+            self._write_experiment_manifest(manifest)
             self._append("\n[UI] Comparacion experimental finalizada correctamente.\n")
         except Exception as exc:
             returncode = 1
             self._append(f"\n[ERROR] {exc}\n")
+            manifest.setdefault("warnings", []).append(str(exc))
+            self._write_experiment_manifest(manifest)
         finally:
             for key, raw in original_configs.items():
                 PIPELINES[key].config_path.write_text(raw, encoding="utf-8")
@@ -1531,6 +1931,12 @@ class ExperimentRunner:
                 self._current = None
                 self._returncode = returncode
                 self._finished_at = time.time()
+            manifest["timing"]["total_seconds"] = (
+                self._finished_at - self._started_at
+                if self._finished_at is not None and self._started_at is not None
+                else None
+            )
+            self._write_experiment_manifest(manifest)
             self._append("[UI] Configuraciones originales restauradas.\n")
 
     def _restore_original_config(self, key: str, original_configs: dict[str, str]) -> None:
@@ -1550,6 +1956,7 @@ class ExperimentRunner:
         fc_displacements: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
+        split_mode: str = "block",
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -1576,9 +1983,30 @@ class ExperimentRunner:
             log_start = len(self._logs)
         prepare_metadata: dict[str, Any] = {}
         if key == "md":
-            self._prepare_md_config(config, workspace, size, split_ratios)
+            self._prepare_md_config(config, workspace, size, split_ratios, split_mode=split_mode)
+            original_steps = list(config.get("pipeline", {}).get("steps", []))
+            config.setdefault("pipeline", {})["steps"] = ["generate_md_dataset"]
             write_yaml(spec.config_path, config)
-            self._append("[UI] Config temporal escrita; se restaurara al finalizar el experimento.\n")
+            self._append("[UI] Config temporal MD escrita para generar dataset y manifests.\n")
+            generation_returncode = self._run_pipeline_process(
+                spec,
+                key=key,
+                size=size,
+                started_at=started_at,
+            )
+            if generation_returncode != 0:
+                raise RuntimeError(
+                    f"{spec.label} dataset_{size} fallo generando dataset con codigo "
+                    f"{generation_returncode}."
+                )
+            self._validate_split_manifests(key, config, size)
+            config["pipeline"]["steps"] = [
+                step
+                for step in original_steps
+                if step in {"run_md_training", "run_md_testing", "run_md_prediction"}
+            ] or ["run_md_training", "run_md_testing", "run_md_prediction"]
+            write_yaml(spec.config_path, config)
+            self._append("[UI] Config temporal MD escrita para entrenar/evaluar tras validacion.\n")
             returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         else:
             self._prepare_atom_generation_config(
@@ -1608,8 +2036,10 @@ class ExperimentRunner:
             self._append("[UI] Config temporal de entrenamiento escrita tras FC.\n")
             if prepare_metadata.get("test_needs_siesta"):
                 self._run_atom_test_single_points(spec, config, Path(prepare_metadata["test_samples_dir"]))
+                self._refresh_atom_split_manifests(config)
                 write_yaml(spec.config_path, config)
                 self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
+            self._validate_split_manifests(key, config, size)
             returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         with self._lock:
             run_log = "".join(self._logs[log_start:])
@@ -1658,6 +2088,7 @@ class ExperimentRunner:
         workspace: Path,
         size: int,
         split_ratios: dict[str, float] | None = None,
+        split_mode: str = "block",
     ) -> None:
         dataset_dir = workspace / "dataset"
         pseudo_count = copy_pseudopotentials(PIPELINES["md"].root / "dataset", dataset_dir)
@@ -1668,7 +2099,7 @@ class ExperimentRunner:
         config["md"]["steps"] = size
         config["splits"] = {
             "enabled": True,
-            "strategy": "spread",
+            "strategy": split_mode,
             "train": counts["train"],
             "validation": counts["validation"],
             "test": counts["test"],
@@ -1831,6 +2262,14 @@ class ExperimentRunner:
         copy_sample_dirs(train_samples, train_samples_dir)
         copy_sample_dirs(validation_samples, validation_samples_dir)
         copy_sample_dirs(test_samples, test_samples_dir)
+        split_manifest_paths = write_atom_split_manifests(
+            dataset_dir,
+            {
+                "train": train_samples,
+                "validation": validation_samples,
+                "test": test_samples,
+            },
+        )
         test_needs_siesta = any(
             not is_completed_atom_sample(path)
             for path in test_samples_dir.iterdir()
@@ -1895,6 +2334,8 @@ class ExperimentRunner:
             "completed_samples": sum(1 for path in selected_samples if is_completed_atom_sample(path)),
             "fc_generated_samples": len(all_samples),
             "fc_completed_samples": len(completed_samples),
+            "split_manifest_paths": {key: str(value) for key, value in split_manifest_paths.items()},
+            "seed": (config.get("structure", {}).get("force_constants", {}) or {}).get("random_seed"),
         }
 
     def _run_pipeline_process(
@@ -1917,16 +2358,28 @@ class ExperimentRunner:
         )
         command = [shell, "-lc", shell_command]
         self._append(f"[RUN] {' '.join(command)}\n")
-        master_fd, slave_fd = pty.openpty()
-        process = subprocess.Popen(
-            command,
-            cwd=spec.root,
-            stdin=subprocess.DEVNULL,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        )
-        os.close(slave_fd)
+        master_fd: int | None = None
+        if pty is not None:
+            master_fd, slave_fd = pty.openpty()
+            process = subprocess.Popen(
+                command,
+                cwd=spec.root,
+                stdin=subprocess.DEVNULL,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+            os.close(slave_fd)
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=spec.root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
         with self._lock:
             self._process = process
         self._append(f"[UI] PID: {process.pid}\n")
@@ -1941,7 +2394,8 @@ class ExperimentRunner:
                 eta_provider=lambda: self._estimated_seconds(key, size, time.time() - started_at),
             )
         finally:
-            os.close(master_fd)
+            if master_fd is not None:
+                os.close(master_fd)
         with self._lock:
             if self._process is process:
                 self._process = None
@@ -1986,6 +2440,76 @@ class ExperimentRunner:
         config["pipeline"]["steps"] = original_steps
         if returncode != 0:
             raise RuntimeError(f"{spec.label}: fallo SIESTA del split de test con codigo {returncode}.")
+
+    def _refresh_atom_split_manifests(self, config: dict[str, Any]) -> None:
+        dataset_dir = Path(config["paths"]["dataset_dir"])
+        split_samples = {
+            "train": sorted(path for path in (dataset_dir / "train_samples").iterdir() if path.is_dir()),
+            "validation": sorted(path for path in (dataset_dir / "validation_samples").iterdir() if path.is_dir()),
+            "test": sorted(path for path in (dataset_dir / "test_samples").iterdir() if path.is_dir()),
+        }
+        write_atom_split_manifests(dataset_dir, split_samples)
+        self._append("[UI] AtomDisplacement split manifests refrescados tras SIESTA de test.\n")
+
+    def _validate_split_manifests(
+        self,
+        key: str,
+        config: dict[str, Any],
+        size: int,
+    ) -> dict[str, Any]:
+        dataset_dir = Path(config["paths"]["dataset_dir"])
+        split_root = dataset_dir / "splits"
+        script = COMPARISON_ROOT / "scripts" / "validate_sample_bundle.py"
+        summaries: dict[str, Any] = {}
+        for split_name in ("train", "validation", "test"):
+            manifest_path = split_root / f"{split_name}_manifest.csv"
+            if not manifest_path.exists():
+                raise RuntimeError(f"{PIPELINES[key].label}: falta split manifest: {manifest_path}")
+            rows = read_csv_rows(manifest_path)
+            min_valid = len(rows)
+            output_dir = dataset_dir / "validation" / split_name
+            command = [
+                sys.executable,
+                str(script),
+                "--manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(output_dir),
+                "--min-valid",
+                str(min_valid),
+            ]
+            self._append(f"[UI] Validando {PIPELINES[key].label} {split_name}: {' '.join(command)}\n")
+            result = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.stdout.strip():
+                self._append(result.stdout.strip() + "\n")
+            if result.stderr.strip():
+                self._append(result.stderr.strip() + "\n")
+            summary_path = output_dir / "validation_summary.json"
+            if summary_path.exists():
+                try:
+                    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    summary = {"ok": False, "error": str(exc)}
+            else:
+                summary = {"ok": False, "error": "validation_summary_missing"}
+            summary["returncode"] = result.returncode
+            summaries[split_name] = summary
+            valid_manifest = output_dir / "valid_samples.csv"
+            if valid_manifest.exists():
+                shutil.copy2(valid_manifest, split_root / f"{split_name}_valid_manifest.csv")
+            if result.returncode != 0 or not summary.get("ok"):
+                raise RuntimeError(
+                    f"{PIPELINES[key].label}: validacion {split_name} fallo; "
+                    f"revisa {summary_path}."
+                )
+        self._append(f"[UI] Validacion de muestras completada para {PIPELINES[key].label} dataset_{size}.\n")
+        return summaries
 
     def _archive_outputs(
         self,
@@ -2088,8 +2612,13 @@ class ExperimentRunner:
         copy_if_exists(dataset_dir / "samples_manifest.json", result_dir / "samples_manifest.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_dataset.json", result_dir / "water_atom_displacement_dataset.json")
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_summary.csv", result_dir / "water_atom_displacement_summary.csv")
+        for manifest_file in sorted((dataset_dir / "splits").glob("*_manifest.csv")):
+            copy_if_exists(manifest_file, result_dir / "splits" / manifest_file.name)
+        for validation_file in sorted((dataset_dir / "validation").glob("*/*.csv")):
+            copy_if_exists(validation_file, result_dir / "validation" / validation_file.parent.name / validation_file.name)
         evaluation_metrics = self._evaluate_hamiltonian_metrics(key, config, result_dir)
         effective_size = int(prepare_metadata.get("effective_size", size))
+        checkpoint_path = find_latest_checkpoint(training_dir, config)
         manifest = {
             "pipeline": key,
             "dataset_label": dataset_label,
@@ -2100,7 +2629,11 @@ class ExperimentRunner:
             "returncode": returncode,
             "pipeline_elapsed_seconds": pipeline_elapsed_seconds,
             "workspace": str(workspace),
+            "dataset_dir": str(dataset_dir),
+            "training_dir": str(training_dir),
             "result_dir": str(result_dir),
+            "model_checkpoint": str(checkpoint_path) if checkpoint_path else None,
+            "seed": prepare_metadata.get("seed"),
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
             "generated_samples": prepare_metadata.get("generated_samples"),
@@ -2165,6 +2698,283 @@ class ExperimentRunner:
                 "[WARN] Evaluacion Hamiltoniana termino con codigo "
                 f"{result.returncode}. Revisa {manifest_path}.\n"
             )
+        return summary
+
+    def _run_local_script(
+        self,
+        command: list[str],
+        *,
+        label: str,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        self._append(f"[UI] {label}: {' '.join(command)}\n")
+        result = subprocess.run(
+            command,
+            cwd=cwd or REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.stdout.strip():
+            self._append(result.stdout.strip() + "\n")
+        if result.stderr.strip():
+            self._append(result.stderr.strip() + "\n")
+        return result
+
+    def _split_manifest_for_result(self, result: dict[str, Any], split_name: str) -> Path:
+        result_dir = Path(str(result["result_dir"]))
+        split_root = result_dir / "splits"
+        for name in (f"{split_name}_valid_manifest.csv", f"{split_name}_manifest.csv"):
+            candidate = split_root / name
+            if candidate.exists():
+                return candidate
+        raise RuntimeError(f"Missing {split_name} manifest for {result.get('pipeline')}: {result_dir}")
+
+    def _basis_files_glob_for_result(self, result: dict[str, Any]) -> str:
+        config = load_config(Path(str(result["result_dir"])) / "pipeline_config.yaml")
+        dataset_dir = Path(config["paths"]["dataset_dir"])
+        candidates = [
+            dataset_dir / "basis",
+            dataset_dir / "MD_steps" / "basis",
+            Path(str(config["paths"].get("relaxed_dir", ""))),
+        ]
+        for directory in candidates:
+            if directory.exists() and list(directory.glob("*.ion.xml")):
+                return str(directory / "*.ion.xml")
+        configured = (
+            config.get("prediction", {}).get("data", {}).get("basis_files")
+            or config.get("training", {}).get("data", {}).get("basis_files")
+        )
+        if configured:
+            return str(configured)
+        raise RuntimeError(f"No basis .ion.xml files found for {result.get('pipeline')} result.")
+
+    def _prepare_cross_result_dir(
+        self,
+        cross_result_dir: Path,
+        prediction_dir: Path,
+        test_manifest: Path,
+    ) -> dict[str, int]:
+        if cross_result_dir.exists():
+            shutil.rmtree(cross_result_dir)
+        cross_result_dir.mkdir(parents=True, exist_ok=True)
+        prediction_root = prediction_dir / "predicted_hamiltonians"
+        if not prediction_root.exists():
+            raise RuntimeError(f"Prediction output missing: {prediction_root}")
+        shutil.copytree(prediction_root, cross_result_dir / "predicted_hamiltonians")
+        copy_if_exists(prediction_dir / "prediction_summary.json", cross_result_dir / "prediction_summary.json")
+        copy_if_exists(prediction_dir / "prediction_manifest.csv", cross_result_dir / "prediction_manifest.csv")
+
+        rows = read_csv_rows(test_manifest)
+        references = 0
+        structures = 0
+        for row in rows:
+            sample_id = str(row.get("sample_id") or row.get("sample") or "")
+            if not sample_id:
+                continue
+            hamiltonian_path = Path(str(row.get("hamiltonian_path") or ""))
+            if hamiltonian_path.exists() and hamiltonian_path.is_file():
+                dst = cross_result_dir / "siesta_hamiltonians" / sample_id / hamiltonian_path.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(hamiltonian_path, dst)
+                references += 1
+            structure_path = Path(str(row.get("structure_path") or ""))
+            if structure_path.exists() and structure_path.is_file():
+                dst = cross_result_dir / "structures" / sample_id / "RUN.fdf"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(structure_path, dst)
+                structures += 1
+            metadata_path = Path(str(row.get("metadata_path") or ""))
+            if metadata_path.exists() and metadata_path.is_file():
+                dst = cross_result_dir / "structures" / sample_id / metadata_path.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(metadata_path, dst)
+        return {"references": references, "structures": structures}
+
+    def _common_test_pair_id(self, md_result: dict[str, Any], atom_result: dict[str, Any]) -> str:
+        md_label = str(md_result.get("dataset_label", f"dataset_{md_result.get('dataset_size')}"))
+        atom_label = str(atom_result.get("dataset_label", f"dataset_{atom_result.get('dataset_size')}"))
+        return f"{md_label}__{atom_label}".replace("/", "_").replace("\\", "_")
+
+    def _run_cross_evaluation(self, run_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        runs = [run for run in manifest.get("runs", []) if run.get("returncode") == 0]
+        md_runs = [run for run in runs if run.get("pipeline") == "md"]
+        atom_runs = [run for run in runs if run.get("pipeline") == "atom_displacement"]
+        summary: dict[str, Any] = {
+            "ok": False,
+            "warnings": [],
+            "common_tests": [],
+            "cross_evaluations": [],
+            "outputs": {},
+        }
+        if not md_runs or not atom_runs:
+            summary["warnings"].append("Both MD and AtomDisplacement successful runs are required for cross evaluation.")
+            self._append("[WARN] No hay runs exitosos de ambos metodos; se omite cross-evaluation.\n")
+            return summary
+
+        md_by_size: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        atom_by_size: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for run in md_runs:
+            md_by_size[int(run.get("dataset_size", 0))].append(run)
+        for run in atom_runs:
+            atom_by_size[int(run.get("dataset_size", 0))].append(run)
+
+        common_root = experiment_root(run_id) / "common_tests"
+        cross_root = experiment_root(run_id) / "cross_evaluations"
+        prediction_root = experiment_root(run_id) / "cross_predictions"
+        summary_root = experiment_root(run_id) / "summary"
+        test_sets = list(manifest.get("test_sets") or DEFAULT_COMMON_TEST_SETS)
+        common_root.mkdir(parents=True, exist_ok=True)
+        cross_root.mkdir(parents=True, exist_ok=True)
+        prediction_root.mkdir(parents=True, exist_ok=True)
+
+        for dataset_size in sorted(set(md_by_size) & set(atom_by_size)):
+            md_result = md_by_size[dataset_size][0]
+            for atom_result in atom_by_size[dataset_size]:
+                pair_id = self._common_test_pair_id(md_result, atom_result)
+                pair_common_dir = common_root / pair_id
+                build_command = [
+                    sys.executable,
+                    str(COMPARISON_ROOT / "scripts" / "build_common_tests.py"),
+                    "--md-test-manifest",
+                    str(self._split_manifest_for_result(md_result, "test")),
+                    "--atomdisp-test-manifest",
+                    str(self._split_manifest_for_result(atom_result, "test")),
+                    "--train-manifest",
+                    str(self._split_manifest_for_result(md_result, "train")),
+                    "--train-manifest",
+                    str(self._split_manifest_for_result(atom_result, "train")),
+                    "--output-dir",
+                    str(pair_common_dir),
+                    "--test-sets",
+                    ",".join(test_sets),
+                ]
+                build_result = self._run_local_script(build_command, label=f"Construyendo common tests {pair_id}")
+                if build_result.returncode != 0:
+                    raise RuntimeError(f"Common test builder failed for {pair_id}.")
+                summary["common_tests"].append(str(pair_common_dir))
+
+                for train_result in (md_result, atom_result):
+                    train_method = str(train_result["pipeline"])
+                    checkpoint = train_result.get("model_checkpoint")
+                    if not checkpoint or not Path(str(checkpoint)).exists():
+                        warning = f"Missing checkpoint for {train_method} {train_result.get('dataset_label')}; skipping cross prediction."
+                        summary["warnings"].append(warning)
+                        self._append(f"[WARN] {warning}\n")
+                        continue
+                    basis_files = self._basis_files_glob_for_result(train_result)
+                    train_config = load_config(Path(str(train_result["result_dir"])) / "pipeline_config.yaml")
+                    for test_set in test_sets:
+                        test_manifest = pair_common_dir / test_set / "test_manifest.csv"
+                        if not test_manifest.exists():
+                            warning = f"Missing common test manifest {test_manifest}; skipping."
+                            summary["warnings"].append(warning)
+                            self._append(f"[WARN] {warning}\n")
+                            continue
+                        cross_name = f"{pair_id}__{train_method}__on__{test_set}"
+                        prediction_dir = prediction_root / cross_name
+                        predict_command = [
+                            sys.executable,
+                            str(COMPARISON_ROOT / "scripts" / "predict_model_on_dataset.py"),
+                            "--checkpoint",
+                            str(checkpoint),
+                            "--train-method",
+                            train_method,
+                            "--test-set",
+                            test_set,
+                            "--test-manifest",
+                            str(test_manifest),
+                            "--basis-files",
+                            basis_files,
+                            "--output-dir",
+                            str(prediction_dir),
+                        ]
+                        predict_start = time.time()
+                        predict_result = self._run_local_script(
+                            predict_command,
+                            label=f"Prediccion cruzada {cross_name}",
+                        )
+                        prediction_time = time.time() - predict_start
+                        if predict_result.returncode != 0:
+                            raise RuntimeError(f"Cross prediction failed for {cross_name}.")
+
+                        cross_result_dir = cross_root / cross_name
+                        copy_counts = self._prepare_cross_result_dir(
+                            cross_result_dir,
+                            prediction_dir,
+                            test_manifest,
+                        )
+                        evaluation_start = time.time()
+                        evaluation_summary = self._evaluate_hamiltonian_metrics(
+                            train_method,
+                            train_config,
+                            cross_result_dir,
+                        )
+                        evaluation_time = time.time() - evaluation_start
+                        cross_manifest = {
+                            "experiment_id": run_id,
+                            "pair_id": pair_id,
+                            "train_method": train_method,
+                            "test_set": test_set,
+                            "dataset_size": dataset_size,
+                            "seed": train_result.get("seed"),
+                            "epoch": None,
+                            "model_checkpoint": str(checkpoint),
+                            "prediction_dir": str(prediction_dir),
+                            "siesta_reference_dir": str(cross_result_dir / "siesta_hamiltonians"),
+                            "prediction_time_seconds": prediction_time,
+                            "evaluation_time_seconds": evaluation_time,
+                            "total_time_seconds": (
+                                float(train_result.get("pipeline_elapsed_seconds") or 0.0)
+                                + prediction_time
+                                + evaluation_time
+                            ),
+                            "references": copy_counts["references"],
+                            "structures": copy_counts["structures"],
+                            "evaluation": evaluation_summary,
+                        }
+                        (cross_result_dir / "cross_evaluation_manifest.json").write_text(
+                            json.dumps(json_safe(cross_manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                            encoding="utf-8",
+                        )
+                        summary["cross_evaluations"].append(cross_manifest)
+
+        aggregate_command = [
+            sys.executable,
+            str(COMPARISON_ROOT / "scripts" / "aggregate_cross_metrics.py"),
+            "--experiment-id",
+            run_id,
+            "--cross-root",
+            str(cross_root),
+            "--output-dir",
+            str(summary_root),
+        ]
+        aggregate_result = self._run_local_script(aggregate_command, label="Agregando metricas cruzadas")
+        if aggregate_result.returncode != 0:
+            raise RuntimeError("Cross metric aggregation failed.")
+
+        winner_command = [
+            sys.executable,
+            str(COMPARISON_ROOT / "scripts" / "analyze_winners.py"),
+            "--metrics-csv",
+            str(summary_root / "cross_evaluation_metrics.csv"),
+            "--output-dir",
+            str(summary_root),
+            "--primary-metric",
+            str((manifest.get("selected_metrics") or {}).get("primary_metric", "global_rmse_eV")),
+        ]
+        winner_result = self._run_local_script(winner_command, label="Analizando winners")
+        if winner_result.returncode != 0:
+            raise RuntimeError("Winner analysis failed.")
+
+        summary["ok"] = True
+        summary["outputs"] = {
+            "common_tests": str(common_root),
+            "cross_evaluations": str(cross_root),
+            "cross_evaluation_metrics": str(summary_root / "cross_evaluation_metrics.csv"),
+            "winner_summary": str(summary_root / "winner_summary.csv"),
+            "recommendation": str(summary_root / "recommendation.json"),
+        }
         return summary
 
 
@@ -2343,6 +3153,10 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 random_seed = None if random_seed in (None, "") else int(random_seed)
                 max_datasets = parse_max_datasets(payload.get("max_datasets"))
                 combination_mode = parse_combination_mode(payload.get("combination_mode"))
+                split_mode = parse_split_mode(payload.get("split_mode"))
+                test_sets = parse_test_sets(payload.get("test_sets"))
+                primary_metric = str(payload.get("primary_metric") or "global_rmse_eV").strip()
+                compute_budget_mode = parse_compute_budget_mode(payload.get("compute_budget_mode"))
                 raw_atom_sizes = payload.get("atom_sizes")
                 atom_config = load_config(PIPELINES["atom_displacement"].config_path)
                 force_constants = atom_config.get("structure", {}).get("force_constants", {}) or {}
@@ -2389,6 +3203,10 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         atom_dataset_specs,
                         split_ratios,
                         random_seed,
+                        split_mode,
+                        test_sets,
+                        primary_metric,
+                        compute_budget_mode,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

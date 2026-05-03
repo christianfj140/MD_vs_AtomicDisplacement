@@ -4,12 +4,29 @@
 from __future__ import annotations
 
 import os
+import csv
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from md_pipeline_config import command, load_pipeline_config, paths, render_run_fdf
+
+BOHR_TO_ANG = 0.529177210903
+MANIFEST_FIELDS = [
+    "sample_id",
+    "method",
+    "source_run",
+    "frame_index",
+    "displacement_amplitude",
+    "displacement_family",
+    "structure_path",
+    "hamiltonian_path",
+    "run_out_path",
+    "metadata_path",
+    "status",
+    "sample_dir",
+]
 
 
 def require_command(command_name: str) -> None:
@@ -126,6 +143,15 @@ def _split_spread(items: list[Path], train_count: int, validation_count: int, te
     return {"train": train, "validation": validation, "test": test}
 
 
+def _split_block(items: list[Path], train_count: int, validation_count: int, test_count: int) -> dict[str, list[Path]]:
+    requested = train_count + validation_count + test_count
+    selected = list(items[:requested])
+    train = selected[:train_count]
+    validation = selected[train_count : train_count + validation_count]
+    test = selected[train_count + validation_count : train_count + validation_count + test_count]
+    return {"train": train, "validation": validation, "test": test}
+
+
 def _sample_names(samples: list[Path]) -> str:
     return ", ".join(path.name for path in samples) if samples else "-"
 
@@ -144,6 +170,243 @@ def _prepare_split_sample(src_dir: Path, dst_dir: Path) -> None:
     for src in src_dir.iterdir():
         if src.is_file():
             _link_or_copy_file(src, dst_dir / src.name)
+
+
+def _parse_float_triplet(line: str, *, path: Path, line_number: int) -> tuple[float, float, float]:
+    parts = line.split()
+    if len(parts) < 3:
+        raise RuntimeError(f"{path}:{line_number}: expected at least 3 floats.")
+    try:
+        return float(parts[0]), float(parts[1]), float(parts[2])
+    except ValueError as exc:
+        raise RuntimeError(f"{path}:{line_number}: invalid float triplet.") from exc
+
+
+def parse_xv_geometry(xv_path: Path) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, float, float, float]]]:
+    """Read the geometry written by SIESTA in XV format.
+
+    SIESTA XV coordinates and lattice vectors are in Bohr. The per-frame FDF
+    files written below use Angstrom to match the generated RUN.fdf template.
+    """
+
+    lines = [line for line in xv_path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+    if len(lines) < 4:
+        raise RuntimeError(f"{xv_path}: XV file is too short to contain a geometry.")
+    lattice = []
+    for index in range(3):
+        lattice.append(
+            tuple(value * BOHR_TO_ANG for value in _parse_float_triplet(lines[index], path=xv_path, line_number=index + 1))
+        )
+    try:
+        atom_count = int(lines[3].split()[0])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"{xv_path}: invalid atom count line.") from exc
+    if len(lines) < 4 + atom_count:
+        raise RuntimeError(f"{xv_path}: expected {atom_count} atom rows, found {max(0, len(lines) - 4)}.")
+
+    atoms: list[tuple[int, int, float, float, float]] = []
+    for offset, line in enumerate(lines[4 : 4 + atom_count], start=5):
+        parts = line.split()
+        if len(parts) < 5:
+            raise RuntimeError(f"{xv_path}:{offset}: invalid XV atom row.")
+        try:
+            species_index = int(parts[0])
+            atomic_number = int(parts[1])
+            x, y, z = (float(parts[col]) * BOHR_TO_ANG for col in (2, 3, 4))
+        except ValueError as exc:
+            raise RuntimeError(f"{xv_path}:{offset}: invalid XV atom values.") from exc
+        atoms.append((species_index, atomic_number, x, y, z))
+    return lattice, atoms
+
+
+def _replace_or_append_block(text: str, block_name: str, block_lines: list[str]) -> str:
+    lines = text.splitlines()
+    lower_name = block_name.lower()
+    output: list[str] = []
+    index = 0
+    replaced = False
+    while index < len(lines):
+        clean = lines[index].split("#", 1)[0].strip().lower()
+        if clean == f"%block {lower_name}":
+            output.append(f"%block {block_name}")
+            output.extend(block_lines)
+            output.append(f"%endblock {block_name}")
+            index += 1
+            while index < len(lines):
+                end_clean = lines[index].split("#", 1)[0].strip().lower()
+                index += 1
+                if end_clean == f"%endblock {lower_name}":
+                    break
+            replaced = True
+            continue
+        output.append(lines[index])
+        index += 1
+
+    if not replaced:
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"%block {block_name}")
+        output.extend(block_lines)
+        output.append(f"%endblock {block_name}")
+    return "\n".join(output).rstrip() + "\n"
+
+
+def _set_fdf_directive(text: str, key: str, value: str) -> str:
+    lines = text.splitlines()
+    output: list[str] = []
+    inserted = False
+    lower_key = key.lower()
+    for line in lines:
+        clean = line.split("#", 1)[0].strip()
+        first = clean.split(None, 1)[0].lower() if clean else ""
+        if first == lower_key:
+            if not inserted:
+                output.append(f"{key} {value}")
+                inserted = True
+            continue
+        output.append(line)
+    if not inserted:
+        output.append(f"{key} {value}")
+    return "\n".join(output).rstrip() + "\n"
+
+
+def rewrite_run_fdf_from_xv(run_fdf_path: Path, xv_path: Path) -> None:
+    lattice, atoms = parse_xv_geometry(xv_path)
+    lattice_lines = [f"{x:.12f} {y:.12f} {z:.12f}" for x, y, z in lattice]
+    atom_lines = [
+        f"{x:.12f} {y:.12f} {z:.12f} {species_index}"
+        for species_index, _atomic_number, x, y, z in atoms
+    ]
+    text = run_fdf_path.read_text(encoding="utf-8", errors="ignore")
+    text = _set_fdf_directive(text, "LatticeConstant", "1.0 Ang")
+    text = _set_fdf_directive(text, "AtomicCoordinatesFormat", "Ang")
+    text = _replace_or_append_block(text, "LatticeVectors", lattice_lines)
+    text = _replace_or_append_block(text, "AtomicCoordinatesAndAtomicSpecies", atom_lines)
+    run_fdf_path.write_text(text, encoding="utf-8")
+
+
+def effective_fdf_geometry_signature(run_fdf_path: Path) -> tuple[str, ...]:
+    """Return the geometry blocks Graph2Mat can see in RUN.fdf.
+
+    Tests use this to catch the historical failure mode where all MD frames had
+    identical effective input geometries despite different ``siesta.XV`` files.
+    """
+
+    text = run_fdf_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    capture = None
+    blocks: list[str] = []
+    for line in text:
+        clean = line.split("#", 1)[0].strip()
+        lower = clean.lower()
+        if lower in {"%block latticevectors", "%block atomiccoordinatesandatomicspecies"}:
+            capture = lower
+            blocks.append(lower)
+            continue
+        if lower in {"%endblock latticevectors", "%endblock atomiccoordinatesandatomicspecies"}:
+            capture = None
+            continue
+        if capture and clean:
+            blocks.append(" ".join(clean.split()))
+    return tuple(blocks)
+
+
+def xv_geometry_signature(xv_path: Path) -> tuple[str, ...]:
+    lattice, atoms = parse_xv_geometry(xv_path)
+    return tuple(
+        [f"L {x:.10f} {y:.10f} {z:.10f}" for x, y, z in lattice]
+        + [
+            f"A {species_index} {atomic_number} {x:.10f} {y:.10f} {z:.10f}"
+            for species_index, atomic_number, x, y, z in atoms
+        ]
+    )
+
+
+def refresh_md_step_geometries(config: dict) -> None:
+    pipeline_paths = paths(config)
+    steps_dir = pipeline_paths["dataset_dir"] / "MD_steps"
+    step_dirs = sorted(
+        (path for path in steps_dir.iterdir() if path.is_dir() and path.name.isdigit()),
+        key=lambda path: int(path.name),
+    )
+    if not step_dirs:
+        raise RuntimeError(f"No MD step directories found in {steps_dir}.")
+
+    rewritten = 0
+    xv_signatures: set[tuple[str, ...]] = set()
+    for step_dir in step_dirs:
+        run_fdf_path = step_dir / "RUN.fdf"
+        xv_path = step_dir / "siesta.XV"
+        if not run_fdf_path.exists():
+            raise RuntimeError(f"Missing per-step RUN.fdf: {run_fdf_path}")
+        if not xv_path.exists():
+            raise RuntimeError(f"Missing per-step siesta.XV geometry: {xv_path}")
+        xv_signatures.add(xv_geometry_signature(xv_path))
+        rewrite_run_fdf_from_xv(run_fdf_path, xv_path)
+        rewritten += 1
+
+    signatures = {effective_fdf_geometry_signature(step_dir / "RUN.fdf") for step_dir in step_dirs}
+    if len(xv_signatures) > 1 and len(signatures) <= 1:
+        raise RuntimeError(
+            "MD geometry validation failed: multiple MD frames still expose the same "
+            "effective RUN.fdf geometry to Graph2Mat."
+        )
+    print(f"[OK] Geometrias MD por frame escritas en RUN.fdf: {rewritten} muestras.")
+
+
+def _find_hamiltonian(sample_dir: Path) -> Path | None:
+    for name in ("siesta.TSHS", "siesta.HSX"):
+        path = sample_dir / name
+        if path.exists():
+            return path
+    candidates = sorted(
+        [
+            path
+            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
+            if path.name != "ML_prediction.HSX"
+        ]
+    )
+    return candidates[0] if candidates else None
+
+
+def _write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_split_manifests(
+    config: dict,
+    split_root: Path,
+    split_ranges: dict[str, list[Path]],
+) -> None:
+    pipeline_paths = paths(config)
+    dataset_dir = pipeline_paths["dataset_dir"]
+    run_out_path = pipeline_paths["run_out_path"]
+    for split_name, source_samples in split_ranges.items():
+        rows = []
+        for source_sample in source_samples:
+            sample_dir = split_root / split_name / source_sample.name
+            structure_path = sample_dir / "RUN.fdf"
+            hamiltonian_path = _find_hamiltonian(sample_dir)
+            rows.append(
+                {
+                    "sample_id": f"md_{source_sample.name}",
+                    "method": "md",
+                    "source_run": str(dataset_dir),
+                    "frame_index": source_sample.name,
+                    "displacement_amplitude": "",
+                    "displacement_family": "",
+                    "structure_path": str(structure_path),
+                    "hamiltonian_path": str(hamiltonian_path or ""),
+                    "run_out_path": str(run_out_path),
+                    "metadata_path": "",
+                    "status": "completed" if structure_path.exists() and hamiltonian_path else "incomplete",
+                    "sample_dir": str(sample_dir),
+                }
+            )
+        _write_manifest(split_root / f"{split_name}_manifest.csv", rows)
 
 
 def prepare_dataset_splits(config: dict) -> None:
@@ -178,16 +441,23 @@ def prepare_dataset_splits(config: dict) -> None:
     if split_root.exists():
         shutil.rmtree(split_root)
 
+    strategy = str(split_config.get("strategy", "block")).strip().lower()
     selected = _select_spread(step_dirs, requested)
-    split_ranges = _split_spread(selected, train_count, validation_count, test_count)
+    if strategy == "spread":
+        split_ranges = _split_spread(selected, train_count, validation_count, test_count)
+    elif strategy == "block":
+        split_ranges = _split_block(selected, train_count, validation_count, test_count)
+    else:
+        raise RuntimeError(f"Estrategia de split MD no soportada: {strategy!r}.")
     for split_name, samples in split_ranges.items():
         for sample_dir in samples:
             _prepare_split_sample(sample_dir, split_root / split_name / sample_dir.name)
+    write_split_manifests(config, split_root, split_ranges)
 
     print(
         "[OK] Split MD preparado: "
         f"{train_count} train, {test_count} test, {validation_count} validation "
-        f"en {split_root}"
+        f"en {split_root} (strategy={strategy})"
     )
     print(f"[INFO] MD train samples: {_sample_names(split_ranges['train'])}")
     print(f"[INFO] MD test samples: {_sample_names(split_ranges['test'])}")
@@ -204,11 +474,13 @@ def main() -> int:
 
     require_command(command(config, "graph2mat"))
     require_command(command(config, "shell"))
+    require_command(command(config, "siesta"))
 
     pipeline_paths["dataset_dir"].mkdir(parents=True, exist_ok=True)
     setup_store(config)
     write_run_fdf(config)
     run_siesta_with_venv(config)
+    refresh_md_step_geometries(config)
     prepare_dataset_splits(config)
 
     print("\n=== Pipeline completado correctamente ===")

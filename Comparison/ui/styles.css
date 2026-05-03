@@ -188,6 +188,10 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.grid.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -559,6 +563,7 @@ h3 {
 
   .grid.two,
   .grid.three,
+  .grid.four,
   .fc-layout {
     grid-template-columns: 1fr;
   }
