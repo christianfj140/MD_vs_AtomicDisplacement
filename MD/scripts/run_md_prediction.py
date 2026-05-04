@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import shutil
 import sys
 
@@ -44,14 +45,17 @@ def main() -> int:
     model = LitMACEMatrixModel.load_from_checkpoint(
         str(pipeline_paths["training_dir"] / ckpt_path)
     )
-    datamodule = MatrixDataModule(
-        out_matrix=training_data["out_matrix"],
-        symmetric_matrix=bool(training_data["symmetric_matrix"]),
-        sub_point_matrix=bool(training_data.get("sub_point_matrix", False)),
-        basis_files=training_data["basis_files"],
-        predict_structs=str(prediction["predict_structs"]),
-        store_in_memory=bool(training_data.get("store_in_memory", True)),
-    )
+    datamodule_kwargs = {
+        "out_matrix": training_data["out_matrix"],
+        "symmetric_matrix": bool(training_data["symmetric_matrix"]),
+        "sub_point_matrix": bool(training_data.get("sub_point_matrix", False)),
+        "basis_files": training_data["basis_files"],
+        "predict_structs": str(prediction["predict_structs"]),
+        "store_in_memory": bool(training_data.get("store_in_memory", True)),
+    }
+    if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["n_matrix_components"] = int(training_data.get("n_matrix_components", 2))
+    datamodule = MatrixDataModule(**datamodule_kwargs)
 
     callbacks = []
     if prediction["callbacks"].get("matrix_writer", True):

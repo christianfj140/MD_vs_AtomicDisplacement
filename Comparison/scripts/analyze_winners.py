@@ -27,6 +27,11 @@ METADATA_COLUMNS = {
     "train_method",
     "test_set",
     "dataset_size",
+    "train_dataset_size",
+    "md_dataset_size",
+    "atom_dataset_size",
+    "md_dataset_label",
+    "atom_dataset_label",
     "seed",
     "epoch",
     "checkpoint",
@@ -41,6 +46,31 @@ METADATA_COLUMNS = {
     "hamiltonian_symmetrized_for_spectrum",
     "fermi_level_source",
     "status",
+}
+ERROR_METRICS = {
+    "global_mae_eV",
+    "global_rmse_eV",
+    "global_max_abs_error_eV",
+    "occupied_mae_eV",
+    "occupied_rmse_eV",
+    "fermi_window_mae_eV",
+    "fermi_window_rmse_eV",
+    "gap_abs_error_eV",
+    "mae_pred_eV",
+    "mae_ref_eV",
+    "mae_union_eV",
+    "rmse_pred_eV",
+    "rmse_ref_eV",
+    "rmse_union_eV",
+    "max_abs_error_union_eV",
+    "relative_frobenius_ref",
+    "relative_frobenius_union",
+    "relative_l1_union",
+    "weighted_false_nonzeros_eV",
+    "weighted_false_zeros_eV",
+    "dos_wasserstein_eV",
+    "dos_l1",
+    "dos_l2",
 }
 
 
@@ -80,11 +110,8 @@ def finite(value: Any) -> bool:
 def metric_columns(rows: list[dict[str, Any]]) -> list[str]:
     columns: set[str] = set()
     for row in rows:
-        for key, value in row.items():
-            if key in METADATA_COLUMNS:
-                continue
-            if key.endswith("_seconds"):
-                continue
+        for key in ERROR_METRICS:
+            value = row.get(key)
             if finite(value):
                 columns.add(key)
     return sorted(columns)
@@ -95,11 +122,22 @@ def mean(values: list[float]) -> float | None:
     return sum(clean) / len(clean) if clean else None
 
 
-def row_dataset_size(row: dict[str, Any]) -> int | str:
-    value = row.get("dataset_size")
+def numeric_id(value: Any) -> int | str:
     if finite(value):
         return int(float(value))
     return "unknown"
+
+
+def row_dataset_size(row: dict[str, Any]) -> int | str:
+    return numeric_id(row.get("train_dataset_size", row.get("dataset_size")))
+
+
+def row_md_dataset_size(row: dict[str, Any]) -> int | str:
+    return numeric_id(row.get("md_dataset_size", row.get("dataset_size")))
+
+
+def row_atom_dataset_size(row: dict[str, Any]) -> int | str:
+    return numeric_id(row.get("atom_dataset_size", row.get("dataset_size")))
 
 
 def row_seed(row: dict[str, Any]) -> int | str:
@@ -124,16 +162,20 @@ def group_metric_means(
         train_method = str(row.get("train_method") or "")
         test_set = str(row.get("test_set") or "")
         dataset_size = row_dataset_size(row)
-        seed = row_seed(row)
+        seed = "pooled"
         for metric in metrics:
             value = row.get(metric)
             if finite(value):
-                values[(dataset_size, seed, test_set, metric, train_method)].append(float(value))
+                md_dataset_size = row_md_dataset_size(row)
+                atom_dataset_size = row_atom_dataset_size(row)
+                values[(md_dataset_size, atom_dataset_size, seed, test_set, metric, train_method)].append(float(value))
         for timing_col in timing_columns:
             value = row.get(timing_col)
             if finite(value):
                 for metric in metrics:
-                    timings[(dataset_size, seed, test_set, metric, train_method)][timing_col].append(float(value))
+                    md_dataset_size = row_md_dataset_size(row)
+                    atom_dataset_size = row_atom_dataset_size(row)
+                    timings[(md_dataset_size, atom_dataset_size, seed, test_set, metric, train_method)][timing_col].append(float(value))
 
     means = {key: mean(vals) for key, vals in values.items()}
     timing_means = {
@@ -166,22 +208,32 @@ def compare_methods(
     lower_is_better: bool,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    def comparable_sort_key(key: tuple[Any, ...]) -> tuple[str, str, str, str]:
+        md_dataset_size, atom_dataset_size, seed, test_set, metric = key
+        md_sort = f"{int(md_dataset_size):012d}" if isinstance(md_dataset_size, int) else str(md_dataset_size)
+        atom_sort = f"{int(atom_dataset_size):012d}" if isinstance(atom_dataset_size, int) else str(atom_dataset_size)
+        seed_sort = f"{int(seed):012d}" if isinstance(seed, int) else str(seed)
+        return md_sort, atom_sort, seed_sort, str(test_set), str(metric)
+
     comparable = sorted(
         {
             key[:-1]
             for key in means
             if key[-1] in {METHOD_MD, METHOD_ATOM}
-        }
+        },
+        key=comparable_sort_key,
     )
-    for dataset_size, seed, test_set, metric in comparable:
-        md_key = (dataset_size, seed, test_set, metric, METHOD_MD)
-        atom_key = (dataset_size, seed, test_set, metric, METHOD_ATOM)
+    for md_dataset_size, atom_dataset_size, seed, test_set, metric in comparable:
+        md_key = (md_dataset_size, atom_dataset_size, seed, test_set, metric, METHOD_MD)
+        atom_key = (md_dataset_size, atom_dataset_size, seed, test_set, metric, METHOD_ATOM)
         if md_key not in means or atom_key not in means:
             continue
         md_mean = means[md_key]
         atom_mean = means[atom_key]
         row = {
-            "dataset_size": dataset_size,
+            "dataset_size": f"md_{md_dataset_size}__atom_{atom_dataset_size}",
+            "md_dataset_size": md_dataset_size,
+            "atom_dataset_size": atom_dataset_size,
             "seed": seed,
             "test_set": test_set,
             "metric": metric,
@@ -208,18 +260,20 @@ def compare_methods(
 
 
 def summarize_stability(pair_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[Any, str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[Any, Any, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in pair_rows:
-        grouped[(row["dataset_size"], row["test_set"], row["metric"])].append(row)
+        grouped[(row["md_dataset_size"], row["atom_dataset_size"], row["test_set"], row["metric"])].append(row)
 
     summary = []
-    for (dataset_size, test_set, metric), rows in sorted(grouped.items()):
+    for (md_dataset_size, atom_dataset_size, test_set, metric), rows in sorted(grouped.items()):
         winners = [str(row["winner"]) for row in rows if row["winner"] != "tie"]
         unique_winners = sorted(set(winners))
         stable = len(unique_winners) == 1 and len(rows) > 0
         summary.append(
             {
-                "dataset_size": dataset_size,
+                "dataset_size": f"md_{md_dataset_size}__atom_{atom_dataset_size}",
+                "md_dataset_size": md_dataset_size,
+                "atom_dataset_size": atom_dataset_size,
                 "test_set": test_set,
                 "metric": metric,
                 "seeds_compared": len({row["seed"] for row in rows}),
@@ -240,28 +294,52 @@ def summarize_stability(pair_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     return summary
 
 
-def first_atom_win(summary_rows: list[dict[str, Any]], metric: str, *, allowed_test_sets: set[str]) -> dict[str, Any] | None:
+def first_method_win(
+    summary_rows: list[dict[str, Any]],
+    metric: str,
+    method: str,
+    *,
+    allowed_test_sets: set[str],
+) -> dict[str, Any] | None:
     candidates = [
         row
         for row in summary_rows
         if row.get("metric") == metric
         and row.get("test_set") in allowed_test_sets
-        and row.get("stable_winner") == METHOD_ATOM
+        and row.get("stable_winner") == method
     ]
-    candidates.sort(key=lambda row: (float(row["dataset_size"]) if finite(row["dataset_size"]) else math.inf, str(row["test_set"])))
+    candidates.sort(
+        key=lambda row: (
+            float(row["md_dataset_size"]) if finite(row.get("md_dataset_size")) else math.inf,
+            float(row["atom_dataset_size"]) if finite(row.get("atom_dataset_size")) else math.inf,
+            str(row["test_set"]),
+        )
+    )
     return candidates[0] if candidates else None
 
 
-def first_compute_atom_win(pair_rows: list[dict[str, Any]], metric: str, *, allowed_test_sets: set[str]) -> dict[str, Any] | None:
+def first_compute_method_win(
+    pair_rows: list[dict[str, Any]],
+    metric: str,
+    method: str,
+    *,
+    allowed_test_sets: set[str],
+) -> dict[str, Any] | None:
     candidates = [
         row
         for row in pair_rows
         if row.get("metric") == metric
         and row.get("test_set") in allowed_test_sets
-        and row.get("winner") == METHOD_ATOM
+        and row.get("winner") == method
         and finite(row.get("compute_budget_seconds"))
     ]
-    candidates.sort(key=lambda row: (float(row["compute_budget_seconds"]), float(row["dataset_size"]) if finite(row["dataset_size"]) else math.inf))
+    candidates.sort(
+        key=lambda row: (
+            float(row["compute_budget_seconds"]),
+            float(row["md_dataset_size"]) if finite(row.get("md_dataset_size")) else math.inf,
+            float(row["atom_dataset_size"]) if finite(row.get("atom_dataset_size")) else math.inf,
+        )
+    )
     return candidates[0] if candidates else None
 
 
@@ -288,14 +366,26 @@ def build_recommendation(
     }
     missing_cells = sorted(f"{method} on {test_set}" for method, test_set in required_cells - available_cells)
     allowed_test_sets = {"test_md", "test_mixed"}
-    first_size = first_atom_win(summary_rows, primary_metric, allowed_test_sets=allowed_test_sets)
-    first_compute = first_compute_atom_win(
+    first_atom_size = first_method_win(summary_rows, primary_metric, METHOD_ATOM, allowed_test_sets=allowed_test_sets)
+    first_md_size = first_method_win(summary_rows, primary_metric, METHOD_MD, allowed_test_sets=allowed_test_sets)
+    first_atom_compute = first_compute_method_win(
         [
             row
             for row in pair_rows
             if row.get("metric") == primary_metric
         ],
         primary_metric,
+        METHOD_ATOM,
+        allowed_test_sets=allowed_test_sets,
+    )
+    first_md_compute = first_compute_method_win(
+        [
+            row
+            for row in pair_rows
+            if row.get("metric") == primary_metric
+        ],
+        primary_metric,
+        METHOD_MD,
         allowed_test_sets=allowed_test_sets,
     )
     atom_only_wins = [
@@ -306,13 +396,22 @@ def build_recommendation(
         and row.get("stable_winner") == METHOD_ATOM
     ]
     status = "no_conservative_winner"
-    reason = "AtomDisplacement has not beaten MD stably on MD or mixed test distributions."
-    if first_size:
+    reason = "No method wins stably on MD or mixed test distributions for the primary metric."
+    if first_md_size and not first_atom_size:
+        status = "md_conservative_win"
+        reason = (
+            "MD beats AtomDisplacement on the same frozen test set across seeds "
+            "for MD or mixed test distributions."
+        )
+    elif first_atom_size and not first_md_size:
         status = "atom_displacement_conservative_win"
         reason = (
             "AtomDisplacement beats MD on the same frozen test set across seeds "
             "and not only on the AtomDisplacement distribution."
         )
+    elif first_md_size and first_atom_size:
+        status = "mixed_conservative_result"
+        reason = "Both methods win stably on at least one allowed test distribution."
     elif atom_only_wins:
         reason = (
             "AtomDisplacement only wins on test_atomdisp; this is distribution-specific "
@@ -329,11 +428,13 @@ def build_recommendation(
         "methods_seen": methods,
         "test_sets_seen": test_sets,
         "missing_required_cells": missing_cells,
-        "first_dataset_size_where_atom_displacement_beats_md": first_size,
-        "first_compute_budget_where_atom_displacement_beats_md": first_compute,
+        "first_dataset_size_where_md_beats_atom_displacement": first_md_size,
+        "first_dataset_size_where_atom_displacement_beats_md": first_atom_size,
+        "first_compute_budget_where_md_beats_atom_displacement": first_md_compute,
+        "first_compute_budget_where_atom_displacement_beats_md": first_atom_compute,
         "conservative_rule": (
-            "AtomDisplacement wins only if it beats MD on the same frozen test set, "
-            "across seeds, and on test_md or test_mixed rather than only test_atomdisp."
+            "A method wins only if it beats the other method on the same frozen test set, "
+            "across seeds, and on test_md or test_mixed rather than only its own distribution."
         ),
     }
 
@@ -342,7 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metrics-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--primary-metric", default="global_rmse_eV")
+    parser.add_argument("--primary-metric", default="fermi_window_rmse_eV")
     parser.add_argument("--higher-is-better", action="store_true")
     return parser
 

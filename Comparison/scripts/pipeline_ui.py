@@ -423,6 +423,7 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
 
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
+DEFAULT_PRIMARY_METRIC = "fermi_window_rmse_eV"
 SPLIT_MANIFEST_FIELDS = [
     "sample_id",
     "method",
@@ -1604,7 +1605,7 @@ class ExperimentRunner:
         random_seed: int | None = None,
         split_mode: str = "block",
         test_sets: list[str] | None = None,
-        primary_metric: str = "global_rmse_eV",
+        primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
     ) -> dict[str, Any]:
         with self._lock:
@@ -1814,7 +1815,7 @@ class ExperimentRunner:
         random_seed: int | None = None,
         split_mode: str = "block",
         test_sets: list[str] | None = None,
-        primary_metric: str = "global_rmse_eV",
+        primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
     ) -> None:
         original_configs = {
@@ -2749,6 +2750,24 @@ class ExperimentRunner:
             return str(configured)
         raise RuntimeError(f"No basis .ion.xml files found for {result.get('pipeline')} result.")
 
+    def _python_for_result(self, result: dict[str, Any], config: dict[str, Any]) -> str:
+        pipeline = str(result.get("pipeline"))
+        spec = PIPELINES.get(pipeline)
+        venv_activate = config.get("paths", {}).get("venv_activate")
+        if spec is not None and venv_activate:
+            python = resolve_pipeline_path(spec, str(venv_activate)).parent / "python"
+            if python.exists():
+                return str(python)
+        return sys.executable
+
+    def _n_matrix_components_for_result(self, config: dict[str, Any]) -> int | None:
+        for section in ("prediction", "testing", "training"):
+            data = config.get(section, {}).get("data", {})
+            value = data.get("n_matrix_components")
+            if value not in (None, ""):
+                return int(value)
+        return None
+
     def _prepare_cross_result_dir(
         self,
         cross_result_dir: Path,
@@ -2812,13 +2831,6 @@ class ExperimentRunner:
             self._append("[WARN] No hay runs exitosos de ambos metodos; se omite cross-evaluation.\n")
             return summary
 
-        md_by_size: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        atom_by_size: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for run in md_runs:
-            md_by_size[int(run.get("dataset_size", 0))].append(run)
-        for run in atom_runs:
-            atom_by_size[int(run.get("dataset_size", 0))].append(run)
-
         common_root = experiment_root(run_id) / "common_tests"
         cross_root = experiment_root(run_id) / "cross_evaluations"
         prediction_root = experiment_root(run_id) / "cross_predictions"
@@ -2828,9 +2840,12 @@ class ExperimentRunner:
         cross_root.mkdir(parents=True, exist_ok=True)
         prediction_root.mkdir(parents=True, exist_ok=True)
 
-        for dataset_size in sorted(set(md_by_size) & set(atom_by_size)):
-            md_result = md_by_size[dataset_size][0]
-            for atom_result in atom_by_size[dataset_size]:
+        md_runs = sorted(md_runs, key=lambda run: (int(run.get("dataset_size", 0)), str(run.get("dataset_label", ""))))
+        atom_runs = sorted(atom_runs, key=lambda run: (int(run.get("dataset_size", 0)), str(run.get("dataset_label", ""))))
+        for md_result in md_runs:
+            md_dataset_size = int(md_result.get("dataset_size", 0))
+            for atom_result in atom_runs:
+                atom_dataset_size = int(atom_result.get("dataset_size", 0))
                 pair_id = self._common_test_pair_id(md_result, atom_result)
                 pair_common_dir = common_root / pair_id
                 build_command = [
@@ -2864,6 +2879,8 @@ class ExperimentRunner:
                         continue
                     basis_files = self._basis_files_glob_for_result(train_result)
                     train_config = load_config(Path(str(train_result["result_dir"])) / "pipeline_config.yaml")
+                    train_python = self._python_for_result(train_result, train_config)
+                    n_matrix_components = self._n_matrix_components_for_result(train_config)
                     for test_set in test_sets:
                         test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                         if not test_manifest.exists():
@@ -2874,7 +2891,7 @@ class ExperimentRunner:
                         cross_name = f"{pair_id}__{train_method}__on__{test_set}"
                         prediction_dir = prediction_root / cross_name
                         predict_command = [
-                            sys.executable,
+                            train_python,
                             str(COMPARISON_ROOT / "scripts" / "predict_model_on_dataset.py"),
                             "--checkpoint",
                             str(checkpoint),
@@ -2889,6 +2906,9 @@ class ExperimentRunner:
                             "--output-dir",
                             str(prediction_dir),
                         ]
+                        if n_matrix_components is not None:
+                            predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                        predict_command.append("--patch-graph2mat-basis-loading")
                         predict_start = time.time()
                         predict_result = self._run_local_script(
                             predict_command,
@@ -2916,7 +2936,12 @@ class ExperimentRunner:
                             "pair_id": pair_id,
                             "train_method": train_method,
                             "test_set": test_set,
-                            "dataset_size": dataset_size,
+                            "dataset_size": int(train_result.get("dataset_size", 0)),
+                            "train_dataset_size": int(train_result.get("dataset_size", 0)),
+                            "md_dataset_size": md_dataset_size,
+                            "atom_dataset_size": atom_dataset_size,
+                            "md_dataset_label": str(md_result.get("dataset_label", f"dataset_{md_dataset_size}")),
+                            "atom_dataset_label": str(atom_result.get("dataset_label", f"dataset_{atom_dataset_size}")),
                             "seed": train_result.get("seed"),
                             "epoch": None,
                             "model_checkpoint": str(checkpoint),
@@ -2961,7 +2986,7 @@ class ExperimentRunner:
             "--output-dir",
             str(summary_root),
             "--primary-metric",
-            str((manifest.get("selected_metrics") or {}).get("primary_metric", "global_rmse_eV")),
+            str((manifest.get("selected_metrics") or {}).get("primary_metric", DEFAULT_PRIMARY_METRIC)),
         ]
         winner_result = self._run_local_script(winner_command, label="Analizando winners")
         if winner_result.returncode != 0:
@@ -3155,7 +3180,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 combination_mode = parse_combination_mode(payload.get("combination_mode"))
                 split_mode = parse_split_mode(payload.get("split_mode"))
                 test_sets = parse_test_sets(payload.get("test_sets"))
-                primary_metric = str(payload.get("primary_metric") or "global_rmse_eV").strip()
+                primary_metric = str(payload.get("primary_metric") or DEFAULT_PRIMARY_METRIC).strip()
                 compute_budget_mode = parse_compute_budget_mode(payload.get("compute_budget_mode"))
                 raw_atom_sizes = payload.get("atom_sizes")
                 atom_config = load_config(PIPELINES["atom_displacement"].config_path)

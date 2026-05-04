@@ -104,6 +104,19 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
     trainer.predict(model, datamodule=datamodule, ckpt_path=str(args.checkpoint))
 
 
+def checkpoint_training_dir(checkpoint: Path) -> Path:
+    for parent in checkpoint.parents:
+        if parent.name == "lightning_logs":
+            return parent.parent
+    return checkpoint.parent
+
+
+def relative_pattern(pattern: str, base: Path) -> str:
+    if os.path.isabs(pattern):
+        return os.path.relpath(pattern, base).replace("\\", "/")
+    return pattern
+
+
 def collect_predictions(rows: list[dict[str, Any]], workspace: Path, output_dir: Path) -> list[dict[str, Any]]:
     prediction_rows = []
     prediction_root = output_dir / "predicted_hamiltonians"
@@ -158,13 +171,18 @@ def main() -> int:
     rows = read_rows(args.test_manifest)
     start = time.time()
     copied_rows = copy_sample_inputs(rows, workspace)
-    predict_glob = (workspace / "predict_structures" / "*" / "RUN.fdf").as_posix()
+    run_cwd = checkpoint_training_dir(args.checkpoint)
+    args.basis_files = relative_pattern(str(args.basis_files), run_cwd)
+    predict_glob = os.path.relpath(
+        workspace / "predict_structures" / "*" / "RUN.fdf",
+        run_cwd,
+    ).replace("\\", "/")
     prediction_status = "dry_run"
     error = None
     if not args.dry_run:
         cwd = Path.cwd()
         try:
-            os.chdir(args.output_dir)
+            os.chdir(run_cwd)
             run_prediction(args, predict_glob)
             prediction_status = "completed"
         except Exception as exc:

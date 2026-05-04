@@ -756,11 +756,22 @@ function renderHeatmap(id, runs) {
 
 function latestCrossExperiment(payload) {
   const experiments = payload?.cross_experiments || [];
-  return experiments.length ? experiments[experiments.length - 1] : null;
+  if (!experiments.length) return null;
+  const latest = experiments[experiments.length - 1];
+  return {
+    ...latest,
+    experiment_id: experiments.map((experiment) => experiment.experiment_id).join(" + "),
+    metrics: experiments.flatMap((experiment) => experiment.metrics || []),
+    source_experiments: experiments.map((experiment) => ({
+      experiment_id: experiment.experiment_id,
+      rows: (experiment.metrics || []).length,
+      outputs: experiment.outputs,
+    })),
+  };
 }
 
 function primaryCrossMetric(experiment) {
-  return experiment?.recommendation?.primary_metric || experiment?.manifest?.selected_metrics?.primary_metric || "global_rmse_eV";
+  return experiment?.recommendation?.primary_metric || experiment?.manifest?.selected_metrics?.primary_metric || "fermi_window_rmse_eV";
 }
 
 function groupedCrossMeans(rows, metric) {
@@ -768,9 +779,20 @@ function groupedCrossMeans(rows, metric) {
   for (const row of rows || []) {
     const value = row[metric];
     if (typeof value !== "number" || !Number.isFinite(value)) continue;
-    const key = [row.dataset_size, row.train_method, row.test_set].join("||");
+    const mdDatasetSize = Number(row.md_dataset_size ?? row.dataset_size);
+    const atomDatasetSize = Number(row.atom_dataset_size ?? row.dataset_size);
+    const trainDatasetSize = Number(row.train_dataset_size ?? row.dataset_size);
+    const key = [mdDatasetSize, atomDatasetSize, trainDatasetSize, row.train_method, row.test_set].join("||");
     if (!groups.has(key)) {
-      groups.set(key, { dataset_size: row.dataset_size, train_method: row.train_method, test_set: row.test_set, values: [], times: [] });
+      groups.set(key, {
+        dataset_size: trainDatasetSize,
+        md_dataset_size: mdDatasetSize,
+        atom_dataset_size: atomDatasetSize,
+        train_method: row.train_method,
+        test_set: row.test_set,
+        values: [],
+        times: [],
+      });
     }
     groups.get(key).values.push(value);
     if (typeof row.total_time_seconds === "number" && Number.isFinite(row.total_time_seconds)) {
@@ -779,6 +801,8 @@ function groupedCrossMeans(rows, metric) {
   }
   return Array.from(groups.values()).map((group) => ({
     dataset_size: Number(group.dataset_size),
+    md_dataset_size: Number(group.md_dataset_size),
+    atom_dataset_size: Number(group.atom_dataset_size),
     train_method: group.train_method,
     test_set: group.test_set,
     mean: group.values.reduce((sum, value) => sum + value, 0) / group.values.length,
@@ -869,32 +893,96 @@ function renderCrossCompute(id, experiment) {
 function renderWinnerMap(id, experiment) {
   const metric = primaryCrossMetric(experiment);
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
-  const keys = Array.from(new Set(means.map((row) => `${row.dataset_size}||${row.test_set}`))).sort();
-  const datasetLabels = keys.map((key) => key.split("||")[0]);
-  const testSetLabels = keys.map((key) => key.split("||")[1]);
-  const z = keys.map((key) => {
-    const [datasetSize, testSet] = key.split("||");
-    const md = means.find((row) => String(row.dataset_size) === datasetSize && row.test_set === testSet && row.train_method === "md");
-    const atom = means.find((row) => String(row.dataset_size) === datasetSize && row.test_set === testSet && row.train_method === "atom_displacement");
+  const mdSizes = Array.from(new Set(means.map((row) => row.md_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
+  const atomSizes = Array.from(new Set(means.map((row) => row.atom_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
+  const testSets = ["test_md", "test_atomdisp", "test_mixed"];
+  const rows = testSets.flatMap((testSet) => atomSizes.map((atomSize) => ({ testSet, atomSize })));
+  const labels = new Map([
+    [-1, "MD"],
+    [0, "Tie"],
+    [1, "AtomDisplacement"],
+  ]);
+  const shortLabels = new Map([
+    [-1, "MD"],
+    [0, "="],
+    [1, "AD"],
+  ]);
+  const z = rows.map(({ testSet, atomSize }) => mdSizes.map((mdSize) => {
+    const md = means.find((row) =>
+      row.md_dataset_size === mdSize &&
+      row.atom_dataset_size === atomSize &&
+      row.test_set === testSet &&
+      row.train_method === "md"
+    );
+    const atom = means.find((row) =>
+      row.md_dataset_size === mdSize &&
+      row.atom_dataset_size === atomSize &&
+      row.test_set === testSet &&
+      row.train_method === "atom_displacement"
+    );
     if (!md || !atom) return null;
     if (Math.abs(md.mean - atom.mean) < 1e-12) return 0;
     return atom.mean < md.mean ? 1 : -1;
+  }));
+  const yLabels = rows.map(({ testSet, atomSize }) => `${testSet} · AD ${atomSize}`);
+  const text = z.map((row) => row.map((value) => (value == null ? "" : shortLabels.get(value))));
+  const customdata = rows.map(({ testSet, atomSize }, rowIndex) => mdSizes.map((mdSize, colIndex) => {
+    const md = means.find((row) =>
+      row.md_dataset_size === mdSize &&
+      row.atom_dataset_size === atomSize &&
+      row.test_set === testSet &&
+      row.train_method === "md"
+    );
+    const atom = means.find((row) =>
+      row.md_dataset_size === mdSize &&
+      row.atom_dataset_size === atomSize &&
+      row.test_set === testSet &&
+      row.train_method === "atom_displacement"
+    );
+    return {
+      winner: z[rowIndex][colIndex] == null ? "No data" : labels.get(z[rowIndex][colIndex]),
+      testSet,
+      mdSize,
+      atomSize,
+      md: md?.mean,
+      atom: atom?.mean,
+    };
+  }));
+  const annotations = [];
+  rows.forEach((row, rowIndex) => {
+    mdSizes.forEach((mdSize, colIndex) => {
+      const label = text[rowIndex][colIndex];
+      if (!label) return;
+      annotations.push({
+        x: mdSize,
+        y: yLabels[rowIndex],
+        text: label,
+        showarrow: false,
+        font: { size: 11, color: "#17202a" },
+      });
+    });
   });
   const layout = plotLayout(`Winner map (${metric})`, "Winner", {
-    xaxis: { title: "Dataset size", tickvals: keys.map((_, index) => index), ticktext: datasetLabels },
-    yaxis: { title: "", tickvals: [0], ticktext: ["winner"] },
-    annotations: keys.map((key, index) => ({
-      x: index,
-      y: 0,
-      text: testSetLabels[index],
-      showarrow: false,
-      font: { size: 11, color: "#17202a" },
-    })),
+    xaxis: { title: "MD train size", tickmode: "array", tickvals: mdSizes, ticktext: mdSizes.map(String) },
+    yaxis: { title: "Frozen test set / AtomDisplacement train size", automargin: true },
+    annotations,
   });
-  if (!keys.length) layout.annotations = [emptyPlotAnnotation("No hay pares MD/AtomDisplacement en el mismo test set.")];
+  if (!mdSizes.length || !atomSizes.length) layout.annotations = [emptyPlotAnnotation("No hay pares MD/AtomDisplacement en el mismo test set.")];
   Plotly.react(
     id,
-    [{ type: "heatmap", z: [z], x: keys.map((_, index) => index), y: ["winner"], colorscale: [[0, "#4b6f8f"], [0.5, "#d7dee5"], [1, "#2a7f62"]], showscale: false }],
+    [{
+      type: "heatmap",
+      z,
+      x: mdSizes,
+      y: yLabels,
+      customdata,
+      zmin: -1,
+      zmax: 1,
+      colorscale: [[0, "#4b6f8f"], [0.5, "#d7dee5"], [1, "#2a7f62"]],
+      colorbar: { tickvals: [-1, 0, 1], ticktext: ["MD", "Tie", "AtomDisp"] },
+      hovertemplate:
+        "MD size %{customdata.mdSize}<br>AtomDisp size %{customdata.atomSize}<br>%{customdata.testSet}<br>winner: %{customdata.winner}<br>MD: %{customdata.md:.4g}<br>AtomDisp: %{customdata.atom:.4g}<extra></extra>",
+    }],
     layout,
     { responsive: true, displaylogo: false },
   );
@@ -915,7 +1003,11 @@ function renderPlots(payload) {
   const runs = payload?.runs || [];
   const crossExperiment = latestCrossExperiment(payload);
   const recommendation = crossExperiment?.recommendation;
-  const crossText = recommendation?.status ? ` | cross: ${recommendation.status} - ${recommendation.reason || ""}` : "";
+  const crossRows = crossExperiment?.metrics?.length || 0;
+  const crossSources = crossExperiment?.source_experiments?.length || 0;
+  const crossText = recommendation?.status
+    ? ` | cross: ${crossRows} filas en ${crossSources} experimentos | ${recommendation.status} - ${recommendation.reason || ""}`
+    : "";
   status.textContent = runs.length
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
     : "No hay metricas archivadas";
