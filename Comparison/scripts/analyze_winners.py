@@ -37,6 +37,11 @@ METADATA_COLUMNS = {
     "atomdisp_siesta_reference_count",
     "budget_ratio",
     "budget_mismatch_warning",
+    "siesta_settings_hash",
+    "siesta_settings_warning",
+    "model_config_hash",
+    "model_config_warning",
+    "strict_comparison_mode",
     "seed",
     "epoch",
     "checkpoint",
@@ -457,6 +462,18 @@ def build_recommendation(
         for row in rows
     }
     missing_cells = sorted(f"{method} on {test_set}" for method, test_set in required_cells - available_cells)
+    severe_warnings = sorted(
+        {
+            str(value)
+            for row in rows
+            for value in (
+                row.get("siesta_settings_warning"),
+                row.get("model_config_warning"),
+                row.get("budget_mismatch_warning"),
+            )
+            if value not in (None, "", False)
+        }
+    )
     allowed_test_sets = {"test_md", "test_mixed"}
     primary_summary = [
         row
@@ -531,6 +548,9 @@ def build_recommendation(
     if missing_cells:
         status = "insufficient_cross_evaluation"
         reason = "The cross-evaluation grid is incomplete; no winner should be declared."
+    elif severe_warnings:
+        status = "inconclusive"
+        reason = "Validation warnings invalidate a robust winner: " + " | ".join(severe_warnings)
     elif single_seed_only and available_primary_wins:
         if available_md_wins and not available_atom_wins:
             status = "md_available_single_seed_win"
@@ -557,6 +577,7 @@ def build_recommendation(
         "methods_seen": methods,
         "test_sets_seen": test_sets,
         "missing_required_cells": missing_cells,
+        "severe_warnings": severe_warnings,
         "first_dataset_size_where_md_beats_atom_displacement": first_md_size,
         "first_dataset_size_where_atom_displacement_beats_md": first_atom_size,
         "first_compute_budget_where_md_beats_atom_displacement": first_md_compute,

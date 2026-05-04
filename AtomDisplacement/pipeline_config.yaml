@@ -155,6 +155,7 @@ training:
     out_matrix: hamiltonian
     symmetric_matrix: true
     sub_point_matrix: false
+    n_matrix_components: 2
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     runs_json: runs.json
     batch_size: 10

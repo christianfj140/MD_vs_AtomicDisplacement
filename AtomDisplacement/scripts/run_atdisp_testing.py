@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import os
 import inspect
+import csv
+from pathlib import Path
 
 import pytorch_lightning as pl
 from graph2mat.core.data.processing import MatrixDataProcessor
 from graph2mat.tools.lightning import MatrixDataModule, PlotMatrixError, SamplewiseMetricsLogger
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
-from atom_displacement_utils import PIPELINE_CONFIG, TRAINING_DIR, completed_sample_dirs, resolve_ckpt_rel_path
+from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, completed_sample_dirs, resolve_ckpt_rel_path
+
+
+SPLITS_DIR = DATASET_DIR / "splits"
 
 
 def patch_graph2mat_run_loading() -> None:
@@ -32,25 +37,65 @@ def patch_graph2mat_run_loading() -> None:
     MatrixDataProcessor.get_config_kwargs = patched
 
 
+def relpath_from_training(path: Path) -> str:
+    return os.path.relpath(path, TRAINING_DIR).replace("\\", "/")
+
+
+def manifest_structures(path: Path) -> list[Path]:
+    runs: list[Path] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            status = str(row.get("status") or "").lower()
+            valid = str(row.get("valid") or "").lower()
+            if status and status not in {"valid", "completed"}:
+                continue
+            if valid and valid not in {"true", "1", "yes"}:
+                continue
+            structure = row.get("structure_path")
+            if structure and Path(structure).exists():
+                runs.append(Path(structure))
+    return runs
+
+
+def runs_pattern_from_structures(structures: list[Path]) -> str:
+    if len(structures) == 1:
+        return relpath_from_training(structures[0])
+    parents = {path.parent.parent for path in structures if path.name == PIPELINE_CONFIG["paths"]["run_fdf_name"]}
+    if len(parents) == 1:
+        return relpath_from_training(next(iter(parents)) / "*" / PIPELINE_CONFIG["paths"]["run_fdf_name"])
+    raise RuntimeError("El manifest de test contiene estructuras en carpetas no agrupables por un glob seguro.")
+
+
+def strict_test_runs() -> str:
+    configured_test_runs = PIPELINE_CONFIG["testing"].get("test_runs")
+    if configured_test_runs:
+        return str(configured_test_runs)
+    for name in ("test_valid_manifest.csv", "test_manifest.csv"):
+        manifest = SPLITS_DIR / name
+        if manifest.exists():
+            runs = manifest_structures(manifest)
+            if not runs:
+                raise RuntimeError(f"El manifest de test no contiene muestras validas: {manifest}")
+            return runs_pattern_from_structures(runs)
+    if bool(PIPELINE_CONFIG.get("testing", {}).get("allow_sample_index_debug", False)):
+        sample_dirs = completed_sample_dirs()
+        if not sample_dirs:
+            raise RuntimeError("No hay muestras completadas para testear. Ejecuta primero run_single_points.py.")
+        sample_index = int(PIPELINE_CONFIG["testing"]["sample_index"])
+        return relpath_from_training(sample_dirs[sample_index] / PIPELINE_CONFIG["paths"]["run_fdf_name"])
+    raise RuntimeError(
+        "AtomDisplacement strict testing requiere testing.test_runs o "
+        "dataset/splits/test_manifest.csv. No se usara sample_index salvo con "
+        "testing.allow_sample_index_debug=true."
+    )
+
+
 def main() -> int:
     print("=== AtomDisplacement (test) ===")
     patch_graph2mat_run_loading()
 
     ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, "")
-    configured_test_runs = PIPELINE_CONFIG["testing"].get("test_runs")
-    if configured_test_runs:
-        test_run = str(configured_test_runs)
-    else:
-        sample_dirs = completed_sample_dirs()
-        if not sample_dirs:
-            raise RuntimeError(
-                "No hay muestras completadas para testear. Ejecuta primero run_single_points.py."
-            )
-        sample_index = int(PIPELINE_CONFIG["testing"]["sample_index"])
-        test_run = os.path.relpath(
-            sample_dirs[sample_index] / PIPELINE_CONFIG["paths"]["run_fdf_name"],
-            TRAINING_DIR,
-        ).replace("\\", "/")
+    test_run = strict_test_runs()
     os.chdir(TRAINING_DIR)
 
     testing = PIPELINE_CONFIG["testing"]

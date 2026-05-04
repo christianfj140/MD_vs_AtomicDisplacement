@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import csv
 from pathlib import Path
 
 from atom_displacement_utils import (
     PIPELINE_CONFIG,
     PIPELINE_PATHS,
+    DATASET_DIR,
     TRAINING_DIR,
     completed_sample_dirs,
     ensure_dir,
@@ -21,6 +23,7 @@ from pipeline_config_utils import command, render_training_config
 
 CONFIG_PATH = PIPELINE_PATHS["training_config_path"]
 RUNS_JSON_PATH = PIPELINE_PATHS["runs_json_path"]
+SPLITS_DIR = DATASET_DIR / "splits"
 
 
 def relpath_from_training(path: Path) -> str:
@@ -37,8 +40,50 @@ def write_runs_json(sample_dirs: list[Path]) -> str:
     return RUNS_JSON_PATH.name
 
 
+def read_manifest_runs(path: Path) -> list[Path]:
+    run_fdf_name = PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    sample_dirs: list[Path] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            status = str(row.get("status") or "").lower()
+            valid = str(row.get("valid") or "").lower()
+            if status and status not in {"valid", "completed"}:
+                continue
+            if valid and valid not in {"true", "1", "yes"}:
+                continue
+            sample_dir_value = row.get("sample_dir")
+            structure_value = row.get("structure_path")
+            if sample_dir_value:
+                sample_dir = Path(sample_dir_value)
+            elif structure_value:
+                sample_dir = Path(structure_value).parent
+            else:
+                continue
+            if (sample_dir / run_fdf_name).exists():
+                sample_dirs.append(sample_dir)
+    return sorted(dict.fromkeys(sample_dirs))
+
+
+def strict_train_sample_dirs() -> list[Path]:
+    for name in ("train_valid_manifest.csv", "train_manifest.csv"):
+        manifest = SPLITS_DIR / name
+        if manifest.exists():
+            samples = read_manifest_runs(manifest)
+            if samples:
+                return samples
+            raise RuntimeError(f"El manifest de train no contiene muestras validas: {manifest}")
+    if bool(PIPELINE_CONFIG.get("training", {}).get("allow_all_completed_debug", False)):
+        print("[WARN] training.allow_all_completed_debug=true; usando todas las muestras completadas.")
+        return completed_sample_dirs()
+    raise RuntimeError(
+        "AtomDisplacement strict training requiere dataset/splits/train_manifest.csv "
+        "o train_valid_manifest.csv. Usa la UI/prepare splits o activa "
+        "training.allow_all_completed_debug solo para depuracion."
+    )
+
+
 def build_config_yaml() -> str:
-    sample_dirs = completed_sample_dirs()
+    sample_dirs = strict_train_sample_dirs()
     all_sample_dirs = generated_sample_dirs()
     min_completed = int(PIPELINE_CONFIG["training"]["min_completed_samples"])
     if len(sample_dirs) < min_completed:

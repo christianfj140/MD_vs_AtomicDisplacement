@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 from siesta_settings import DEFAULT_SHARED, compare_settings, file_digest
+from model_settings import compare_model_settings
 
 try:
     import pty
@@ -450,6 +451,7 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
 DEFAULT_PRIMARY_METRIC = "fermi_window_rmse_eV"
+STRICT_COMPARISON_MODE = True
 SPLIT_MANIFEST_FIELDS = [
     "sample_id",
     "method",
@@ -1845,6 +1847,7 @@ class ExperimentRunner:
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
         shared_settings = load_config(DEFAULT_SHARED) if DEFAULT_SHARED.exists() else {}
         siesta_report = compare_settings(md_config, atom_config, shared_settings)
+        model_report = compare_model_settings(md_config, atom_config)
         files_to_hash = [
             PIPELINES["md"].config_path,
             PIPELINES["atom_displacement"].config_path,
@@ -1882,6 +1885,11 @@ class ExperimentRunner:
             "shared_siesta_settings_hash": siesta_report["shared_siesta_settings_hash"],
             "siesta_settings_warning": siesta_report["warning"],
             "siesta_settings_mismatches": siesta_report["mismatches"],
+            "model_config_hash": model_report["model_config_hash"],
+            "md_model_config_hash": model_report["md_model_config_hash"],
+            "atom_displacement_model_config_hash": model_report["atom_displacement_model_config_hash"],
+            "model_config_warning": model_report["warning"],
+            "model_config_mismatches": model_report["mismatches"],
             "basis_hash": file_digest([*sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml"))]),
             "pseudopotential_hash": file_digest([
                 *sorted((PIPELINES["md"].root / "dataset").glob("*.psf")),
@@ -1909,6 +1917,7 @@ class ExperimentRunner:
                 "primary_metric": primary_metric,
             },
             "compute_budget_mode": compute_budget_mode,
+            "strict_comparison_mode": STRICT_COMPARISON_MODE,
             "output_directories": {
                 "experiment_root": str(experiment_root(run_id)),
                 "manifest": str(experiment_manifest_path(run_id)),
@@ -1994,6 +2003,8 @@ class ExperimentRunner:
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
         if manifest.get("siesta_settings_warning"):
             manifest.setdefault("warnings", []).append(str(manifest["siesta_settings_warning"]))
+        if manifest.get("model_config_warning"):
+            manifest.setdefault("warnings", []).append(str(manifest["model_config_warning"]))
         self._write_experiment_manifest(manifest)
         returncode = 0
         try:
@@ -2010,6 +2021,18 @@ class ExperimentRunner:
             self._append(f"[UI] Primary metric: {primary_metric}; compute mode: {compute_budget_mode}\n")
             if manifest.get("siesta_settings_warning"):
                 self._append(f"[WARN] {manifest['siesta_settings_warning']}\n")
+            if manifest.get("model_config_warning"):
+                self._append(f"[WARN] {manifest['model_config_warning']}\n")
+            if STRICT_COMPARISON_MODE and manifest.get("siesta_settings_warning"):
+                raise RuntimeError(
+                    "Strict comparison aborted: MD y AtomDisplacement tienen settings SIESTA distintas. "
+                    "Revisa experiment_manifest.yaml: siesta_settings_mismatches."
+                )
+            if STRICT_COMPARISON_MODE and manifest.get("model_config_warning"):
+                raise RuntimeError(
+                    "Strict comparison aborted: MD y AtomDisplacement tienen hiperparametros Graph2Mat distintos. "
+                    "Revisa experiment_manifest.yaml: model_config_mismatches."
+                )
             if atom_dataset_specs:
                 self._append(
                     "[UI] AtomDisplacement FC plan: "
@@ -3064,6 +3087,36 @@ class ExperimentRunner:
                 if build_result.returncode != 0:
                     raise RuntimeError(f"Common test builder failed for {pair_id}.")
                 summary["common_tests"].append(str(pair_common_dir))
+                train_manifests = [
+                    self._split_manifest_for_result(md_result, "train"),
+                    self._split_manifest_for_result(atom_result, "train"),
+                ]
+                for test_set in test_sets:
+                    test_manifest = pair_common_dir / test_set / "test_manifest.csv"
+                    if not test_manifest.exists():
+                        continue
+                    leakage_dir = pair_common_dir / "geometry_leakage" / test_set
+                    leakage_command = [
+                        sys.executable,
+                        str(COMPARISON_ROOT / "scripts" / "check_geometry_leakage.py"),
+                        "--train-manifest",
+                        str(train_manifests[0]),
+                        "--train-manifest",
+                        str(train_manifests[1]),
+                        "--test-manifest",
+                        str(test_manifest),
+                        "--output-dir",
+                        str(leakage_dir),
+                    ]
+                    leakage_result = self._run_local_script(
+                        leakage_command,
+                        label=f"Chequeando leakage geometrico {pair_id} {test_set}",
+                    )
+                    if leakage_result.returncode != 0:
+                        warning = f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
+                        summary["warnings"].append(warning)
+                        if STRICT_COMPARISON_MODE:
+                            raise RuntimeError(warning)
 
                 for train_result in (md_result, atom_result):
                     train_method = str(train_result["pipeline"])
@@ -3141,6 +3194,11 @@ class ExperimentRunner:
                             "atomdisp_siesta_reference_count": atom_budget,
                             "budget_ratio": ratio,
                             "budget_mismatch_warning": mismatch_warning,
+                            "siesta_settings_hash": manifest.get("siesta_settings_hash"),
+                            "siesta_settings_warning": manifest.get("siesta_settings_warning", ""),
+                            "model_config_hash": manifest.get("model_config_hash"),
+                            "model_config_warning": manifest.get("model_config_warning", ""),
+                            "strict_comparison_mode": manifest.get("strict_comparison_mode", STRICT_COMPARISON_MODE),
                             "md_dataset_label": str(md_result.get("dataset_label", f"dataset_{md_dataset_size}")),
                             "atom_dataset_label": str(atom_result.get("dataset_label", f"dataset_{atom_dataset_size}")),
                             "seed": train_result.get("seed"),

@@ -83,13 +83,8 @@ def matrix_sort_key(path: Path) -> tuple[int, str]:
 
 
 def find_matrix(sample_dir: Path) -> Path | None:
-    matrices = [
-        path
-        for suffix in MATRIX_SUFFIXES
-        for path in sample_dir.glob(f"*{suffix}")
-        if path.name != "ML_prediction.HSX"
-    ]
-    return sorted(matrices, key=matrix_sort_key)[0] if matrices else None
+    matrix, _ambiguous, _count = choose_reference_matrix(sample_dir)
+    return matrix
 
 
 def find_matrices(sample_dir: Path) -> list[Path]:
@@ -102,6 +97,28 @@ def find_matrices(sample_dir: Path) -> list[Path]:
         ],
         key=matrix_sort_key,
     )
+
+
+def choose_reference_matrix(sample_dir: Path) -> tuple[Path | None, bool, int]:
+    """Choose TSHS over HSX; reject only multiple competing preferred files."""
+
+    tshs = sorted(
+        [path for path in sample_dir.glob("*.TSHS") if path.name != "ML_prediction.HSX"],
+        key=matrix_sort_key,
+    )
+    hsx = sorted(
+        [path for path in sample_dir.glob("*.HSX") if path.name != "ML_prediction.HSX"],
+        key=matrix_sort_key,
+    )
+    if len(tshs) == 1:
+        return tshs[0], False, len(tshs) + len(hsx)
+    if len(tshs) > 1:
+        return None, True, len(tshs) + len(hsx)
+    if len(hsx) == 1:
+        return hsx[0], False, len(hsx)
+    if len(hsx) > 1:
+        return None, True, len(hsx)
+    return None, False, 0
 
 
 def system_label_from_fdf(path: Path) -> str | None:
@@ -218,9 +235,12 @@ def validate_sample(
         if structure_path is None:
             structure_path = find_first(sample.sample_dir, STRUCTURE_NAMES)
         if hamiltonian_path is None:
-            hamiltonian_path = find_matrix(sample.sample_dir)
-        matrix_count = len(find_matrices(sample.sample_dir))
+            hamiltonian_path, ambiguous_matrix, matrix_count = choose_reference_matrix(sample.sample_dir)
+        else:
+            ambiguous_matrix = False
+            matrix_count = 1 if hamiltonian_path.exists() else 0
     else:
+        ambiguous_matrix = False
         matrix_count = 1 if hamiltonian_path is not None and hamiltonian_path.exists() else 0
 
     structure_exists = structure_path is not None and structure_path.exists()
@@ -234,7 +254,7 @@ def validate_sample(
             reasons.append("missing_hamiltonian_debug_allowed")
         else:
             reasons.append("missing_matrix")
-    if matrix_count > 1:
+    if ambiguous_matrix:
         reasons.append("ambiguous_reference_matrix")
 
     completed, converged, run_out_status = parse_run_out_status(sample.run_out_path)

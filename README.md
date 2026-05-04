@@ -206,7 +206,10 @@ La comparacion MD vs AtomDisplacement solo debe interpretarse como valida si:
 
 - ambos modelos se evaluan contra el mismo test congelado con referencias SIESTA;
 - las settings SIESTA de MD y AtomDisplacement no muestran mismatch en el
-  manifest;
+  manifest; en modo de comparacion estricta la UI aborta si hay mismatch;
+- los hiperparametros Graph2Mat comparables coinciden; rutas de dataset, basis
+  y logger pueden diferir, pero arquitectura, loss, batch size, epocas, target
+  y simetria no deben cambiar salvo en una ablation explicita;
 - la metrica primaria existe para ambos metodos, preferiblemente
   `fermi_window_rmse_eV`, despues `occupied_rmse_eV`,
   `relative_frobenius_union` o `dos_wasserstein_eV`;
@@ -216,6 +219,13 @@ La comparacion MD vs AtomDisplacement solo debe interpretarse como valida si:
   esta indicado y no hay aviso grave de mismatch;
 - no hay avisos fuertes de leakage geometrico, muestras invalidas o datos
   espectrales ausentes.
+
+Los entrypoints standalone de `AtomDisplacement` son conservadores: el
+entrenamiento requiere `dataset/splits/train_manifest.csv` o
+`train_valid_manifest.csv`; el test/predict usan el split `test` y no caen al
+dataset completo salvo que se active una bandera `*_debug` en el YAML. Esto
+mantiene compatibilidad para depuracion, pero evita que el flujo cientifico
+entrene o prediga accidentalmente sobre todas las muestras.
 
 La pestaña `Experiment` permite barrer tamaños de dataset, por ejemplo:
 
@@ -264,6 +274,7 @@ antes de confiar en las graficas.
   matrices sin `RUN.out`; deben regenerarse o validarse con los outputs reales.
 - La unificacion SIESTA se implementa como hash/comparacion y warning; no fuerza
   todavia la regeneracion automatica de ambos `.fdf` desde un unico template.
+  En la UI de comparacion estricta el warning se convierte en error.
 - Las trayectorias MD cortas y los desplazamientos cartesianos locales pueden
   producir leakage o distribuciones de test poco representativas; usa
   `check_geometry_leakage.py` y multiples seeds.

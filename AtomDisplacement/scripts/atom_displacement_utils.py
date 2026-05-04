@@ -423,6 +423,33 @@ def reference_matrices(sample_dir: Path) -> list[Path]:
     )
 
 
+def choose_reference_matrix(sample_dir: Path) -> tuple[Path | None, bool, int]:
+    """Choose the SIESTA reference matrix deterministically.
+
+    SIESTA commonly writes both TSHS and HSX for the same calculation. That is
+    not ambiguous: TSHS is preferred because it carries overlap information.
+    Ambiguity means multiple candidate references of the preferred suffix.
+    """
+
+    tshs = sorted(
+        [path for path in sample_dir.glob("*.TSHS") if path.name != "ML_prediction.HSX"],
+        key=matrix_sort_key,
+    )
+    hsx = sorted(
+        [path for path in sample_dir.glob("*.HSX") if path.name != "ML_prediction.HSX"],
+        key=matrix_sort_key,
+    )
+    if len(tshs) == 1:
+        return tshs[0], False, len(tshs) + len(hsx)
+    if len(tshs) > 1:
+        return None, True, len(tshs) + len(hsx)
+    if len(hsx) == 1:
+        return hsx[0], False, len(hsx)
+    if len(hsx) > 1:
+        return None, True, len(hsx)
+    return None, False, 0
+
+
 def validate_sample_dir(
     sample_dir: Path,
     *,
@@ -433,7 +460,7 @@ def validate_sample_dir(
     reasons: list[str] = []
     run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
     run_out = sample_dir / PIPELINE_CONFIG["paths"]["run_out_name"]
-    matrices = reference_matrices(sample_dir)
+    reference_matrix, ambiguous_matrix, matrix_count = choose_reference_matrix(sample_dir)
     try:
         status = sample_run_status(sample_dir)
     except Exception as exc:
@@ -448,9 +475,9 @@ def validate_sample_dir(
 
     if not run_fdf.exists():
         reasons.append("missing_run_fdf")
-    if not matrices:
+    if reference_matrix is None and not ambiguous_matrix:
         reasons.append("missing_matrix")
-    if len(matrices) > 1:
+    if ambiguous_matrix:
         reasons.append("ambiguous_reference_matrix")
     if not status.get("output_exists", False):
         reasons.append("missing_output")
@@ -470,8 +497,8 @@ def validate_sample_dir(
         "sample_dir": str(sample_dir),
         "run_fdf": str(run_fdf) if run_fdf.exists() else "",
         "run_out": str(run_out) if run_out.exists() else "",
-        "hamiltonian_path": str(matrices[0]) if len(matrices) == 1 else "",
-        "reference_matrix_count": len(matrices),
+        "hamiltonian_path": str(reference_matrix) if reference_matrix else "",
+        "reference_matrix_count": matrix_count,
         "job_completed": bool(status.get("job_completed", False)),
         "scf_converged": bool(status.get("scf_converged", False)),
         "stale_output": bool(status.get("stale_output", False)),

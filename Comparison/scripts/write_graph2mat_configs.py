@@ -41,18 +41,31 @@ def graph2mat_training_block(config: dict[str, Any], dataset_kind: str) -> dict[
     return block
 
 
-def set_portable_paths(block: dict[str, Any], dataset_kind: str) -> None:
+def set_portable_paths(block: dict[str, Any], dataset_kind: str, *, debug_full_dataset_globs: bool = False) -> None:
     data = block["data"]
     if dataset_kind == "md":
         data["basis_files"] = "../MD/dataset/MD_steps/basis/*.ion.xml"
-        data["train_runs"] = "../MD/dataset/MD_steps/*/RUN.fdf"
+        data["train_runs"] = (
+            "../MD/dataset/MD_steps/*/RUN.fdf"
+            if debug_full_dataset_globs
+            else "../MD/dataset/splits/train/*/RUN.fdf"
+        )
     else:
         data["basis_files"] = "../AtomDisplacement/dataset/FC_steps/basis/*.ion.xml"
-        data["train_runs"] = "../AtomDisplacement/dataset/FC_steps/*/RUN.fdf"
+        data["train_runs"] = (
+            "../AtomDisplacement/dataset/FC_steps/*/RUN.fdf"
+            if debug_full_dataset_globs
+            else "../AtomDisplacement/dataset/train_samples/*/RUN.fdf"
+        )
         data.pop("runs_json", None)
 
 
-def force_shared_hyperparams(md_block: dict[str, Any], fc_block: dict[str, Any]) -> None:
+def force_shared_hyperparams(
+    md_block: dict[str, Any],
+    fc_block: dict[str, Any],
+    *,
+    debug_full_dataset_globs: bool = False,
+) -> None:
     """Keep the two configs identical except for dataset paths and logger name."""
     fc_data = fc_block["data"]
     fc_logger = fc_block["trainer"]["logger"]["init_args"]["name"]
@@ -71,8 +84,8 @@ def force_shared_hyperparams(md_block: dict[str, Any], fc_block: dict[str, Any])
         if key in md_block["data"]:
             fc_data[key] = copy.deepcopy(md_block["data"][key])
     fc_block["data"] = fc_data
-    set_portable_paths(md_block, "md")
-    set_portable_paths(fc_block, "fc")
+    set_portable_paths(md_block, "md", debug_full_dataset_globs=debug_full_dataset_globs)
+    set_portable_paths(fc_block, "fc", debug_full_dataset_globs=debug_full_dataset_globs)
 
 
 def validate_config(block: dict[str, Any], label: str) -> None:
@@ -104,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fc-config", type=Path, default=FC_CONFIG)
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "configs")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--debug-full-dataset-globs",
+        action="store_true",
+        help="Debug only: use full MD_steps/FC_steps globs instead of strict train split paths.",
+    )
     return parser
 
 
@@ -114,7 +132,7 @@ def main() -> int:
 
     md_block = graph2mat_training_block(md_pipeline, "md")
     fc_block = graph2mat_training_block(fc_pipeline, "fc")
-    force_shared_hyperparams(md_block, fc_block)
+    force_shared_hyperparams(md_block, fc_block, debug_full_dataset_globs=args.debug_full_dataset_globs)
     validate_config(md_block, "config_md")
     validate_config(fc_block, "config_fc")
 

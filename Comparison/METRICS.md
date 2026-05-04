@@ -128,6 +128,12 @@ metric, and checkpoints. `pooled` aggregation is only produced when explicitly
 requested with `--aggregation-mode pooled`. A single seed is reported as a
 single-seed result, not as a robust winner.
 
+Winner recommendations are marked `inconclusive` when machine-readable
+validation warnings are present in the aggregated cross metrics, including
+SIESTA settings mismatch, Graph2Mat model/config mismatch, or a severe budget
+mismatch. In strict UI comparison mode, SIESTA/model mismatches and geometry
+leakage abort before winner analysis.
+
 `timing_breakdown.json` is written for new UI runs and includes the required
 phase keys. Some legacy Graph2Mat/SIESTA entrypoints still expose only coarse
 process timings, so missing phase values are explicit `null` values rather than
@@ -138,7 +144,8 @@ invented numbers.
 Before a sample is considered scientifically valid, strict validation requires:
 
 - `RUN.fdf`
-- exactly one non-predicted `.TSHS` or `.HSX`
+- a non-predicted Hamiltonian reference; `.TSHS` is preferred over `.HSX`
+  when both are present from the same SIESTA run
 - `RUN.out`
 - SIESTA `Job completed`
 - `SCF cycle converged`
@@ -152,3 +159,7 @@ Validation artifacts are `valid_samples.csv`, `invalid_samples.csv` and
 near-duplicate geometries, neighboring MD frames crossing splits, and
 AtomDisplacement displacement-family leakage. It uses direct atom ordering from
 `RUN.fdf`; it does not perform alignment/Kabsch.
+
+For strict one-click comparisons, geometry leakage diagnostics are run after
+common frozen tests are built and before cross predictions. Any detected leakage
+invalidates that comparison rather than being hidden in a plot.

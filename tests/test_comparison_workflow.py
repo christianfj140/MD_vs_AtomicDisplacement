@@ -150,6 +150,65 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertIn("scf_not_converged", module.validate_sample_dir(failed_scf)["validation_reason"])
             self.assertTrue(module.validate_sample_dir(valid)["valid"])
 
+    def test_validation_accepts_matching_tshs_and_hsx_outputs(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root / "samples", "001")
+            (sample / "siesta.HSX").write_bytes(b"fake hsx")
+            output = root / "validation"
+            result = run_script(
+                "Comparison/scripts/validate_sample_bundle.py",
+                "--samples-dir",
+                str(root / "samples"),
+                "--method",
+                "atom_displacement",
+                "--output-dir",
+                str(output),
+                "--min-valid",
+                "1",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (output / "valid_samples.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0]["hamiltonian_path"].endswith(".TSHS"))
+
+    def test_atomdisp_training_requires_split_manifest_in_strict_mode(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "run_atdisp_training",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "run_atdisp_training.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root / "FC_steps", "001")
+            module.DATASET_DIR = root
+            module.SPLITS_DIR = root / "splits"
+            module.generated_sample_dirs = lambda: [sample]
+            module.completed_sample_dirs = lambda: [sample]
+            module.PIPELINE_CONFIG.setdefault("training", {}).pop("allow_all_completed_debug", None)
+            with self.assertRaisesRegex(RuntimeError, "strict training requiere"):
+                module.strict_train_sample_dirs()
+
+            module.SPLITS_DIR.mkdir()
+            write_csv(
+                module.SPLITS_DIR / "train_manifest.csv",
+                [
+                    {
+                        "sample_id": "001",
+                        "sample_dir": str(sample),
+                        "structure_path": str(sample / "RUN.fdf"),
+                        "status": "valid",
+                        "valid": "true",
+                    }
+                ],
+            )
+            self.assertEqual(module.strict_train_sample_dirs(), [sample])
+
     def test_run_single_points_reruns_stale_matrix_instead_of_skipping(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
         spec = importlib.util.spec_from_file_location(
@@ -454,6 +513,41 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual({row["experiment_id"] for row in pairs}, {"exp_test", "other_exp"})
             self.assertEqual(len(pairs), 2)
 
+    def test_winner_analysis_inconclusive_on_validation_warnings(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for method, value in (("md", "0.5"), ("atom_displacement", "1.0")):
+                for test_set in ("test_md", "test_atomdisp", "test_mixed"):
+                    rows.append(
+                        {
+                            "experiment_id": "exp_test",
+                            "train_method": method,
+                            "test_set": test_set,
+                            "md_dataset_size": "10",
+                            "atom_dataset_size": "10",
+                            "seed": "1",
+                            "model_checkpoint": f"{method}.ckpt",
+                            "global_rmse_eV": value,
+                            "siesta_settings_warning": "settings mismatch",
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "inconclusive")
+            self.assertIn("settings mismatch", recommendation["reason"])
+
     def test_geometry_leakage_detects_duplicates_near_duplicates_and_md_neighbors(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
@@ -563,17 +657,62 @@ class ComparisonWorkflowTests(unittest.TestCase):
         spec.loader.exec_module(module)
 
         shared = {"siesta": {"mesh_cutoff": "200 Ry"}}
-        md = {"md": {"mesh_cutoff": "200 Ry", "lattice_constant": 15, "save_hs": True}}
+        md = {
+            "md": {
+                "lattice_constant": 15,
+                "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
+                "basis_type": "split",
+                "basis_size": "DZP",
+                "energy_shift": "0.03 eV",
+                "mesh_cutoff": "200 Ry",
+                "xc_functional": "GGA",
+                "xc_authors": "PBE",
+                "max_scf_iterations": 200,
+                "solution_method": "diagon",
+                "dm_mixing_weight": 0.02,
+                "dm_number_pulay": 3,
+                "dm_tolerance": "1.d-5",
+                "dm_require_energy_convergence": "T",
+                "dm_energy_tolerance": "1.e-5 eV",
+                "spin_polarized": "F",
+                "fix_spin": "F",
+                "non_collinear_spin": "F",
+                "force_aux_cell": False,
+                "save_hs_file": True,
+                "save_hs": True,
+            }
+        }
         atom = {
             "structure": {
-                "siesta": {"MeshCutoff": "200 Ry", "ForceAuxCell": "F"},
                 "lattice_constant": 15,
+                "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
                 "force_constants": {"save_tshs": True},
+                "siesta": {
+                    "ForceAuxCell": "F",
+                    "Save.HS": "T",
+                    "MeshCutoff": "200 Ry",
+                    "PAO.BasisType": "split",
+                    "PAO.BasisSize": "DZP",
+                    "PAO.EnergyShift": "0.03 eV",
+                    "XC.functional": "GGA",
+                    "XC.authors": "PBE",
+                    "MaxSCFIterations": 200,
+                    "SolutionMethod": "diagon",
+                    "DM.MixingWeight": 0.02,
+                    "DM.NumberPulay": 3,
+                    "DM.Tolerance": "1.d-5",
+                    "DM.Require.Energy.Convergence": "T",
+                    "DM.Energy.Tolerance": "1.e-5 eV",
+                    "SpinPolarized": "F",
+                    "FixSpin": "F",
+                    "NonCollinearSpin": "F",
+                },
             }
         }
         ok_report = module.compare_settings(md, atom, shared)
         self.assertTrue(ok_report["ok"])
-        atom_bad = {"structure": {"siesta": {"mesh_cutoff": "300 Ry", "lattice_constant": 15}}}
+        atom_bad = json.loads(json.dumps(atom))
+        atom_bad["structure"]["siesta"]["MeshCutoff"] = "300 Ry"
         bad_report = module.compare_settings(md, atom_bad, shared)
         self.assertFalse(bad_report["ok"])
         self.assertTrue(bad_report["warning"])
@@ -595,6 +734,50 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertFalse(module.should_compare_budget_pair(md, atom_other, [atom_same, atom_other], "equal_sample_count"))
         self.assertTrue(module.should_compare_budget_pair(md, atom_other, [atom_other], "equal_siesta_budget"))
         self.assertTrue(module.budget_warning(10, 30))
+
+    def test_model_settings_detects_hyperparameter_mismatch(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "model_settings",
+            REPO_ROOT / "Comparison" / "scripts" / "model_settings.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        md = {"training": {"data": {"out_matrix": "hamiltonian", "batch_size": 8}, "model": {"optim_lr": 0.005}, "trainer": {"max_epochs": 10}}}
+        atom = {"training": {"data": {"out_matrix": "hamiltonian", "batch_size": 16}, "model": {"optim_lr": 0.005}, "trainer": {"max_epochs": 10}}}
+        report = module.compare_model_settings(md, atom)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["mismatches"][0]["section"], "data")
+
+    def test_write_graph2mat_configs_uses_split_paths_by_default(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "write_graph2mat_configs",
+            REPO_ROOT / "Comparison" / "scripts" / "write_graph2mat_configs.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        block = {
+            "data": {
+                "out_matrix": "hamiltonian",
+                "symmetric_matrix": True,
+                "basis_files": "old",
+                "train_runs": "old",
+                "batch_size": 2,
+                "store_in_memory": True,
+            },
+            "model": {},
+            "trainer": {"logger": {"init_args": {"name": "x"}}},
+        }
+        md_block = json.loads(json.dumps(block))
+        fc_block = json.loads(json.dumps(block))
+        module.force_shared_hyperparams(md_block, fc_block)
+        self.assertEqual(md_block["data"]["train_runs"], "../MD/dataset/splits/train/*/RUN.fdf")
+        self.assertEqual(fc_block["data"]["train_runs"], "../AtomDisplacement/dataset/train_samples/*/RUN.fdf")
+        module.force_shared_hyperparams(md_block, fc_block, debug_full_dataset_globs=True)
+        self.assertEqual(md_block["data"]["train_runs"], "../MD/dataset/MD_steps/*/RUN.fdf")
 
     def test_verify_integrity_accepts_multi_displacement_fc_layout(self) -> None:
         with workspace_tempdir() as tmp:

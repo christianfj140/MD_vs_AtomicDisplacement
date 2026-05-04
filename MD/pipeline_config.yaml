@@ -13,6 +13,22 @@ md:
   type_of_run: verlet
   steps: 10
   basis_size: DZP
+  basis_type: split
+  energy_shift: 0.03 eV
+  mesh_cutoff: 200 Ry
+  xc_functional: GGA
+  xc_authors: PBE
+  max_scf_iterations: 200
+  solution_method: diagon
+  dm_mixing_weight: 0.02
+  dm_number_pulay: 3
+  dm_tolerance: 1.d-5
+  dm_require_energy_convergence: T
+  dm_energy_tolerance: 1.e-5 eV
+  spin_polarized: F
+  fix_spin: F
+  non_collinear_spin: F
+  save_hs_file: true
   save_hs: true
   save_de: true
   lua_script: md_store.lua
@@ -21,15 +37,15 @@ md:
     value: 1.0
     unit: Ang
   lattice_vectors:
-  - - 10.0
+  - - 15.0
     - 0.0
     - 0.0
   - - 0.0
-    - 10.0
+    - 15.0
     - 0.0
   - - 0.0
     - 0.0
-    - 10.0
+    - 15.0
   species:
   - index: 1
     atomic_number: 8

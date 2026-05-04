@@ -82,7 +82,9 @@ def md_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
         "MeshCutoff": md.get("mesh_cutoff"),
         "XC.functional": md.get("xc_functional"),
         "XC.authors": md.get("xc_authors"),
+        "PAO.BasisType": md.get("basis_type"),
         "PAO.BasisSize": md.get("basis_size"),
+        "PAO.EnergyShift": md.get("energy_shift"),
         "MaxSCFIterations": md.get("max_scf_iterations"),
         "SolutionMethod": md.get("solution_method"),
         "DM.MixingWeight": md.get("dm_mixing_weight"),
@@ -94,6 +96,7 @@ def md_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
         "FixSpin": md.get("fix_spin"),
         "NonCollinearSpin": md.get("non_collinear_spin"),
         "ForceAuxCell": "T" if bool(md.get("force_aux_cell", False)) else "F",
+        "Save.HS": "T" if bool(md.get("save_hs_file", False)) else "F",
         "TS.HS.Save": "T" if bool(md.get("save_hs", False)) else "F",
     }
 
