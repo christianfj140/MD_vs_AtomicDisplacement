@@ -148,6 +148,7 @@ splits:
 single_points:
   limit: null
   rerun: false
+  allow_unvalidated_matrices: false
 
 training:
   data:

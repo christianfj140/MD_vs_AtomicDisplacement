@@ -191,6 +191,32 @@ python3 Comparison/scripts/pipeline_ui.py
 
 Abre `http://127.0.0.1:8770`. La pantalla ejecuta ambos pipelines, muestra logs separados y resume los artefactos que se usaran para comparar resultados.
 
+### Flujo cientifico recomendado
+
+La UI es el punto de entrada recomendado para sacar conclusiones comparativas.
+Los scripts sueltos siguen siendo utiles para depuracion, pero pueden omitir
+partes del protocolo experimental. Antes de entrenar o evaluar, el flujo de UI
+valida que cada muestra tenga `RUN.fdf`, una unica referencia `.TSHS`/`.HSX`,
+`RUN.out`, completion normal de SIESTA y SCF convergido. Las salidas de
+validacion quedan en `valid_samples.csv`, `invalid_samples.csv` y
+`validation_summary.json`; si hay muestras invalidas, los manifests validos son
+los que deben usarse para entrenamiento/evaluacion.
+
+La comparacion MD vs AtomDisplacement solo debe interpretarse como valida si:
+
+- ambos modelos se evaluan contra el mismo test congelado con referencias SIESTA;
+- las settings SIESTA de MD y AtomDisplacement no muestran mismatch en el
+  manifest;
+- la metrica primaria existe para ambos metodos, preferiblemente
+  `fermi_window_rmse_eV`, despues `occupied_rmse_eV`,
+  `relative_frobenius_union` o `dos_wasserstein_eV`;
+- las semillas aparecen explicitamente y no hay conclusion robusta basada en
+  una sola seed;
+- el modo de presupuesto (`equal_sample_count`, `equal_siesta_budget` o `both`)
+  esta indicado y no hay aviso grave de mismatch;
+- no hay avisos fuertes de leakage geometrico, muestras invalidas o datos
+  espectrales ausentes.
+
 La pestaña `Experiment` permite barrer tamaños de dataset, por ejemplo:
 
 - `MD`: `50, 100, 200, 500`
@@ -206,7 +232,9 @@ Cada carpeta de resultados guarda `structures/`, `predicted_hamiltonians/`, `sie
 Scripts auxiliares de comparacion:
 
 ```bash
-python3 Comparison/scripts/verify_dataset_integrity.py
+python3 Comparison/scripts/verify_dataset_integrity.py --dry-run
+python3 Comparison/scripts/validate_sample_bundle.py --help
+python3 Comparison/scripts/check_geometry_leakage.py --help
 python3 Comparison/scripts/analyze_phonons.py --fc-run-dir AtomDisplacement/dataset
 python3 Comparison/scripts/evaluate_cross.py
 ```
@@ -214,3 +242,30 @@ python3 Comparison/scripts/evaluate_cross.py
 `evaluate_cross.py` escribe `Comparison/results/comparison/metrics.csv`. Si se le pasan
 resultados cruzados explicitos (`--md-on-fc`, `--fc-on-md`, etc.), rellena tambien
 las celdas Modelo/Test correspondientes.
+
+### Smoke test minimo
+
+Desde la raiz:
+
+```bash
+python3 -m unittest tests/test_comparison_workflow.py
+python3 Comparison/scripts/pipeline_ui.py
+```
+
+Para un experimento pequeño desde la UI, usa tamaños iguales y reducidos
+(`MD=10`, `AtomDisplacement=10`), `compute_budget_mode=both`, una seed fija y
+revisa primero `experiment_manifest.yaml`, `validation_summary.json`,
+`cross_evaluation_metrics.csv`, `winner_summary.csv` y `recommendation.json`
+antes de confiar en las graficas.
+
+### Limitaciones actuales
+
+- La validacion estricta puede invalidar datasets antiguos que solo guardaban
+  matrices sin `RUN.out`; deben regenerarse o validarse con los outputs reales.
+- La unificacion SIESTA se implementa como hash/comparacion y warning; no fuerza
+  todavia la regeneracion automatica de ambos `.fdf` desde un unico template.
+- Las trayectorias MD cortas y los desplazamientos cartesianos locales pueden
+  producir leakage o distribuciones de test poco representativas; usa
+  `check_geometry_leakage.py` y multiples seeds.
+- Algunas metricas cerca de Fermi son delicadas en moleculas y dependen de que
+  SIESTA proporcione un Fermi level real.

@@ -104,16 +104,51 @@ The safest comparison is:
 
 - MD prediction vs SIESTA reference.
 - AtomDisplacement prediction vs SIESTA reference.
-- Then compare the resulting MD and AtomDisplacement metric distributions at
-  matching dataset sizes, epochs, and compute budgets.
+- Then compare the resulting MD and AtomDisplacement metric distributions on
+  the same frozen SIESTA-referenced test set.
+- Keep the chosen budget mode explicit:
+  `equal_sample_count`, `equal_siesta_budget`, or `both`.
 
 Matrix error alone should not be treated as the final answer. A lower matrix
 MAE can still fail to improve frontier eigenvalues, gap, or DOS, so the report
 keeps matrix, spectral, near-Fermi, DOS, and matrix-spectrum relationship
 metrics separate.
 
-`pipeline_elapsed_seconds` is archived for new experiment runs as the total
-pipeline process time before post-processing archive/evaluation. The current
-code does not yet split this into SIESTA generation time, training time, and
-inference time, so those finer efficiency metrics must not be inferred from the
-current artifacts.
+For physical conclusions the UI/winner analysis should prefer, in order of
+availability:
+
+1. `fermi_window_rmse_eV`
+2. `occupied_rmse_eV`
+3. `relative_frobenius_union`
+4. `dos_wasserstein_eV`
+5. `global_rmse_eV` only as a secondary/report metric
+
+Winner outputs preserve `experiment_id`, `seed`, dataset sizes, test set,
+metric, and checkpoints. `pooled` aggregation is only produced when explicitly
+requested with `--aggregation-mode pooled`. A single seed is reported as a
+single-seed result, not as a robust winner.
+
+`timing_breakdown.json` is written for new UI runs and includes the required
+phase keys. Some legacy Graph2Mat/SIESTA entrypoints still expose only coarse
+process timings, so missing phase values are explicit `null` values rather than
+invented numbers.
+
+## Validation and Leakage Diagnostics
+
+Before a sample is considered scientifically valid, strict validation requires:
+
+- `RUN.fdf`
+- exactly one non-predicted `.TSHS` or `.HSX`
+- `RUN.out`
+- SIESTA `Job completed`
+- `SCF cycle converged`
+
+Validation artifacts are `valid_samples.csv`, `invalid_samples.csv` and
+`validation_summary.json`. Typical invalid reasons include `missing_run_fdf`,
+`missing_matrix`, `missing_output`, `job_not_completed`,
+`scf_not_converged`, `ambiguous_reference_matrix`, and `parser_error`.
+
+`Comparison/scripts/check_geometry_leakage.py` reports exact duplicates,
+near-duplicate geometries, neighboring MD frames crossing splits, and
+AtomDisplacement displacement-family leakage. It uses direct atom ordering from
+`RUN.fdf`; it does not perform alignment/Kabsch.

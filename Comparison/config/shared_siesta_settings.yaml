@@ -1,0 +1,29 @@
+# Shared SIESTA settings used as the strict-comparison reference for MD vs
+# AtomicDisplacement experiments. The current pass uses this file for hashing and
+# mismatch warnings; generation code still reads each pipeline config directly.
+lattice_constant:
+  value: 1.0
+  unit: Ang
+lattice_vectors:
+  - [15.0, 0.0, 0.0]
+  - [0.0, 15.0, 0.0]
+  - [0.0, 0.0, 15.0]
+PAO.BasisType: split
+PAO.BasisSize: DZP
+PAO.EnergyShift: 0.03 eV
+MeshCutoff: 200 Ry
+XC.functional: GGA
+XC.authors: PBE
+MaxSCFIterations: 200
+SolutionMethod: diagon
+DM.MixingWeight: 0.02
+DM.NumberPulay: 3
+DM.Tolerance: 1.d-5
+DM.Require.Energy.Convergence: T
+DM.Energy.Tolerance: 1.e-5 eV
+SpinPolarized: F
+FixSpin: F
+NonCollinearSpin: F
+ForceAuxCell: T
+Save.HS: T
+TS.HS.Save: T

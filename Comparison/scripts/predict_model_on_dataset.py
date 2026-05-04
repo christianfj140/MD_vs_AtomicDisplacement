@@ -57,16 +57,24 @@ def copy_sample_inputs(rows: list[dict[str, str]], workspace: Path) -> list[dict
             raise RuntimeError(f"Missing structure for {sample_id}: {src_structure}")
         dst_structure = sample_dir / "RUN.fdf"
         shutil.copy2(src_structure, dst_structure)
-        # Copy local files Graph2Mat/SIESTA readers may need beside RUN.fdf.
+        # Copy only structural/basis side inputs. Reference Hamiltonians are
+        # deliberately not copied into the prediction input tree; evaluation
+        # reads them through the manifest/reference paths instead.
         source_parent = src_structure.parent
-        for pattern in ("*.psf", "*.ion", "*.ion.xml", "*.XV", "*.TSHS", "*.HSX"):
+        for pattern in ("*.psf", "*.ion", "*.ion.xml", "*.XV"):
             for src in source_parent.glob(pattern):
                 if src.name == "ML_prediction.HSX":
                     continue
                 dst = sample_dir / src.name
                 if not dst.exists():
                     shutil.copy2(src, dst)
-        copied.append({**row, "prediction_structure_path": str(dst_structure)})
+        copied.append(
+            {
+                **row,
+                "prediction_structure_path": str(dst_structure),
+                "reference_hamiltonian_copied_to_input": False,
+            }
+        )
     return copied
 
 
@@ -212,6 +220,7 @@ def main() -> int:
             "prediction_manifest": str(args.output_dir / "prediction_manifest.csv"),
             "predicted_hamiltonians": str(args.output_dir / "predicted_hamiltonians"),
         },
+        "input_reference_files_copied": False,
     }
     (args.output_dir / "prediction_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",

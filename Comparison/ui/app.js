@@ -758,15 +758,20 @@ function latestCrossExperiment(payload) {
   const experiments = payload?.cross_experiments || [];
   if (!experiments.length) return null;
   const latest = experiments[experiments.length - 1];
+  const sourceExperiments = experiments.map((experiment) => ({
+    experiment_id: experiment.experiment_id,
+    rows: (experiment.metrics || []).length,
+    outputs: experiment.outputs,
+  }));
   return {
     ...latest,
-    experiment_id: experiments.map((experiment) => experiment.experiment_id).join(" + "),
-    metrics: experiments.flatMap((experiment) => experiment.metrics || []),
-    source_experiments: experiments.map((experiment) => ({
-      experiment_id: experiment.experiment_id,
-      rows: (experiment.metrics || []).length,
-      outputs: experiment.outputs,
-    })),
+    metrics: latest.metrics || [],
+    source_experiments: sourceExperiments,
+    multi_experiment_available: experiments.length > 1,
+    isolation_warning:
+      experiments.length > 1
+        ? "Mostrando solo el experimento cross mas reciente. La comparacion multi-experimento debe seleccionarse explicitamente."
+        : "",
   };
 }
 
@@ -818,24 +823,32 @@ function renderCrossHeatmap(id, experiment) {
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
   const trainMethods = ["md", "atom_displacement"];
   const testSets = ["test_md", "test_atomdisp", "test_mixed"];
-  const latestSize = Math.max(...means.map((row) => row.dataset_size).filter(Number.isFinite), -Infinity);
-  const filtered = Number.isFinite(latestSize) ? means.filter((row) => row.dataset_size === latestSize) : [];
-  const z = trainMethods.map((method) =>
-    testSets.map((testSet) => {
-      const row = filtered.find((item) => item.train_method === method && item.test_set === testSet);
+  const sizeLabels = Array.from(
+    new Set(
+      means
+        .map((row) => `${row.test_set} · MD ${row.md_dataset_size} / AD ${row.atom_dataset_size}`)
+        .filter(Boolean),
+    ),
+  );
+  const z = sizeLabels.map((label) =>
+    trainMethods.map((method) => {
+      const row = means.find((item) =>
+        `${item.test_set} · MD ${item.md_dataset_size} / AD ${item.atom_dataset_size}` === label &&
+        item.train_method === method
+      );
       return row ? row.mean : null;
     }),
   );
   const layout = plotLayout(`Cross-evaluation heatmap (${metric})`, metric, {
-    xaxis: { title: "Frozen test set", gridcolor: "#edf1f4", zeroline: false },
-    yaxis: { title: "Training method", gridcolor: "#edf1f4", zeroline: false },
+    xaxis: { title: "Training method", gridcolor: "#edf1f4", zeroline: false },
+    yaxis: { title: "Frozen test set / pair size", automargin: true },
   });
   if (!means.length) {
     layout.annotations = [emptyPlotAnnotation("No hay tabla cross_evaluation_metrics.csv completa.")];
   }
   Plotly.react(
     id,
-    [{ type: "heatmap", z, x: testSets, y: trainMethods, colorscale: "Viridis", hoverongaps: false }],
+    [{ type: "heatmap", z, x: trainMethods, y: sizeLabels, colorscale: "Viridis", hoverongaps: false }],
     layout,
     { responsive: true, displaylogo: false },
   );
@@ -1005,8 +1018,9 @@ function renderPlots(payload) {
   const recommendation = crossExperiment?.recommendation;
   const crossRows = crossExperiment?.metrics?.length || 0;
   const crossSources = crossExperiment?.source_experiments?.length || 0;
+  const isolationText = crossExperiment?.isolation_warning ? ` | ${crossExperiment.isolation_warning}` : "";
   const crossText = recommendation?.status
-    ? ` | cross: ${crossRows} filas en ${crossSources} experimentos | ${recommendation.status} - ${recommendation.reason || ""}`
+    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | ${recommendation.status} - ${recommendation.reason || ""}${isolationText}`
     : "";
   status.textContent = runs.length
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`

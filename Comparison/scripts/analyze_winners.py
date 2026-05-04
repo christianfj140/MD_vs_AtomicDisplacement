@@ -32,6 +32,11 @@ METADATA_COLUMNS = {
     "atom_dataset_size",
     "md_dataset_label",
     "atom_dataset_label",
+    "compute_budget_mode",
+    "md_siesta_reference_count",
+    "atomdisp_siesta_reference_count",
+    "budget_ratio",
+    "budget_mismatch_warning",
     "seed",
     "epoch",
     "checkpoint",
@@ -147,9 +152,34 @@ def row_seed(row: dict[str, Any]) -> int | str:
     return "unknown"
 
 
+def row_experiment_id(row: dict[str, Any]) -> str:
+    return str(row.get("experiment_id") or "unknown")
+
+
+def row_epoch(row: dict[str, Any]) -> int | str:
+    value = row.get("epoch")
+    if finite(value):
+        return int(float(value))
+    return "unknown"
+
+
+def row_checkpoint(row: dict[str, Any]) -> str:
+    return str(row.get("model_checkpoint") or row.get("checkpoint") or "unknown")
+
+
+def aggregation_ids(row: dict[str, Any], aggregation_mode: str) -> tuple[str, int | str, int | str, str]:
+    if aggregation_mode == "pooled":
+        return "pooled", "pooled", "pooled", "pooled"
+    if aggregation_mode == "across_seeds":
+        return row_experiment_id(row), "across_seeds", row_epoch(row), row_checkpoint(row)
+    return row_experiment_id(row), row_seed(row), row_epoch(row), row_checkpoint(row)
+
+
 def group_metric_means(
     rows: list[dict[str, Any]],
     metrics: list[str],
+    *,
+    aggregation_mode: str = "per_seed",
 ) -> tuple[dict[tuple[Any, ...], float], dict[tuple[Any, ...], dict[str, float | None]]]:
     values: dict[tuple[Any, ...], list[float]] = defaultdict(list)
     timings: dict[tuple[Any, ...], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
@@ -161,21 +191,44 @@ def group_metric_means(
     for row in rows:
         train_method = str(row.get("train_method") or "")
         test_set = str(row.get("test_set") or "")
-        dataset_size = row_dataset_size(row)
-        seed = "pooled"
+        experiment_id, seed, epoch, checkpoint = aggregation_ids(row, aggregation_mode)
         for metric in metrics:
             value = row.get(metric)
             if finite(value):
                 md_dataset_size = row_md_dataset_size(row)
                 atom_dataset_size = row_atom_dataset_size(row)
-                values[(md_dataset_size, atom_dataset_size, seed, test_set, metric, train_method)].append(float(value))
+                values[
+                    (
+                        experiment_id,
+                        md_dataset_size,
+                        atom_dataset_size,
+                        seed,
+                        epoch,
+                        test_set,
+                        metric,
+                        train_method,
+                        checkpoint,
+                    )
+                ].append(float(value))
         for timing_col in timing_columns:
             value = row.get(timing_col)
             if finite(value):
                 for metric in metrics:
                     md_dataset_size = row_md_dataset_size(row)
                     atom_dataset_size = row_atom_dataset_size(row)
-                    timings[(md_dataset_size, atom_dataset_size, seed, test_set, metric, train_method)][timing_col].append(float(value))
+                    timings[
+                        (
+                            experiment_id,
+                            md_dataset_size,
+                            atom_dataset_size,
+                            seed,
+                            epoch,
+                            test_set,
+                            metric,
+                            train_method,
+                            checkpoint,
+                        )
+                    ][timing_col].append(float(value))
 
     means = {key: mean(vals) for key, vals in values.items()}
     timing_means = {
@@ -208,80 +261,119 @@ def compare_methods(
     lower_is_better: bool,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    def comparable_sort_key(key: tuple[Any, ...]) -> tuple[str, str, str, str]:
-        md_dataset_size, atom_dataset_size, seed, test_set, metric = key
+
+    def comparable_sort_key(key: tuple[Any, ...]) -> tuple[str, str, str, str, str, str]:
+        experiment_id, md_dataset_size, atom_dataset_size, seed, epoch, test_set, metric = key
         md_sort = f"{int(md_dataset_size):012d}" if isinstance(md_dataset_size, int) else str(md_dataset_size)
         atom_sort = f"{int(atom_dataset_size):012d}" if isinstance(atom_dataset_size, int) else str(atom_dataset_size)
         seed_sort = f"{int(seed):012d}" if isinstance(seed, int) else str(seed)
-        return md_sort, atom_sort, seed_sort, str(test_set), str(metric)
+        return str(experiment_id), md_sort, atom_sort, seed_sort, str(epoch), str(test_set), str(metric)
 
     comparable = sorted(
         {
-            key[:-1]
+            key[:7]
             for key in means
-            if key[-1] in {METHOD_MD, METHOD_ATOM}
+            if key[7] in {METHOD_MD, METHOD_ATOM}
         },
         key=comparable_sort_key,
     )
-    for md_dataset_size, atom_dataset_size, seed, test_set, metric in comparable:
-        md_key = (md_dataset_size, atom_dataset_size, seed, test_set, metric, METHOD_MD)
-        atom_key = (md_dataset_size, atom_dataset_size, seed, test_set, metric, METHOD_ATOM)
-        if md_key not in means or atom_key not in means:
+    for experiment_id, md_dataset_size, atom_dataset_size, seed, epoch, test_set, metric in comparable:
+        md_keys = [
+            key
+            for key in means
+            if key[:7] == (experiment_id, md_dataset_size, atom_dataset_size, seed, epoch, test_set, metric)
+            and key[7] == METHOD_MD
+        ]
+        atom_keys = [
+            key
+            for key in means
+            if key[:7] == (experiment_id, md_dataset_size, atom_dataset_size, seed, epoch, test_set, metric)
+            and key[7] == METHOD_ATOM
+        ]
+        if not md_keys or not atom_keys:
             continue
-        md_mean = means[md_key]
-        atom_mean = means[atom_key]
-        row = {
-            "dataset_size": f"md_{md_dataset_size}__atom_{atom_dataset_size}",
-            "md_dataset_size": md_dataset_size,
-            "atom_dataset_size": atom_dataset_size,
-            "seed": seed,
-            "test_set": test_set,
-            "metric": metric,
-            "md_mean": md_mean,
-            "atom_displacement_mean": atom_mean,
-            "absolute_difference_atom_minus_md": atom_mean - md_mean,
-            "percent_improvement_atom_vs_md": percent_improvement(
-                md_mean,
-                atom_mean,
-                lower_is_better=lower_is_better,
-            ),
-            "winner": winner_for(md_mean, atom_mean, lower_is_better=lower_is_better),
-        }
-        for timing_col, value in timing_means.get(md_key, {}).items():
-            row[f"md_{timing_col}"] = value
-        for timing_col, value in timing_means.get(atom_key, {}).items():
-            row[f"atom_displacement_{timing_col}"] = value
-        md_total = row.get("md_total_time_seconds")
-        atom_total = row.get("atom_displacement_total_time_seconds")
-        if finite(md_total) and finite(atom_total):
-            row["compute_budget_seconds"] = max(float(md_total), float(atom_total))
-        rows.append(row)
+        for md_key in md_keys:
+            for atom_key in atom_keys:
+                md_mean = means[md_key]
+                atom_mean = means[atom_key]
+                row = {
+                    "experiment_id": experiment_id,
+                    "dataset_size": f"md_{md_dataset_size}__atom_{atom_dataset_size}",
+                    "md_dataset_size": md_dataset_size,
+                    "atom_dataset_size": atom_dataset_size,
+                    "seed": seed,
+                    "epoch": epoch,
+                    "test_set": test_set,
+                    "metric": metric,
+                    "md_model_checkpoint": md_key[8],
+                    "atom_displacement_model_checkpoint": atom_key[8],
+                    "md_mean": md_mean,
+                    "atom_displacement_mean": atom_mean,
+                    "absolute_difference_atom_minus_md": atom_mean - md_mean,
+                    "percent_improvement_atom_vs_md": percent_improvement(
+                        md_mean,
+                        atom_mean,
+                        lower_is_better=lower_is_better,
+                    ),
+                    "winner": winner_for(md_mean, atom_mean, lower_is_better=lower_is_better),
+                }
+                for timing_col, value in timing_means.get(md_key, {}).items():
+                    row[f"md_{timing_col}"] = value
+                for timing_col, value in timing_means.get(atom_key, {}).items():
+                    row[f"atom_displacement_{timing_col}"] = value
+                md_total = row.get("md_total_time_seconds")
+                atom_total = row.get("atom_displacement_total_time_seconds")
+                if finite(md_total) and finite(atom_total):
+                    row["compute_budget_seconds"] = max(float(md_total), float(atom_total))
+                rows.append(row)
     return rows
 
 
 def summarize_stability(pair_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[Any, Any, str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, Any, Any, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in pair_rows:
-        grouped[(row["md_dataset_size"], row["atom_dataset_size"], row["test_set"], row["metric"])].append(row)
+        grouped[
+            (
+                str(row.get("experiment_id", "unknown")),
+                row["md_dataset_size"],
+                row["atom_dataset_size"],
+                row["test_set"],
+                row["metric"],
+            )
+        ].append(row)
 
     summary = []
-    for (md_dataset_size, atom_dataset_size, test_set, metric), rows in sorted(grouped.items()):
+    for (experiment_id, md_dataset_size, atom_dataset_size, test_set, metric), rows in sorted(grouped.items()):
         winners = [str(row["winner"]) for row in rows if row["winner"] != "tie"]
         unique_winners = sorted(set(winners))
-        stable = len(unique_winners) == 1 and len(rows) > 0
+        seeds = sorted({row["seed"] for row in rows}, key=str)
+        n_seeds = len(seeds)
+        stable = len(unique_winners) == 1 and len(rows) > 0 and n_seeds > 1
+        single_seed = n_seeds <= 1
+        md_wins = sum(1 for winner in winners if winner == METHOD_MD)
+        atom_wins = sum(1 for winner in winners if winner == METHOD_ATOM)
+        winner_label = unique_winners[0] if (stable or (single_seed and len(unique_winners) == 1)) else "unstable"
         summary.append(
             {
+                "experiment_id": experiment_id,
                 "dataset_size": f"md_{md_dataset_size}__atom_{atom_dataset_size}",
                 "md_dataset_size": md_dataset_size,
                 "atom_dataset_size": atom_dataset_size,
                 "test_set": test_set,
                 "metric": metric,
-                "seeds_compared": len({row["seed"] for row in rows}),
-                "md_wins": sum(1 for winner in winners if winner == METHOD_MD),
-                "atom_displacement_wins": sum(1 for winner in winners if winner == METHOD_ATOM),
+                "seeds_compared": n_seeds,
+                "n_seeds": n_seeds,
+                "seeds": ",".join(str(seed) for seed in seeds),
+                "md_wins": md_wins,
+                "atom_displacement_wins": atom_wins,
+                "wins_md": md_wins,
+                "wins_atomdisp": atom_wins,
                 "ties": sum(1 for row in rows if row["winner"] == "tie"),
                 "stable_across_seeds": stable,
                 "stable_winner": unique_winners[0] if stable else "unstable",
+                "winner": winner_label,
+                "winner_stability": "stable" if stable else ("single_seed" if single_seed else "unstable"),
+                "single_seed_warning": single_seed,
                 "mean_percent_improvement_atom_vs_md": mean(
                     [
                         float(row["percent_improvement_atom_vs_md"])
@@ -366,6 +458,16 @@ def build_recommendation(
     }
     missing_cells = sorted(f"{method} on {test_set}" for method, test_set in required_cells - available_cells)
     allowed_test_sets = {"test_md", "test_mixed"}
+    primary_summary = [
+        row
+        for row in summary_rows
+        if row.get("metric") == primary_metric and row.get("test_set") in allowed_test_sets
+    ]
+    max_seeds = max(
+        (int(row.get("n_seeds") or row.get("seeds_compared") or 0) for row in primary_summary),
+        default=0,
+    )
+    single_seed_only = max_seeds <= 1
     first_atom_size = first_method_win(summary_rows, primary_metric, METHOD_ATOM, allowed_test_sets=allowed_test_sets)
     first_md_size = first_method_win(summary_rows, primary_metric, METHOD_MD, allowed_test_sets=allowed_test_sets)
     first_atom_compute = first_compute_method_win(
@@ -395,6 +497,15 @@ def build_recommendation(
         and row.get("test_set") == "test_atomdisp"
         and row.get("stable_winner") == METHOD_ATOM
     ]
+    available_primary_wins = [
+        row
+        for row in pair_rows
+        if row.get("metric") == primary_metric
+        and row.get("test_set") in allowed_test_sets
+        and row.get("winner") in {METHOD_MD, METHOD_ATOM}
+    ]
+    available_md_wins = [row for row in available_primary_wins if row.get("winner") == METHOD_MD]
+    available_atom_wins = [row for row in available_primary_wins if row.get("winner") == METHOD_ATOM]
     status = "no_conservative_winner"
     reason = "No method wins stably on MD or mixed test distributions for the primary metric."
     if first_md_size and not first_atom_size:
@@ -420,11 +531,29 @@ def build_recommendation(
     if missing_cells:
         status = "insufficient_cross_evaluation"
         reason = "The cross-evaluation grid is incomplete; no winner should be declared."
+    elif single_seed_only and available_primary_wins:
+        if available_md_wins and not available_atom_wins:
+            status = "md_available_single_seed_win"
+            reason = (
+                "MD wins on the available frozen test set, but only one seed is available; "
+                "this is not a robust conclusion."
+            )
+        elif available_atom_wins and not available_md_wins:
+            status = "atom_displacement_available_single_seed_win"
+            reason = (
+                "AtomDisplacement wins on the available frozen test set, but only one seed is available; "
+                "this is not a robust conclusion."
+            )
+        else:
+            status = "mixed_available_single_seed_result"
+            reason = "Single-seed winners disagree across allowed test distributions; no robust winner."
 
     return {
         "status": status,
         "primary_metric": primary_metric,
         "reason": reason,
+        "n_seeds": max_seeds,
+        "single_seed_warning": single_seed_only,
         "methods_seen": methods,
         "test_sets_seen": test_sets,
         "missing_required_cells": missing_cells,
@@ -445,6 +574,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--primary-metric", default="fermi_window_rmse_eV")
     parser.add_argument("--higher-is-better", action="store_true")
+    parser.add_argument(
+        "--aggregation-mode",
+        choices=["per_seed", "across_seeds", "pooled"],
+        default="per_seed",
+        help="Default preserves experiment/seed/checkpoint. Use pooled only for explicit exploratory aggregation.",
+    )
     return parser
 
 
@@ -454,7 +589,7 @@ def main() -> int:
     metrics = metric_columns(rows)
     if args.primary_metric not in metrics:
         metrics.insert(0, args.primary_metric)
-    means, timing_means = group_metric_means(rows, metrics)
+    means, timing_means = group_metric_means(rows, metrics, aggregation_mode=args.aggregation_mode)
     pair_rows = compare_methods(
         means,
         timing_means,
@@ -475,6 +610,11 @@ def main() -> int:
         pair_rows,
         primary_metric=args.primary_metric,
     )
+    recommendation["aggregation_mode"] = args.aggregation_mode
+    for row in pair_rows:
+        row["aggregation_mode"] = args.aggregation_mode
+    for row in summary_rows:
+        row["aggregation_mode"] = args.aggregation_mode
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_rows(args.output_dir / "winner_by_dataset_size.csv", pair_rows)

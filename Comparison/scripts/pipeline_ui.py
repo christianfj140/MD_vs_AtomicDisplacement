@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+from siesta_settings import DEFAULT_SHARED, compare_settings, file_digest
 
 try:
     import pty
@@ -39,6 +40,7 @@ COMPARISON_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = COMPARISON_ROOT / "results"
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
 LOG_HEARTBEAT_SECONDS = 30.0
+METRIC_VERSION = "2026-05-04.strict-validation-v1"
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -393,6 +395,30 @@ def files_digest(paths_to_hash: list[Path]) -> str:
     return digest.hexdigest()
 
 
+def git_commit() -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def git_dirty_warning() -> str:
+    result = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return "Could not determine git dirty state."
+    return "Working tree has uncommitted changes." if result.stdout.strip() else ""
+
+
 def experiment_root(run_id: str) -> Path:
     return RESULTS_ROOT / run_id
 
@@ -429,12 +455,22 @@ SPLIT_MANIFEST_FIELDS = [
     "method",
     "source_run",
     "frame_index",
+    "time_index",
     "displacement_amplitude",
+    "displacement_magnitude",
+    "displaced_atom",
+    "displacement_axis",
+    "displacement_sign",
     "displacement_family",
     "structure_path",
     "hamiltonian_path",
+    "output_path",
     "run_out_path",
     "metadata_path",
+    "valid",
+    "validation_reason",
+    "split",
+    "seed",
     "status",
     "sample_dir",
 ]
@@ -702,6 +738,57 @@ def parse_compute_budget_mode(value: Any) -> str:
             f"(recibido: {value!r})."
         )
     return mode
+
+
+def reference_budget_for_run(run: dict[str, Any]) -> int:
+    for key in ("completed_samples", "effective_dataset_size", "dataset_size"):
+        value = run.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            return int(float(value))
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value)
+    return 0
+
+
+def budget_ratio(md_budget: int, atom_budget: int) -> float | None:
+    if md_budget <= 0 or atom_budget <= 0:
+        return None
+    return max(md_budget, atom_budget) / min(md_budget, atom_budget)
+
+
+def budget_warning(md_budget: int, atom_budget: int, *, tolerance: float = 1.25) -> str:
+    ratio = budget_ratio(md_budget, atom_budget)
+    if ratio is None:
+        return "Budget could not be computed."
+    if ratio > tolerance:
+        return f"Budgets differ by ratio {ratio:.3g}; equal-budget comparison is approximate."
+    return ""
+
+
+def should_compare_budget_pair(
+    md_run: dict[str, Any],
+    atom_run: dict[str, Any],
+    all_atom_runs: list[dict[str, Any]],
+    mode: str,
+) -> bool:
+    md_size = int(md_run.get("dataset_size", 0))
+    atom_size = int(atom_run.get("dataset_size", 0))
+    if mode == "both":
+        return True
+    if mode == "equal_sample_count":
+        return md_size == atom_size
+    if mode == "equal_siesta_budget":
+        md_budget = reference_budget_for_run(md_run)
+        atom_budget = reference_budget_for_run(atom_run)
+        if md_budget <= 0 or atom_budget <= 0:
+            return False
+        deltas = [
+            abs(reference_budget_for_run(candidate) - md_budget)
+            for candidate in all_atom_runs
+            if reference_budget_for_run(candidate) > 0
+        ]
+        return bool(deltas) and abs(atom_budget - md_budget) == min(deltas)
+    return True
 
 
 def unique_ints_preserve_order(values: list[int]) -> list[int]:
@@ -1095,6 +1182,48 @@ def find_reference_matrix(sample_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def reference_matrices(sample_dir: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
+            if path.name != "ML_prediction.HSX"
+        ],
+        key=natural_matrix_sort_key,
+    )
+
+
+def sample_output_status(run_out: Path) -> tuple[bool, str]:
+    if not run_out.exists():
+        return False, "missing_output"
+    try:
+        text = run_out.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False, "parser_error"
+    reasons = []
+    if "Job completed" not in text:
+        reasons.append("job_not_completed")
+    if "SCF cycle converged" not in text:
+        reasons.append("scf_not_converged")
+    return not reasons, "ok" if not reasons else ";".join(reasons)
+
+
+def validated_reference_for_sample(sample_dir: Path) -> tuple[Path | None, bool, str]:
+    reasons = []
+    if not (sample_dir / "RUN.fdf").exists():
+        reasons.append("missing_run_fdf")
+    matrices = reference_matrices(sample_dir)
+    if not matrices:
+        reasons.append("missing_matrix")
+    if len(matrices) > 1:
+        reasons.append("ambiguous_reference_matrix")
+    output_ok, output_reason = sample_output_status(sample_dir / "RUN.out")
+    if not output_ok:
+        reasons.extend(output_reason.split(";"))
+    valid = not reasons
+    return (matrices[0] if len(matrices) == 1 else None), valid, "ok" if valid else ";".join(reasons)
+
+
 def load_sample_metadata(sample_dir: Path) -> dict[str, Any]:
     metadata_path = sample_dir / "metadata.json"
     if not metadata_path.exists():
@@ -1141,19 +1270,31 @@ def write_atom_split_manifests(
                 if raw_run_out.exists():
                     run_out_path = raw_run_out
             metadata_path = copied_dir / "metadata.json"
+            hamiltonian_path, valid, validation_reason = validated_reference_for_sample(copied_dir)
+            displacement = metadata.get("displacement_ang", "")
             rows.append(
                 {
                     "sample_id": f"atomdisp_{sample_dir.name}",
                     "method": "atom_displacement",
                     "source_run": str(metadata.get("raw_fc_run_dir") or sample_dir.parent),
                     "frame_index": "",
-                    "displacement_amplitude": metadata.get("displacement_ang", ""),
+                    "time_index": "",
+                    "displacement_amplitude": displacement,
+                    "displacement_magnitude": displacement,
+                    "displaced_atom": metadata.get("atom", ""),
+                    "displacement_axis": metadata.get("direction", ""),
+                    "displacement_sign": metadata.get("sign", ""),
                     "displacement_family": atom_displacement_family(metadata),
                     "structure_path": str(structure_path),
                     "hamiltonian_path": str(hamiltonian_path or ""),
+                    "output_path": str(run_out_path) if run_out_path.exists() else "",
                     "run_out_path": str(run_out_path) if run_out_path.exists() else "",
                     "metadata_path": str(metadata_path) if metadata_path.exists() else "",
-                    "status": "completed" if structure_path.exists() and hamiltonian_path else "incomplete",
+                    "valid": valid,
+                    "validation_reason": validation_reason,
+                    "split": split_name,
+                    "seed": metadata.get("subsampling", {}).get("seed", ""),
+                    "status": "completed" if valid else "incomplete",
                     "sample_dir": str(copied_dir),
                 }
             )
@@ -1164,18 +1305,8 @@ def write_atom_split_manifests(
 
 
 def is_completed_atom_sample(sample_dir: Path) -> bool:
-    if (sample_dir / "RUN.fdf").exists() and find_reference_matrix(sample_dir):
-        return True
-    run_out = sample_dir / "RUN.out"
-    if not run_out.exists():
-        return False
-    text = run_out.read_text(encoding="utf-8", errors="ignore")
-    has_reference = any(
-        path.suffix in {".HSX", ".TSHS"} and path.name != "ML_prediction.HSX"
-        for path in sample_dir.iterdir()
-        if path.is_file()
-    )
-    return "Job completed" in text and "SCF cycle converged" in text and has_reference
+    _matrix, valid, _reason = validated_reference_for_sample(sample_dir)
+    return valid
 
 
 def atom_source_samples_dir(spec: PipelineSpec, config: dict[str, Any]) -> Path:
@@ -1712,6 +1843,8 @@ class ExperimentRunner:
     ) -> dict[str, Any]:
         md_config = load_config(PIPELINES["md"].config_path)
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+        shared_settings = load_config(DEFAULT_SHARED) if DEFAULT_SHARED.exists() else {}
+        siesta_report = compare_settings(md_config, atom_config, shared_settings)
         files_to_hash = [
             PIPELINES["md"].config_path,
             PIPELINES["atom_displacement"].config_path,
@@ -1736,9 +1869,24 @@ class ExperimentRunner:
         )
         return {
             "experiment_id": run_id,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "git_commit": git_commit(),
+            "dirty_tree_warning": git_dirty_warning(),
+            "metric_version": METRIC_VERSION,
             "molecule_system_name": system_name,
-            "siesta_settings_hash": files_digest(files_to_hash),
+            "config_hash": files_digest([PIPELINES["md"].config_path, PIPELINES["atom_displacement"].config_path]),
+            "siesta_settings_hash": siesta_report["siesta_settings_hash"],
+            "md_siesta_settings_hash": siesta_report["md_siesta_settings_hash"],
+            "atom_displacement_siesta_settings_hash": siesta_report["atom_displacement_siesta_settings_hash"],
+            "shared_siesta_settings_hash": siesta_report["shared_siesta_settings_hash"],
+            "siesta_settings_warning": siesta_report["warning"],
+            "siesta_settings_mismatches": siesta_report["mismatches"],
+            "basis_hash": file_digest([*sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml"))]),
+            "pseudopotential_hash": file_digest([
+                *sorted((PIPELINES["md"].root / "dataset").glob("*.psf")),
+                *sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf")),
+            ]),
             "basis_pseudopotential_info": basis_and_pseudos,
             "train_methods": ["md", "atom_displacement"],
             "dataset_sizes": {
@@ -1771,10 +1919,18 @@ class ExperimentRunner:
             "timing": {
                 "md_siesta_generation_seconds": None,
                 "atom_displacement_siesta_generation_seconds": None,
+                "dataset_preparation_seconds": None,
+                "normalization_seconds": None,
                 "training_seconds": {},
                 "prediction_seconds": {},
                 "evaluation_seconds": {},
+                "winner_analysis_seconds": None,
+                "total_experiment_seconds": None,
                 "total_seconds": None,
+                "timing_incomplete_warning": (
+                    "Per-phase generation/training/prediction timings are partly unavailable "
+                    "for legacy Graph2Mat entrypoints; run manifests keep measured totals."
+                ),
             },
             "runs": [],
             "warnings": [],
@@ -1836,6 +1992,8 @@ class ExperimentRunner:
             compute_budget_mode,
         )
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
+        if manifest.get("siesta_settings_warning"):
+            manifest.setdefault("warnings", []).append(str(manifest["siesta_settings_warning"]))
         self._write_experiment_manifest(manifest)
         returncode = 0
         try:
@@ -1850,6 +2008,8 @@ class ExperimentRunner:
             self._append(f"[UI] Split mode MD: {split_mode}\n")
             self._append(f"[UI] Common test sets: {', '.join(test_sets or DEFAULT_COMMON_TEST_SETS)}\n")
             self._append(f"[UI] Primary metric: {primary_metric}; compute mode: {compute_budget_mode}\n")
+            if manifest.get("siesta_settings_warning"):
+                self._append(f"[WARN] {manifest['siesta_settings_warning']}\n")
             if atom_dataset_specs:
                 self._append(
                     "[UI] AtomDisplacement FC plan: "
@@ -1937,6 +2097,7 @@ class ExperimentRunner:
                 if self._finished_at is not None and self._started_at is not None
                 else None
             )
+            manifest["timing"]["total_experiment_seconds"] = manifest["timing"]["total_seconds"]
             self._write_experiment_manifest(manifest)
             self._append("[UI] Configuraciones originales restauradas.\n")
 
@@ -2618,6 +2779,30 @@ class ExperimentRunner:
         for validation_file in sorted((dataset_dir / "validation").glob("*/*.csv")):
             copy_if_exists(validation_file, result_dir / "validation" / validation_file.parent.name / validation_file.name)
         evaluation_metrics = self._evaluate_hamiltonian_metrics(key, config, result_dir)
+        timing_breakdown = {
+            "md_siesta_generation_seconds": None,
+            "atomdisp_siesta_generation_seconds": None,
+            "dataset_preparation_seconds": None,
+            "normalization_seconds": None,
+            "training_seconds": None,
+            "prediction_seconds": None,
+            "evaluation_seconds": evaluation_metrics.get("evaluation_time_seconds"),
+            "winner_analysis_seconds": None,
+            "total_experiment_seconds": pipeline_elapsed_seconds,
+            "timing_incomplete_warning": (
+                "This per-run manifest contains measured total time and Hamiltonian evaluation time; "
+                "legacy training/testing scripts do not expose separate training and prediction timings."
+            ),
+        }
+        if key == "md":
+            timing_breakdown["md_siesta_generation_seconds"] = prepare_metadata.get("generation_seconds")
+        else:
+            timing_breakdown["atomdisp_siesta_generation_seconds"] = prepare_metadata.get("generation_seconds")
+            timing_breakdown["dataset_preparation_seconds"] = prepare_metadata.get("dataset_preparation_seconds")
+        (result_dir / "timing_breakdown.json").write_text(
+            json.dumps(json_safe(timing_breakdown), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
         effective_size = int(prepare_metadata.get("effective_size", size))
         checkpoint_path = find_latest_checkpoint(training_dir, config)
         manifest = {
@@ -2637,6 +2822,7 @@ class ExperimentRunner:
             "seed": prepare_metadata.get("seed"),
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
+            "timing_breakdown": timing_breakdown,
             "generated_samples": prepare_metadata.get("generated_samples"),
             "completed_samples": prepare_metadata.get("completed_samples"),
             "fc_generated_samples": prepare_metadata.get("fc_generated_samples"),
@@ -2668,6 +2854,7 @@ class ExperimentRunner:
         script = COMPARISON_ROOT / "scripts" / "evaluate_hamiltonian_metrics.py"
         command = [str(python), str(script), str(result_dir)]
         self._append(f"[UI] Calculando metricas sparse/espectro/DOS: {' '.join(command)}\n")
+        started_at = time.time()
         result = subprocess.run(
             command,
             cwd=REPO_ROOT,
@@ -2675,6 +2862,7 @@ class ExperimentRunner:
             text=True,
             check=False,
         )
+        elapsed = time.time() - started_at
         if result.stdout.strip():
             self._append(result.stdout.strip() + "\n")
         if result.stderr.strip():
@@ -2689,6 +2877,7 @@ class ExperimentRunner:
         else:
             summary = {"exists": False}
         summary["returncode"] = result.returncode
+        summary["evaluation_time_seconds"] = elapsed
         if result.returncode == 0:
             self._append(
                 "[UI] Metricas Hamiltonianas archivadas: "
@@ -2844,8 +3033,15 @@ class ExperimentRunner:
         atom_runs = sorted(atom_runs, key=lambda run: (int(run.get("dataset_size", 0)), str(run.get("dataset_label", ""))))
         for md_result in md_runs:
             md_dataset_size = int(md_result.get("dataset_size", 0))
+            md_budget = reference_budget_for_run(md_result)
             for atom_result in atom_runs:
+                compute_mode = str(manifest.get("compute_budget_mode", "both"))
+                if not should_compare_budget_pair(md_result, atom_result, atom_runs, compute_mode):
+                    continue
                 atom_dataset_size = int(atom_result.get("dataset_size", 0))
+                atom_budget = reference_budget_for_run(atom_result)
+                ratio = budget_ratio(md_budget, atom_budget)
+                mismatch_warning = budget_warning(md_budget, atom_budget)
                 pair_id = self._common_test_pair_id(md_result, atom_result)
                 pair_common_dir = common_root / pair_id
                 build_command = [
@@ -2940,6 +3136,11 @@ class ExperimentRunner:
                             "train_dataset_size": int(train_result.get("dataset_size", 0)),
                             "md_dataset_size": md_dataset_size,
                             "atom_dataset_size": atom_dataset_size,
+                            "compute_budget_mode": compute_mode,
+                            "md_siesta_reference_count": md_budget,
+                            "atomdisp_siesta_reference_count": atom_budget,
+                            "budget_ratio": ratio,
+                            "budget_mismatch_warning": mismatch_warning,
                             "md_dataset_label": str(md_result.get("dataset_label", f"dataset_{md_dataset_size}")),
                             "atom_dataset_label": str(atom_result.get("dataset_label", f"dataset_{atom_dataset_size}")),
                             "seed": train_result.get("seed"),

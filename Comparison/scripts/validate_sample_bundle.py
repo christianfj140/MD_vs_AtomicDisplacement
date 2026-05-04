@@ -92,6 +92,18 @@ def find_matrix(sample_dir: Path) -> Path | None:
     return sorted(matrices, key=matrix_sort_key)[0] if matrices else None
 
 
+def find_matrices(sample_dir: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for suffix in MATRIX_SUFFIXES
+            for path in sample_dir.glob(f"*{suffix}")
+            if path.name != "ML_prediction.HSX"
+        ],
+        key=matrix_sort_key,
+    )
+
+
 def system_label_from_fdf(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -115,7 +127,10 @@ def has_atomic_coordinates(path: Path) -> bool:
 def parse_run_out_status(path: Path | None) -> tuple[bool, bool, str]:
     if path is None or not path.exists():
         return False, False, "missing_run_out"
-    text = path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        return False, False, f"parser_error:{exc}"
     completed = "Job completed" in text
     converged = "SCF cycle converged" in text
     if completed and converged:
@@ -154,7 +169,7 @@ def candidates_from_manifest(path: Path, common_run_out: Path | None) -> list[Sa
         sample_dir = as_path(row.get("sample_dir"), base)
         structure_path = as_path(row.get("structure_path"), base)
         hamiltonian_path = as_path(row.get("hamiltonian_path"), base)
-        run_out_path = as_path(row.get("run_out_path"), base) or common_run_out
+        run_out_path = as_path(row.get("run_out_path") or row.get("output_path"), base) or common_run_out
         sample_id = row.get("sample_id") or (sample_dir.name if sample_dir else f"row_{index}")
         method = row.get("method") or "unknown"
         candidates.append(
@@ -204,10 +219,13 @@ def validate_sample(
             structure_path = find_first(sample.sample_dir, STRUCTURE_NAMES)
         if hamiltonian_path is None:
             hamiltonian_path = find_matrix(sample.sample_dir)
+        matrix_count = len(find_matrices(sample.sample_dir))
+    else:
+        matrix_count = 1 if hamiltonian_path is not None and hamiltonian_path.exists() else 0
 
     structure_exists = structure_path is not None and structure_path.exists()
     if not structure_exists:
-        reasons.append("missing_structure")
+        reasons.append("missing_run_fdf")
     elif not has_atomic_coordinates(structure_path):
         reasons.append("structure_missing_atomic_coordinates")
 
@@ -215,11 +233,17 @@ def validate_sample(
         if allow_missing_hamiltonian_debug:
             reasons.append("missing_hamiltonian_debug_allowed")
         else:
-            reasons.append("missing_hamiltonian")
+            reasons.append("missing_matrix")
+    if matrix_count > 1:
+        reasons.append("ambiguous_reference_matrix")
 
     completed, converged, run_out_status = parse_run_out_status(sample.run_out_path)
+    if run_out_status == "missing_run_out":
+        reasons.append("missing_output")
+    if run_out_status.startswith("parser_error"):
+        reasons.append("parser_error")
     if not completed:
-        reasons.append("siesta_not_completed")
+        reasons.append("job_not_completed")
     if not converged:
         reasons.append("scf_not_converged")
 
@@ -301,6 +325,7 @@ def main() -> int:
     if not fieldnames:
         fieldnames = ["sample_id", "status", "invalid_reasons"]
 
+    write_csv(args.output_dir / "sample_validation_summary.csv", rows, fieldnames)
     write_csv(args.output_dir / "valid_samples.csv", valid_rows, fieldnames)
     write_csv(args.output_dir / "invalid_samples.csv", invalid_rows, fieldnames)
     summary = {
@@ -312,6 +337,7 @@ def main() -> int:
         "require_spectral": bool(args.require_spectral),
         "allow_missing_hamiltonian_debug": bool(args.allow_missing_hamiltonian_debug),
         "outputs": {
+            "sample_validation_summary": str(args.output_dir / "sample_validation_summary.csv"),
             "valid_samples": str(args.output_dir / "valid_samples.csv"),
             "invalid_samples": str(args.output_dir / "invalid_samples.csv"),
             "validation_summary": str(args.output_dir / "validation_summary.json"),

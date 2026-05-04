@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -383,16 +384,149 @@ def parse_total_energy_ev(sample_dir: Path) -> float | None:
 def sample_run_status(sample_dir: Path) -> dict[str, Any]:
     run_out = sample_dir / "RUN.out"
     if not run_out.exists():
-        return {"job_completed": False, "scf_converged": False}
+        return {
+            "output_exists": False,
+            "job_completed": False,
+            "scf_converged": False,
+            "stale_output": False,
+        }
     run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    stale_output = False
     if run_fdf.exists() and run_out.stat().st_mtime < run_fdf.stat().st_mtime:
-        return {"job_completed": False, "scf_converged": False}
+        stale_output = True
 
     text = run_out.read_text(encoding="utf-8", errors="ignore")
     return {
-        "job_completed": "Job completed" in text,
-        "scf_converged": "SCF cycle converged" in text,
+        "output_exists": True,
+        "job_completed": (not stale_output) and "Job completed" in text,
+        "scf_converged": (not stale_output) and "SCF cycle converged" in text,
+        "stale_output": stale_output,
     }
+
+
+def matrix_sort_key(path: Path) -> tuple[int, str]:
+    numbers: list[int] = []
+    for chunk in path.stem.replace("-", ".").replace("_", ".").split("."):
+        if chunk.isdigit():
+            numbers.append(int(chunk))
+    return (numbers[-1] if numbers else 10**9, path.name)
+
+
+def reference_matrices(sample_dir: Path) -> list[Path]:
+    return sorted(
+        [
+            path
+            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
+            if path.name != "ML_prediction.HSX"
+        ],
+        key=matrix_sort_key,
+    )
+
+
+def validate_sample_dir(
+    sample_dir: Path,
+    *,
+    allow_unvalidated_matrices: bool = False,
+) -> dict[str, Any]:
+    """Validate one SIESTA reference sample before training or reuse."""
+
+    reasons: list[str] = []
+    run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    run_out = sample_dir / PIPELINE_CONFIG["paths"]["run_out_name"]
+    matrices = reference_matrices(sample_dir)
+    try:
+        status = sample_run_status(sample_dir)
+    except Exception as exc:
+        status = {
+            "output_exists": run_out.exists(),
+            "job_completed": False,
+            "scf_converged": False,
+            "stale_output": False,
+            "parser_error": str(exc),
+        }
+        reasons.append("parser_error")
+
+    if not run_fdf.exists():
+        reasons.append("missing_run_fdf")
+    if not matrices:
+        reasons.append("missing_matrix")
+    if len(matrices) > 1:
+        reasons.append("ambiguous_reference_matrix")
+    if not status.get("output_exists", False):
+        reasons.append("missing_output")
+    elif status.get("stale_output", False):
+        reasons.append("stale_output")
+    if status.get("output_exists", False) and not status.get("job_completed", False):
+        reasons.append("job_not_completed")
+    if status.get("output_exists", False) and not status.get("scf_converged", False):
+        reasons.append("scf_not_converged")
+
+    hard_reasons = set(reasons)
+    if allow_unvalidated_matrices:
+        hard_reasons -= {"missing_output", "job_not_completed", "scf_not_converged", "stale_output"}
+    valid = not hard_reasons
+    return {
+        "sample_id": sample_dir.name,
+        "sample_dir": str(sample_dir),
+        "run_fdf": str(run_fdf) if run_fdf.exists() else "",
+        "run_out": str(run_out) if run_out.exists() else "",
+        "hamiltonian_path": str(matrices[0]) if len(matrices) == 1 else "",
+        "reference_matrix_count": len(matrices),
+        "job_completed": bool(status.get("job_completed", False)),
+        "scf_converged": bool(status.get("scf_converged", False)),
+        "stale_output": bool(status.get("stale_output", False)),
+        "valid": valid,
+        "status": "valid" if valid else "invalid",
+        "validation_reason": "ok" if valid else ";".join(reasons),
+        "invalid_reasons": "" if valid else ";".join(reasons),
+        "allow_unvalidated_matrices": bool(allow_unvalidated_matrices),
+    }
+
+
+def write_validation_outputs(output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "sample_id",
+        "sample_dir",
+        "run_fdf",
+        "run_out",
+        "hamiltonian_path",
+        "reference_matrix_count",
+        "job_completed",
+        "scf_converged",
+        "stale_output",
+        "valid",
+        "status",
+        "validation_reason",
+        "invalid_reasons",
+        "allow_unvalidated_matrices",
+    ]
+
+    def write_csv_file(path: Path, subset: list[dict[str, Any]]) -> None:
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(subset)
+
+    valid_rows = [row for row in rows if row.get("valid")]
+    invalid_rows = [row for row in rows if not row.get("valid")]
+    write_csv_file(output_dir / "sample_validation_summary.csv", rows)
+    write_csv_file(output_dir / "valid_samples.csv", valid_rows)
+    write_csv_file(output_dir / "invalid_samples.csv", invalid_rows)
+    summary = {
+        "ok": not invalid_rows,
+        "samples_seen": len(rows),
+        "valid_samples": len(valid_rows),
+        "invalid_samples": len(invalid_rows),
+        "outputs": {
+            "sample_validation_summary": str(output_dir / "sample_validation_summary.csv"),
+            "valid_samples": str(output_dir / "valid_samples.csv"),
+            "invalid_samples": str(output_dir / "invalid_samples.csv"),
+            "validation_summary": str(output_dir / "validation_summary.json"),
+        },
+    }
+    write_json(output_dir / "validation_summary.json", summary)
+    return summary
 
 
 def generated_sample_dirs() -> list[Path]:
@@ -470,15 +604,15 @@ def generated_sample_dirs() -> list[Path]:
 
 def completed_sample_dirs() -> list[Path]:
     completed = []
+    allow_unvalidated = bool(
+        PIPELINE_CONFIG.get("single_points", {}).get("allow_unvalidated_matrices", False)
+    )
     for sample_dir in generated_sample_dirs():
-        hsx_path = find_first_output(sample_dir, ".HSX")
-        tshs_path = find_first_output(sample_dir, ".TSHS")
-        run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
-        if run_fdf.exists() and tshs_path:
-            completed.append(sample_dir)
-            continue
-        status = sample_run_status(sample_dir)
-        if status["job_completed"] and status["scf_converged"] and (hsx_path or tshs_path):
+        validation = validate_sample_dir(
+            sample_dir,
+            allow_unvalidated_matrices=allow_unvalidated,
+        )
+        if validation["valid"]:
             completed.append(sample_dir)
     return completed
 

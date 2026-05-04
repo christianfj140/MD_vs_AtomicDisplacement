@@ -124,8 +124,69 @@ class ComparisonWorkflowTests(unittest.TestCase):
             with (output / "invalid_samples.csv").open(encoding="utf-8") as handle:
                 invalid = list(csv.DictReader(handle))
             reasons = " ".join(row["invalid_reasons"] for row in invalid)
-            self.assertIn("missing_hamiltonian", reasons)
+            self.assertIn("missing_matrix", reasons)
             self.assertIn("scf_not_converged", reasons)
+
+    def test_strict_atomdisp_validation_rejects_missing_run_out_and_failed_scf(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "atom_displacement_utils",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "atom_displacement_utils.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            missing_out = make_sample(root, "missing_out")
+            (missing_out / "RUN.out").unlink()
+            failed_scf = make_sample(root, "failed_scf", converged=False)
+            valid = make_sample(root, "valid")
+
+            self.assertFalse(module.validate_sample_dir(missing_out)["valid"])
+            self.assertIn("missing_output", module.validate_sample_dir(missing_out)["validation_reason"])
+            self.assertFalse(module.validate_sample_dir(failed_scf)["valid"])
+            self.assertIn("scf_not_converged", module.validate_sample_dir(failed_scf)["validation_reason"])
+            self.assertTrue(module.validate_sample_dir(valid)["valid"])
+
+    def test_run_single_points_reruns_stale_matrix_instead_of_skipping(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "run_single_points",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "run_single_points.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root, "001")
+            (sample / "RUN.out").unlink()
+            calls: list[Path] = []
+
+            module.generated_sample_dirs = lambda: [sample]
+            module.require_command = lambda command: None
+            module.DATASET_DIR = root
+            module.PIPELINE_PATHS["run_summary_path"] = root / "run_summary.json"
+
+            def fake_run_siesta(sample_dir: Path, output_path: Path) -> int:
+                calls.append(sample_dir)
+                output_path.write_text("Job completed\nSCF cycle converged\n", encoding="utf-8")
+                return 0
+
+            module.run_siesta_in_dir = fake_run_siesta
+            argv = sys.argv
+            try:
+                sys.argv = ["run_single_points.py"]
+                rc = module.main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, [sample])
+            summary = json.loads((root / "validation" / "validation_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["valid_samples"], 1)
 
     def test_build_common_tests_refuses_train_test_overlap(self) -> None:
         with workspace_tempdir() as tmp:
@@ -274,6 +335,378 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
             self.assertNotEqual(recommendation["status"], "atom_displacement_conservative_win")
+
+    def test_winner_analysis_preserves_seeds_and_marks_stability(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2"):
+                rows.extend(
+                    [
+                        {
+                            "experiment_id": "exp_test",
+                            "train_method": "md",
+                            "test_set": "test_mixed",
+                            "md_dataset_size": "10",
+                            "atom_dataset_size": "10",
+                            "seed": seed,
+                            "model_checkpoint": f"md_{seed}.ckpt",
+                            "global_rmse_eV": "0.5",
+                        },
+                        {
+                            "experiment_id": "exp_test",
+                            "train_method": "atom_displacement",
+                            "test_set": "test_mixed",
+                            "md_dataset_size": "10",
+                            "atom_dataset_size": "10",
+                            "seed": seed,
+                            "model_checkpoint": f"ad_{seed}.ckpt",
+                            "global_rmse_eV": "1.0",
+                        },
+                    ]
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "winner_summary.csv").open(encoding="utf-8") as handle:
+                summary_rows = list(csv.DictReader(handle))
+            self.assertEqual(summary_rows[0]["winner"], "md")
+            self.assertEqual(summary_rows[0]["n_seeds"], "2")
+            self.assertEqual(summary_rows[0]["winner_stability"], "stable")
+            with (root / "summary" / "winner_by_dataset_size.csv").open(encoding="utf-8") as handle:
+                pairs = list(csv.DictReader(handle))
+            self.assertEqual({row["seed"] for row in pairs}, {"1", "2"})
+            self.assertNotIn("pooled", {row["seed"] for row in pairs})
+
+    def test_winner_analysis_single_seed_warning_and_checkpoint_isolation(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            write_csv(
+                metrics,
+                [
+                    {
+                        "experiment_id": "exp_test",
+                        "train_method": "md",
+                        "test_set": "test_mixed",
+                        "md_dataset_size": "10",
+                        "atom_dataset_size": "10",
+                        "seed": "1",
+                        "model_checkpoint": "md_a.ckpt",
+                        "global_rmse_eV": "0.5",
+                    },
+                    {
+                        "experiment_id": "exp_test",
+                        "train_method": "atom_displacement",
+                        "test_set": "test_mixed",
+                        "md_dataset_size": "10",
+                        "atom_dataset_size": "10",
+                        "seed": "1",
+                        "model_checkpoint": "ad_a.ckpt",
+                        "global_rmse_eV": "1.0",
+                    },
+                    {
+                        "experiment_id": "other_exp",
+                        "train_method": "md",
+                        "test_set": "test_mixed",
+                        "md_dataset_size": "10",
+                        "atom_dataset_size": "10",
+                        "seed": "1",
+                        "model_checkpoint": "md_b.ckpt",
+                        "global_rmse_eV": "9.0",
+                    },
+                    {
+                        "experiment_id": "other_exp",
+                        "train_method": "atom_displacement",
+                        "test_set": "test_mixed",
+                        "md_dataset_size": "10",
+                        "atom_dataset_size": "10",
+                        "seed": "1",
+                        "model_checkpoint": "ad_b.ckpt",
+                        "global_rmse_eV": "8.0",
+                    },
+                ],
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertTrue(recommendation["single_seed_warning"])
+            self.assertNotIn("conservative_win", recommendation["status"])
+            with (root / "summary" / "winner_by_dataset_size.csv").open(encoding="utf-8") as handle:
+                pairs = list(csv.DictReader(handle))
+            self.assertEqual({row["experiment_id"] for row in pairs}, {"exp_test", "other_exp"})
+            self.assertEqual(len(pairs), 2)
+
+    def test_geometry_leakage_detects_duplicates_near_duplicates_and_md_neighbors(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            train_a = make_sample(root / "samples", "train_a")
+            test_same = make_sample(root / "samples", "test_same")
+            test_near = make_sample(root / "samples", "test_near")
+            minimal_run_fdf(test_near / "RUN.fdf")
+            text = (test_near / "RUN.fdf").read_text(encoding="utf-8").replace("0.0 0.7 0.0 2", "0.0 0.70001 0.0 2")
+            (test_near / "RUN.fdf").write_text(text, encoding="utf-8")
+            train_manifest = root / "train.csv"
+            test_manifest = root / "test.csv"
+            write_csv(
+                train_manifest,
+                [
+                    {
+                        "sample_id": "train_a",
+                        "method": "md",
+                        "frame_index": "10",
+                        "structure_path": str(train_a / "RUN.fdf"),
+                    }
+                ],
+            )
+            write_csv(
+                test_manifest,
+                [
+                    {
+                        "sample_id": "test_same",
+                        "method": "md",
+                        "frame_index": "11",
+                        "structure_path": str(test_same / "RUN.fdf"),
+                    },
+                    {
+                        "sample_id": "test_near",
+                        "method": "md",
+                        "frame_index": "20",
+                        "structure_path": str(test_near / "RUN.fdf"),
+                    },
+                ],
+            )
+            result = run_script(
+                "Comparison/scripts/check_geometry_leakage.py",
+                "--train-manifest",
+                str(train_manifest),
+                "--test-manifest",
+                str(test_manifest),
+                "--output-dir",
+                str(root / "leakage"),
+                "--rmsd-threshold",
+                "0.001",
+            )
+            self.assertEqual(result.returncode, 2)
+            summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
+            self.assertGreaterEqual(summary["exact_duplicates"], 1)
+            self.assertGreaterEqual(summary["near_duplicates"], 1)
+            self.assertGreaterEqual(summary["md_neighbor_warnings"], 1)
+
+    def test_geometry_leakage_allows_different_geometries(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            train = make_sample(root / "samples", "train")
+            test = make_sample(root / "samples", "test")
+            text = (test / "RUN.fdf").read_text(encoding="utf-8").replace("0.0 0.7 0.0 2", "0.0 2.0 0.0 2")
+            (test / "RUN.fdf").write_text(text, encoding="utf-8")
+            train_manifest = root / "train.csv"
+            test_manifest = root / "test.csv"
+            write_csv(train_manifest, [{"sample_id": "train", "method": "md", "structure_path": str(train / "RUN.fdf")}])
+            write_csv(test_manifest, [{"sample_id": "test", "method": "md", "structure_path": str(test / "RUN.fdf")}])
+            result = run_script(
+                "Comparison/scripts/check_geometry_leakage.py",
+                "--train-manifest",
+                str(train_manifest),
+                "--test-manifest",
+                str(test_manifest),
+                "--output-dir",
+                str(root / "leakage"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_predict_inputs_do_not_copy_reference_hamiltonians(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "predict_model_on_dataset",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root / "samples", "001")
+            rows = [{"sample_id": "001", "structure_path": str(sample / "RUN.fdf")}]
+            copied = module.copy_sample_inputs(rows, root / "workspace")
+            copied_dir = root / "workspace" / "predict_structures" / "001"
+            self.assertTrue((copied_dir / "RUN.fdf").exists())
+            self.assertFalse(any(copied_dir.glob("*.TSHS")))
+            self.assertFalse(any(copied_dir.glob("*.HSX")))
+            self.assertFalse(copied[0]["reference_hamiltonian_copied_to_input"])
+
+    def test_siesta_settings_hash_and_mismatch_warning(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "siesta_settings",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        shared = {"siesta": {"mesh_cutoff": "200 Ry"}}
+        md = {"md": {"mesh_cutoff": "200 Ry", "lattice_constant": 15, "save_hs": True}}
+        atom = {
+            "structure": {
+                "siesta": {"MeshCutoff": "200 Ry", "ForceAuxCell": "F"},
+                "lattice_constant": 15,
+                "force_constants": {"save_tshs": True},
+            }
+        }
+        ok_report = module.compare_settings(md, atom, shared)
+        self.assertTrue(ok_report["ok"])
+        atom_bad = {"structure": {"siesta": {"mesh_cutoff": "300 Ry", "lattice_constant": 15}}}
+        bad_report = module.compare_settings(md, atom_bad, shared)
+        self.assertFalse(bad_report["ok"])
+        self.assertTrue(bad_report["warning"])
+
+    def test_compute_budget_pairing_helpers(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "pipeline_ui",
+            REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["pipeline_ui"] = module
+        spec.loader.exec_module(module)
+        md = {"dataset_size": 10, "siesta_hamiltonians": 10}
+        atom_same = {"dataset_size": 10, "siesta_hamiltonians": 10}
+        atom_other = {"dataset_size": 20, "siesta_hamiltonians": 11}
+        self.assertTrue(module.should_compare_budget_pair(md, atom_same, [atom_same, atom_other], "equal_sample_count"))
+        self.assertFalse(module.should_compare_budget_pair(md, atom_other, [atom_same, atom_other], "equal_sample_count"))
+        self.assertTrue(module.should_compare_budget_pair(md, atom_other, [atom_other], "equal_siesta_budget"))
+        self.assertTrue(module.budget_warning(10, 30))
+
+    def test_verify_integrity_accepts_multi_displacement_fc_layout(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            base = root / "base"
+            base.mkdir()
+            minimal_run_fdf(base / "RUN.fdf")
+            (base / "H.psf").write_text("pseudo", encoding="utf-8")
+            md_steps = root / "MD_steps"
+            fc_steps = root / "FC_steps"
+            for index in range(1, 4):
+                make_sample(md_steps, str(index))
+            for index in range(1, 9):
+                make_sample(fc_steps, str(index))
+            fc_raw = root / "dataset"
+            for label in ("d0p01", "d0p02"):
+                run_dir = fc_raw / "FC_runs" / label
+                run_dir.mkdir(parents=True)
+                (run_dir / "FORCE_CONSTANTS.FC").write_text("fc", encoding="utf-8")
+            manifest = {
+                "generation_mode": "siesta_fc_multi_run",
+                "runs": [{"label": "d0p01", "selected_count": 4}, {"label": "d0p02", "selected_count": 4}],
+            }
+            manifest_path = root / "samples_manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            result = run_script(
+                "Comparison/scripts/verify_dataset_integrity.py",
+                "--base-fdf",
+                str(base / "RUN.fdf"),
+                "--md-steps-dir",
+                str(md_steps),
+                "--fc-steps-dir",
+                str(fc_steps),
+                "--fc-raw-dir",
+                str(fc_raw),
+                "--samples-manifest",
+                str(manifest_path),
+                "--siesta-bin",
+                "true",
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["fc_mode"], "siesta_fc_multi_run")
+            self.assertEqual(report["actual_normalized_samples"], 8)
+
+    def test_verify_integrity_reports_missing_fc_run_and_stale_matrix(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            base = root / "base"
+            base.mkdir()
+            minimal_run_fdf(base / "RUN.fdf")
+            (base / "H.psf").write_text("pseudo", encoding="utf-8")
+            md_steps = root / "MD_steps"
+            fc_steps = root / "FC_steps"
+            make_sample(md_steps, "1")
+            stale = make_sample(fc_steps, "1")
+            (stale / "RUN.out").unlink()
+            fc_raw = root / "dataset"
+            (fc_raw / "FC_runs" / "d0p01").mkdir(parents=True)
+            (fc_raw / "FC_runs" / "d0p01" / "FC").write_text("fc", encoding="utf-8")
+            manifest_path = root / "samples_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "generation_mode": "siesta_fc_multi_run",
+                        "runs": [{"label": "d0p01", "selected_count": 1}, {"label": "d0p02", "selected_count": 1}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = run_script(
+                "Comparison/scripts/verify_dataset_integrity.py",
+                "--base-fdf",
+                str(base / "RUN.fdf"),
+                "--md-steps-dir",
+                str(md_steps),
+                "--fc-steps-dir",
+                str(fc_steps),
+                "--fc-raw-dir",
+                str(fc_raw),
+                "--samples-manifest",
+                str(manifest_path),
+                "--siesta-bin",
+                "true",
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 2)
+            report = json.loads(result.stdout)
+            self.assertIn("d0p02", report["missing_raw_fc_runs"])
+            self.assertIn("1", report["fc"]["missing_output"])
+
+    def test_ui_latest_cross_experiment_does_not_flatten_all_metrics(self) -> None:
+        app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("experiments.flatMap((experiment) => experiment.metrics", app_js)
+        self.assertIn("Mostrando solo el experimento cross mas reciente", app_js)
+
+    def test_timing_breakdown_schema_keys(self) -> None:
+        required = {
+            "md_siesta_generation_seconds",
+            "atomdisp_siesta_generation_seconds",
+            "dataset_preparation_seconds",
+            "normalization_seconds",
+            "training_seconds",
+            "prediction_seconds",
+            "evaluation_seconds",
+            "winner_analysis_seconds",
+            "total_experiment_seconds",
+        }
+        schema_text = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
+        for key in required:
+            self.assertIn(key, schema_text)
 
     def test_md_rewrite_makes_effective_geometries_differ_when_xv_differs(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))

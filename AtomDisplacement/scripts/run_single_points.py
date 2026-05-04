@@ -12,10 +12,10 @@ from atom_displacement_utils import (
     PIPELINE_CONFIG,
     PIPELINE_PATHS,
     generated_sample_dirs,
-    find_first_output,
     require_command,
     run_siesta_in_dir,
-    sample_run_status,
+    validate_sample_dir,
+    write_validation_outputs,
     write_json,
 )
 from pipeline_config_utils import command
@@ -26,6 +26,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Lanza SIESTA para todas las muestras generadas.")
     parser.add_argument("--limit", type=int, default=single_points["limit"])
     parser.add_argument("--rerun", action="store_true", default=bool(single_points["rerun"]))
+    parser.add_argument(
+        "--allow-unvalidated-matrices",
+        action="store_true",
+        default=bool(single_points.get("allow_unvalidated_matrices", False)),
+        help=(
+            "Solo para depuracion: permite reutilizar matrices existentes aunque "
+            "RUN.out no demuestre completion y convergencia SCF."
+        ),
+    )
     return parser
 
 
@@ -47,31 +56,58 @@ def main() -> int:
     print(f"[INFO] Muestras detectadas: {len(sample_dirs)}")
 
     summary = []
+    validation_rows = []
     for sample_dir in sample_dirs:
-        status = sample_run_status(sample_dir)
-        has_reference_matrix = (
-            find_first_output(sample_dir, ".TSHS") is not None
-            or find_first_output(sample_dir, ".HSX") is not None
+        validation = validate_sample_dir(
+            sample_dir,
+            allow_unvalidated_matrices=args.allow_unvalidated_matrices,
         )
-        if has_reference_matrix and not args.rerun:
-            print(f"[SKIP] {sample_dir.name} ya tiene Hamiltoniano de referencia")
-            summary.append({"id": sample_dir.name, "status": "skipped_existing_matrix"})
-            continue
-        if status["job_completed"] and not args.rerun:
-            print(f"[SKIP] {sample_dir.name} ya completada")
-            summary.append({"id": sample_dir.name, "status": "skipped_completed"})
+        if validation["valid"] and not args.rerun:
+            print(f"[SKIP] {sample_dir.name} validada: Hamiltoniano y SIESTA convergido")
+            summary.append(
+                {
+                    "id": sample_dir.name,
+                    "status": "skipped_validated",
+                    "validation_reason": validation["validation_reason"],
+                }
+            )
+            validation_rows.append(validation)
             continue
 
         print(f"[RUN] {sample_dir.name}")
         try:
             run_siesta_in_dir(sample_dir, sample_dir / PIPELINE_CONFIG["paths"]["run_out_name"])
-            summary.append({"id": sample_dir.name, "status": "completed"})
+            validation = validate_sample_dir(
+                sample_dir,
+                allow_unvalidated_matrices=args.allow_unvalidated_matrices,
+            )
+            summary.append(
+                {
+                    "id": sample_dir.name,
+                    "status": "completed" if validation["valid"] else "completed_invalid",
+                    "validation_reason": validation["validation_reason"],
+                }
+            )
         except Exception as exc:
-            summary.append({"id": sample_dir.name, "status": "failed", "error": str(exc)})
+            validation = validate_sample_dir(
+                sample_dir,
+                allow_unvalidated_matrices=args.allow_unvalidated_matrices,
+            )
+            summary.append(
+                {
+                    "id": sample_dir.name,
+                    "status": "failed",
+                    "error": str(exc),
+                    "validation_reason": validation["validation_reason"],
+                }
+            )
             print(f"[ERROR] {sample_dir.name}: {exc}")
+        validation_rows.append(validation)
 
     write_json(PIPELINE_PATHS["run_summary_path"], summary)
+    validation_summary = write_validation_outputs(DATASET_DIR / "validation", validation_rows)
     print("[OK] Resumen de ejecucion guardado en dataset/run_summary.json")
+    print(f"[OK] Validacion de muestras guardada en {validation_summary['outputs']['validation_summary']}")
     return 0
 
 
