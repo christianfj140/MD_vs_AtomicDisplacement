@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -56,6 +57,36 @@ def valid_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return [row for row in rows if str(row.get("status", "")).lower() in {"valid", "ok", "completed"}]
 
 
+def file_sha256(path_value: str) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_size(path_value: str) -> int | None:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return None
+    return path.stat().st_size
+
+
+def canonical_json(data: Any) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def content_hash(data: Any) -> str:
+    return hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
+
+
 def copy_file_if_exists(src_value: str, destination_dir: Path) -> str:
     if not src_value:
         return ""
@@ -83,8 +114,48 @@ def freeze_rows(rows: list[dict[str, str]], test_set: str, output_dir: Path) -> 
             item["run_out_path"] = copy_file_if_exists(row.get("run_out_path", ""), sample_dir)
         if row.get("metadata_path"):
             item["metadata_path"] = copy_file_if_exists(row.get("metadata_path", ""), sample_dir)
+        item["structure_sha256"] = file_sha256(item.get("structure_path", ""))
+        item["hamiltonian_sha256"] = file_sha256(item.get("hamiltonian_path", ""))
+        item["run_out_sha256"] = file_sha256(item.get("run_out_path", ""))
+        item["metadata_sha256"] = file_sha256(item.get("metadata_path", ""))
+        item["structure_size_bytes"] = file_size(item.get("structure_path", ""))
+        item["hamiltonian_size_bytes"] = file_size(item.get("hamiltonian_path", ""))
         frozen.append(item)
     return frozen
+
+
+def frozen_manifest(test_set: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    samples = [
+        {
+            "sample_id": row.get("sample_id", ""),
+            "method": row.get("method", ""),
+            "test_set": test_set,
+            "structure_path": row.get("structure_path", ""),
+            "source_structure_path": row.get("source_structure_path", ""),
+            "structure_sha256": row.get("structure_sha256", ""),
+            "structure_size_bytes": row.get("structure_size_bytes"),
+            "hamiltonian_path": row.get("hamiltonian_path", ""),
+            "source_hamiltonian_path": row.get("source_hamiltonian_path", ""),
+            "hamiltonian_sha256": row.get("hamiltonian_sha256", ""),
+            "hamiltonian_size_bytes": row.get("hamiltonian_size_bytes"),
+            "run_out_sha256": row.get("run_out_sha256", ""),
+            "metadata_sha256": row.get("metadata_sha256", ""),
+            "status": row.get("status", ""),
+        }
+        for row in sorted(rows, key=lambda item: (str(item.get("method", "")), str(item.get("sample_id", ""))))
+    ]
+    methods: dict[str, int] = {}
+    for sample in samples:
+        method = str(sample.get("method") or "unknown")
+        methods[method] = methods.get(method, 0) + 1
+    payload = {
+        "test_set": test_set,
+        "samples": samples,
+        "sample_count": len(samples),
+        "method_counts": methods,
+    }
+    payload["frozen_test_hash"] = content_hash(samples)
+    return payload
 
 
 def ensure_independent(test_rows: list[dict[str, str]], train_rows: list[dict[str, str]], allow_overlap: bool) -> list[str]:
@@ -107,8 +178,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated subset of test_md,test_atomdisp,test_mixed.",
     )
     parser.add_argument("--mixed-max-per-method", type=int, default=None)
+    parser.add_argument(
+        "--mixed-selection",
+        choices=["spread", "prefix"],
+        default="spread",
+        help="How to choose rows for test_mixed when --mixed-max-per-method is set.",
+    )
     parser.add_argument("--allow-train-test-overlap-debug", action="store_true")
     return parser
+
+
+def select_spread(rows: list[dict[str, str]], count: int | None) -> list[dict[str, str]]:
+    if count is None or count >= len(rows):
+        return list(rows)
+    if count <= 0:
+        return []
+    used: set[int] = set()
+    selected: list[int] = []
+    for index in range(count):
+        target = min(len(rows) - 1, int((index + 0.5) * len(rows) / count))
+        if target in used:
+            target = min(
+                (candidate for candidate in range(len(rows)) if candidate not in used),
+                key=lambda candidate: abs(candidate - target),
+            )
+        used.add(target)
+        selected.append(target)
+    return [rows[index] for index in sorted(selected)]
+
+
+def select_mixed_part(rows: list[dict[str, str]], count: int | None, mode: str) -> list[dict[str, str]]:
+    if mode == "prefix":
+        return rows[:count] if count is not None else list(rows)
+    return select_spread(rows, count)
 
 
 def main() -> int:
@@ -130,8 +232,8 @@ def main() -> int:
     if "test_atomdisp" in requested:
         test_sets["test_atomdisp"] = atom_rows
     if "test_mixed" in requested:
-        md_part = md_rows[: args.mixed_max_per_method] if args.mixed_max_per_method else md_rows
-        atom_part = atom_rows[: args.mixed_max_per_method] if args.mixed_max_per_method else atom_rows
+        md_part = select_mixed_part(md_rows, args.mixed_max_per_method, args.mixed_selection)
+        atom_part = select_mixed_part(atom_rows, args.mixed_max_per_method, args.mixed_selection)
         test_sets["test_mixed"] = md_part + atom_part
 
     output_rows = []
@@ -143,6 +245,11 @@ def main() -> int:
             errors.append(f"{test_set} overlaps train manifests: {overlaps}")
         frozen = freeze_rows(rows, test_set, args.output_dir)
         write_rows(args.output_dir / test_set / "test_manifest.csv", frozen)
+        frozen_payload = frozen_manifest(test_set, frozen)
+        (args.output_dir / test_set / "frozen_test_manifest.json").write_text(
+            json.dumps(frozen_payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
         output_rows.extend(
             {
                 "test_set": test_set,
@@ -150,6 +257,8 @@ def main() -> int:
                 "method": row.get("method"),
                 "structure_path": row.get("structure_path"),
                 "hamiltonian_path": row.get("hamiltonian_path"),
+                "structure_sha256": row.get("structure_sha256"),
+                "hamiltonian_sha256": row.get("hamiltonian_sha256"),
                 "status": row.get("status"),
             }
             for row in frozen
@@ -163,6 +272,10 @@ def main() -> int:
             name: {
                 "samples": len(rows),
                 "manifest": str(args.output_dir / name / "test_manifest.csv"),
+                "frozen_manifest": str(args.output_dir / name / "frozen_test_manifest.json"),
+                "frozen_test_hash": json.loads(
+                    (args.output_dir / name / "frozen_test_manifest.json").read_text(encoding="utf-8")
+                )["frozen_test_hash"],
             }
             for name, rows in test_sets.items()
         },

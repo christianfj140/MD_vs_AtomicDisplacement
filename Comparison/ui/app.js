@@ -905,6 +905,16 @@ function renderCrossCompute(id, experiment) {
 
 function renderWinnerMap(id, experiment) {
   const metric = primaryCrossMetric(experiment);
+  const scientificStatus = experiment?.recommendation?.scientific_status;
+  if (scientificStatus && scientificStatus !== "robust_comparison") {
+    const layout = plotLayout(`Winner map (${metric})`, "Winner");
+    const blockers = recommendationBlockers(experiment?.recommendation).slice(0, 4).join(" | ");
+    layout.annotations = [
+      emptyPlotAnnotation(`Winner no robusto: ${scientificStatus}${blockers ? ` · ${blockers}` : ""}`),
+    ];
+    Plotly.react(id, [], layout, { responsive: true, displaylogo: false });
+    return;
+  }
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
   const mdSizes = Array.from(new Set(means.map((row) => row.md_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
   const atomSizes = Array.from(new Set(means.map((row) => row.atom_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
@@ -1001,6 +1011,25 @@ function renderWinnerMap(id, experiment) {
   );
 }
 
+function recommendationBlockers(recommendation) {
+  if (!recommendation) return [];
+  const blockers = [];
+  if ((recommendation.missing_required_cells || []).length) blockers.push("missing cells");
+  if (recommendation.insufficient_robust_seeds || recommendation.single_seed_warning) blockers.push("insufficient seeds");
+  if ((recommendation.missing_primary_metric_cells || []).length) blockers.push("missing primary metric");
+  const warnings = recommendation.severe_warnings || [];
+  const addWarning = (label, pattern) => {
+    if (warnings.some((warning) => String(warning).toLowerCase().includes(pattern))) blockers.push(label);
+  };
+  addWarning("leakage", "leakage");
+  addWarning("SIESTA/model/basis mismatch", "mismatch");
+  addWarning("SIESTA/model/basis mismatch", "basis");
+  addWarning("checkpoint fallback", "checkpoint");
+  addWarning("reproducibility warning", "absolute");
+  addWarning("reproducibility warning", "reproducibility");
+  return Array.from(new Set(blockers.concat(warnings.map((warning) => String(warning)))));
+}
+
 function renderPlots(payload) {
   const panel = document.getElementById("plots-panel");
   const status = document.getElementById("plots-status");
@@ -1019,8 +1048,9 @@ function renderPlots(payload) {
   const crossRows = crossExperiment?.metrics?.length || 0;
   const crossSources = crossExperiment?.source_experiments?.length || 0;
   const isolationText = crossExperiment?.isolation_warning ? ` | ${crossExperiment.isolation_warning}` : "";
+  const blockerText = recommendation ? recommendationBlockers(recommendation).slice(0, 6).join(" | ") : "";
   const crossText = recommendation?.status
-    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | ${recommendation.status} - ${recommendation.reason || ""}${isolationText}`
+    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | scientific: ${recommendation.scientific_status || "unknown"} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${recommendation.reason || ""}${isolationText}`
     : "";
   status.textContent = runs.length
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`

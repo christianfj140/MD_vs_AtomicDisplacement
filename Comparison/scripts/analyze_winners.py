@@ -41,11 +41,21 @@ METADATA_COLUMNS = {
     "siesta_settings_warning",
     "model_config_hash",
     "model_config_warning",
+    "basis_pseudopotential_warning",
+    "leakage_warning",
+    "frozen_test_warning",
+    "frozen_test_hash",
+    "frozen_test_manifest",
+    "checkpoint_manifest",
+    "checkpoint_selection_warning",
+    "reproducibility_warning",
+    "nested_subset_warning",
     "strict_comparison_mode",
     "seed",
     "epoch",
     "checkpoint",
     "model_checkpoint",
+    "model_checkpoint_sha256",
     "prediction_dir",
     "siesta_reference_dir",
     "sample",
@@ -397,6 +407,7 @@ def first_method_win(
     method: str,
     *,
     allowed_test_sets: set[str],
+    minimum_robust_seeds: int,
 ) -> dict[str, Any] | None:
     candidates = [
         row
@@ -404,6 +415,7 @@ def first_method_win(
         if row.get("metric") == metric
         and row.get("test_set") in allowed_test_sets
         and row.get("stable_winner") == method
+        and int(row.get("n_seeds") or row.get("seeds_compared") or 0) >= minimum_robust_seeds
     ]
     candidates.sort(
         key=lambda row: (
@@ -417,11 +429,26 @@ def first_method_win(
 
 def first_compute_method_win(
     pair_rows: list[dict[str, Any]],
+    summary_rows: list[dict[str, Any]],
     metric: str,
     method: str,
     *,
     allowed_test_sets: set[str],
+    minimum_robust_seeds: int,
 ) -> dict[str, Any] | None:
+    robust_groups = {
+        (
+            str(row.get("experiment_id", "unknown")),
+            row.get("md_dataset_size"),
+            row.get("atom_dataset_size"),
+            row.get("test_set"),
+        )
+        for row in summary_rows
+        if row.get("metric") == metric
+        and row.get("test_set") in allowed_test_sets
+        and row.get("stable_winner") == method
+        and int(row.get("n_seeds") or row.get("seeds_compared") or 0) >= minimum_robust_seeds
+    }
     candidates = [
         row
         for row in pair_rows
@@ -429,6 +456,13 @@ def first_compute_method_win(
         and row.get("test_set") in allowed_test_sets
         and row.get("winner") == method
         and finite(row.get("compute_budget_seconds"))
+        and (
+            str(row.get("experiment_id", "unknown")),
+            row.get("md_dataset_size"),
+            row.get("atom_dataset_size"),
+            row.get("test_set"),
+        )
+        in robust_groups
     ]
     candidates.sort(
         key=lambda row: (
@@ -446,9 +480,24 @@ def build_recommendation(
     pair_rows: list[dict[str, Any]],
     *,
     primary_metric: str,
+    minimum_robust_seeds: int = 3,
 ) -> dict[str, Any]:
     test_sets = sorted({str(row.get("test_set")) for row in rows})
     methods = sorted({str(row.get("train_method")) for row in rows})
+    frozen_test_hashes = sorted(
+        {
+            str(row.get("frozen_test_hash"))
+            for row in rows
+            if row.get("frozen_test_hash") not in (None, "", False)
+        }
+    )
+    model_checkpoint_hashes = sorted(
+        {
+            str(row.get("model_checkpoint_sha256"))
+            for row in rows
+            if row.get("model_checkpoint_sha256") not in (None, "", False)
+        }
+    )
     required_cells = {
         (METHOD_MD, "test_md"),
         (METHOD_MD, "test_atomdisp"),
@@ -462,6 +511,15 @@ def build_recommendation(
         for row in rows
     }
     missing_cells = sorted(f"{method} on {test_set}" for method, test_set in required_cells - available_cells)
+    primary_metric_cells = {
+        (str(row.get("train_method")), str(row.get("test_set")))
+        for row in rows
+        if finite(row.get(primary_metric))
+    }
+    missing_primary_metric_cells = sorted(
+        f"{method} on {test_set}"
+        for method, test_set in required_cells - primary_metric_cells
+    )
     severe_warnings = sorted(
         {
             str(value)
@@ -469,7 +527,13 @@ def build_recommendation(
             for value in (
                 row.get("siesta_settings_warning"),
                 row.get("model_config_warning"),
+                row.get("basis_pseudopotential_warning"),
                 row.get("budget_mismatch_warning"),
+                row.get("leakage_warning"),
+                row.get("frozen_test_warning"),
+                row.get("checkpoint_selection_warning"),
+                row.get("reproducibility_warning"),
+                row.get("nested_subset_warning"),
             )
             if value not in (None, "", False)
         }
@@ -485,17 +549,32 @@ def build_recommendation(
         default=0,
     )
     single_seed_only = max_seeds <= 1
-    first_atom_size = first_method_win(summary_rows, primary_metric, METHOD_ATOM, allowed_test_sets=allowed_test_sets)
-    first_md_size = first_method_win(summary_rows, primary_metric, METHOD_MD, allowed_test_sets=allowed_test_sets)
+    insufficient_robust_seeds = max_seeds < minimum_robust_seeds
+    first_atom_size = first_method_win(
+        summary_rows,
+        primary_metric,
+        METHOD_ATOM,
+        allowed_test_sets=allowed_test_sets,
+        minimum_robust_seeds=minimum_robust_seeds,
+    )
+    first_md_size = first_method_win(
+        summary_rows,
+        primary_metric,
+        METHOD_MD,
+        allowed_test_sets=allowed_test_sets,
+        minimum_robust_seeds=minimum_robust_seeds,
+    )
     first_atom_compute = first_compute_method_win(
         [
             row
             for row in pair_rows
             if row.get("metric") == primary_metric
         ],
+        summary_rows,
         primary_metric,
         METHOD_ATOM,
         allowed_test_sets=allowed_test_sets,
+        minimum_robust_seeds=minimum_robust_seeds,
     )
     first_md_compute = first_compute_method_win(
         [
@@ -503,9 +582,11 @@ def build_recommendation(
             for row in pair_rows
             if row.get("metric") == primary_metric
         ],
+        summary_rows,
         primary_metric,
         METHOD_MD,
         allowed_test_sets=allowed_test_sets,
+        minimum_robust_seeds=minimum_robust_seeds,
     )
     atom_only_wins = [
         row
@@ -513,6 +594,14 @@ def build_recommendation(
         if row.get("metric") == primary_metric
         and row.get("test_set") == "test_atomdisp"
         and row.get("stable_winner") == METHOD_ATOM
+    ]
+    underpowered_stable_wins = [
+        row
+        for row in summary_rows
+        if row.get("metric") == primary_metric
+        and row.get("test_set") in allowed_test_sets
+        and row.get("stable_winner") in {METHOD_MD, METHOD_ATOM}
+        and int(row.get("n_seeds") or row.get("seeds_compared") or 0) < minimum_robust_seeds
     ]
     available_primary_wins = [
         row
@@ -548,6 +637,12 @@ def build_recommendation(
     if missing_cells:
         status = "insufficient_cross_evaluation"
         reason = "The cross-evaluation grid is incomplete; no winner should be declared."
+    elif missing_primary_metric_cells:
+        status = "insufficient_primary_metric"
+        reason = (
+            f"The primary metric {primary_metric!r} is missing in required cells; "
+            "no winner should be declared."
+        )
     elif severe_warnings:
         status = "inconclusive"
         reason = "Validation warnings invalidate a robust winner: " + " | ".join(severe_warnings)
@@ -568,15 +663,36 @@ def build_recommendation(
             status = "mixed_available_single_seed_result"
             reason = "Single-seed winners disagree across allowed test distributions; no robust winner."
 
+    robust_statuses = {"md_conservative_win", "atom_displacement_conservative_win", "mixed_conservative_result"}
+    if status in robust_statuses and not insufficient_robust_seeds:
+        scientific_status = "robust_comparison"
+    elif (
+        (insufficient_robust_seeds or bool(underpowered_stable_wins))
+        and not missing_cells
+        and not missing_primary_metric_cells
+        and not severe_warnings
+        and (status in robust_statuses or "single_seed" in status or bool(underpowered_stable_wins))
+    ):
+        scientific_status = "exploratory"
+    else:
+        scientific_status = "scientifically_inconclusive"
+
     return {
         "status": status,
+        "scientific_status": scientific_status,
         "primary_metric": primary_metric,
         "reason": reason,
         "n_seeds": max_seeds,
+        "minimum_robust_seeds": minimum_robust_seeds,
         "single_seed_warning": single_seed_only,
+        "insufficient_robust_seeds": insufficient_robust_seeds,
+        "underpowered_stable_wins": underpowered_stable_wins,
         "methods_seen": methods,
         "test_sets_seen": test_sets,
+        "frozen_test_hashes": frozen_test_hashes,
+        "model_checkpoint_hashes": model_checkpoint_hashes,
         "missing_required_cells": missing_cells,
+        "missing_primary_metric_cells": missing_primary_metric_cells,
         "severe_warnings": severe_warnings,
         "first_dataset_size_where_md_beats_atom_displacement": first_md_size,
         "first_dataset_size_where_atom_displacement_beats_md": first_atom_size,
@@ -594,6 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--primary-metric", default="fermi_window_rmse_eV")
+    parser.add_argument("--minimum-robust-seeds", type=int, default=3)
     parser.add_argument("--higher-is-better", action="store_true")
     parser.add_argument(
         "--aggregation-mode",
@@ -630,6 +747,7 @@ def main() -> int:
         summary_rows,
         pair_rows,
         primary_metric=args.primary_metric,
+        minimum_robust_seeds=args.minimum_robust_seeds,
     )
     recommendation["aggregation_mode"] = args.aggregation_mode
     for row in pair_rows:

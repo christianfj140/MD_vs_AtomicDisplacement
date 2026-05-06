@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,8 +69,21 @@ def config_dir(config: dict[str, Any]) -> Path:
     return Path(config["_config_dir"])
 
 
+def expand_path_tokens(value: str | Path) -> str:
+    text = str(value)
+    repo_root = PROJECT_ROOT.parent
+    replacements = {
+        "${REPO_ROOT}": str(repo_root),
+        "${GRAPH2MAT_VENV}": os.environ.get("GRAPH2MAT_VENV", ""),
+    }
+    for token, replacement in replacements.items():
+        if replacement:
+            text = text.replace(token, replacement)
+    return os.path.expandvars(text)
+
+
 def resolve_path(config: dict[str, Any], value: str | Path) -> Path:
-    path = Path(value).expanduser()
+    path = Path(expand_path_tokens(value)).expanduser()
     if path.is_absolute():
         return path
     return config_dir(config) / path
@@ -273,6 +290,43 @@ def checkpoint_version(path: Path) -> int:
         if match:
             return int(match.group(1))
     return -1
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_checkpoint_manifest(
+    config: dict[str, Any],
+    checkpoint_rel_path: str,
+    *,
+    selection_mode: str,
+    selection_metric: str | None = None,
+    epoch: int | None = None,
+    run_id: str | None = None,
+) -> Path:
+    training_dir = paths(config)["training_dir"]
+    checkpoint_path = Path(checkpoint_rel_path)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = training_dir / checkpoint_path
+    payload = {
+        "checkpoint_path": str(checkpoint_path),
+        "relative_path": checkpoint_rel_path,
+        "checkpoint_sha256": file_sha256(checkpoint_path) if checkpoint_path.exists() else None,
+        "epoch": epoch,
+        "selection_metric": selection_metric,
+        "selection_mode": selection_mode,
+        "run_id": run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "training_dir": str(training_dir),
+    }
+    manifest_path = training_dir / "checkpoint_manifest.json"
+    manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return manifest_path
 
 
 def resolve_checkpoint(config: dict[str, Any]) -> str:

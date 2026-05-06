@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Detect exact and near-duplicate geometries crossing train/test splits.
+"""Detect geometry leakage crossing train/test splits.
 
-This first diagnostic intentionally uses the atom ordering present in RUN.fdf.
-It does not perform alignment, so the reported RMSD is transparent and
-conservative for the comparison pipeline, where samples should share a stable
-ordering.
+The report keeps the original raw-coordinate duplicate checks and also adds
+translation/rotation-invariant diagnostics based on internal distance
+signatures grouped by the atom species ordering present in RUN.fdf.
 """
 
 from __future__ import annotations
@@ -15,6 +14,11 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - optional diagnostic dependency.
+    np = None
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -54,10 +58,11 @@ def structure_path(row: dict[str, str], manifest_path: Path | None = None) -> Pa
     return path
 
 
-def parse_run_fdf_coordinates(path: Path) -> list[tuple[float, float, float]]:
+def parse_run_fdf_geometry(path: Path) -> tuple[list[str], list[tuple[float, float, float]]]:
     text = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     inside = False
     coords: list[tuple[float, float, float]] = []
+    species: list[str] = []
     for line in text:
         clean = line.split("#", 1)[0].strip()
         if not clean:
@@ -75,8 +80,14 @@ def parse_run_fdf_coordinates(path: Path) -> list[tuple[float, float, float]]:
             continue
         try:
             coords.append((float(parts[0]), float(parts[1]), float(parts[2])))
+            species.append(parts[3] if len(parts) >= 4 else "")
         except ValueError:
             continue
+    return species, coords
+
+
+def parse_run_fdf_coordinates(path: Path) -> list[tuple[float, float, float]]:
+    _species, coords = parse_run_fdf_geometry(path)
     return coords
 
 
@@ -98,6 +109,69 @@ def compare_coords(
     return math.sqrt(squared / count), max_abs
 
 
+def aligned_rmsd(
+    left: list[tuple[float, float, float]],
+    right: list[tuple[float, float, float]],
+) -> float | None:
+    if not left or not right or len(left) != len(right):
+        return None
+    if np is not None:
+        left_array = np.asarray(left, dtype=float)
+        right_array = np.asarray(right, dtype=float)
+        left_centered = left_array - left_array.mean(axis=0)
+        right_centered = right_array - right_array.mean(axis=0)
+        covariance = left_centered.T @ right_centered
+        u_matrix, _singular_values, vt_matrix = np.linalg.svd(covariance)
+        correction = np.eye(3)
+        correction[2, 2] = np.linalg.det(vt_matrix.T @ u_matrix.T)
+        rotation = vt_matrix.T @ correction @ u_matrix.T
+        aligned = left_centered @ rotation
+        delta = aligned - right_centered
+        return float(np.sqrt(np.mean(np.sum(delta * delta, axis=1))))
+    # A dependency-free rigid-shape proxy: for fixed atom ordering, equality of
+    # all internal distances is invariant to translation and rotation. For the
+    # small molecular systems handled by this pipeline it catches the same
+    # leakage class that a full Kabsch RMSD would flag, while keeping this
+    # diagnostic usable in minimal Python environments.
+    distance_diff = distance_signature_max_diff([""] * len(left), left, [""] * len(right), right)
+    return distance_diff
+
+
+def distance_signature(
+    species: list[str],
+    coords: list[tuple[float, float, float]],
+) -> list[tuple[str, str, float]]:
+    if not coords:
+        return []
+    signature: list[tuple[str, str, float]] = []
+    for left in range(len(coords)):
+        for right in range(left + 1, len(coords)):
+            label_pair = sorted([species[left] if left < len(species) else "", species[right] if right < len(species) else ""])
+            distance = math.sqrt(
+                sum((coords[left][axis] - coords[right][axis]) ** 2 for axis in range(3))
+            )
+            signature.append((label_pair[0], label_pair[1], distance))
+    return sorted(signature)
+
+
+def distance_signature_max_diff(
+    left_species: list[str],
+    left: list[tuple[float, float, float]],
+    right_species: list[str],
+    right: list[tuple[float, float, float]],
+) -> float | None:
+    left_sig = distance_signature(left_species, left)
+    right_sig = distance_signature(right_species, right)
+    if not left_sig or len(left_sig) != len(right_sig):
+        return None
+    max_diff = 0.0
+    for left_item, right_item in zip(left_sig, right_sig, strict=False):
+        if left_item[:2] != right_item[:2]:
+            return None
+        max_diff = max(max_diff, abs(left_item[2] - right_item[2]))
+    return max_diff
+
+
 def load_manifest_rows(paths: list[Path], split: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -112,11 +186,20 @@ def load_manifest_rows(paths: list[Path], split: str) -> list[dict[str, Any]]:
 def family_key(row: dict[str, Any]) -> tuple[str, ...]:
     keys = [
         "source_run",
+        "raw_fc_run_dir",
+        "raw_displacement_run_id",
         "base_sample_id",
+        "matrix_label",
+        "source_matrix_label",
         "displacement_magnitude",
+        "displacement_ang",
+        "displacement_input",
         "displaced_atom",
+        "atom",
         "displacement_axis",
+        "direction",
         "displacement_sign",
+        "sign",
     ]
     return tuple(str(row.get(key, "")) for key in keys)
 
@@ -128,33 +211,43 @@ def analyze(
     rmsd_threshold: float,
     max_diff_threshold: float,
     neighbor_frame_window: int,
+    aligned_rmsd_threshold: float,
+    distance_threshold: float,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     coords_cache: dict[Path, list[tuple[float, float, float]]] = {}
+    species_cache: dict[Path, list[str]] = {}
     report: list[dict[str, Any]] = []
     parser_errors: list[str] = []
 
-    def coords_for(row: dict[str, Any]) -> list[tuple[float, float, float]]:
+    def geometry_for(row: dict[str, Any]) -> tuple[list[str], list[tuple[float, float, float]]]:
         manifest_path = Path(str(row.get("manifest_path", ""))) if row.get("manifest_path") else None
         path = structure_path(row, manifest_path)
         if path is None:
-            return []
+            return [], []
         if path not in coords_cache:
             try:
-                coords_cache[path] = parse_run_fdf_coordinates(path)
+                species, coords = parse_run_fdf_geometry(path)
+                species_cache[path] = species
+                coords_cache[path] = coords
             except Exception as exc:
                 parser_errors.append(f"{path}: {exc}")
+                species_cache[path] = []
                 coords_cache[path] = []
-        return coords_cache[path]
+        return species_cache[path], coords_cache[path]
 
     exact = 0
     near = 0
+    aligned_near = 0
+    distance_near = 0
     md_neighbors = 0
     atom_family = 0
     for train in train_rows:
-        train_coords = coords_for(train)
+        train_species, train_coords = geometry_for(train)
         for test in test_rows:
-            test_coords = coords_for(test)
+            test_species, test_coords = geometry_for(test)
             rmsd, max_diff = compare_coords(train_coords, test_coords)
+            aligned_shape_rmsd = aligned_rmsd(train_coords, test_coords)
+            distance_max_diff = distance_signature_max_diff(train_species, train_coords, test_species, test_coords)
             reasons: list[str] = []
             if rmsd is not None and max_diff is not None:
                 if max_diff == 0:
@@ -163,6 +256,12 @@ def analyze(
                 elif rmsd <= rmsd_threshold or max_diff <= max_diff_threshold:
                     reasons.append("near_duplicate_geometry")
                     near += 1
+            if aligned_shape_rmsd is not None and aligned_shape_rmsd <= aligned_rmsd_threshold and max_diff != 0:
+                reasons.append("aligned_near_duplicate_geometry")
+                aligned_near += 1
+            if distance_max_diff is not None and distance_max_diff <= distance_threshold and max_diff != 0:
+                reasons.append("internal_distance_near_duplicate_geometry")
+                distance_near += 1
 
             train_method = str(train.get("method", "")).lower()
             test_method = str(test.get("method", "")).lower()
@@ -191,6 +290,8 @@ def analyze(
                         "test_method": test.get("method", ""),
                         "rmsd": rmsd if rmsd is not None else "",
                         "max_abs_diff": max_diff if max_diff is not None else "",
+                        "aligned_rmsd": aligned_shape_rmsd if aligned_shape_rmsd is not None else "",
+                        "internal_distance_max_diff": distance_max_diff if distance_max_diff is not None else "",
                         "reasons": ";".join(sorted(set(reasons))),
                     }
                 )
@@ -203,11 +304,15 @@ def analyze(
         "warnings": len(report),
         "exact_duplicates": exact,
         "near_duplicates": near,
+        "aligned_near_duplicates": aligned_near,
+        "internal_distance_near_duplicates": distance_near,
         "md_neighbor_warnings": md_neighbors,
         "atom_displacement_family_warnings": atom_family,
         "parser_errors": parser_errors,
         "rmsd_threshold": rmsd_threshold,
         "max_diff_threshold": max_diff_threshold,
+        "aligned_rmsd_threshold": aligned_rmsd_threshold,
+        "distance_threshold": distance_threshold,
         "neighbor_frame_window": neighbor_frame_window,
     }
     return report, summary
@@ -233,6 +338,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--rmsd-threshold", type=float, default=1e-4)
     parser.add_argument("--max-diff-threshold", type=float, default=1e-4)
+    parser.add_argument("--aligned-rmsd-threshold", type=float, default=1e-4)
+    parser.add_argument("--distance-threshold", type=float, default=1e-4)
     parser.add_argument("--neighbor-frame-window", type=int, default=1)
     return parser
 
@@ -247,6 +354,8 @@ def main() -> int:
         rmsd_threshold=args.rmsd_threshold,
         max_diff_threshold=args.max_diff_threshold,
         neighbor_frame_window=args.neighbor_frame_window,
+        aligned_rmsd_threshold=args.aligned_rmsd_threshold,
+        distance_threshold=args.distance_threshold,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_csv(args.output_dir / "geometry_leakage_report.csv", report)

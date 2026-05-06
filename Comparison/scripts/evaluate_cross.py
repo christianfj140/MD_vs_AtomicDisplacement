@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=COMPARISON_RESULTS / "comparison" / "metrics.csv",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-incomplete-legacy",
+        action="store_true",
+        help="Allow missing cells for legacy exploratory tables. Strict mode is the default.",
+    )
     return parser
 
 
@@ -75,6 +80,27 @@ def main() -> int:
     args = build_parser().parse_args()
     md_on_md = args.md_on_md or latest_run(COMPARISON_RESULTS / "results_md")
     fc_on_fc = args.fc_on_fc or latest_run(COMPARISON_RESULTS / "results_atomdisp")
+    paths = {
+        "md_on_md": md_on_md,
+        "md_on_fc": args.md_on_fc,
+        "md_on_mixed": args.md_on_mixed,
+        "fc_on_md": args.fc_on_md,
+        "fc_on_fc": fc_on_fc,
+        "fc_on_mixed": args.fc_on_mixed,
+    }
+    missing = sorted(name for name, path in paths.items() if path is None)
+    if missing and not args.allow_incomplete_legacy:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "Incomplete cross-evaluation grid. Pass --allow-incomplete-legacy for exploratory tables.",
+                    "missing_cells": missing,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
     matrix = {
         "Modelo_MD": {
             "Test_MD": load_metrics(md_on_md),

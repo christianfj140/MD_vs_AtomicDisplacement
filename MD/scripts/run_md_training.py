@@ -8,7 +8,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from md_pipeline_config import command, load_pipeline_config, paths, render_training_config
+from md_pipeline_config import (
+    command,
+    load_pipeline_config,
+    paths,
+    render_training_config,
+    resolve_checkpoint,
+    write_checkpoint_manifest,
+)
 
 
 def require_command(command_name: str) -> None:
@@ -60,6 +67,15 @@ def main() -> int:
     pipeline_paths["training_dir"].mkdir(parents=True, exist_ok=True)
     write_config_yaml(config)
     run_command(fit_command, cwd=pipeline_paths["training_dir"])
+    ckpt_path = resolve_checkpoint(config)
+    selection_mode = "configured_path" if config.get("checkpoint", {}).get("path") else str(config.get("checkpoint", {}).get("selection", "latest_version"))
+    manifest_path = write_checkpoint_manifest(
+        config,
+        ckpt_path,
+        selection_mode=selection_mode,
+        selection_metric="best_checkpoint",
+    )
+    print(f"[OK] Checkpoint manifest escrito en {manifest_path}")
 
     log_dir = config["training"]["trainer"]["logger"]["init_args"]["save_dir"]
     print(f"[INFO] Si quieres ver métricas: tensorboard --logdir {log_dir}")

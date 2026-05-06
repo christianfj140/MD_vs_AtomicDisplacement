@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import hashlib
 import itertools
 import math
 import os
 import json
+import platform
 import select
 import shutil
 import shlex
@@ -94,7 +96,13 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def resolve_pipeline_path(spec: PipelineSpec, value: str | Path) -> Path:
-    path = Path(value).expanduser()
+    text = str(value)
+    graph2mat_venv = os.environ.get("GRAPH2MAT_VENV", "")
+    text = text.replace("${REPO_ROOT}", str(REPO_ROOT))
+    if graph2mat_venv:
+        text = text.replace("${GRAPH2MAT_VENV}", graph2mat_venv)
+    text = os.path.expandvars(text)
+    path = Path(text).expanduser()
     if path.is_absolute():
         return path
     return spec.root / path
@@ -396,6 +404,23 @@ def files_digest(paths_to_hash: list[Path]) -> str:
     return digest.hexdigest()
 
 
+def files_content_digest(paths_to_hash: list[Path]) -> str:
+    entries = [
+        (path.name, file_sha256(path) or "")
+        for path in paths_to_hash
+        if path.exists() and path.is_file()
+    ]
+    if not entries:
+        return ""
+    digest = hashlib.sha256()
+    for name, sha in sorted(entries):
+        digest.update(name.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(sha.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def git_commit() -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -418,6 +443,70 @@ def git_dirty_warning() -> str:
     if result.returncode != 0:
         return "Could not determine git dirty state."
     return "Working tree has uncommitted changes." if result.stdout.strip() else ""
+
+
+def command_version(command_name: str) -> str:
+    candidates = ([command_name, "--version"], [command_name, "-V"])
+    for command in candidates:
+        try:
+            result = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            continue
+        output = (result.stdout or result.stderr or "").strip()
+        if result.returncode == 0 and output:
+            return output.splitlines()[0]
+    return "unavailable"
+
+
+def python_module_version(module_name: str) -> str:
+    try:
+        module = __import__(module_name)
+    except Exception:
+        return "unavailable"
+    return str(getattr(module, "__version__", "unavailable"))
+
+
+def environment_versions(configs: list[dict[str, Any]] | None = None) -> dict[str, str]:
+    configs = configs or []
+    siesta = "siesta"
+    graph2mat = "graph2mat"
+    for config in configs:
+        commands = config.get("commands", {}) if isinstance(config, dict) else {}
+        siesta = str(commands.get("siesta", siesta))
+        graph2mat = str(commands.get("graph2mat", graph2mat))
+    return {
+        "python_version": sys.version.split()[0],
+        "platform": platform.platform(),
+        "git_commit": git_commit() or "unavailable",
+        "siesta_version": command_version(siesta),
+        "graph2mat_version": command_version(graph2mat),
+        "sisl_version": python_module_version("sisl"),
+    }
+
+
+def absolute_path_warning(paths_to_check: list[Path]) -> str:
+    home = str(Path.home())
+    matches = [
+        str(path)
+        for path in paths_to_check
+        if path.is_absolute() and (str(path).startswith(home) or str(path).startswith("/mnt/"))
+    ]
+    return "User-local absolute paths detected: " + ", ".join(matches) if matches else ""
+
+
+def sample_set_hash(sample_ids: list[str]) -> str:
+    digest = hashlib.sha256()
+    for sample_id in sorted(set(sample_ids)):
+        digest.update(sample_id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def experiment_root(run_id: str) -> Path:
@@ -451,6 +540,7 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
 DEFAULT_PRIMARY_METRIC = "fermi_window_rmse_eV"
+MINIMUM_ROBUST_SEEDS = 3
 STRICT_COMPARISON_MODE = True
 SPLIT_MANIFEST_FIELDS = [
     "sample_id",
@@ -472,6 +562,9 @@ SPLIT_MANIFEST_FIELDS = [
     "valid",
     "validation_reason",
     "split",
+    "split_group_id",
+    "split_group_fields",
+    "split_strategy",
     "seed",
     "status",
     "sample_dir",
@@ -707,9 +800,9 @@ def parse_combination_mode(value: Any) -> str:
 
 def parse_split_mode(value: Any) -> str:
     mode = "block" if value in (None, "") else str(value).strip().lower()
-    if mode not in {"block", "spread"}:
+    if mode not in {"block", "spread", "blocked_with_gap"}:
         raise RuntimeError(
-            "split_mode debe ser 'block' o 'spread' "
+            "split_mode debe ser 'block', 'spread' o 'blocked_with_gap' "
             f"(recibido: {value!r})."
         )
     return mode
@@ -1128,6 +1221,49 @@ def split_spread(items: list[Path], counts: dict[str, int]) -> dict[str, list[Pa
     return {"train": train, "validation": validation, "test": test}
 
 
+ATOM_SPLIT_GROUP_FIELDS = [
+    "raw_displacement_run_id",
+    "raw_fc_run_dir",
+    "displacement_input",
+    "displacement_ang",
+    "atom",
+    "direction",
+    "sign",
+]
+
+
+def atom_split_group_id(sample_dir: Path) -> str:
+    metadata = load_sample_metadata(sample_dir)
+    values = {field: metadata.get(field, "") for field in ATOM_SPLIT_GROUP_FIELDS}
+    payload = json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    readable = "|".join(str(values[field]) for field in ATOM_SPLIT_GROUP_FIELDS if values[field] not in (None, ""))
+    return readable or digest
+
+
+def split_grouped_exact(items: list[Path], counts: dict[str, int]) -> dict[str, list[Path]]:
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for item in items:
+        groups[atom_split_group_id(item)].append(item)
+    ordered_groups = [(key, sorted(value, key=sample_sort_key)) for key, value in sorted(groups.items())]
+    result = {"train": [], "validation": [], "test": []}
+    for split_name in ("test", "validation", "train"):
+        target = counts[split_name]
+        for key, samples in list(ordered_groups):
+            if len(result[split_name]) + len(samples) > target:
+                continue
+            result[split_name].extend(samples)
+            ordered_groups.remove((key, samples))
+            if len(result[split_name]) == target:
+                break
+        if len(result[split_name]) != target:
+            raise RuntimeError(
+                "AtomDisplacement grouped split no puede satisfacer los tamanos exactos "
+                f"sin partir familias: {split_name} necesita {target}, obtuvo {len(result[split_name])}."
+            )
+    return result
+
+
 def sample_names(samples: list[Path]) -> str:
     return ", ".join(path.name for path in samples) if samples else "-"
 
@@ -1274,6 +1410,7 @@ def write_atom_split_manifests(
             metadata_path = copied_dir / "metadata.json"
             hamiltonian_path, valid, validation_reason = validated_reference_for_sample(copied_dir)
             displacement = metadata.get("displacement_ang", "")
+            group_id = atom_split_group_id(copied_dir)
             rows.append(
                 {
                     "sample_id": f"atomdisp_{sample_dir.name}",
@@ -1295,6 +1432,9 @@ def write_atom_split_manifests(
                     "valid": valid,
                     "validation_reason": validation_reason,
                     "split": split_name,
+                    "split_group_id": group_id,
+                    "split_group_fields": ",".join(ATOM_SPLIT_GROUP_FIELDS),
+                    "split_strategy": "grouped_exact",
                     "seed": metadata.get("subsampling", {}).get("seed", ""),
                     "status": "completed" if valid else "incomplete",
                     "sample_dir": str(copied_dir),
@@ -1458,6 +1598,19 @@ def read_metrics_summary(path: Path) -> dict[str, Any]:
 
 
 def find_latest_checkpoint(training_dir: Path, config: dict[str, Any]) -> Path | None:
+    manifest_path = training_dir / "checkpoint_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            checkpoint_value = manifest.get("checkpoint_path") or manifest.get("path")
+            if checkpoint_value:
+                candidate = Path(str(checkpoint_value))
+                if not candidate.is_absolute():
+                    candidate = training_dir / candidate
+                if candidate.exists():
+                    return candidate
+        except Exception:
+            pass
     configured = config.get("checkpoint", {}).get("path")
     if configured:
         candidate = Path(str(configured))
@@ -1474,6 +1627,69 @@ def find_latest_checkpoint(training_dir: Path, config: dict[str, Any]) -> Path |
         return candidates[-1]
     fallback = sorted(training_dir.rglob("*.ckpt"), key=lambda path: path.stat().st_mtime)
     return fallback[-1] if fallback else None
+
+
+def checkpoint_selection_warning(training_dir: Path, checkpoint_path: Path | None) -> str:
+    manifest_path = training_dir / "checkpoint_manifest.json"
+    if checkpoint_path is None:
+        return "No checkpoint was selected."
+    if not manifest_path.exists():
+        return "Checkpoint selected by latest-version fallback; strict scientific comparison should use checkpoint_manifest.json."
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return f"Checkpoint manifest could not be parsed: {exc}"
+    expected = manifest.get("checkpoint_path") or manifest.get("path")
+    if not expected:
+        return "Checkpoint manifest does not define checkpoint_path."
+    expected_path = Path(str(expected))
+    if not expected_path.is_absolute():
+        expected_path = training_dir / expected_path
+    if expected_path.resolve() != checkpoint_path.resolve():
+        return "Selected checkpoint does not match checkpoint_manifest.json."
+    expected_hash = manifest.get("checkpoint_sha256") or manifest.get("sha256")
+    actual_hash = file_sha256(checkpoint_path)
+    if expected_hash and actual_hash and str(expected_hash) != str(actual_hash):
+        return "Selected checkpoint hash does not match checkpoint_manifest.json."
+    return ""
+
+
+def checkpoint_metadata(checkpoint_path: Path | None, training_dir: Path) -> dict[str, Any]:
+    if checkpoint_path is None:
+        return {"path": None, "sha256": None, "relative_path": None, "selection": None}
+    relative_path = None
+    try:
+        relative_path = checkpoint_path.relative_to(training_dir).as_posix()
+    except ValueError:
+        relative_path = str(checkpoint_path)
+    version = None
+    for part in checkpoint_path.parts:
+        if part.startswith("version_") and part.removeprefix("version_").isdigit():
+            version = int(part.removeprefix("version_"))
+    return {
+        "path": str(checkpoint_path),
+        "relative_path": relative_path,
+        "sha256": file_sha256(checkpoint_path),
+        "size_bytes": checkpoint_path.stat().st_size if checkpoint_path.exists() else None,
+        "mtime": checkpoint_path.stat().st_mtime if checkpoint_path.exists() else None,
+        "version": version,
+        "selection": "manifest_signed_checkpoint",
+    }
+
+
+def write_checkpoint_manifest(training_dir: Path, metadata: dict[str, Any], warning: str) -> Path:
+    path = training_dir / "checkpoint_manifest.json"
+    payload = {
+        "checkpoint_path": metadata.get("path"),
+        "checkpoint_sha256": metadata.get("sha256"),
+        "relative_path": metadata.get("relative_path"),
+        "selection_reason": "manifest" if not warning else "latest_version_fallback",
+        "checkpoint_selection_warning": warning,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "training_dir": str(training_dir),
+    }
+    path.write_text(json.dumps(json_safe(payload), indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
+    return path
 
 
 def read_csv_rows(path: Path) -> list[dict[str, Any]]:
@@ -1857,6 +2073,26 @@ class ExperimentRunner:
             *sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf")),
             *sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml")),
         ]
+        md_basis_files = sorted((PIPELINES["md"].root / "dataset" / "MD_steps" / "basis").glob("*.ion.xml"))
+        atom_basis_files = (
+            sorted((PIPELINES["atom_displacement"].root / "dataset" / "FC_steps" / "basis").glob("*.ion.xml"))
+            or sorted((PIPELINES["atom_displacement"].root / "dataset" / "AtDis_steps" / "basis").glob("*.ion.xml"))
+            or sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml"))
+        )
+        md_pseudo_files = sorted((PIPELINES["md"].root / "dataset").glob("*.psf"))
+        atom_pseudo_files = sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf"))
+        md_basis_content_hash = files_content_digest(md_basis_files)
+        atom_basis_content_hash = files_content_digest(atom_basis_files)
+        md_pseudo_content_hash = files_content_digest(md_pseudo_files)
+        atom_pseudo_content_hash = files_content_digest(atom_pseudo_files)
+        basis_pseudopotential_warning = ""
+        if md_basis_content_hash and atom_basis_content_hash and md_basis_content_hash != atom_basis_content_hash:
+            basis_pseudopotential_warning = "MD and AtomDisplacement basis .ion.xml content hashes differ."
+        if md_pseudo_content_hash and atom_pseudo_content_hash and md_pseudo_content_hash != atom_pseudo_content_hash:
+            suffix = "MD and AtomDisplacement pseudopotential .psf content hashes differ."
+            basis_pseudopotential_warning = (
+                f"{basis_pseudopotential_warning} | {suffix}" if basis_pseudopotential_warning else suffix
+            )
         basis_and_pseudos = [
             {
                 "path": str(path),
@@ -1870,12 +2106,36 @@ class ExperimentRunner:
             or atom_config.get("structure", {}).get("system_name")
             or "unknown"
         )
+        resolved_paths = [
+            resolve_pipeline_path(PIPELINES["md"], value)
+            for value in (md_config.get("paths", {}) or {}).values()
+            if isinstance(value, (str, Path))
+        ] + [
+            resolve_pipeline_path(PIPELINES["atom_displacement"], value)
+            for value in (atom_config.get("paths", {}) or {}).values()
+            if isinstance(value, (str, Path))
+        ]
+        artifact_hashes = {
+            "configs": files_digest([PIPELINES["md"].config_path, PIPELINES["atom_displacement"].config_path]),
+            "md_pseudopotentials": files_content_digest(md_pseudo_files),
+            "atom_displacement_pseudopotentials": files_content_digest(atom_pseudo_files),
+            "md_basis": files_content_digest(md_basis_files),
+            "atom_displacement_basis": files_content_digest(atom_basis_files),
+            "rendered_inputs": file_digest([
+                PIPELINES["md"].root / "dataset" / "RUN.fdf",
+                PIPELINES["atom_displacement"].root / "base" / "RUN.fdf",
+            ]),
+        }
         return {
             "experiment_id": run_id,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "git_commit": git_commit(),
             "dirty_tree_warning": git_dirty_warning(),
+            "environment_versions": environment_versions([md_config, atom_config]),
+            "artifact_hashes": artifact_hashes,
+            "reproducibility_warning": absolute_path_warning(resolved_paths),
+            "basis_pseudopotential_warning": basis_pseudopotential_warning,
             "metric_version": METRIC_VERSION,
             "molecule_system_name": system_name,
             "config_hash": files_digest([PIPELINES["md"].config_path, PIPELINES["atom_displacement"].config_path]),
@@ -1890,11 +2150,8 @@ class ExperimentRunner:
             "atom_displacement_model_config_hash": model_report["atom_displacement_model_config_hash"],
             "model_config_warning": model_report["warning"],
             "model_config_mismatches": model_report["mismatches"],
-            "basis_hash": file_digest([*sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml"))]),
-            "pseudopotential_hash": file_digest([
-                *sorted((PIPELINES["md"].root / "dataset").glob("*.psf")),
-                *sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf")),
-            ]),
+            "basis_hash": files_content_digest([*md_basis_files, *atom_basis_files]),
+            "pseudopotential_hash": files_content_digest([*md_pseudo_files, *atom_pseudo_files]),
             "basis_pseudopotential_info": basis_and_pseudos,
             "train_methods": ["md", "atom_displacement"],
             "dataset_sizes": {
@@ -1905,6 +2162,7 @@ class ExperimentRunner:
             "seeds": [random_seed] if random_seed is not None else [],
             "split_ratios": split_ratios,
             "split_mode": split_mode,
+            "minimum_robust_seeds": MINIMUM_ROBUST_SEEDS,
             "test_sets": list(test_sets),
             "training_hyperparameters": {
                 "md": md_config.get("training", {}),
@@ -2005,6 +2263,10 @@ class ExperimentRunner:
             manifest.setdefault("warnings", []).append(str(manifest["siesta_settings_warning"]))
         if manifest.get("model_config_warning"):
             manifest.setdefault("warnings", []).append(str(manifest["model_config_warning"]))
+        if manifest.get("basis_pseudopotential_warning"):
+            manifest.setdefault("warnings", []).append(str(manifest["basis_pseudopotential_warning"]))
+        if manifest.get("reproducibility_warning"):
+            manifest.setdefault("warnings", []).append(str(manifest["reproducibility_warning"]))
         self._write_experiment_manifest(manifest)
         returncode = 0
         try:
@@ -2065,10 +2327,13 @@ class ExperimentRunner:
                 "[UI] ETA: el primer dataset de cada pipeline no tiene historico; "
                 "los siguientes usan segundos/estructura de runs ya completados.\n"
             )
+            previous_by_method: dict[str, dict[str, Any]] = {}
             for size in md_sizes:
                 self._ensure_not_stopped()
                 self._restore_original_config("md", original_configs)
                 result = self._run_one("md", size, run_id, split_ratios=split_ratios, split_mode=split_mode)
+                self._annotate_nested_subset(result, previous_by_method.get("md"))
+                previous_by_method["md"] = result
                 with self._lock:
                     self._results.append(result)
                 manifest["runs"].append(result)
@@ -2095,6 +2360,8 @@ class ExperimentRunner:
                     random_seed=random_seed,
                     split_mode=split_mode,
                 )
+                self._annotate_nested_subset(result, previous_by_method.get("atom_displacement"))
+                previous_by_method["atom_displacement"] = result
                 with self._lock:
                     self._results.append(result)
                 manifest["runs"].append(result)
@@ -2131,6 +2398,28 @@ class ExperimentRunner:
         with self._lock:
             if self._stop_requested:
                 raise RuntimeError("Experimento detenido por el usuario.")
+
+    def _annotate_nested_subset(self, result: dict[str, Any], parent: dict[str, Any] | None) -> None:
+        result["parent_dataset_size"] = parent.get("dataset_size") if parent else None
+        result["parent_dataset_hash"] = parent.get("dataset_sample_hash") if parent else ""
+        result["nested_subset_hash"] = result.get("dataset_sample_hash", "")
+        result["nested_subset_of_parent"] = True
+        result["nested_subset_warning"] = ""
+        if parent:
+            parent_samples = set(str(item) for item in parent.get("dataset_sample_ids", []))
+            current_samples = set(str(item) for item in result.get("dataset_sample_ids", []))
+            if not parent_samples.issubset(current_samples):
+                result["nested_subset_of_parent"] = False
+                result["nested_subset_warning"] = (
+                    "Dataset-size sweep is not nested: previous dataset samples "
+                    "are not all present in the current dataset."
+                )
+        manifest_path = Path(str(result.get("result_dir", ""))) / "manifest.json"
+        if manifest_path.exists():
+            manifest_path.write_text(
+                json.dumps(json_safe(result), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
 
     def _run_one(
         self,
@@ -2357,7 +2646,7 @@ class ExperimentRunner:
             force_constants["random_seed"] = int(random_seed)
             force_constants.setdefault("subsampling", {})["seed"] = int(random_seed)
         force_constants["target_count"] = None
-        config["structure"]["force_constants"]["allow_missing_matrix"] = True
+        config["structure"]["force_constants"]["allow_missing_matrix"] = False
         config["pipeline"]["steps"] = [
             "render_inputs",
             "generate_atom_displacement_dataset",
@@ -2424,7 +2713,7 @@ class ExperimentRunner:
         validation_needed = counts["validation"]
         test_needed = counts["test"]
         selected_samples = select_spread(all_samples, size)
-        split_samples = split_spread(selected_samples, counts)
+        split_samples = split_grouped_exact(selected_samples, counts)
         train_samples = split_samples["train"]
         validation_samples = split_samples["validation"]
         test_samples = split_samples["test"]
@@ -2727,6 +3016,7 @@ class ExperimentRunner:
             md_outputs_root = dataset_dir / "splits" / "test"
             if not md_outputs_root.exists():
                 md_outputs_root = dataset_dir / "MD_steps"
+            copy_basis_files(dataset_dir / "MD_steps", result_dir / "basis")
             copy_matching_files(
                 md_outputs_root,
                 "*/RUN.fdf",
@@ -2749,6 +3039,7 @@ class ExperimentRunner:
             )
         else:
             samples_dir = Path(config["paths"].get("test_samples_dir", config["paths"]["samples_dir"]))
+            copy_basis_files(samples_dir, result_dir / "basis")
             copy_matching_files(
                 samples_dir,
                 "*/RUN.fdf",
@@ -2828,6 +3119,27 @@ class ExperimentRunner:
         )
         effective_size = int(prepare_metadata.get("effective_size", size))
         checkpoint_path = find_latest_checkpoint(training_dir, config)
+        signed_checkpoint = checkpoint_metadata(checkpoint_path, training_dir)
+        checkpoint_warning = checkpoint_selection_warning(training_dir, checkpoint_path)
+        checkpoint_manifest_path = write_checkpoint_manifest(training_dir, signed_checkpoint, checkpoint_warning)
+        source_pseudos = (
+            sorted((PIPELINES["md"].root / "dataset").glob("*.psf"))
+            if key == "md"
+            else sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf"))
+        )
+        run_artifact_hashes = {
+            "basis": files_content_digest(sorted((result_dir / "basis").glob("*.ion.xml"))),
+            "pseudopotentials": files_content_digest(source_pseudos),
+            "rendered_run_fdf": files_content_digest(sorted((result_dir / "structures").glob("*/RUN.fdf"))),
+            "pipeline_config": files_content_digest([result_dir / "pipeline_config.yaml"]),
+            "checkpoint_manifest": files_content_digest([checkpoint_manifest_path]),
+        }
+        dataset_sample_ids: list[str] = []
+        for split_manifest in sorted((result_dir / "splits").glob("*_manifest.csv")):
+            for row in read_csv_rows(split_manifest):
+                sample_id = str(row.get("sample_id") or row.get("sample") or "")
+                if sample_id:
+                    dataset_sample_ids.append(sample_id)
         manifest = {
             "pipeline": key,
             "dataset_label": dataset_label,
@@ -2842,6 +3154,13 @@ class ExperimentRunner:
             "training_dir": str(training_dir),
             "result_dir": str(result_dir),
             "model_checkpoint": str(checkpoint_path) if checkpoint_path else None,
+            "model_checkpoint_metadata": signed_checkpoint,
+            "model_checkpoint_sha256": signed_checkpoint.get("sha256"),
+            "checkpoint_manifest": str(checkpoint_manifest_path),
+            "checkpoint_selection_warning": checkpoint_warning,
+            "artifact_hashes": run_artifact_hashes,
+            "dataset_sample_ids": sorted(set(dataset_sample_ids)),
+            "dataset_sample_hash": sample_set_hash(dataset_sample_ids),
             "seed": prepare_metadata.get("seed"),
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
@@ -2910,6 +3229,11 @@ class ExperimentRunner:
             self._append(
                 "[WARN] Evaluacion Hamiltoniana termino con codigo "
                 f"{result.returncode}. Revisa {manifest_path}.\n"
+            )
+        if summary.get("structural_metrics_error"):
+            raise RuntimeError(
+                "Evaluacion Hamiltoniana sin basis orbital valida: "
+                f"{summary.get('structural_basis_error') or summary.get('structural_metrics_unavailable')}"
             )
         return summary
 
@@ -2985,6 +3309,7 @@ class ExperimentRunner:
         cross_result_dir: Path,
         prediction_dir: Path,
         test_manifest: Path,
+        basis_files_glob: str | None = None,
     ) -> dict[str, int]:
         if cross_result_dir.exists():
             shutil.rmtree(cross_result_dir)
@@ -2995,6 +3320,13 @@ class ExperimentRunner:
         shutil.copytree(prediction_root, cross_result_dir / "predicted_hamiltonians")
         copy_if_exists(prediction_dir / "prediction_summary.json", cross_result_dir / "prediction_summary.json")
         copy_if_exists(prediction_dir / "prediction_manifest.csv", cross_result_dir / "prediction_manifest.csv")
+        copy_if_exists(test_manifest.parent / "frozen_test_manifest.json", cross_result_dir / "frozen_test_manifest.json")
+        if basis_files_glob:
+            basis_dir = cross_result_dir / "basis"
+            basis_dir.mkdir(parents=True, exist_ok=True)
+            for src in sorted(Path(path) for path in glob.glob(basis_files_glob)):
+                if src.is_file():
+                    shutil.copy2(src, basis_dir / src.name)
 
         rows = read_csv_rows(test_manifest)
         references = 0
@@ -3091,6 +3423,8 @@ class ExperimentRunner:
                     self._split_manifest_for_result(md_result, "train"),
                     self._split_manifest_for_result(atom_result, "train"),
                 ]
+                leakage_warnings_by_test_set: dict[str, str] = {}
+                leakage_summary_by_test_set: dict[str, str] = {}
                 for test_set in test_sets:
                     test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                     if not test_manifest.exists():
@@ -3112,9 +3446,13 @@ class ExperimentRunner:
                         leakage_command,
                         label=f"Chequeando leakage geometrico {pair_id} {test_set}",
                     )
+                    leakage_summary_path = leakage_dir / "geometry_leakage_summary.json"
+                    if leakage_summary_path.exists():
+                        leakage_summary_by_test_set[test_set] = str(leakage_summary_path)
                     if leakage_result.returncode != 0:
                         warning = f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
                         summary["warnings"].append(warning)
+                        leakage_warnings_by_test_set[test_set] = warning
                         if STRICT_COMPARISON_MODE:
                             raise RuntimeError(warning)
 
@@ -3137,6 +3475,16 @@ class ExperimentRunner:
                             summary["warnings"].append(warning)
                             self._append(f"[WARN] {warning}\n")
                             continue
+                        frozen_manifest_path = test_manifest.parent / "frozen_test_manifest.json"
+                        frozen_test_hash = None
+                        frozen_test_warning = ""
+                        if frozen_manifest_path.exists():
+                            frozen_payload = json.loads(frozen_manifest_path.read_text(encoding="utf-8"))
+                            frozen_test_hash = frozen_payload.get("frozen_test_hash")
+                        else:
+                            frozen_test_warning = f"Missing frozen test manifest for {pair_id} {test_set}."
+                            if STRICT_COMPARISON_MODE:
+                                raise RuntimeError(frozen_test_warning)
                         cross_name = f"{pair_id}__{train_method}__on__{test_set}"
                         prediction_dir = prediction_root / cross_name
                         predict_command = [
@@ -3172,6 +3520,7 @@ class ExperimentRunner:
                             cross_result_dir,
                             prediction_dir,
                             test_manifest,
+                            basis_files,
                         )
                         evaluation_start = time.time()
                         evaluation_summary = self._evaluate_hamiltonian_metrics(
@@ -3194,16 +3543,27 @@ class ExperimentRunner:
                             "atomdisp_siesta_reference_count": atom_budget,
                             "budget_ratio": ratio,
                             "budget_mismatch_warning": mismatch_warning,
+                            "leakage_warning": leakage_warnings_by_test_set.get(test_set, ""),
+                            "leakage_summary": leakage_summary_by_test_set.get(test_set, ""),
+                            "frozen_test_warning": frozen_test_warning,
+                            "frozen_test_hash": frozen_test_hash,
+                            "frozen_test_manifest": str(frozen_manifest_path) if frozen_manifest_path.exists() else "",
                             "siesta_settings_hash": manifest.get("siesta_settings_hash"),
                             "siesta_settings_warning": manifest.get("siesta_settings_warning", ""),
                             "model_config_hash": manifest.get("model_config_hash"),
                             "model_config_warning": manifest.get("model_config_warning", ""),
+                            "basis_pseudopotential_warning": manifest.get("basis_pseudopotential_warning", ""),
                             "strict_comparison_mode": manifest.get("strict_comparison_mode", STRICT_COMPARISON_MODE),
                             "md_dataset_label": str(md_result.get("dataset_label", f"dataset_{md_dataset_size}")),
                             "atom_dataset_label": str(atom_result.get("dataset_label", f"dataset_{atom_dataset_size}")),
                             "seed": train_result.get("seed"),
                             "epoch": None,
                             "model_checkpoint": str(checkpoint),
+                            "model_checkpoint_sha256": train_result.get("model_checkpoint_sha256"),
+                            "checkpoint_manifest": train_result.get("checkpoint_manifest", ""),
+                            "checkpoint_selection_warning": train_result.get("checkpoint_selection_warning", ""),
+                            "reproducibility_warning": manifest.get("reproducibility_warning", ""),
+                            "nested_subset_warning": train_result.get("nested_subset_warning", ""),
                             "prediction_dir": str(prediction_dir),
                             "siesta_reference_dir": str(cross_result_dir / "siesta_hamiltonians"),
                             "prediction_time_seconds": prediction_time,
@@ -3246,6 +3606,8 @@ class ExperimentRunner:
             str(summary_root),
             "--primary-metric",
             str((manifest.get("selected_metrics") or {}).get("primary_metric", DEFAULT_PRIMARY_METRIC)),
+            "--minimum-robust-seeds",
+            str(manifest.get("minimum_robust_seeds", MINIMUM_ROBUST_SEEDS)),
         ]
         winner_result = self._run_local_script(winner_command, label="Analizando winners")
         if winner_result.returncode != 0:

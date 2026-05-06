@@ -19,7 +19,7 @@ from atom_displacement_utils import (
     relaxed_basis_files,
     run_command_in_venv,
 )
-from pipeline_config_utils import command, render_training_config
+from pipeline_config_utils import command, render_training_config, resolve_checkpoint, write_checkpoint_manifest
 
 CONFIG_PATH = PIPELINE_PATHS["training_config_path"]
 RUNS_JSON_PATH = PIPELINE_PATHS["runs_json_path"]
@@ -118,6 +118,15 @@ def main() -> int:
     print(f"[OK] Config escrito en {CONFIG_PATH}")
     fit_command = [command(PIPELINE_CONFIG, "graph2mat"), *PIPELINE_CONFIG["training"]["fit_args"]]
     run_command_in_venv(fit_command, cwd=TRAINING_DIR)
+    ckpt_path = resolve_checkpoint(PIPELINE_CONFIG)
+    selection_mode = "configured_path" if PIPELINE_CONFIG.get("checkpoint", {}).get("path") else str(PIPELINE_CONFIG.get("checkpoint", {}).get("selection", "latest_version"))
+    manifest_path = write_checkpoint_manifest(
+        PIPELINE_CONFIG,
+        ckpt_path,
+        selection_mode=selection_mode,
+        selection_metric="best_checkpoint",
+    )
+    print(f"[OK] Checkpoint manifest escrito en {manifest_path}")
     print(f"[INFO] Si quieres ver metricas: {PIPELINE_CONFIG['training']['tensorboard_hint']}")
     print("\n=== Entrenamiento completado correctamente ===")
     return 0

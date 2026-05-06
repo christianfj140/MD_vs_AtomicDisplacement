@@ -33,6 +33,10 @@ MANIFEST_FIELDS = [
     "valid",
     "validation_reason",
     "split",
+    "split_strategy",
+    "temporal_gap",
+    "source_frame_index",
+    "excluded_gap_reason",
     "seed",
     "status",
     "sample_dir",
@@ -160,6 +164,49 @@ def _split_block(items: list[Path], train_count: int, validation_count: int, tes
     validation = selected[train_count : train_count + validation_count]
     test = selected[train_count + validation_count : train_count + validation_count + test_count]
     return {"train": train, "validation": validation, "test": test}
+
+
+def _parse_block_order(value: object) -> list[str]:
+    if isinstance(value, str):
+        order = [item.strip().lower() for item in value.replace(";", ",").split(",") if item.strip()]
+    elif isinstance(value, list):
+        order = [str(item).strip().lower() for item in value if str(item).strip()]
+    else:
+        order = ["train", "validation", "test"]
+    if sorted(order) != ["test", "train", "validation"]:
+        raise RuntimeError(
+            "splits.block_order debe contener exactamente train, validation y test."
+        )
+    return order
+
+
+def _split_blocked_with_gap(
+    items: list[Path],
+    counts: dict[str, int],
+    *,
+    temporal_gap: int,
+    block_order: list[str],
+) -> tuple[dict[str, list[Path]], list[tuple[Path, str]]]:
+    nonempty_blocks = [name for name in block_order if counts[name] > 0]
+    required = sum(counts.values()) + max(0, len(nonempty_blocks) - 1) * temporal_gap
+    if required > len(items):
+        raise RuntimeError(
+            "El split MD blocked_with_gap necesita mas frames de los disponibles: "
+            f"{required} > {len(items)} (gap={temporal_gap}, counts={counts})."
+        )
+    split_ranges = {"train": [], "validation": [], "test": []}
+    excluded: list[tuple[Path, str]] = []
+    cursor = 0
+    for block_index, split_name in enumerate(nonempty_blocks):
+        count = counts[split_name]
+        split_ranges[split_name] = list(items[cursor : cursor + count])
+        cursor += count
+        if block_index < len(nonempty_blocks) - 1 and temporal_gap > 0:
+            next_split = nonempty_blocks[block_index + 1]
+            for sample in items[cursor : cursor + temporal_gap]:
+                excluded.append((sample, f"temporal_gap_between_{split_name}_and_{next_split}"))
+            cursor += temporal_gap
+    return split_ranges, excluded
 
 
 def _sample_names(samples: list[Path]) -> str:
@@ -386,10 +433,57 @@ def _write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def write_excluded_gap_manifest(
+    config: dict,
+    split_root: Path,
+    excluded_samples: list[tuple[Path, str]],
+    *,
+    strategy: str,
+    temporal_gap: int,
+) -> None:
+    pipeline_paths = paths(config)
+    dataset_dir = pipeline_paths["dataset_dir"]
+    rows = [
+        {
+            "sample_id": f"md_{sample.name}",
+            "method": "md",
+            "source_run": str(dataset_dir),
+            "frame_index": sample.name,
+            "time_index": sample.name,
+            "displacement_amplitude": "",
+            "displacement_magnitude": "",
+            "displaced_atom": "",
+            "displacement_axis": "",
+            "displacement_sign": "",
+            "displacement_family": "",
+            "structure_path": str(sample / "RUN.fdf"),
+            "hamiltonian_path": str(_find_hamiltonian(sample) or ""),
+            "output_path": str(pipeline_paths["run_out_path"]),
+            "run_out_path": str(pipeline_paths["run_out_path"]),
+            "metadata_path": "",
+            "valid": False,
+            "validation_reason": "excluded_temporal_gap",
+            "split": "excluded_gap",
+            "split_strategy": strategy,
+            "temporal_gap": str(temporal_gap),
+            "source_frame_index": sample.name,
+            "excluded_gap_reason": reason,
+            "seed": "",
+            "status": "excluded",
+            "sample_dir": str(sample),
+        }
+        for sample, reason in excluded_samples
+    ]
+    _write_manifest(split_root / "excluded_gap_manifest.csv", rows)
+
+
 def write_split_manifests(
     config: dict,
     split_root: Path,
     split_ranges: dict[str, list[Path]],
+    *,
+    strategy: str,
+    temporal_gap: int,
 ) -> None:
     pipeline_paths = paths(config)
     dataset_dir = pipeline_paths["dataset_dir"]
@@ -421,6 +515,10 @@ def write_split_manifests(
                     "valid": bool(structure_path.exists() and hamiltonian_path and run_out_path.exists()),
                     "validation_reason": "ok" if structure_path.exists() and hamiltonian_path and run_out_path.exists() else "missing_run_fdf_or_matrix_or_output",
                     "split": split_name,
+                    "split_strategy": strategy,
+                    "temporal_gap": str(temporal_gap),
+                    "source_frame_index": source_sample.name,
+                    "excluded_gap_reason": "",
                     "seed": "",
                     "status": "completed" if structure_path.exists() and hamiltonian_path and run_out_path.exists() else "incomplete",
                     "sample_dir": str(sample_dir),
@@ -462,17 +560,38 @@ def prepare_dataset_splits(config: dict) -> None:
         shutil.rmtree(split_root)
 
     strategy = str(split_config.get("strategy", "block")).strip().lower()
-    selected = _select_spread(step_dirs, requested)
+    temporal_gap = int(split_config.get("temporal_gap", 0) or 0)
+    if temporal_gap < 0:
+        raise RuntimeError("splits.temporal_gap debe ser >= 0.")
+    excluded_gap_samples: list[tuple[Path, str]] = []
     if strategy == "spread":
+        selected = _select_spread(step_dirs, requested)
         split_ranges = _split_spread(selected, train_count, validation_count, test_count)
     elif strategy == "block":
+        selected = _select_spread(step_dirs, requested)
         split_ranges = _split_block(selected, train_count, validation_count, test_count)
+    elif strategy == "blocked_with_gap":
+        counts = {"train": train_count, "validation": validation_count, "test": test_count}
+        split_ranges, excluded_gap_samples = _split_blocked_with_gap(
+            step_dirs,
+            counts,
+            temporal_gap=temporal_gap,
+            block_order=_parse_block_order(split_config.get("block_order", "train,validation,test")),
+        )
     else:
         raise RuntimeError(f"Estrategia de split MD no soportada: {strategy!r}.")
     for split_name, samples in split_ranges.items():
         for sample_dir in samples:
             _prepare_split_sample(sample_dir, split_root / split_name / sample_dir.name)
-    write_split_manifests(config, split_root, split_ranges)
+    write_split_manifests(config, split_root, split_ranges, strategy=strategy, temporal_gap=temporal_gap)
+    if excluded_gap_samples:
+        write_excluded_gap_manifest(
+            config,
+            split_root,
+            excluded_gap_samples,
+            strategy=strategy,
+            temporal_gap=temporal_gap,
+        )
 
     print(
         "[OK] Split MD preparado: "

@@ -8,6 +8,35 @@ Repositorio para comparar las predicciones de `graph2mat` entrenado con dos tipo
 
 El objetivo es estudiar como cambia la calidad de las predicciones del Hamiltoniano cuando el modelo se entrena con trayectorias MD frente a un muestreo local del entorno geometrico de equilibrio.
 
+## Ruta de comparacion cientifica
+
+Los scripts standalone de `MD/` y `AtomDisplacement/` siguen siendo utiles para
+desarrollo y exploracion. Para una conclusion MD vs AtomicDisplacement, la ruta
+valida es la de `Comparison/scripts/pipeline_ui.py`: construye tests congelados,
+ejecuta la evaluacion cruzada 2x3, agrega metricas y termina en
+`Comparison/scripts/analyze_winners.py`.
+
+La recomendacion final solo se considera `robust_comparison` si hay al menos
+tres seeds, las seis celdas cruzadas estan presentes, la metrica primaria existe
+en todas ellas y no hay warnings severos de leakage, settings, budget,
+checkpoint o reproducibilidad. Menos de tres seeds se reporta como
+`exploratory`; cualquier warning severo deja el resultado como
+`scientifically_inconclusive`.
+
+Los artefactos principales de trazabilidad son:
+
+- `frozen_test_manifest.json` con hashes SHA256 de estructuras, referencias y
+  salidas SIESTA del test congelado.
+- `training/checkpoint_manifest.json` con checkpoint elegido, hash y razon de
+  seleccion.
+- `cross_evaluation_manifest.json` y `recommendation.json` con hashes,
+  warnings y `scientific_status`.
+- `metrics/block_metrics.csv`, `metrics/species_pair_metrics.csv` y
+  `metrics/distance_bin_metrics.csv` como diagnosticos estructurales del error
+  sparse usando la base `.ion.xml` real. La base orbital es obligatoria; si no
+  esta archivada o no cuadra con la dimension del Hamiltoniano, la ruta estricta
+  aborta.
+
 ## Estructura del repositorio
 
 ```text
@@ -32,7 +61,7 @@ Este repo asume que existen al menos estas herramientas:
 
 - `siesta`
 - `graph2mat`
-- un entorno virtual en `/home/christian/graph2mat-env`
+- un entorno virtual en ``
 
 Los scripts de `AtomDisplacement` activan automáticamente ese entorno cuando llaman a `graph2mat` o a `siesta`.
 
@@ -42,7 +71,7 @@ La carpeta `MD/` contiene el pipeline original basado en dinamica molecular.
 
 ### Script principal
 
-- [main_md.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/MD/scripts/main_md.py)
+- [main_md.py](MD/scripts/main_md.py)
 
 ### Orden del pipeline
 
@@ -84,14 +113,14 @@ La carpeta `AtomDisplacement/` contiene un pipeline nuevo para construir un data
 
 ### Script principal
 
-- [main_atom_displacement.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/main_atom_displacement.py)
+- [main_atom_displacement.py](AtomDisplacement/scripts/main_atom_displacement.py)
 
 ### Scripts individuales
 
-- [run_relaxation.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/run_relaxation.py)
-- [generate_atom_displacement_dataset.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/generate_atom_displacement_dataset.py)
-- [run_single_points.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/run_single_points.py)
-- [collect_atom_displacement_dataset.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/collect_atom_displacement_dataset.py)
+- [run_relaxation.py](AtomDisplacement/scripts/run_relaxation.py)
+- [generate_atom_displacement_dataset.py](AtomDisplacement/scripts/generate_atom_displacement_dataset.py)
+- [run_single_points.py](AtomDisplacement/scripts/run_single_points.py)
+- [collect_atom_displacement_dataset.py](AtomDisplacement/scripts/collect_atom_displacement_dataset.py)
 
 ### Ejecucion completa
 
@@ -112,7 +141,7 @@ python3 AtomDisplacement/scripts/collect_atom_displacement_dataset.py
 ## Variables importantes del dataset de `AtomDisplacement`
 
 Los parametros FC estan en `structure.force_constants` dentro de
-[pipeline_config.yaml](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/pipeline_config.yaml):
+[pipeline_config.yaml](AtomDisplacement/pipeline_config.yaml):
 
 - `displacement`: amplitud del desplazamiento, por ejemplo `0.04 Bohr` o `0.05 Ang`
 - `first_atom`: primer atomo desplazado por SIESTA FC
@@ -125,19 +154,19 @@ y expande el dataset con amplitudes adicionales del mismo patron cartesiano
 (`2 * displacement`, `3 * displacement`, ...). Esas geometrías extra se calculan
 como single-points SIESTA para obtener Hamiltonianos compatibles con Graph2Mat.
 
-Los parametros del `.fdf` base de relajacion estan en [RUN.fdf](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/base/RUN.fdf).
+Los parametros del `.fdf` base de relajacion estan en [RUN.fdf](AtomDisplacement/base/RUN.fdf).
 
 ## Pipeline de entrenamiento en `AtomDisplacement`
 
 ### Script principal
 
-- [main_atdisp.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/main_atdisp.py)
+- [main_atdisp.py](AtomDisplacement/scripts/main_atdisp.py)
 
 ### Scripts individuales
 
-- [run_atdisp_training.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/run_atdisp_training.py)
-- [run_atdisp_testing.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/run_atdisp_testing.py)
-- [run_atdisp_prediction.py](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/scripts/run_atdisp_prediction.py)
+- [run_atdisp_training.py](AtomDisplacement/scripts/run_atdisp_training.py)
+- [run_atdisp_testing.py](AtomDisplacement/scripts/run_atdisp_testing.py)
+- [run_atdisp_prediction.py](AtomDisplacement/scripts/run_atdisp_prediction.py)
 
 ### Ejecucion completa
 
@@ -157,14 +186,14 @@ python3 AtomDisplacement/scripts/run_atdisp_prediction.py
 
 ### Dataset
 
-- [samples_manifest.json](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/dataset/samples_manifest.json)
-- [water_atom_displacement_dataset.json](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/dataset/collected/water_atom_displacement_dataset.json)
-- [water_atom_displacement_summary.csv](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/dataset/collected/water_atom_displacement_summary.csv)
+- [samples_manifest.json](AtomDisplacement/dataset/samples_manifest.json)
+- [water_atom_displacement_dataset.json](AtomDisplacement/dataset/collected/water_atom_displacement_dataset.json)
+- [water_atom_displacement_summary.csv](AtomDisplacement/dataset/collected/water_atom_displacement_summary.csv)
 
 ### Entrenamiento
 
-- [config.yaml](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/training/config.yaml)
-- [sample_metrics.csv](/home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/AtomDisplacement/training/sample_metrics.csv)
+- [config.yaml](AtomDisplacement/training/config.yaml)
+- [sample_metrics.csv](AtomDisplacement/training/sample_metrics.csv)
 - `training/lightning_logs/atom_displacement_model/...`
 
 ## Estado actual del repositorio

@@ -16,7 +16,7 @@ paths:
   run_summary_name: run_summary.json
   collected_json_name: water_atom_displacement_dataset.json
   collected_csv_name: water_atom_displacement_summary.csv
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${GRAPH2MAT_VENV}/bin/activate
 
 commands:
   graph2mat: graph2mat

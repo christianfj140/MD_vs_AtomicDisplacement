@@ -16,7 +16,7 @@ from graph2mat.tools.lightning import (
 )
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
-from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint
+from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint, write_checkpoint_manifest
 
 
 def require_command(command_name: str) -> None:
@@ -42,6 +42,14 @@ def main() -> int:
 
     require_command(command(config, "graph2mat"))
     ckpt_path = resolve_checkpoint(config)
+    selection_mode = "configured_path" if config.get("checkpoint", {}).get("path") else str(config.get("checkpoint", {}).get("selection", "latest_version"))
+    manifest_path = write_checkpoint_manifest(
+        config,
+        ckpt_path,
+        selection_mode=selection_mode,
+        selection_metric="tested_checkpoint",
+    )
+    print(f"[OK] Checkpoint manifest escrito en {manifest_path}")
     os.chdir(pipeline_paths["training_dir"])
 
     training_data = config["training"]["data"]

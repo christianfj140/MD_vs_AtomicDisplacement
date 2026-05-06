@@ -14,6 +14,7 @@ from graph2mat.tools.lightning import MatrixDataModule, PlotMatrixError, Samplew
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
 from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, completed_sample_dirs, resolve_ckpt_rel_path
+from pipeline_config_utils import write_checkpoint_manifest
 
 
 SPLITS_DIR = DATASET_DIR / "splits"
@@ -95,6 +96,14 @@ def main() -> int:
     patch_graph2mat_run_loading()
 
     ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, "")
+    selection_mode = "configured_path" if PIPELINE_CONFIG.get("checkpoint", {}).get("path") else str(PIPELINE_CONFIG.get("checkpoint", {}).get("selection", "latest_version"))
+    manifest_path = write_checkpoint_manifest(
+        PIPELINE_CONFIG,
+        ckpt_path,
+        selection_mode=selection_mode,
+        selection_metric="tested_checkpoint",
+    )
+    print(f"[OK] Checkpoint manifest escrito en {manifest_path}")
     test_run = strict_test_runs()
     os.chdir(TRAINING_DIR)
 

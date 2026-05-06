@@ -1,10 +1,10 @@
 paths:
-  dataset_dir: /mnt/c/Users/usuario/Desktop/CINN/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260501_015442/md/dataset_10/dataset
-  training_dir: /mnt/c/Users/usuario/Desktop/CINN/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260501_015442/md/dataset_10/training
+  dataset_dir: ${REPO_ROOT}/MD/dataset
+  training_dir: ${REPO_ROOT}/MD/training
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${GRAPH2MAT_VENV}/bin/activate
 commands:
   graph2mat: graph2mat
   siesta: siesta

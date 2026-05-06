@@ -44,9 +44,20 @@ Reported metrics include:
 - `false_nonzero_rate`: fraction of predicted support absent from SIESTA.
 - `hermiticity_ref`, `hermiticity_pred`: relative Hermiticity defect.
 
-Block-wise orbital and distance-dependent metrics are not computed yet because
-the archived HSX/TSHS comparison path does not currently expose stable atom-pair
-metadata in the result CSVs.
+Diagnostic structural metrics are written from the real SIESTA/Graph2Mat basis.
+The evaluator requires archived `.ion.xml` files and counts PAOs from each
+species basis using the angular degeneracy `2*l+1`:
+
+- `metrics/block_metrics.csv`: errors grouped by `(row_atom, col_atom)`.
+- `metrics/species_pair_metrics.csv`: errors grouped by species pair.
+- `metrics/distance_bin_metrics.csv`: errors grouped into `0-1.2`,
+  `1.2-2.0`, `2.0-4.0`, and `>4.0 Ang` bins.
+
+If the basis is missing, cannot be parsed, lacks a species present in `RUN.fdf`,
+or its orbital count does not match the Hamiltonian dimension, the metrics
+manifest records `structural_basis_error` and the UI strict path aborts the
+evaluation. These metrics are diagnostic in the current strict comparison; they
+do not decide the winner.
 
 ## Spectral Metrics
 
@@ -124,9 +135,12 @@ availability:
 5. `global_rmse_eV` only as a secondary/report metric
 
 Winner outputs preserve `experiment_id`, `seed`, dataset sizes, test set,
-metric, and checkpoints. `pooled` aggregation is only produced when explicitly
-requested with `--aggregation-mode pooled`. A single seed is reported as a
-single-seed result, not as a robust winner.
+metric, frozen-test hash, checkpoint manifest, and checkpoint hash. `pooled`
+aggregation is only produced when explicitly requested with
+`--aggregation-mode pooled`. Fewer than three seeds are reported as
+`scientific_status: exploratory`; `robust_comparison` requires at least three
+seeds, complete 2x3 cross evaluation, a complete primary metric, and no severe
+warnings.
 
 Winner recommendations are marked `inconclusive` when machine-readable
 validation warnings are present in the aggregated cross metrics, including
@@ -157,8 +171,10 @@ Validation artifacts are `valid_samples.csv`, `invalid_samples.csv` and
 
 `Comparison/scripts/check_geometry_leakage.py` reports exact duplicates,
 near-duplicate geometries, neighboring MD frames crossing splits, and
-AtomDisplacement displacement-family leakage. It uses direct atom ordering from
-`RUN.fdf`; it does not perform alignment/Kabsch.
+AtomDisplacement displacement-family leakage. In addition to raw-coordinate
+checks, it records a translation/rotation-invariant internal-distance signature
+by species and atom order. It still does not solve arbitrary atom permutation or
+full PBC equivalence.
 
 For strict one-click comparisons, geometry leakage diagnostics are run after
 common frozen tests are built and before cross predictions. Any detected leakage

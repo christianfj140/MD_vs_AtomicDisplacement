@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -219,6 +220,191 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "weighted_false_nonzeros_eV": float(sum(abs(pred_values[index]) for index in false_nonzeros)),
         "hermiticity_ref": hermiticity_defect(reference.hamiltonian),
         "hermiticity_pred": hermiticity_defect(predicted.hamiltonian),
+    }
+
+
+def parse_structure_atoms(path: Path) -> tuple[list[str], np.ndarray]:
+    """Return species labels and Cartesian coordinates from a minimal SIESTA RUN.fdf."""
+    if not path.exists():
+        return [], np.empty((0, 3), dtype=float)
+    species_by_index: dict[str, str] = {}
+    atoms: list[tuple[str, tuple[float, float, float]]] = []
+    in_species = False
+    in_coords = False
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith("%block"):
+            block = lower.split(maxsplit=1)[1] if len(lower.split(maxsplit=1)) > 1 else ""
+            in_species = "chemicalspecieslabel" in block
+            in_coords = "atomiccoordinatesandatomicspecies" in block
+            continue
+        if lower.startswith("%endblock"):
+            in_species = False
+            in_coords = False
+            continue
+        parts = line.split()
+        if in_species and len(parts) >= 3:
+            species_by_index[parts[0]] = parts[-1]
+            continue
+        if in_coords and len(parts) >= 4:
+            try:
+                coords = (float(parts[0]), float(parts[1]), float(parts[2]))
+            except ValueError:
+                continue
+            species_key = parts[3]
+            atoms.append((species_by_index.get(species_key, species_key), coords))
+    labels = [label for label, _coords in atoms]
+    coords = np.asarray([coords for _label, coords in atoms], dtype=float) if atoms else np.empty((0, 3), dtype=float)
+    return labels, coords
+
+
+def basis_orbital_counts(basis_dirs: list[Path]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for basis_dir in basis_dirs:
+        if not basis_dir.exists():
+            continue
+        for path in sorted(basis_dir.glob("*.ion.xml")):
+            try:
+                root = ET.parse(path).getroot()
+            except ET.ParseError as exc:
+                raise RuntimeError(f"Could not parse basis file {path}: {exc}") from exc
+            symbol = (root.findtext("symbol") or root.findtext("label") or path.stem).strip()
+            paos = root.find("paos")
+            if paos is None:
+                raise RuntimeError(f"Basis file {path} does not contain a <paos> block.")
+            total = 0
+            for orbital in paos.findall("orbital"):
+                try:
+                    angular_momentum = int(str(orbital.attrib.get("l", "")).strip())
+                except ValueError as exc:
+                    raise RuntimeError(f"Basis file {path} contains an orbital without integer l.") from exc
+                total += 2 * angular_momentum + 1
+            if total <= 0:
+                raise RuntimeError(f"Basis file {path} does not define PAO orbitals.")
+            counts[symbol] = total
+    return counts
+
+
+def find_basis_dirs(result_dir: Path) -> list[Path]:
+    candidates = [
+        result_dir / "basis",
+        result_dir / "structures" / "basis",
+        result_dir.parent / "basis",
+    ]
+    return [path for path in candidates if path.exists() and list(path.glob("*.ion.xml"))]
+
+
+def orbital_atom_map_from_basis(species: list[str], basis_counts: dict[str, int], n_orbitals: int) -> list[int]:
+    missing = sorted({label for label in species if label not in basis_counts})
+    if missing:
+        raise RuntimeError(f"Missing .ion.xml basis for species: {', '.join(missing)}.")
+    atom_by_orbital: list[int] = []
+    for atom_index, label in enumerate(species):
+        atom_by_orbital.extend([atom_index] * int(basis_counts[label]))
+    if len(atom_by_orbital) != n_orbitals:
+        raise RuntimeError(
+            "Basis-derived orbital count does not match Hamiltonian dimension: "
+            f"{len(atom_by_orbital)} != {n_orbitals}."
+        )
+    return atom_by_orbital
+
+
+def distance_bin(distance_ang: float) -> str:
+    if distance_ang < 1.2:
+        return "0-1.2"
+    if distance_ang < 2.0:
+        return "1.2-2.0"
+    if distance_ang < 4.0:
+        return "2.0-4.0"
+    return ">4.0"
+
+
+def _empty_structural_metrics(reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "reason": reason,
+        "block_rows": [],
+        "species_pair_rows": [],
+        "distance_bin_rows": [],
+    }
+
+
+def _finalize_groups(groups: dict[Any, list[dict[str, Any]]], row_builder) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, entries in sorted(groups.items(), key=lambda item: str(item[0])):
+        deltas = [entry["delta"] for entry in entries]
+        distances = [entry["distance_ang"] for entry in entries if entry["distance_ang"] is not None]
+        row = row_builder(key, entries)
+        row.update(
+            {
+                "n_entries": len(entries),
+                "mae_union_eV": mean_abs(deltas),
+                "rmse_union_eV": rmse(deltas),
+                "max_abs_error_union_eV": float(max((abs(value) for value in deltas), default=math.nan)),
+                "mean_distance_ang": float(np.mean(distances)) if distances else math.nan,
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def structural_sparse_metrics(
+    sample: str,
+    reference: MatrixData,
+    predicted: MatrixData,
+    structure_path: Path,
+    basis_counts: dict[str, int],
+) -> dict[str, Any]:
+    species, coords = parse_structure_atoms(structure_path)
+    if not species:
+        raise RuntimeError("Missing or unreadable structure for structural metrics.")
+    if reference.hamiltonian.shape != predicted.hamiltonian.shape or reference.hamiltonian.shape[0] != reference.hamiltonian.shape[1]:
+        raise RuntimeError("Matrix shape mismatch for structural metrics.")
+    atom_by_orbital = orbital_atom_map_from_basis(species, basis_counts, reference.hamiltonian.shape[0])
+
+    ref_values = csr_value_dict(reference.hamiltonian, SUPPORT_THRESHOLD)
+    pred_values = csr_value_dict(predicted.hamiltonian, SUPPORT_THRESHOLD)
+    block_groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    species_groups: dict[str, list[dict[str, Any]]] = {}
+    distance_groups: dict[str, list[dict[str, Any]]] = {}
+    for row_index, col_index in sorted(set(ref_values) | set(pred_values)):
+        row_atom = atom_by_orbital[row_index]
+        col_atom = atom_by_orbital[col_index]
+        delta = pred_values.get((row_index, col_index), 0.0) - ref_values.get((row_index, col_index), 0.0)
+        distance = float(np.linalg.norm(coords[row_atom] - coords[col_atom])) if len(coords) else math.nan
+        entry = {"delta": delta, "distance_ang": distance}
+        block_groups.setdefault((row_atom, col_atom), []).append(entry)
+        species_pair = f"{species[row_atom]}-{species[col_atom]}"
+        species_groups.setdefault(species_pair, []).append(entry)
+        distance_groups.setdefault(distance_bin(distance), []).append(entry)
+
+    block_rows = _finalize_groups(
+        block_groups,
+        lambda key, _entries: {
+            "sample": sample,
+            "row_atom": key[0],
+            "col_atom": key[1],
+            "row_species": species[key[0]],
+            "col_species": species[key[1]],
+        },
+    )
+    species_rows = _finalize_groups(
+        species_groups,
+        lambda key, _entries: {"sample": sample, "species_pair": key},
+    )
+    distance_rows = _finalize_groups(
+        distance_groups,
+        lambda key, _entries: {"sample": sample, "distance_bin": key},
+    )
+    return {
+        "available": True,
+        "reason": "",
+        "block_rows": block_rows,
+        "species_pair_rows": species_rows,
+        "distance_bin_rows": distance_rows,
     }
 
 
@@ -483,12 +669,28 @@ def extract(result_dir: Path) -> dict[str, Any]:
     prediction_dirs = sample_dirs(prediction_root)
     reference_dirs = sample_dirs(reference_root)
     sample_names = sorted(set(prediction_dirs) | set(reference_dirs))
+    basis_dirs = find_basis_dirs(result_dir)
 
     sparse_rows: list[dict[str, Any]] = []
     spectral_rows: list[dict[str, Any]] = []
     dos_rows: list[dict[str, Any]] = []
     overlap_rows: list[dict[str, Any]] = []
+    block_rows: list[dict[str, Any]] = []
+    species_pair_rows: list[dict[str, Any]] = []
+    distance_bin_rows: list[dict[str, Any]] = []
+    structural_unavailable: list[dict[str, str]] = []
+    structural_basis_error = ""
     errors: list[dict[str, str]] = []
+    try:
+        basis_counts = basis_orbital_counts(basis_dirs)
+        if not basis_counts:
+            raise RuntimeError(
+                "No .ion.xml basis files were found. Basis files are required for structural sparse metrics."
+            )
+    except Exception as exc:
+        basis_counts = {}
+        structural_basis_error = str(exc)
+        errors.append({"sample": "*", "kind": "structural_basis", "error": structural_basis_error})
 
     for sample in sample_names:
         predicted_path = find_prediction(prediction_dirs[sample]) if sample in prediction_dirs else None
@@ -530,12 +732,32 @@ def extract(result_dir: Path) -> dict[str, Any]:
             errors.append({"sample": sample, "kind": "sparse_metrics", "error": str(exc)})
 
         try:
+            structural = structural_sparse_metrics(
+                sample,
+                reference,
+                predicted,
+                result_dir / "structures" / sample / "RUN.fdf",
+                basis_counts,
+            )
+            if structural["available"]:
+                block_rows.extend(structural["block_rows"])
+                species_pair_rows.extend(structural["species_pair_rows"])
+                distance_bin_rows.extend(structural["distance_bin_rows"])
+            else:
+                structural_unavailable.append({"sample": sample, "reason": structural["reason"]})
+        except Exception as exc:
+            structural_unavailable.append({"sample": sample, "reason": str(exc)})
+            errors.append({"sample": sample, "kind": "structural_metrics", "error": str(exc)})
+
+        try:
             ref_eig = generalized_eigenvalues(reference.hamiltonian, reference.overlap)
             pred_eig = generalized_eigenvalues(predicted.hamiltonian, reference.overlap)
             write_csv(eigen_root / "siesta" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(ref_eig))
             write_csv(eigen_root / "predicted" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(pred_eig))
             fermi_level = reference.fermi_level
             fermi_source = reference.fermi_level_source or "unavailable"
+            same_band_count = ref_eig.size == pred_eig.size
+            spectral_comparable = bool(reference.has_overlap and same_band_count and fermi_level is not None)
             if fermi_level is None or not math.isfinite(fermi_level):
                 errors.append(
                     {
@@ -549,6 +771,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
                 )
                 fermi_level = None
                 fermi_source = "unavailable"
+                spectral_comparable = False
             band_rows, spectral_metrics = eigen_error_metrics(
                 ref_eig,
                 pred_eig,
@@ -566,6 +789,9 @@ def extract(result_dir: Path) -> dict[str, Any]:
                     "siesta_bands": int(ref_eig.size),
                     "predicted_bands": int(pred_eig.size),
                     "overlap_source": "siesta_reference",
+                    "spectral_comparable": spectral_comparable,
+                    "same_band_count": same_band_count,
+                    "reference_has_overlap": reference.has_overlap,
                     "hamiltonian_symmetrized_for_spectrum": True,
                     **spectral_metrics,
                 }
@@ -616,6 +842,9 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "siesta_bands",
         "predicted_bands",
         "overlap_source",
+        "spectral_comparable",
+        "same_band_count",
+        "reference_has_overlap",
         "hamiltonian_symmetrized_for_spectrum",
         "n_compared_bands",
         "fermi_ref_eV",
@@ -669,11 +898,44 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "overlap_error",
         "fermi_level_eV",
     ]
+    block_fields = [
+        "sample",
+        "row_atom",
+        "col_atom",
+        "row_species",
+        "col_species",
+        "n_entries",
+        "mae_union_eV",
+        "rmse_union_eV",
+        "max_abs_error_union_eV",
+        "mean_distance_ang",
+    ]
+    species_pair_fields = [
+        "sample",
+        "species_pair",
+        "n_entries",
+        "mae_union_eV",
+        "rmse_union_eV",
+        "max_abs_error_union_eV",
+        "mean_distance_ang",
+    ]
+    distance_bin_fields = [
+        "sample",
+        "distance_bin",
+        "n_entries",
+        "mae_union_eV",
+        "rmse_union_eV",
+        "max_abs_error_union_eV",
+        "mean_distance_ang",
+    ]
 
     write_csv(metrics_root / "sparse_metrics.csv", sparse_fields, sparse_rows)
     write_csv(metrics_root / "spectral_metrics.csv", spectral_fields, spectral_rows)
     write_csv(metrics_root / "dos_metrics.csv", dos_fields, dos_rows)
     write_csv(metrics_root / "matrix_spectrum_relationship.csv", relationship_fields, relationship_rows)
+    write_csv(metrics_root / "block_metrics.csv", block_fields, block_rows)
+    write_csv(metrics_root / "species_pair_metrics.csv", species_pair_fields, species_pair_rows)
+    write_csv(metrics_root / "distance_bin_metrics.csv", distance_bin_fields, distance_bin_rows)
     write_csv(eigen_root / "eigenvalue_metrics.csv", spectral_fields, spectral_rows)
     write_csv(eigen_root / "overlap_summary.csv", overlap_fields, overlap_rows)
 
@@ -690,6 +952,19 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "sparse_samples": len(sparse_rows),
         "dos_samples": len(dos_rows),
         "overlap_entries": len(overlap_rows),
+        "structural_metrics_basis_required": True,
+        "structural_basis_dirs": [str(path) for path in basis_dirs],
+        "structural_basis_orbital_counts": basis_counts,
+        "structural_basis_error": structural_basis_error,
+        "structural_metrics_error": bool(structural_basis_error or structural_unavailable),
+        "structural_metrics_available": bool(block_rows or species_pair_rows or distance_bin_rows),
+        "structural_metrics_samples": len(
+            {
+                str(row.get("sample"))
+                for row in block_rows
+            }
+        ),
+        "structural_metrics_unavailable": structural_unavailable,
         "support_threshold": SUPPORT_THRESHOLD,
         "fermi_window_eV": FERMI_WINDOW_EV,
         "dos_sigma_eV": DOS_SIGMA_EV,
@@ -702,6 +977,9 @@ def extract(result_dir: Path) -> dict[str, Any]:
             "spectral_metrics": str(metrics_root / "spectral_metrics.csv"),
             "dos_metrics": str(metrics_root / "dos_metrics.csv"),
             "matrix_spectrum_relationship": str(metrics_root / "matrix_spectrum_relationship.csv"),
+            "block_metrics": str(metrics_root / "block_metrics.csv"),
+            "species_pair_metrics": str(metrics_root / "species_pair_metrics.csv"),
+            "distance_bin_metrics": str(metrics_root / "distance_bin_metrics.csv"),
             "eigenvalues_siesta": str(eigen_root / "siesta"),
             "eigenvalues_predicted": str(eigen_root / "predicted"),
             "band_errors": str(eigen_root / "band_errors"),
