@@ -1787,10 +1787,12 @@ def plot_data_summary() -> dict[str, Any]:
             sparse_rows = read_csv_rows(result_dir / "metrics" / "sparse_metrics.csv")
             spectral_rows = read_csv_rows(result_dir / "metrics" / "spectral_metrics.csv")
             dos_rows = read_csv_rows(result_dir / "metrics" / "dos_metrics.csv")
+            sparse_sweep_rows = read_csv_rows(result_dir / "metrics" / "sparse_threshold_sweep.csv")
+            dos_sweep_rows = read_csv_rows(result_dir / "metrics" / "dos_sigma_sweep.csv")
             relationship_rows = read_csv_rows(
                 result_dir / "metrics" / "matrix_spectrum_relationship.csv"
             )
-            if not sparse_rows and not spectral_rows and not dos_rows and not relationship_rows:
+            if not sparse_rows and not spectral_rows and not dos_rows and not relationship_rows and not sparse_sweep_rows and not dos_sweep_rows:
                 continue
             errors = manifest.get("errors", [])
             if not isinstance(errors, list):
@@ -1829,12 +1831,16 @@ def plot_data_summary() -> dict[str, Any]:
                         "sparse": numeric_means(sparse_rows),
                         "spectral": numeric_means(spectral_rows),
                         "dos": numeric_means(dos_rows),
+                        "sparse_sweep": numeric_means(sparse_sweep_rows),
+                        "dos_sweep": numeric_means(dos_sweep_rows),
                         "matrix_spectrum": numeric_means(relationship_rows),
                     },
                     "samples": {
                         "sparse": sparse_rows,
                         "spectral": spectral_rows,
                         "dos": dos_rows,
+                        "sparse_sweep": sparse_sweep_rows,
+                        "dos_sweep": dos_sweep_rows,
                         "matrix_spectrum": relationship_rows,
                     },
                     "diagnostics": metric_diagnostics(

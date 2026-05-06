@@ -43,6 +43,9 @@ Reported metrics include:
 - `false_zero_rate`: fraction of SIESTA support missing in the prediction.
 - `false_nonzero_rate`: fraction of predicted support absent from SIESTA.
 - `hermiticity_ref`, `hermiticity_pred`: relative Hermiticity defect.
+- `metrics/sparse_threshold_sweep.csv`: sensitivity table at thresholds
+  `1e-12`, `1e-10`, `1e-8`, `1e-6` with `mae_union_eV` and `rmse_union_eV`.
+  This is a robustness diagnostic; it should not replace the canonical table.
 
 Diagnostic structural metrics are written from the real SIESTA/Graph2Mat basis.
 The evaluator requires archived `.ion.xml` files and counts PAOs from each
@@ -74,6 +77,12 @@ Reported metrics include:
   SIESTA Fermi level.
 - `gap_ref_eV`, `gap_pred_eV`, `gap_abs_error_eV`: gap metrics around the SIESTA
   Fermi level.
+- `homo_error_eV`, `lumo_error_eV`, `frontier_window_rmse_eV`: frontier orbital
+  diagnostics. If the Fermi level is unavailable, a molecule fallback uses the
+  central occupied/unoccupied index split as an explicit approximation.
+- Alignment diagnostics are additionally reported and never overwrite raw errors:
+  `align_global_shift_eV`, `align_global_mae_eV`, `align_global_rmse_eV`,
+  `align_fermi_*`, and `align_homo_*`.
 
 Important: near-Fermi, occupied-band, and gap metrics require a real Fermi level
 read from the SIESTA reference file. The evaluator does not estimate or infer a
@@ -90,6 +99,10 @@ eigenvalues using `sigma = 0.10 eV` and a 1000-point energy grid. It reports:
 - `dos_l1`: L1 distance between normalized DOS curves.
 - `dos_l2`: L2 distance between normalized DOS curves.
 
+Sensitivity diagnostics are written to `metrics/dos_sigma_sweep.csv` for sigma
+values `[0.05, 0.10, 0.20, 0.40] eV`. The purpose is to avoid conclusions driven
+by one arbitrary broadening parameter.
+
 ## Matrix-Spectrum Relationship
 
 `metrics/matrix_spectrum_relationship.csv` joins sparse and spectral rows by
@@ -105,9 +118,9 @@ Per sample it records:
 - `fermi_window_rmse_eV` when a real SIESTA Fermi level exists
 - `gap_abs_error_eV` when a real SIESTA Fermi level exists
 
-The manifest summary includes Pearson correlations for matrix error versus
-global spectral RMSE, and Fermi-window correlations only over samples with a
-real SIESTA Fermi level.
+The manifest summary includes both Pearson and Spearman correlations for matrix
+error versus spectral errors. Spearman is the rank-robust companion and should
+be preferred whenever heavy-tailed outliers are visible.
 
 ## Interpreting MD vs AtomDisplacement
 

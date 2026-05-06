@@ -754,6 +754,69 @@ function renderHeatmap(id, runs) {
   );
 }
 
+function renderSensitivitySweeps(id, runs) {
+  const traces = [];
+  for (const [pipeline, items] of groupedRuns(runs)) {
+    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const sparseSweepRows = items.flatMap((run) => run.samples?.sparse_sweep || []);
+    const dosSweepRows = items.flatMap((run) => run.samples?.dos_sweep || []);
+    const sparseByThreshold = new Map();
+    for (const row of sparseSweepRows) {
+      const t = Number(row.support_threshold);
+      const v = Number(row.rmse_union_eV);
+      if (!Number.isFinite(t) || !Number.isFinite(v)) continue;
+      if (!sparseByThreshold.has(t)) sparseByThreshold.set(t, []);
+      sparseByThreshold.get(t).push(v);
+    }
+    const dosBySigma = new Map();
+    for (const row of dosSweepRows) {
+      const s = Number(row.dos_sigma_eV);
+      const v = Number(row.dos_wasserstein_eV);
+      if (!Number.isFinite(s) || !Number.isFinite(v)) continue;
+      if (!dosBySigma.has(s)) dosBySigma.set(s, []);
+      dosBySigma.get(s).push(v);
+    }
+    const ts = Array.from(sparseByThreshold.keys()).sort((a, b) => a - b);
+    if (ts.length) {
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        name: `${label} sparse-threshold RMSE`,
+        x: ts,
+        y: ts.map((t) => sparseByThreshold.get(t).reduce((s, v) => s + v, 0) / sparseByThreshold.get(t).length),
+        xaxis: "x1",
+        yaxis: "y1",
+      });
+    }
+    const ss = Array.from(dosBySigma.keys()).sort((a, b) => a - b);
+    if (ss.length) {
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        name: `${label} DOS sigma W1`,
+        x: ss,
+        y: ss.map((s) => dosBySigma.get(s).reduce((sum, v) => sum + v, 0) / dosBySigma.get(s).length),
+        xaxis: "x2",
+        yaxis: "y2",
+      });
+    }
+  }
+  const layout = {
+    title: { text: "Sensitivity sweeps", x: 0.02, xanchor: "left", font: { size: 15 } },
+    grid: { rows: 1, columns: 2, pattern: "independent" },
+    xaxis: { title: "Support threshold", type: "log" },
+    yaxis: { title: "RMSE union (eV)" },
+    xaxis2: { title: "DOS sigma (eV)" },
+    yaxis2: { title: "DOS Wasserstein (eV)" },
+    margin: { l: 56, r: 18, t: 46, b: 48 },
+    legend: { orientation: "h", y: -0.25 },
+    paper_bgcolor: "#ffffff",
+    plot_bgcolor: "#ffffff",
+  };
+  if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay datos de sensitivity sweep.")];
+  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
 function latestCrossExperiment(payload) {
   const experiments = payload?.cross_experiments || [];
   if (!experiments.length) return null;
@@ -1063,6 +1126,9 @@ function renderPlots(payload) {
   renderBoxPlot("plot-box", runs);
   renderScatterPlot("plot-scatter", runs);
   renderHeatmap("plot-heatmap", runs);
+  renderLinePlot("plot-frontier", runs, "spectral", [{ key: "frontier_window_rmse_eV", label: "Frontier RMSE" }], "Frontier window", "RMSE eV");
+  renderLinePlot("plot-aligned", runs, "spectral", [{ key: "align_global_rmse_eV", label: "Aligned global RMSE" }], "Spectral aligned RMSE", "RMSE eV");
+  renderSensitivitySweeps("plot-sweeps", runs);
   renderCrossHeatmap("plot-cross-heatmap", crossExperiment);
   renderCrossLearning("plot-learning", crossExperiment);
   renderCrossCompute("plot-compute", crossExperiment);

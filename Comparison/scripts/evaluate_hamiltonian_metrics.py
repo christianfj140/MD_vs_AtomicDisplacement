@@ -14,13 +14,16 @@ from typing import Any
 
 import numpy as np
 import scipy.linalg
+import scipy.stats
 from scipy import sparse
 import sisl
 
 
 SUPPORT_THRESHOLD = 1e-12
+SUPPORT_THRESHOLDS_SWEEP = [1e-12, 1e-10, 1e-8, 1e-6]
 FERMI_WINDOW_EV = 2.0
 DOS_SIGMA_EV = 0.10
+DOS_SIGMA_SWEEP_EV = [0.05, 0.10, 0.20, 0.40]
 DOS_POINTS = 1000
 
 
@@ -161,6 +164,27 @@ def rmse(values: list[complex]) -> float:
     return float(np.sqrt(np.mean(np.abs(values) ** 2))) if values else math.nan
 
 
+def spearman_correlation(rows: list[dict[str, Any]], x_key: str, y_key: str) -> float:
+    pairs: list[tuple[float, float]] = []
+    for row in rows:
+        try:
+            x = float(row[x_key])
+            y = float(row[y_key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            pairs.append((x, y))
+    if len(pairs) < 2:
+        return math.nan
+    x_values = np.asarray([pair[0] for pair in pairs], dtype=float)
+    y_values = np.asarray([pair[1] for pair in pairs], dtype=float)
+    if float(np.std(x_values)) == 0.0 or float(np.std(y_values)) == 0.0:
+        return math.nan
+    xr = scipy.stats.rankdata(x_values)
+    yr = scipy.stats.rankdata(y_values)
+    return float(np.corrcoef(xr, yr)[0, 1])
+
+
 def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) -> dict[str, Any]:
     ref_values = csr_value_dict(reference.hamiltonian, SUPPORT_THRESHOLD)
     pred_values = csr_value_dict(predicted.hamiltonian, SUPPORT_THRESHOLD)
@@ -221,6 +245,25 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "hermiticity_ref": hermiticity_defect(reference.hamiltonian),
         "hermiticity_pred": hermiticity_defect(predicted.hamiltonian),
     }
+
+
+def sparse_threshold_sweep_metrics(sample: str, reference: MatrixData, predicted: MatrixData) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for threshold in SUPPORT_THRESHOLDS_SWEEP:
+        ref_values = csr_value_dict(reference.hamiltonian, threshold)
+        pred_values = csr_value_dict(predicted.hamiltonian, threshold)
+        support = set(ref_values) | set(pred_values)
+        deltas = [pred_values.get(index, 0.0) - ref_values.get(index, 0.0) for index in support]
+        rows.append(
+            {
+                "sample": sample,
+                "support_threshold": threshold,
+                "union_nnz": len(support),
+                "mae_union_eV": mean_abs(deltas),
+                "rmse_union_eV": rmse(deltas),
+            }
+        )
+    return rows
 
 
 def parse_structure_atoms(path: Path) -> tuple[list[str], np.ndarray]:
@@ -470,9 +513,22 @@ def eigen_error_metrics(
 
     occupied_mask = np.zeros(n_bands, dtype=bool)
     fermi_mask = np.zeros(n_bands, dtype=bool)
+    homo_index = None
+    lumo_index = None
     if fermi_level is not None:
         occupied_mask = reference <= fermi_level
         fermi_mask = np.abs(reference - fermi_level) <= FERMI_WINDOW_EV
+        occ_indices = np.where(occupied_mask)[0]
+        virt_indices = np.where(~occupied_mask)[0]
+        if occ_indices.size and virt_indices.size:
+            homo_index = int(occ_indices[-1])
+            lumo_index = int(virt_indices[0])
+    else:
+        # Molecule fallback: infer HOMO/LUMO from index ordering when no Fermi level is stored.
+        if n_bands >= 2:
+            homo_index = max(0, (n_bands // 2) - 1)
+            lumo_index = min(n_bands - 1, homo_index + 1)
+            fermi_mask[homo_index:lumo_index + 1] = True
 
     def masked_mae(mask: np.ndarray) -> float:
         return float(np.mean(np.abs(errors[mask]))) if np.any(mask) else math.nan
@@ -482,6 +538,28 @@ def eigen_error_metrics(
 
     gap_ref = band_gap(reference, fermi_level)
     gap_pred = band_gap(predicted, fermi_level)
+    if (gap_ref != gap_ref or gap_pred != gap_pred) and homo_index is not None and lumo_index is not None:
+        gap_ref = float(reference[lumo_index] - reference[homo_index])
+        gap_pred = float(predicted[lumo_index] - predicted[homo_index])
+
+    def aligned_errors(mask: np.ndarray | None = None) -> tuple[float, float, float]:
+        if n_bands == 0:
+            return (math.nan, math.nan, math.nan)
+        use_ref = reference if mask is None else reference[mask]
+        use_pred = predicted if mask is None else predicted[mask]
+        if use_ref.size == 0:
+            return (math.nan, math.nan, math.nan)
+        shift = float(np.mean(use_ref - use_pred))
+        delta = (use_pred + shift) - use_ref
+        return shift, float(np.mean(np.abs(delta))), float(np.sqrt(np.mean(delta**2)))
+
+    global_shift, global_aligned_mae, global_aligned_rmse = aligned_errors(None)
+    fermi_shift, fermi_aligned_mae, fermi_aligned_rmse = aligned_errors(fermi_mask)
+    homo_shift, homo_aligned_mae, homo_aligned_rmse = (
+        aligned_errors(np.array([i == homo_index for i in range(n_bands)], dtype=bool))
+        if homo_index is not None
+        else (math.nan, math.nan, math.nan)
+    )
     metrics = {
         "n_compared_bands": n_bands,
         "fermi_ref_eV": fermi_level,
@@ -497,6 +575,20 @@ def eigen_error_metrics(
         "fermi_window_bands": int(np.count_nonzero(fermi_mask)),
         "fermi_window_mae_eV": masked_mae(fermi_mask),
         "fermi_window_rmse_eV": masked_rmse(fermi_mask),
+        "homo_index": homo_index,
+        "lumo_index": lumo_index,
+        "homo_error_eV": float(errors[homo_index]) if homo_index is not None else math.nan,
+        "lumo_error_eV": float(errors[lumo_index]) if lumo_index is not None else math.nan,
+        "frontier_window_rmse_eV": masked_rmse(fermi_mask),
+        "align_global_shift_eV": global_shift,
+        "align_global_mae_eV": global_aligned_mae,
+        "align_global_rmse_eV": global_aligned_rmse,
+        "align_fermi_shift_eV": fermi_shift,
+        "align_fermi_mae_eV": fermi_aligned_mae,
+        "align_fermi_rmse_eV": fermi_aligned_rmse,
+        "align_homo_shift_eV": homo_shift,
+        "align_homo_mae_eV": homo_aligned_mae,
+        "align_homo_rmse_eV": homo_aligned_rmse,
         "gap_ref_eV": gap_ref,
         "gap_pred_eV": gap_pred,
         "gap_abs_error_eV": abs(gap_pred - gap_ref)
@@ -528,7 +620,7 @@ def wasserstein_from_grid(a_density: np.ndarray, b_density: np.ndarray, dx: floa
     return float(np.sum(np.abs(cdf_delta)) * dx)
 
 
-def dos_for_sample(reference: np.ndarray, predicted: np.ndarray) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def dos_for_sample(reference: np.ndarray, predicted: np.ndarray, sigma_ev: float = DOS_SIGMA_EV) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     combined = np.concatenate([reference, predicted])
     if combined.size == 0:
         return [], {
@@ -538,13 +630,13 @@ def dos_for_sample(reference: np.ndarray, predicted: np.ndarray) -> tuple[list[d
             "energy_min_eV": math.nan,
             "energy_max_eV": math.nan,
         }
-    margin = max(5.0 * DOS_SIGMA_EV, 0.05 * float(np.ptp(combined) if combined.size > 1 else 1.0))
+    margin = max(5.0 * sigma_ev, 0.05 * float(np.ptp(combined) if combined.size > 1 else 1.0))
     energy_min = float(np.min(combined) - margin)
     energy_max = float(np.max(combined) + margin)
     grid = np.linspace(energy_min, energy_max, DOS_POINTS)
     dx = float(grid[1] - grid[0]) if grid.size > 1 else 1.0
-    ref_dos = gaussian_dos(reference, grid, DOS_SIGMA_EV)
-    pred_dos = gaussian_dos(predicted, grid, DOS_SIGMA_EV)
+    ref_dos = gaussian_dos(reference, grid, sigma_ev)
+    pred_dos = gaussian_dos(predicted, grid, sigma_ev)
     ref_norm = normalized_density(ref_dos, dx)
     pred_norm = normalized_density(pred_dos, dx)
     rows = [
@@ -558,7 +650,7 @@ def dos_for_sample(reference: np.ndarray, predicted: np.ndarray) -> tuple[list[d
         for index in range(grid.size)
     ]
     metrics = {
-        "dos_sigma_eV": DOS_SIGMA_EV,
+        "dos_sigma_eV": sigma_ev,
         "dos_grid_points": DOS_POINTS,
         "energy_min_eV": energy_min,
         "energy_max_eV": energy_max,
@@ -657,6 +749,10 @@ def matrix_spectrum_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "fermi_window_rmse_eV",
         ),
         "corr_support_f1_vs_fermi_rmse": pearson_correlation(fermi_rows, "support_f1", "fermi_window_rmse_eV"),
+        "spearman_corr_mae_ref_vs_global_rmse": spearman_correlation(rows, "mae_ref_eV", "global_rmse_eV"),
+        "spearman_corr_frobenius_vs_fermi_rmse": spearman_correlation(
+            fermi_rows, "relative_frobenius_union", "fermi_window_rmse_eV"
+        ),
     }
 
 
@@ -675,6 +771,8 @@ def extract(result_dir: Path) -> dict[str, Any]:
     spectral_rows: list[dict[str, Any]] = []
     dos_rows: list[dict[str, Any]] = []
     overlap_rows: list[dict[str, Any]] = []
+    sparse_sweep_rows: list[dict[str, Any]] = []
+    dos_sweep_rows: list[dict[str, Any]] = []
     block_rows: list[dict[str, Any]] = []
     species_pair_rows: list[dict[str, Any]] = []
     distance_bin_rows: list[dict[str, Any]] = []
@@ -728,6 +826,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
 
         try:
             sparse_rows.append(sparse_metrics(sample, reference, predicted))
+            sparse_sweep_rows.extend(sparse_threshold_sweep_metrics(sample, reference, predicted))
         except Exception as exc:
             errors.append({"sample": sample, "kind": "sparse_metrics", "error": str(exc)})
 
@@ -803,6 +902,9 @@ def extract(result_dir: Path) -> dict[str, Any]:
                 dos_grid_rows,
             )
             dos_rows.append({"sample": sample, **dos_metrics})
+            for sigma in DOS_SIGMA_SWEEP_EV:
+                _grid_rows, sweep_metrics = dos_for_sample(ref_eig, pred_eig, sigma_ev=sigma)
+                dos_sweep_rows.append({"sample": sample, **sweep_metrics})
         except Exception as exc:
             errors.append({"sample": sample, "kind": "spectral_or_dos_metrics", "error": str(exc)})
 
@@ -863,6 +965,20 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "gap_ref_eV",
         "gap_pred_eV",
         "gap_abs_error_eV",
+        "homo_index",
+        "lumo_index",
+        "homo_error_eV",
+        "lumo_error_eV",
+        "frontier_window_rmse_eV",
+        "align_global_shift_eV",
+        "align_global_mae_eV",
+        "align_global_rmse_eV",
+        "align_fermi_shift_eV",
+        "align_fermi_mae_eV",
+        "align_fermi_rmse_eV",
+        "align_homo_shift_eV",
+        "align_homo_mae_eV",
+        "align_homo_rmse_eV",
     ]
     relationship_rows = matrix_spectrum_rows(sparse_rows, spectral_rows)
     relationship_fields = [
@@ -888,6 +1004,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "dos_l1",
         "dos_l2",
     ]
+    sparse_sweep_fields = ["sample", "support_threshold", "union_nnz", "mae_union_eV", "rmse_union_eV"]
     overlap_fields = [
         "sample",
         "kind",
@@ -933,11 +1050,13 @@ def extract(result_dir: Path) -> dict[str, Any]:
     write_csv(metrics_root / "spectral_metrics.csv", spectral_fields, spectral_rows)
     write_csv(metrics_root / "dos_metrics.csv", dos_fields, dos_rows)
     write_csv(metrics_root / "matrix_spectrum_relationship.csv", relationship_fields, relationship_rows)
+    write_csv(metrics_root / "sparse_threshold_sweep.csv", sparse_sweep_fields, sparse_sweep_rows)
     write_csv(metrics_root / "block_metrics.csv", block_fields, block_rows)
     write_csv(metrics_root / "species_pair_metrics.csv", species_pair_fields, species_pair_rows)
     write_csv(metrics_root / "distance_bin_metrics.csv", distance_bin_fields, distance_bin_rows)
     write_csv(eigen_root / "eigenvalue_metrics.csv", spectral_fields, spectral_rows)
     write_csv(eigen_root / "overlap_summary.csv", overlap_fields, overlap_rows)
+    write_csv(metrics_root / "dos_sigma_sweep.csv", dos_fields, dos_sweep_rows)
 
     summary = {
         "sparse": summarize_numeric(sparse_rows, {"sample"}),
@@ -968,6 +1087,8 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "support_threshold": SUPPORT_THRESHOLD,
         "fermi_window_eV": FERMI_WINDOW_EV,
         "dos_sigma_eV": DOS_SIGMA_EV,
+        "dos_sigma_sweep_eV": DOS_SIGMA_SWEEP_EV,
+        "support_threshold_sweep": SUPPORT_THRESHOLDS_SWEEP,
         "dos_points": DOS_POINTS,
         "errors": errors,
         "summary": summary,
