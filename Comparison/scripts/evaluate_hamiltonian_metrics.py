@@ -542,21 +542,29 @@ def eigen_error_metrics(
         gap_ref = float(reference[lumo_index] - reference[homo_index])
         gap_pred = float(predicted[lumo_index] - predicted[homo_index])
 
-    def aligned_errors(mask: np.ndarray | None = None) -> tuple[float, float, float]:
+    def aligned_errors(
+        anchor_mask: np.ndarray | None = None,
+        eval_mask: np.ndarray | None = None,
+    ) -> tuple[float, float, float]:
         if n_bands == 0:
             return (math.nan, math.nan, math.nan)
-        use_ref = reference if mask is None else reference[mask]
-        use_pred = predicted if mask is None else predicted[mask]
-        if use_ref.size == 0:
+        use_anchor_mask = np.ones(n_bands, dtype=bool) if anchor_mask is None else anchor_mask
+        use_eval_mask = np.ones(n_bands, dtype=bool) if eval_mask is None else eval_mask
+        if not np.any(use_anchor_mask) or not np.any(use_eval_mask):
             return (math.nan, math.nan, math.nan)
-        shift = float(np.mean(use_ref - use_pred))
-        delta = (use_pred + shift) - use_ref
-        return shift, float(np.mean(np.abs(delta))), float(np.sqrt(np.mean(delta**2)))
 
-    global_shift, global_aligned_mae, global_aligned_rmse = aligned_errors(None)
-    fermi_shift, fermi_aligned_mae, fermi_aligned_rmse = aligned_errors(fermi_mask)
+        shift = float(np.mean(reference[use_anchor_mask] - predicted[use_anchor_mask]))
+        delta = (predicted + shift) - reference
+        delta_eval = delta[use_eval_mask]
+        return shift, float(np.mean(np.abs(delta_eval))), float(np.sqrt(np.mean(delta_eval**2)))
+
+    global_shift, global_aligned_mae, global_aligned_rmse = aligned_errors(None, None)
+    fermi_shift, fermi_aligned_mae, fermi_aligned_rmse = aligned_errors(fermi_mask, fermi_mask)
     homo_shift, homo_aligned_mae, homo_aligned_rmse = (
-        aligned_errors(np.array([i == homo_index for i in range(n_bands)], dtype=bool))
+        aligned_errors(
+            np.array([i == homo_index for i in range(n_bands)], dtype=bool),
+            None,
+        )
         if homo_index is not None
         else (math.nan, math.nan, math.nan)
     )
