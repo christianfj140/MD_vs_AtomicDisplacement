@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
+from pathlib import Path
 
 from atom_displacement_utils import (
     ATDIS_STEPS_DIR_NAME,
@@ -19,6 +22,47 @@ from atom_displacement_utils import (
     write_json,
 )
 from pipeline_config_utils import command
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def refresh_random_cartesian_hashes() -> None:
+    manifest_path = DATASET_DIR / "RandomCartesian_steps" / "dataset_manifest.json"
+    if not manifest_path.exists():
+        return
+    dataset_root = manifest_path.parent
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if manifest.get("method_id") != "random_cartesian":
+        return
+    matrix_hashes = {}
+    for matrix in sorted(list(dataset_root.glob("sample_*/*.TSHS")) + list(dataset_root.glob("sample_*/*.HSX"))):
+        matrix_hashes[matrix.relative_to(dataset_root).as_posix()] = file_sha256(matrix)
+    manifest["matrix_file_hashes"] = matrix_hashes
+    for sample in manifest.get("samples", []):
+        sample_dir = Path(str(sample.get("sample_dir", "")))
+        matrices = sorted(list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX")))
+        if matrices:
+            sample["matrix_file"] = str(matrices[0])
+            sample["matrix_file_sha256"] = file_sha256(matrices[0])
+    write_json(manifest_path, manifest)
+    artifact_path = dataset_root / "artifact_hashes.json"
+    artifact = {}
+    if artifact_path.exists():
+        try:
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except Exception:
+            artifact = {}
+    artifact["matrices"] = matrix_hashes
+    write_json(artifact_path, artifact)
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -106,8 +150,16 @@ def main() -> int:
 
     write_json(PIPELINE_PATHS["run_summary_path"], summary)
     validation_summary = write_validation_outputs(DATASET_DIR / "validation", validation_rows)
+    refresh_random_cartesian_hashes()
     print("[OK] Resumen de ejecucion guardado en dataset/run_summary.json")
     print(f"[OK] Validacion de muestras guardada en {validation_summary['outputs']['validation_summary']}")
+    if validation_summary["invalid_samples"] and not args.allow_unvalidated_matrices:
+        print(
+            "[ERROR] Single-point validation failed: "
+            f"{validation_summary['invalid_samples']} invalid samples."
+        )
+        return 2
+            
     return 0
 
 

@@ -58,7 +58,7 @@ LongOutput                       T
 WriteCoorXmol                    T
 WriteCoorStep                    T
 WriteForces                      T
-SaveHS                           T
+Save.HS                          T
 XML.Write                        T
 
 MD.TypeOfRun                     CG

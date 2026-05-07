@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build frozen common test sets for MD-vs-AtomDisplacement cross evaluation.
+"""Build frozen common test sets for method-aware cross evaluation.
 
 Examples
 --------
@@ -19,22 +19,45 @@ import argparse
 import csv
 import hashlib
 import json
+import random
 import shutil
 from pathlib import Path
 from typing import Any
 
 
 REQUIRED_COLUMNS = {"sample_id", "method", "structure_path", "hamiltonian_path", "status"}
+LEGACY_METHOD_ALIASES = {
+    "atom_displacement": "siesta_fc_cartesian",
+    "atomdisp": "siesta_fc_cartesian",
+}
+
+
+def canonical_method(value: str) -> str:
+    text = str(value or "").strip()
+    return LEGACY_METHOD_ALIASES.get(text, text)
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_rows = payload.get("samples", payload if isinstance(payload, list) else [])
+        rows = [dict(row) for row in raw_rows if isinstance(row, dict)]
+    else:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
     if not rows:
         return []
     missing = REQUIRED_COLUMNS - set(rows[0])
     if missing:
         raise RuntimeError(f"{path} missing required columns: {sorted(missing)}")
+    return rows
+
+
+def read_manifest_for_method(method: str, path: Path) -> list[dict[str, str]]:
+    rows = read_rows(path)
+    canonical = canonical_method(method)
+    for row in rows:
+        row["method"] = canonical_method(str(row.get("method") or canonical))
     return rows
 
 
@@ -124,11 +147,18 @@ def freeze_rows(rows: list[dict[str, str]], test_set: str, output_dir: Path) -> 
     return frozen
 
 
-def frozen_manifest(test_set: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def frozen_manifest(
+    test_set: str,
+    rows: list[dict[str, Any]],
+    *,
+    selected_methods: list[str],
+    source_manifest_hashes: dict[str, str],
+    random_seed: int,
+) -> dict[str, Any]:
     samples = [
         {
             "sample_id": row.get("sample_id", ""),
-            "method": row.get("method", ""),
+            "method": canonical_method(str(row.get("method", ""))),
             "test_set": test_set,
             "structure_path": row.get("structure_path", ""),
             "source_structure_path": row.get("source_structure_path", ""),
@@ -150,11 +180,26 @@ def frozen_manifest(test_set: str, rows: list[dict[str, Any]]) -> dict[str, Any]
         methods[method] = methods.get(method, 0) + 1
     payload = {
         "test_set": test_set,
+        "selected_methods": selected_methods,
         "samples": samples,
         "sample_count": len(samples),
+        "sample_ids": [sample.get("sample_id", "") for sample in samples],
         "method_counts": methods,
+        "sample_counts_per_method": methods,
+        "source_manifest_hashes": source_manifest_hashes,
+        "random_seed": random_seed,
     }
     payload["frozen_test_hash"] = content_hash(samples)
+    payload["composition_hash"] = content_hash(
+        {
+            "test_set": test_set,
+            "selected_methods": selected_methods,
+            "method_counts": methods,
+            "sample_ids": payload["sample_ids"],
+            "source_manifest_hashes": source_manifest_hashes,
+            "random_seed": random_seed,
+        }
+    )
     return payload
 
 
@@ -168,15 +213,17 @@ def ensure_independent(test_rows: list[dict[str, str]], train_rows: list[dict[st
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--md-test-manifest", type=Path, required=True)
-    parser.add_argument("--atomdisp-test-manifest", type=Path, required=True)
+    parser.add_argument("--test-manifest", action="append", default=[], help="method_id=path")
+    parser.add_argument("--md-test-manifest", type=Path, default=None)
+    parser.add_argument("--atomdisp-test-manifest", type=Path, default=None)
     parser.add_argument("--train-manifest", type=Path, action="append", default=[])
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--test-sets",
-        default="test_md,test_atomdisp,test_mixed",
-        help="Comma-separated subset of test_md,test_atomdisp,test_mixed.",
+        default=None,
+        help="Comma-separated subset such as test_md,test_siesta_fc_cartesian,test_mixed.",
     )
+    parser.add_argument("--mixed-seed", type=int, default=1234)
     parser.add_argument("--mixed-max-per-method", type=int, default=None)
     parser.add_argument(
         "--mixed-selection",
@@ -186,6 +233,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--allow-train-test-overlap-debug", action="store_true")
     return parser
+
+
+def parse_method_manifest_specs(items: list[str]) -> dict[str, Path]:
+    parsed: dict[str, Path] = {}
+    for item in items:
+        if "=" not in item:
+            raise RuntimeError(f"--test-manifest debe tener formato metodo=ruta: {item}")
+        method, path = item.split("=", 1)
+        method = canonical_method(method.strip())
+        if not method:
+            raise RuntimeError(f"--test-manifest contiene metodo vacio: {item}")
+        parsed[method] = Path(path)
+    return parsed
 
 
 def select_spread(rows: list[dict[str, str]], count: int | None) -> list[dict[str, str]]:
@@ -215,26 +275,61 @@ def select_mixed_part(rows: list[dict[str, str]], count: int | None, mode: str) 
 
 def main() -> int:
     args = build_parser().parse_args()
-    requested = {item.strip() for item in args.test_sets.split(",") if item.strip()}
-    unknown = requested - {"test_md", "test_atomdisp", "test_mixed"}
+    manifest_paths = parse_method_manifest_specs(args.test_manifest)
+    legacy_atomdisp = False
+    if args.md_test_manifest is not None:
+        manifest_paths["md"] = args.md_test_manifest
+    if args.atomdisp_test_manifest is not None:
+        manifest_paths["siesta_fc_cartesian"] = args.atomdisp_test_manifest
+        legacy_atomdisp = True
+    if not manifest_paths:
+        raise RuntimeError("Define al menos un --test-manifest metodo=ruta.")
+
+    selected_methods = sorted(manifest_paths)
+    method_test_sets = {f"test_{method}" for method in selected_methods}
+    if legacy_atomdisp and "siesta_fc_cartesian" in selected_methods:
+        method_test_sets.add("test_atomdisp")
+    allowed = set(method_test_sets) | {"test_mixed"}
+    if args.test_sets:
+        requested = {item.strip() for item in args.test_sets.split(",") if item.strip()}
+    else:
+        requested = set(method_test_sets) | {"test_mixed"}
+    unknown = requested - allowed
     if unknown:
         raise RuntimeError(f"Unknown test sets: {sorted(unknown)}")
 
-    md_rows = valid_rows(read_rows(args.md_test_manifest))
-    atom_rows = valid_rows(read_rows(args.atomdisp_test_manifest))
+    rows_by_method = {
+        method: valid_rows(read_manifest_for_method(method, path))
+        for method, path in manifest_paths.items()
+    }
+    source_manifest_hashes = {
+        method: file_sha256(str(path))
+        for method, path in manifest_paths.items()
+    }
     train_rows: list[dict[str, str]] = []
     for manifest in args.train_manifest:
         train_rows.extend(read_rows(manifest))
 
     test_sets: dict[str, list[dict[str, str]]] = {}
-    if "test_md" in requested:
-        test_sets["test_md"] = md_rows
-    if "test_atomdisp" in requested:
-        test_sets["test_atomdisp"] = atom_rows
+    for method, rows in rows_by_method.items():
+        name = f"test_{method}"
+        if name in requested:
+            test_sets[name] = rows
+    if "test_atomdisp" in requested and "siesta_fc_cartesian" in rows_by_method:
+        test_sets["test_atomdisp"] = rows_by_method["siesta_fc_cartesian"]
     if "test_mixed" in requested:
-        md_part = select_mixed_part(md_rows, args.mixed_max_per_method, args.mixed_selection)
-        atom_part = select_mixed_part(atom_rows, args.mixed_max_per_method, args.mixed_selection)
-        test_sets["test_mixed"] = md_part + atom_part
+        rng = random.Random(args.mixed_seed)
+        mixed_rows: list[dict[str, str]] = []
+        for method in selected_methods:
+            method_rows = list(rows_by_method.get(method, []))
+            if args.mixed_selection == "spread":
+                part = select_mixed_part(method_rows, args.mixed_max_per_method, args.mixed_selection)
+            else:
+                rng.shuffle(method_rows)
+                count = args.mixed_max_per_method
+                part = method_rows[:count] if count is not None else method_rows
+            mixed_rows.extend(part)
+        test_sets["test_mixed"] = mixed_rows
 
     output_rows = []
     errors: list[str] = []
@@ -245,7 +340,13 @@ def main() -> int:
             errors.append(f"{test_set} overlaps train manifests: {overlaps}")
         frozen = freeze_rows(rows, test_set, args.output_dir)
         write_rows(args.output_dir / test_set / "test_manifest.csv", frozen)
-        frozen_payload = frozen_manifest(test_set, frozen)
+        frozen_payload = frozen_manifest(
+            test_set,
+            frozen,
+            selected_methods=selected_methods,
+            source_manifest_hashes=source_manifest_hashes,
+            random_seed=args.mixed_seed,
+        )
         (args.output_dir / test_set / "frozen_test_manifest.json").write_text(
             json.dumps(frozen_payload, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",

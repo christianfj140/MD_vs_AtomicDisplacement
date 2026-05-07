@@ -72,6 +72,11 @@ eigenproblem.
 Reported metrics include:
 
 - `global_mae_eV`, `global_rmse_eV`: all compared eigenvalues.
+- `low_energy_mae_eV`, `low_energy_rmse_eV`,
+  `low_energy_max_abs_error_eV`: errors for the lowest electronic eigenvalues
+  after sorting both spectra ascending. By default the evaluator compares the
+  first 10 states, or fewer when the matrices contain fewer common states.
+- `low_energy_n_states`: the actual number of low-energy states compared.
 - `occupied_mae_eV`, `occupied_rmse_eV`: only bands below the SIESTA Fermi level.
 - `fermi_window_mae_eV`, `fermi_window_rmse_eV`: bands within +/- 2 eV of the
   SIESTA Fermi level.
@@ -83,6 +88,35 @@ Reported metrics include:
 - Alignment diagnostics are additionally reported and never overwrite raw errors:
   `align_global_shift_eV`, `align_global_mae_eV`, `align_global_rmse_eV`,
   `align_fermi_*`, and `align_homo_*`.
+
+Low-energy metrics are computed from the same reference/predicted Hamiltonian
+pair, but they answer a different question from matrix MAE/RMSE: whether the
+lowest electronic eigenvalues themselves are reproduced. The prediction is
+solved with the SIESTA reference overlap when overlap is available, so both
+spectra use the same generalized eigenproblem `H c = E S c`. If the reference
+Hamiltonian is non-orthogonal and no supported overlap can be read, the
+low-energy metrics are left unavailable and `low_energy_warning` records the
+reason. The evaluator does not invent an identity overlap.
+
+Configuration defaults are equivalent to:
+
+```yaml
+evaluation:
+  spectral:
+    low_energy:
+      enabled: true
+      n_states: 10
+      alignment: none
+```
+
+`alignment: none` is the raw metric used for scientific comparison. The optional
+`global_shift` diagnostic may add `low_energy_aligned_rmse_eV`, but it never
+replaces `low_energy_rmse_eV`.
+
+Important: A lower matrix MAE/RMSE does not necessarily imply a better
+electronic spectrum. Spectral metrics must be evaluated explicitly, and matrix
+level and spectral errors should both be inspected before drawing physical
+conclusions.
 
 Important: near-Fermi, occupied-band, and gap metrics require a real Fermi level
 read from the SIESTA reference file. The evaluator does not estimate or infer a

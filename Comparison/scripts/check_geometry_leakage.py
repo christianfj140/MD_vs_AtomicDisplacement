@@ -204,6 +204,27 @@ def family_key(row: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(row.get(key, "")) for key in keys)
 
 
+def random_family_key(row: dict[str, Any]) -> tuple[str, ...]:
+    keys = [
+        "base_geometry_hash",
+        "distribution",
+        "sigma_ang",
+        "uniform_range_ang",
+        "seed",
+        "split_group_id",
+    ]
+    metadata_path = row.get("metadata_path")
+    metadata: dict[str, Any] = {}
+    if metadata_path:
+        try:
+            path = Path(str(metadata_path))
+            if path.exists():
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = {}
+    return tuple(str(row.get(key, metadata.get(key, ""))) for key in keys)
+
+
 def analyze(
     train_rows: list[dict[str, Any]],
     test_rows: list[dict[str, Any]],
@@ -241,6 +262,7 @@ def analyze(
     distance_near = 0
     md_neighbors = 0
     atom_family = 0
+    random_family = 0
     for train in train_rows:
         train_species, train_coords = geometry_for(train)
         for test in test_rows:
@@ -278,6 +300,11 @@ def analyze(
                 if any(key) and key == family_key(test):
                     reasons.append("atom_displacement_same_family_cross_split")
                     atom_family += 1
+            if train_method == "random_cartesian" and test_method == "random_cartesian":
+                key = random_family_key(train)
+                if any(key) and key == random_family_key(test):
+                    reasons.append("random_cartesian_same_family_cross_split")
+                    random_family += 1
 
             if reasons:
                 report.append(
@@ -308,6 +335,7 @@ def analyze(
         "internal_distance_near_duplicates": distance_near,
         "md_neighbor_warnings": md_neighbors,
         "atom_displacement_family_warnings": atom_family,
+        "random_cartesian_family_warnings": random_family,
         "parser_errors": parser_errors,
         "rmsd_threshold": rmsd_threshold,
         "max_diff_threshold": max_diff_threshold,

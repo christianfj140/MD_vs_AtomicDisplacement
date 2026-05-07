@@ -78,23 +78,47 @@ def collect_sample(sample_dir: Path) -> dict:
 def write_summary_csv(rows: list[dict], csv_path: Path) -> None:
     fieldnames = [
         "id",
+        "sample_dir",
+        "structure_path",
+        "hamiltonian_path",
+        "run_out_path",
         "job_completed",
         "scf_converged",
+        "valid",
         "energy_ev",
         "oh_1_ang",
         "oh_2_ang",
         "hh_ang",
         "hoh_angle_deg",
     ]
+
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
+
         for row in rows:
+            files = row.get("files", {})
+            status = row.get("status", {})
+
+            structure_path = files.get("run_fdf")
+            hamiltonian_path = files.get("tshs") or files.get("hsx")
+            run_out_path = files.get("run_out")
+
             writer.writerow(
                 {
                     "id": row["id"],
-                    "job_completed": row["status"]["job_completed"],
-                    "scf_converged": row["status"]["scf_converged"],
+                    "sample_dir": str(Path(structure_path).parent) if structure_path else "",
+                    "structure_path": structure_path or "",
+                    "hamiltonian_path": hamiltonian_path or "",
+                    "run_out_path": run_out_path or "",
+                    "job_completed": status.get("job_completed"),
+                    "scf_converged": status.get("scf_converged"),
+                    "valid": bool(
+                        structure_path
+                        and hamiltonian_path
+                        and status.get("job_completed")
+                        and status.get("scf_converged")
+                    ),
                     "energy_ev": row["energy_ev"],
                     **row["geometry_metrics"],
                 }

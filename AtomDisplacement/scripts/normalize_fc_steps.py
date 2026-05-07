@@ -228,11 +228,24 @@ def write_step_run_fdf(step_dir: Path, reference: Structure, step: FcStep) -> No
     (step_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]).write_text(content, encoding="utf-8")
 
 
-def copy_first_existing(candidates: list[Path], destination: Path) -> Path | None:
+def copy_reference_matrices(candidates: list[Path], destination: Path) -> Path | None:
+    copied_files: list[Path] = []
+
     for candidate in candidates:
         if candidate.exists():
-            shutil.copy2(candidate, destination / candidate.name)
-            return destination / candidate.name
+            copied = destination / candidate.name
+            shutil.copyfile(candidate, copied)
+            copied.touch(exist_ok=True)
+            copied_files.append(copied)
+
+    # Prefer TSHS as the selected reference, but keep HSX too if available.
+    for copied in copied_files:
+        if copied.suffix == ".TSHS":
+            return copied
+    for copied in copied_files:
+        if copied.suffix == ".HSX":
+            return copied
+
     return None
 
 
@@ -367,7 +380,7 @@ def normalize_multi_fc_steps(args: argparse.Namespace, manifest: dict[str, Any])
             if not args.dry_run:
                 ensure_dir(step_dir)
                 write_step_run_fdf(step_dir, reference, step)
-                copied_matrix = copy_first_existing(
+                copied_matrix = copy_reference_matrices(
                     [
                         run_dir / f"{step.matrix_label}.TSHS",
                         run_dir / f"{step.matrix_label}.HSX",
@@ -483,7 +496,7 @@ def normalize_fc_steps(args: argparse.Namespace) -> dict[str, Any]:
         step_dir = args.output_dir / f"{step.index:03d}"
         ensure_dir(step_dir)
         write_step_run_fdf(step_dir, reference, step)
-        copied_matrix = copy_first_existing(
+        copied_matrix = copy_reference_matrices(
             [
                 args.fc_run_dir / f"{step.matrix_label}.TSHS",
                 args.fc_run_dir / f"{step.matrix_label}.HSX",

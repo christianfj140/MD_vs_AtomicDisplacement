@@ -1,6 +1,3 @@
-# Central configuration for the AtomDisplacement -> Graph2Mat/MACE pipeline.
-# Paths are relative to this file unless they are absolute.
-
 paths:
   base_dir: base
   relaxed_dir: relaxed
@@ -16,17 +13,14 @@ paths:
   run_summary_name: run_summary.json
   collected_json_name: water_atom_displacement_dataset.json
   collected_csv_name: water_atom_displacement_summary.csv
-  venv_activate: ${GRAPH2MAT_VENV}/bin/activate
-
+  venv_activate: /home/christian/graph2mat-env/bin/activate
 commands:
   graph2mat: graph2mat
   siesta: siesta
   shell: bash
   python: python
-
 generation:
   sample_id_format: sample_{index:04d}
-
 structure:
   molecule_name: H2O
   relaxation:
@@ -39,27 +33,27 @@ structure:
     enabled: true
     displacement: 0.05 Ang
     target_count: null
-    # FC generates +/- displacements along x/y/z for each selected atom:
-    # max_structures = 6 * n_displaced_atoms (+1 if include_reference).
     include_reference: true
     expand_amplitudes: false
-    # "spread" is deterministic; "random" uses the fixed seed below.
     subsampling:
       method: spread
       seed: 0
     random_seed: 42
-    # FC comparison UI interface:
-    # - aligned: lists must have the same length; dataset i uses the ith count
-    #   from every displacement list.
-    # - cartesian: every possible count combination is generated.
-    # Every count must be <= 6 * n_displaced_atoms (+1 reference if
-    # include_reference).
     combination_mode: aligned
     max_datasets: 100
     displacements:
-      "0.02 Ang": [5, 7, 9]
-      "0.03 Ang": [4, 6, 8]
-      "0.05 Ang": [2, 10, 13]
+      0.02 Ang:
+      - 5
+      - 7
+      - 9
+      0.03 Ang:
+      - 4
+      - 6
+      - 8
+      0.05 Ang:
+      - 2
+      - 10
+      - 13
     allow_missing_matrix: true
     first_atom: 1
     last_atom: null
@@ -69,35 +63,71 @@ structure:
     save_dhs: true
     dHdR_tolerance: -1 Ry/Bohr
     dSdR_tolerance: -1 1/Bohr
+  random_cartesian:
+    enabled: false
+    n_structures: 100
+    seed: 1234
+    distribution: gaussian
+    sigma_ang: 0.03
+    uniform_range_ang: 0.05
+    move_atoms: all
+    species_filter: []
+    min_distance_ang: 0.65
+    max_attempts_per_structure: 100
+    remove_center_of_mass_translation: true
   lattice_constant:
     value: 1.0
     unit: Ang
   lattice_vectors:
-    - [15.0, 0.0, 0.0]
-    - [0.0, 15.0, 0.0]
-    - [0.0, 0.0, 15.0]
+  - - 15.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 15.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 15.0
   coordinates_format: Ang
   species:
-    - index: 1
-      atomic_number: 8
-      symbol: O
-    - index: 2
-      atomic_number: 1
-      symbol: H
+  - index: 1
+    atomic_number: 8
+    symbol: O
+  - index: 2
+    atomic_number: 1
+    symbol: H
   atoms:
-    - label: O
-      species_index: 1
-      position: [7.5, 7.5, 7.619262]
-    - label: H
-      species_index: 2
-      position: [7.5, 8.263239, 7.022953]
-    - label: H
-      species_index: 2
-      position: [7.5, 6.836839, 7.022953]
+  - label: O
+    species_index: 1
+    position:
+    - 7.5
+    - 7.5
+    - 7.619262
+  - label: H
+    species_index: 2
+    position:
+    - 7.5
+    - 8.263239
+    - 7.022953
+  - label: H
+    species_index: 2
+    position:
+    - 7.5
+    - 6.836839
+    - 7.022953
   kgrid_monkhorst_pack:
-    - [1, 0, 0, 0.0]
-    - [0, 1, 0, 0.0]
-    - [0, 0, 1, 0.0]
+  - - 1
+    - 0
+    - 0
+    - 0.0
+  - - 0
+    - 1
+    - 0
+    - 0.0
+  - - 0
+    - 0
+    - 1
+    - 0.0
   siesta:
     ForceAuxCell: T
     MeshCutoff: 200 Ry
@@ -139,17 +169,14 @@ structure:
     WriteMDHistory: T
   single_point_overrides:
     DM.UseSaveDM: F
-
 splits:
   train: 0.8
   validation: 0.1
   test: 0.1
-
 single_points:
   limit: null
   rerun: false
-  allow_unvalidated_matrices: false
-
+  allow_unvalidated_matrices: true
 training:
   data:
     out_matrix: hamiltonian
@@ -176,21 +203,19 @@ training:
         save_dir: lightning_logs
     max_epochs: 200
   fit_args:
-    - models
-    - mace
-    - main
-    - fit
-    - -c
-    - config.yaml
+  - models
+  - mace
+  - main
+  - fit
+  - -c
+  - config.yaml
   min_completed_samples: 2
   tensorboard_hint: tensorboard --logdir lightning_logs
-
 checkpoint:
   path: null
   auto_best: true
   search_glob: lightning_logs/**/checkpoints/best-*.ckpt
   selection: latest_version
-
 testing:
   sample_index: 0
   data:
@@ -206,7 +231,6 @@ testing:
     store_plot_in_logger: false
     samplewise_metrics_logger: true
     output_file: sample_metrics.csv
-
 prediction:
   data:
     out_matrix: hamiltonian
@@ -219,10 +243,13 @@ prediction:
   callbacks:
     matrix_writer: true
     output_file: ML_prediction.HSX
-
 pipeline:
   steps:
-    - render_inputs
-    - run_atdisp_training
-    - run_atdisp_testing
-    - run_atdisp_prediction
+  - render_inputs
+  - generate_atom_displacement_dataset
+  - run_single_points
+  - normalize_fc_steps
+  - collect_atom_displacement_dataset
+  - run_atdisp_training
+  - run_atdisp_testing
+  - run_atdisp_prediction

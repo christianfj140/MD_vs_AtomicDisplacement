@@ -26,6 +26,7 @@ RY_TO_EV = 13.605693009
 ATDIS_STEPS_DIR_NAME = "AtDis_steps"
 FC_STEPS_DIR_NAME = "FC_steps"
 FC_RUNS_DIR_NAME = "FC_runs"
+RANDOM_CARTESIAN_STEPS_DIR_NAME = "RandomCartesian_steps"
 ATOM_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_CONFIG = load_pipeline_config()
 PIPELINE_PATHS = paths(PIPELINE_CONFIG)
@@ -396,10 +397,16 @@ def sample_run_status(sample_dir: Path) -> dict[str, Any]:
         stale_output = True
 
     text = run_out.read_text(encoding="utf-8", errors="ignore")
+    scf_markers = (
+        "SCF cycle converged",
+        "PostSCF",
+        "FINAL_HF",
+    )
+    scf_converged = (not stale_output) and any(marker in text for marker in scf_markers)
     return {
         "output_exists": True,
         "job_completed": (not stale_output) and "Job completed" in text,
-        "scf_converged": (not stale_output) and "SCF cycle converged" in text,
+        "scf_converged": scf_converged,
         "stale_output": stale_output,
     }
 
@@ -477,6 +484,8 @@ def validate_sample_dir(
         reasons.append("missing_run_fdf")
     if reference_matrix is None and not ambiguous_matrix:
         reasons.append("missing_matrix")
+    if reference_matrix is not None and run_fdf.exists() and reference_matrix.stat().st_mtime < run_fdf.stat().st_mtime:
+        reasons.append("stale_matrix")
     if ambiguous_matrix:
         reasons.append("ambiguous_reference_matrix")
     if not status.get("output_exists", False):
@@ -574,6 +583,17 @@ def generated_sample_dirs() -> list[Path]:
                 if path.is_dir() and path.name.isdigit()
             ),
             key=lambda path: int(path.name),
+        )
+
+    random_cartesian_dir = DATASET_DIR / RANDOM_CARTESIAN_STEPS_DIR_NAME
+    if random_cartesian_dir.exists():
+        return sorted(
+            (
+                path
+                for path in random_cartesian_dir.iterdir()
+                if path.is_dir() and (path / PIPELINE_CONFIG["paths"]["run_fdf_name"]).exists()
+            ),
+            key=lambda path: path.name,
         )
 
     manifest_path = PIPELINE_PATHS["samples_manifest_path"]

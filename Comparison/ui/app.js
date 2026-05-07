@@ -9,6 +9,8 @@ const pipelines = [
   },
 ];
 
+const DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate";
+
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
@@ -23,6 +25,75 @@ function showToast(message) {
   toast.textContent = message;
   toast.classList.add("visible");
   setTimeout(() => toast.classList.remove("visible"), 2600);
+}
+
+function shellQuote(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+function fallbackCopyText(text) {
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "readonly");
+  el.style.position = "absolute";
+  el.style.left = "-9999px";
+  document.body.appendChild(el);
+  el.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(el);
+  return ok;
+}
+
+async function copyText(text) {
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  return fallbackCopyText(text);
+}
+
+function extractMissingVenvPath(text) {
+  const lines = String(text || "").split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    const match = line.match(/no se encontro el entorno virtual:\s*(\S+)/i);
+    if (match) return match[1].trim();
+  }
+  return null;
+}
+
+function venvCommandFromPath(path) {
+  if (!path) return null;
+  return `source ${shellQuote(path)}`;
+}
+
+function preferredMissingVenvPath() {
+  const ids = ["experiment-log", "md-log", "atom-displacement-log"];
+  for (const id of ids) {
+    const node = document.getElementById(id);
+    const path = extractMissingVenvPath(node?.textContent || "");
+    if (path) return path;
+  }
+  return null;
+}
+
+function updateVenvCommandPreview() {
+  const preview = document.getElementById("venv-command-preview");
+  if (!preview) return;
+  const path = preferredMissingVenvPath();
+  const command = venvCommandFromPath(path);
+  preview.textContent = command || 'source "/ruta/al/venv/bin/activate"';
+}
+
+async function copyVenvActivationCommand() {
+  const path = preferredMissingVenvPath();
+  const command = venvCommandFromPath(path);
+  if (!command) {
+    showToast("No detecte un error de venv en los logs todavia.");
+    return;
+  }
+  await copyText(command);
+  showToast("Comando de activacion copiado al portapapeles.");
 }
 
 async function request(path, options = {}) {
@@ -85,7 +156,14 @@ async function runAll() {
     state.offsets[pipeline.key] = 0;
     document.getElementById(pipeline.logId).textContent = "";
   }
-  const payload = await request("/api/run", { method: "POST", body: "{}" });
+  const venvActivateCommandInput = document.getElementById("venv-activate-command");
+  const venvActivateCommand = String(venvActivateCommandInput?.value || "").trim();
+  const payload = await request("/api/run", {
+    method: "POST",
+    body: JSON.stringify({
+      venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
+    }),
+  });
   updateGlobalStatus(payload);
   if (payload.errors && Object.keys(payload.errors).length) {
     showToast(Object.values(payload.errors).join(" | "));
@@ -122,6 +200,7 @@ async function pollLogs() {
   );
   await pollStatus();
   await pollExperimentLogs();
+  updateVenvCommandPreview();
 }
 
 function parseSizesInput(id) {
@@ -226,6 +305,21 @@ function currentCombinationMode() {
 
 function selectedTestSets() {
   return Array.from(document.getElementById("test-sets")?.selectedOptions || []).map((option) => option.value);
+}
+
+function selectedMethods() {
+  return Array.from(document.querySelectorAll(".method-checkbox:checked")).map((item) => item.value);
+}
+
+function parseRandomCartesianOptions(methods) {
+  const input = document.getElementById("random-cartesian-n-structures");
+  const nStructures = Number(input?.value);
+  if (methods.includes("random_cartesian")) {
+    if (!Number.isInteger(nStructures) || nStructures < 3) {
+      throw new Error("Random Cartesian requiere un numero entero de estructuras >= 3.");
+    }
+  }
+  return Number.isInteger(nStructures) && nStructures > 0 ? { n_structures: nStructures } : {};
 }
 
 function cartesianProduct(arrays) {
@@ -403,25 +497,36 @@ function renderExperimentResults(results) {
 }
 
 async function runExperiment() {
-  const mdSizes = parseSizesInput("md-sizes");
-  const fcDisplacementOptions = parseFcDisplacementOptionsText();
-  if (!Object.keys(fcDisplacementOptions).length) {
-    throw new Error("Define al menos una magnitud FC con opciones.");
+  const methods = selectedMethods();
+  if (!methods.length) {
+    throw new Error("Selecciona al menos un metodo.");
   }
-  const specs = fcDatasetSpecs();
-  validateFcPreviewSpecs(specs);
-  const badDatasets = specs
-    .map((spec) => spec.size)
-    .filter((size) => !Number.isInteger(size) || size < 3);
-  if (badDatasets.length) {
-    throw new Error(
-      `Con train/validation/test se requieren datasets >= 3. Tamaños invalidos: ${badDatasets.join(", ")}.`,
-    );
+  const mdSizes = parseSizesInput("md-sizes");
+  let fcDisplacementOptions = {};
+  let specs = [];
+  if (methods.includes("siesta_fc_cartesian")) {
+    fcDisplacementOptions = parseFcDisplacementOptionsText();
+    if (!Object.keys(fcDisplacementOptions).length) {
+      throw new Error("Define al menos una magnitud FC con opciones.");
+    }
+    specs = fcDatasetSpecs();
+    validateFcPreviewSpecs(specs);
+    const badDatasets = specs
+      .map((spec) => spec.size)
+      .filter((size) => !Number.isInteger(size) || size < 3);
+    if (badDatasets.length) {
+      throw new Error(
+        `Con train/validation/test se requieren datasets >= 3. Tamaños invalidos: ${badDatasets.join(", ")}.`,
+      );
+    }
   }
   const atomSizes = parseSizesInput("atom-sizes");
+  const randomCartesianOptions = parseRandomCartesianOptions(methods);
   const splitRatios = parseSplitRatios();
   const randomSeed = Number(document.getElementById("fc-random-seed").value);
   const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
+  const venvActivateCommandInput = document.getElementById("venv-activate-command");
+  const venvActivateCommand = String(venvActivateCommandInput?.value || "").trim();
   state.experimentOffset = 0;
   document.getElementById("experiment-log").textContent = "";
   const payload = await request("/api/experiment", {
@@ -429,7 +534,10 @@ async function runExperiment() {
     body: JSON.stringify({
       md_sizes: mdSizes,
       atom_sizes: atomSizes,
+      selected_methods: methods,
+      run_mode: document.getElementById("run-mode").value,
       fc_displacement_options: fcDisplacementOptions,
+      random_cartesian_options: randomCartesianOptions,
       combination_mode: currentCombinationMode(),
       sync_md_sizes: true,
       splits: splitRatios,
@@ -439,6 +547,7 @@ async function runExperiment() {
       compute_budget_mode: document.getElementById("compute-budget-mode").value,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
+      venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
     }),
   });
   updateExperimentStatus(payload);
@@ -460,6 +569,7 @@ async function pollExperimentLogs() {
     output.textContent += payload.lines.join("");
     output.scrollTop = output.scrollHeight;
   }
+  updateVenvCommandPreview();
 }
 
 async function loadResults() {
@@ -716,6 +826,7 @@ function renderHeatmap(id, runs) {
     ["sparse", "mae_ref_eV", "MAE ref"],
     ["sparse", "relative_frobenius_union", "Frobenius rel."],
     ["sparse", "support_f1", "Support F1"],
+    ["spectral", "low_energy_rmse_eV", "Low-energy RMSE"],
     ["spectral", "fermi_window_rmse_eV", "Fermi RMSE"],
     ["spectral", "gap_abs_error_eV", "Gap error"],
     ["dos", "dos_wasserstein_eV", "DOS W1"],
@@ -842,6 +953,18 @@ function primaryCrossMetric(experiment) {
   return experiment?.recommendation?.primary_metric || experiment?.manifest?.selected_metrics?.primary_metric || "fermi_window_rmse_eV";
 }
 
+function crossTrainMethods(experiment) {
+  const rows = experiment?.metrics || [];
+  const methods = Array.from(new Set(rows.map((row) => row.train_method).filter(Boolean))).sort();
+  return methods.length ? methods : ["md", "atom_displacement"];
+}
+
+function crossTestSets(experiment) {
+  const rows = experiment?.metrics || [];
+  const sets = Array.from(new Set(rows.map((row) => row.test_set).filter(Boolean))).sort();
+  return sets.length ? sets : ["test_md", "test_atomdisp", "test_mixed"];
+}
+
 function groupedCrossMeans(rows, metric) {
   const groups = new Map();
   for (const row of rows || []) {
@@ -884,8 +1007,8 @@ function groupedCrossMeans(rows, metric) {
 function renderCrossHeatmap(id, experiment) {
   const metric = primaryCrossMetric(experiment);
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
-  const trainMethods = ["md", "atom_displacement"];
-  const testSets = ["test_md", "test_atomdisp", "test_mixed"];
+  const trainMethods = crossTrainMethods(experiment);
+  const testSets = crossTestSets(experiment);
   const sizeLabels = Array.from(
     new Set(
       means
@@ -921,8 +1044,8 @@ function renderCrossLearning(id, experiment) {
   const metric = primaryCrossMetric(experiment);
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
   const traces = [];
-  for (const method of ["md", "atom_displacement"]) {
-    for (const testSet of ["test_md", "test_atomdisp", "test_mixed"]) {
+  for (const method of crossTrainMethods(experiment)) {
+    for (const testSet of crossTestSets(experiment)) {
       const points = means
         .filter((row) => row.train_method === method && row.test_set === testSet)
         .sort((a, b) => a.dataset_size - b.dataset_size);
@@ -946,7 +1069,7 @@ function renderCrossCompute(id, experiment) {
   const metric = primaryCrossMetric(experiment);
   const means = groupedCrossMeans(experiment?.metrics || [], metric).filter((row) => row.time != null);
   const traces = [];
-  for (const method of ["md", "atom_displacement"]) {
+  for (const method of crossTrainMethods(experiment)) {
     const points = means.filter((row) => row.train_method === method).sort((a, b) => a.time - b.time);
     if (!points.length) continue;
     traces.push({
@@ -1120,6 +1243,7 @@ function renderPlots(payload) {
     : "No hay metricas archivadas";
   status.textContent += crossText;
   renderLinePlot("plot-fermi", runs, "spectral", [{ key: "fermi_window_rmse_eV", label: "Fermi RMSE" }], "Error cerca del Fermi", "RMSE eV");
+  renderLinePlot("plot-low-energy", runs, "spectral", [{ key: "low_energy_rmse_eV", label: "Low-energy RMSE" }], "Low-energy eigenvalues", "RMSE eV");
   renderLinePlot("plot-sparse", runs, "sparse", [{ key: "relative_frobenius_union", label: "Frobenius rel." }], "Error sparse matricial", "Relative Frobenius");
   renderLinePlot("plot-dos", runs, "dos", [{ key: "dos_wasserstein_eV", label: "Wasserstein" }], "Distancia DOS total", "Wasserstein eV");
   renderLinePlot("plot-gap", runs, "spectral", [{ key: "gap_abs_error_eV", label: "Gap error" }], "Error de gap", "Abs error eV");
@@ -1179,6 +1303,9 @@ function setupEvents() {
   document.getElementById("stop-experiment").addEventListener("click", () => {
     stopExperiment().catch((error) => showToast(error.message));
   });
+  document.getElementById("copy-venv-command").addEventListener("click", () => {
+    copyVenvActivationCommand().catch((error) => showToast(error.message));
+  });
   document.getElementById("fc-displacement-options").addEventListener("input", updateAtomSizesFromFcPlan);
   document.getElementById("fc-combination-mode").addEventListener("change", updateAtomSizesFromFcPlan);
   document.getElementById("fc-max-datasets").addEventListener("input", updateAtomSizesFromFcPlan);
@@ -1190,6 +1317,11 @@ function setupEvents() {
 async function boot() {
   setupTabs();
   setupEvents();
+  const venvActivateInput = document.getElementById("venv-activate-command");
+  if (venvActivateInput && !String(venvActivateInput.value || "").trim()) {
+    venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;
+  }
+  updateVenvCommandPreview();
   await loadFcConfig();
   await pollLogs();
   await loadResults();

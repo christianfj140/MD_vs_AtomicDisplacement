@@ -25,6 +25,8 @@ FERMI_WINDOW_EV = 2.0
 DOS_SIGMA_EV = 0.10
 DOS_SIGMA_SWEEP_EV = [0.05, 0.10, 0.20, 0.40]
 DOS_POINTS = 1000
+LOW_ENERGY_N_STATES = 10
+LOW_ENERGY_ALIGNMENT = "none"
 
 
 @dataclass
@@ -470,6 +472,108 @@ def generalized_eigenvalues(
     )
 
 
+def validate_low_energy_config(n_states: int, alignment: str) -> tuple[int, str]:
+    try:
+        n_states = int(n_states)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("evaluation.spectral.low_energy.n_states must be a positive integer.") from exc
+    if n_states <= 0:
+        raise RuntimeError("evaluation.spectral.low_energy.n_states must be a positive integer.")
+    if alignment not in {"none", "global_shift"}:
+        raise RuntimeError("evaluation.spectral.low_energy.alignment must be 'none' or 'global_shift'.")
+    return n_states, alignment
+
+
+def low_energy_eigenvalues(
+    matrix: sparse.csr_matrix,
+    overlap: sparse.csr_matrix | None,
+    *,
+    overlap_required: bool,
+) -> tuple[np.ndarray | None, str]:
+    if overlap_required and overlap is None:
+        return None, (
+            "low-energy eigenvalues unavailable: reference overlap is required "
+            "for the generalized eigenproblem but was not found."
+        )
+    try:
+        values = generalized_eigenvalues(matrix, overlap)
+    except Exception as exc:
+        return None, f"low-energy eigenvalues unavailable: eigenvalue solver failed: {exc}"
+    if values.size == 0:
+        return None, "low-energy eigenvalues unavailable: no eigenvalues returned by solver."
+    return np.sort(np.asarray(values, dtype=float)), ""
+
+
+def low_energy_metrics(
+    reference: MatrixData,
+    predicted: MatrixData,
+    *,
+    n_states: int = LOW_ENERGY_N_STATES,
+    alignment: str = LOW_ENERGY_ALIGNMENT,
+) -> dict[str, Any]:
+    n_states, alignment = validate_low_energy_config(n_states, alignment)
+    overlap_required = not bool(reference.orthogonal)
+    overlap = reference.overlap
+    overlap_used = overlap is not None
+    metadata = {
+        "low_energy_requested_states": n_states,
+        "low_energy_alignment": alignment,
+        "low_energy_overlap_used": overlap_used,
+        "low_energy_overlap_required": overlap_required,
+        "low_energy_solver": "scipy.linalg.eigh_generalized" if overlap_used else "numpy.linalg.eigvalsh_standard",
+        "low_energy_warning": "",
+    }
+    ref_eig, ref_warning = low_energy_eigenvalues(
+        reference.hamiltonian,
+        overlap,
+        overlap_required=overlap_required,
+    )
+    pred_eig, pred_warning = low_energy_eigenvalues(
+        predicted.hamiltonian,
+        overlap,
+        overlap_required=overlap_required,
+    )
+    warning = ref_warning or pred_warning
+    if warning:
+        return {
+            **metadata,
+            "low_energy_n_states": None,
+            "low_energy_mae_eV": math.nan,
+            "low_energy_rmse_eV": math.nan,
+            "low_energy_max_abs_error_eV": math.nan,
+            "low_energy_aligned_rmse_eV": math.nan,
+            "low_energy_warning": warning,
+        }
+    assert ref_eig is not None and pred_eig is not None
+    count = min(n_states, ref_eig.size, pred_eig.size)
+    if count <= 0:
+        return {
+            **metadata,
+            "low_energy_n_states": None,
+            "low_energy_mae_eV": math.nan,
+            "low_energy_rmse_eV": math.nan,
+            "low_energy_max_abs_error_eV": math.nan,
+            "low_energy_aligned_rmse_eV": math.nan,
+            "low_energy_warning": "low-energy eigenvalues unavailable: no common states to compare.",
+        }
+    ref_low = ref_eig[:count]
+    pred_low = pred_eig[:count]
+    delta = pred_low - ref_low
+    aligned_rmse = math.nan
+    if alignment == "global_shift":
+        shift = float(np.mean(ref_low - pred_low))
+        aligned_delta = (pred_low + shift) - ref_low
+        aligned_rmse = float(np.sqrt(np.mean(aligned_delta**2)))
+    return {
+        **metadata,
+        "low_energy_n_states": int(count),
+        "low_energy_mae_eV": float(np.mean(np.abs(delta))),
+        "low_energy_rmse_eV": float(np.sqrt(np.mean(delta**2))),
+        "low_energy_max_abs_error_eV": float(np.max(np.abs(delta))),
+        "low_energy_aligned_rmse_eV": aligned_rmse,
+    }
+
+
 def eigenvalue_rows(values: np.ndarray) -> list[dict[str, Any]]:
     return [
         {"band": index, "eigenvalue_eV": float(value)}
@@ -756,7 +860,17 @@ def matrix_spectrum_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def extract(result_dir: Path) -> dict[str, Any]:
+def extract(
+    result_dir: Path,
+    *,
+    low_energy_enabled: bool = True,
+    low_energy_n_states: int = LOW_ENERGY_N_STATES,
+    low_energy_alignment: str = LOW_ENERGY_ALIGNMENT,
+) -> dict[str, Any]:
+    low_energy_n_states, low_energy_alignment = validate_low_energy_config(
+        low_energy_n_states,
+        low_energy_alignment,
+    )
     prediction_root = result_dir / "predicted_hamiltonians"
     reference_root = result_dir / "siesta_hamiltonians"
     eigen_root = result_dir / "eigenvalues"
@@ -877,6 +991,22 @@ def extract(result_dir: Path) -> dict[str, Any]:
                 fermi_level,
                 fermi_source,
             )
+            if low_energy_enabled:
+                low_metrics = low_energy_metrics(
+                    reference,
+                    predicted,
+                    n_states=low_energy_n_states,
+                    alignment=low_energy_alignment,
+                )
+                spectral_metrics.update(low_metrics)
+                if low_metrics.get("low_energy_warning"):
+                    errors.append(
+                        {
+                            "sample": sample,
+                            "kind": "low_energy_metrics",
+                            "error": str(low_metrics["low_energy_warning"]),
+                        }
+                    )
             write_csv(
                 eigen_root / "band_errors" / f"{sample}.csv",
                 ["band", "siesta_eV", "predicted_eV", "error_eV", "abs_error_eV", "siesta_minus_fermi_eV"],
@@ -979,6 +1109,17 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "align_homo_shift_eV",
         "align_homo_mae_eV",
         "align_homo_rmse_eV",
+        "low_energy_requested_states",
+        "low_energy_n_states",
+        "low_energy_mae_eV",
+        "low_energy_rmse_eV",
+        "low_energy_max_abs_error_eV",
+        "low_energy_alignment",
+        "low_energy_aligned_rmse_eV",
+        "low_energy_overlap_used",
+        "low_energy_overlap_required",
+        "low_energy_solver",
+        "low_energy_warning",
     ]
     relationship_rows = matrix_spectrum_rows(sparse_rows, spectral_rows)
     relationship_fields = [
@@ -989,6 +1130,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "relative_frobenius_union",
         "support_f1",
         "global_rmse_eV",
+        "low_energy_rmse_eV",
         "fermi_window_rmse_eV",
         "gap_abs_error_eV",
         "fermi_level_source",
@@ -1088,6 +1230,12 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "fermi_window_eV": FERMI_WINDOW_EV,
         "dos_sigma_eV": DOS_SIGMA_EV,
         "dos_sigma_sweep_eV": DOS_SIGMA_SWEEP_EV,
+        "low_energy": {
+            "enabled": low_energy_enabled,
+            "n_states": low_energy_n_states,
+            "alignment": low_energy_alignment,
+            "required_primary_metric_blocks_robustness": True,
+        },
         "support_threshold_sweep": SUPPORT_THRESHOLDS_SWEEP,
         "dos_points": DOS_POINTS,
         "errors": errors,
@@ -1122,8 +1270,16 @@ def extract(result_dir: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result_dir", type=Path)
+    parser.add_argument("--disable-low-energy", action="store_true")
+    parser.add_argument("--low-energy-n-states", type=int, default=LOW_ENERGY_N_STATES)
+    parser.add_argument("--low-energy-alignment", default=LOW_ENERGY_ALIGNMENT, choices=["none", "global_shift"])
     args = parser.parse_args()
-    manifest = extract(args.result_dir)
+    manifest = extract(
+        args.result_dir,
+        low_energy_enabled=not args.disable_low_energy,
+        low_energy_n_states=args.low_energy_n_states,
+        low_energy_alignment=args.low_energy_alignment,
+    )
     print(json.dumps(json_safe(manifest), ensure_ascii=False, allow_nan=False))
     return 0 if not manifest["errors"] else 2
 

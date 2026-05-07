@@ -44,6 +44,7 @@ RESULTS_ROOT = COMPARISON_ROOT / "results"
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
 LOG_HEARTBEAT_SECONDS = 30.0
 METRIC_VERSION = "2026-05-04.strict-validation-v1"
+DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -85,6 +86,156 @@ PIPELINES = {
         main_script=REPO_ROOT / "AtomDisplacement" / "scripts" / "main_atdisp.py",
     ),
 }
+
+
+@dataclass(frozen=True)
+class MethodSpec:
+    method_id: str
+    display_name: str
+    pipeline_key: str | None
+    dataset_root: Path | None
+    training_root: Path | None
+    results_root: Path | None
+    legacy_aliases: tuple[str, ...] = ()
+    available: bool = True
+    unavailable_reason: str = ""
+
+
+METHOD_REGISTRY: dict[str, MethodSpec] = {
+    "md": MethodSpec(
+        method_id="md",
+        display_name="MD",
+        pipeline_key="md",
+        dataset_root=PIPELINES["md"].root / "dataset",
+        training_root=PIPELINES["md"].root / "training",
+        results_root=RESULTS_ROOT / "results_md",
+    ),
+    "siesta_fc_cartesian": MethodSpec(
+        method_id="siesta_fc_cartesian",
+        display_name="SIESTA FC Cartesian",
+        pipeline_key="atom_displacement",
+        dataset_root=PIPELINES["atom_displacement"].root / "dataset" / "FC_steps",
+        training_root=PIPELINES["atom_displacement"].root / "training",
+        results_root=RESULTS_ROOT / "results_atomdisp",
+        legacy_aliases=("atom_displacement", "atomdisp"),
+    ),
+    "random_cartesian": MethodSpec(
+        method_id="random_cartesian",
+        display_name="Random Cartesian",
+        pipeline_key=None,
+        dataset_root=PIPELINES["atom_displacement"].root / "dataset" / "RandomCartesian_steps",
+        training_root=PIPELINES["atom_displacement"].root / "training",
+        results_root=RESULTS_ROOT / "results_random_cartesian",
+        available=True,
+    ),
+}
+
+METHOD_ALIASES = {
+    alias: spec.method_id
+    for spec in METHOD_REGISTRY.values()
+    for alias in (spec.method_id, *spec.legacy_aliases)
+}
+
+RUN_MODES = {"dataset_only", "full_strict_pipeline"}
+
+
+def method_registry_payload() -> list[dict[str, Any]]:
+    payload = []
+    for spec in METHOD_REGISTRY.values():
+        payload.append(
+            {
+                "method_id": spec.method_id,
+                "display_name": spec.display_name,
+                "dataset_root": str(spec.dataset_root) if spec.dataset_root else "",
+                "training_root": str(spec.training_root) if spec.training_root else "",
+                "results_root": str(spec.results_root) if spec.results_root else "",
+                "legacy_aliases": list(spec.legacy_aliases),
+                "available": spec.available,
+                "availability_status": "available" if spec.available else "not_implemented",
+                "unavailable_reason": spec.unavailable_reason,
+                "config_snapshot": {},
+                "warnings": ([] if spec.available else [spec.unavailable_reason]),
+                "severe_warnings": ([] if spec.available else [spec.unavailable_reason]),
+            }
+        )
+    return payload
+
+
+def normalize_selected_methods(value: Any, *, default_legacy: bool = True) -> list[str]:
+    if value is None:
+        return ["md", "siesta_fc_cartesian"] if default_legacy else []
+    if isinstance(value, str):
+        raw_methods = [item.strip() for item in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw_methods = [str(item).strip() for item in value]
+    else:
+        raise RuntimeError("selected_methods debe ser una lista o texto separado por comas.")
+    selected: list[str] = []
+    unknown: list[str] = []
+    for raw in raw_methods:
+        if not raw:
+            continue
+        method_id = METHOD_ALIASES.get(raw)
+        if method_id is None:
+            unknown.append(raw)
+            continue
+        if method_id not in selected:
+            selected.append(method_id)
+    if unknown:
+        raise RuntimeError(f"selected_methods contiene metodos no soportados: {unknown}.")
+    if not selected:
+        raise RuntimeError("Selecciona al menos un metodo para el experimento.")
+    unavailable = [
+        method_id
+        for method_id in selected
+        if not METHOD_REGISTRY[method_id].available
+    ]
+    if unavailable:
+        reasons = [
+            f"{method_id}: {METHOD_REGISTRY[method_id].unavailable_reason}"
+            for method_id in unavailable
+        ]
+        raise RuntimeError("; ".join(reasons))
+    return selected
+
+
+def parse_run_mode(value: Any) -> str:
+    mode = "full_strict_pipeline" if value in (None, "") else str(value).strip()
+    if mode not in RUN_MODES:
+        raise RuntimeError(
+            "run_mode debe ser 'dataset_only' o 'full_strict_pipeline' "
+            f"(recibido: {value!r})."
+        )
+    return mode
+
+
+def parse_random_cartesian_options(value: Any) -> dict[str, Any]:
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise RuntimeError("random_cartesian_options debe ser un objeto.")
+    return dict(value)
+
+
+def random_cartesian_size_from_options(options: dict[str, Any]) -> int:
+    if options.get("n_structures") not in (None, ""):
+        size = int(options["n_structures"])
+    else:
+        config = load_config(PIPELINES["atom_displacement"].config_path)
+        random_config = (config.get("structure", {}) or {}).get("random_cartesian", {}) or {}
+        size = int(random_config.get("n_structures", 100))
+    if size <= 0:
+        raise RuntimeError("random_cartesian.n_structures debe ser mayor que cero.")
+    return size
+
+
+def pipeline_keys_for_methods(method_ids: list[str]) -> list[str]:
+    keys: list[str] = []
+    for method_id in method_ids:
+        key = METHOD_REGISTRY[method_id].pipeline_key
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -370,6 +521,35 @@ def write_yaml(path: Path, config: dict[str, Any]) -> None:
         yaml.safe_dump(config, sort_keys=False, default_flow_style=False, allow_unicode=False),
         encoding="utf-8",
     )
+
+
+def resolve_venv_activate_from_command(command: str) -> str:
+    text = str(command).strip()
+    if not text:
+        raise RuntimeError("El comando de activacion del entorno virtual esta vacio.")
+    if text.startswith("source "):
+        text = text[len("source ") :].strip()
+    if text.startswith(". "):
+        text = text[2:].strip()
+    text = text.strip("\"'")
+    if not text:
+        raise RuntimeError("No se pudo extraer la ruta del entorno virtual desde el comando.")
+    return text
+
+
+def apply_venv_activate_to_pipeline_configs(command: str | None) -> str:
+    effective_command = str(command).strip() if command is not None else DEFAULT_VENV_ACTIVATE_COMMAND
+    if not effective_command:
+        effective_command = DEFAULT_VENV_ACTIVATE_COMMAND
+    venv_activate_path = resolve_venv_activate_from_command(effective_command)
+    for spec in PIPELINES.values():
+        config = load_config(spec.config_path)
+        paths = config.setdefault("paths", {})
+        if not isinstance(paths, dict):
+            raise RuntimeError(f"{spec.label}: 'paths' debe ser un diccionario en {spec.config_path}.")
+        paths["venv_activate"] = venv_activate_path
+        write_yaml(spec.config_path, config)
+    return venv_activate_path
 
 
 def write_csv_dicts(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> None:
@@ -818,7 +998,11 @@ def parse_test_sets(value: Any) -> list[str]:
     else:
         raise RuntimeError("test_sets debe ser lista o texto separado por comas.")
     selected = [item for item in raw_items if item]
-    unknown = sorted(set(selected) - set(DEFAULT_COMMON_TEST_SETS))
+    allowed = set(DEFAULT_COMMON_TEST_SETS) | {
+        "test_siesta_fc_cartesian",
+        "test_random_cartesian",
+    }
+    unknown = sorted(set(selected) - allowed)
     if unknown:
         raise RuntimeError(f"test_sets contiene valores no soportados: {unknown}.")
     return selected or list(DEFAULT_COMMON_TEST_SETS)
@@ -1234,6 +1418,8 @@ ATOM_SPLIT_GROUP_FIELDS = [
 
 def atom_split_group_id(sample_dir: Path) -> str:
     metadata = load_sample_metadata(sample_dir)
+    if metadata.get("split_group_id"):
+        return str(metadata["split_group_id"])
     values = {field: metadata.get(field, "") for field in ATOM_SPLIT_GROUP_FIELDS}
     payload = json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -1299,27 +1485,6 @@ def read_system_label(run_fdf: Path) -> str:
     return "siesta"
 
 
-def find_reference_matrix(sample_dir: Path) -> Path | None:
-    run_fdf = sample_dir / "RUN.fdf"
-    if run_fdf.exists():
-        system_label = read_system_label(run_fdf)
-        for candidate in (sample_dir / f"{system_label}.TSHS", sample_dir / f"{system_label}.HSX"):
-            if candidate.exists():
-                return candidate
-    for candidate in (sample_dir / "siesta.TSHS", sample_dir / "siesta.HSX"):
-        if candidate.exists():
-            return candidate
-    candidates = sorted(
-        [
-            path
-            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
-            if path.name != "ML_prediction.HSX"
-        ],
-        key=natural_matrix_sort_key,
-    )
-    return candidates[0] if candidates else None
-
-
 def reference_matrices(sample_dir: Path) -> list[Path]:
     return sorted(
         [
@@ -1329,6 +1494,101 @@ def reference_matrices(sample_dir: Path) -> list[Path]:
         ],
         key=natural_matrix_sort_key,
     )
+
+
+def _metadata_reference_matrix(sample_dir: Path) -> Path | None:
+    """Return the matrix explicitly recorded in metadata, preferring the copy inside sample_dir.
+
+    Normalized FC samples store an absolute matrix_file in metadata. After samples are
+    copied into train/test/validation folders, the same filename usually exists inside
+    the copied sample directory. Prefer that local copy so manifests are self-contained.
+    """
+    metadata = load_sample_metadata(sample_dir)
+    raw_value = metadata.get("matrix_file") or metadata.get("hamiltonian_path")
+    if not raw_value:
+        return None
+
+    raw_path = Path(str(raw_value))
+    candidates: list[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(sample_dir / raw_path.name)
+        candidates.append(raw_path)
+    else:
+        candidates.append(sample_dir / raw_path)
+        candidates.append(sample_dir / raw_path.name)
+
+    for candidate in candidates:
+        if (
+            candidate.exists()
+            and candidate.is_file()
+            and candidate.suffix in {".TSHS", ".HSX"}
+            and candidate.name != "ML_prediction.HSX"
+        ):
+            return candidate
+    return None
+
+
+def _canonical_reference_matrix(sample_dir: Path) -> Path | None:
+    run_fdf = sample_dir / "RUN.fdf"
+    if run_fdf.exists():
+        system_label = read_system_label(run_fdf)
+        for candidate in (
+            sample_dir / f"{system_label}.TSHS",
+            sample_dir / f"{system_label}.HSX",
+        ):
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+    for candidate in (
+        sample_dir / "siesta.TSHS",
+        sample_dir / "siesta.HSX",
+    ):
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    return None
+
+
+def _choose_reference_matrix(sample_dir: Path) -> tuple[Path | None, str]:
+    """Choose one SIESTA reference matrix deterministically.
+
+    A sample may legitimately contain both TSHS and HSX. That is not ambiguous:
+    prefer TSHS. Ambiguity only remains if there are multiple TSHS files and no
+    metadata/canonical SystemLabel can identify the intended one.
+    """
+    metadata_matrix = _metadata_reference_matrix(sample_dir)
+    if metadata_matrix is not None:
+        return metadata_matrix, "ok"
+
+    canonical_matrix = _canonical_reference_matrix(sample_dir)
+    if canonical_matrix is not None:
+        return canonical_matrix, "ok"
+
+    matrices = reference_matrices(sample_dir)
+    if not matrices:
+        return None, "missing_matrix"
+
+    tshs = [path for path in matrices if path.suffix == ".TSHS"]
+    hsx = [path for path in matrices if path.suffix == ".HSX"]
+
+    if len(tshs) == 1:
+        return tshs[0], "ok"
+    if len(tshs) > 1:
+        return None, "ambiguous_reference_matrix"
+
+    if len(hsx) == 1:
+        return hsx[0], "ok"
+    if len(hsx) > 1:
+        return None, "ambiguous_reference_matrix"
+
+    return None, "missing_matrix"
+
+
+def find_reference_matrix(sample_dir: Path) -> Path | None:
+    matrix, reason = _choose_reference_matrix(sample_dir)
+    if reason == "ok":
+        return matrix
+    return None
 
 
 def sample_output_status(run_out: Path) -> tuple[bool, str]:
@@ -1348,18 +1608,20 @@ def sample_output_status(run_out: Path) -> tuple[bool, str]:
 
 def validated_reference_for_sample(sample_dir: Path) -> tuple[Path | None, bool, str]:
     reasons = []
+
     if not (sample_dir / "RUN.fdf").exists():
         reasons.append("missing_run_fdf")
-    matrices = reference_matrices(sample_dir)
-    if not matrices:
+
+    matrix = find_reference_matrix(sample_dir)
+    if matrix is None:
         reasons.append("missing_matrix")
-    if len(matrices) > 1:
-        reasons.append("ambiguous_reference_matrix")
+
     output_ok, output_reason = sample_output_status(sample_dir / "RUN.out")
     if not output_ok:
         reasons.extend(output_reason.split(";"))
+
     valid = not reasons
-    return (matrices[0] if len(matrices) == 1 else None), valid, "ok" if valid else ";".join(reasons)
+    return matrix, valid, "ok" if valid else ";".join(reasons)
 
 
 def load_sample_metadata(sample_dir: Path) -> dict[str, Any]:
@@ -1387,6 +1649,10 @@ def atom_displacement_family(metadata: dict[str, Any]) -> str:
 def write_atom_split_manifests(
     dataset_dir: Path,
     split_samples: dict[str, list[Path]],
+    *,
+    method_id: str = "atom_displacement",
+    sample_prefix: str = "atomdisp",
+    split_strategy: str = "grouped_exact",
 ) -> dict[str, Path]:
     split_root = dataset_dir / "splits"
     split_root.mkdir(parents=True, exist_ok=True)
@@ -1413,8 +1679,8 @@ def write_atom_split_manifests(
             group_id = atom_split_group_id(copied_dir)
             rows.append(
                 {
-                    "sample_id": f"atomdisp_{sample_dir.name}",
-                    "method": "atom_displacement",
+                    "sample_id": f"{sample_prefix}_{sample_dir.name}",
+                    "method": method_id,
                     "source_run": str(metadata.get("raw_fc_run_dir") or sample_dir.parent),
                     "frame_index": "",
                     "time_index": "",
@@ -1433,9 +1699,11 @@ def write_atom_split_manifests(
                     "validation_reason": validation_reason,
                     "split": split_name,
                     "split_group_id": group_id,
-                    "split_group_fields": ",".join(ATOM_SPLIT_GROUP_FIELDS),
-                    "split_strategy": "grouped_exact",
-                    "seed": metadata.get("subsampling", {}).get("seed", ""),
+                    "split_group_fields": ",".join(ATOM_SPLIT_GROUP_FIELDS)
+                    if method_id != "random_cartesian"
+                    else "base_geometry_hash,distribution,amplitude,seed_family,split_group_id",
+                    "split_strategy": split_strategy,
+                    "seed": metadata.get("seed", metadata.get("subsampling", {}).get("seed", "")),
                     "status": "completed" if valid else "incomplete",
                     "sample_dir": str(copied_dir),
                 }
@@ -1466,6 +1734,57 @@ def atom_source_samples_dir(spec: PipelineSpec, config: dict[str, Any]) -> Path:
         "AtomDisplacement: no se encontro un dataset valido. "
         f"Busque {atdis_steps_dir} y {configured_samples}."
     )
+
+
+def _csv_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "valid"}
+
+
+def validated_atom_sample_paths_from_validation(dataset_dir: Path) -> set[Path]:
+    """Return FC_steps sample dirs accepted by run_single_points validation.
+
+    This prevents Comparison from re-invalidating samples that the AtomDisplacement
+    pipeline has already validated and written to dataset/validation/valid_samples.csv.
+    """
+    valid_csv = dataset_dir / "validation" / "valid_samples.csv"
+    if not valid_csv.exists():
+        return set()
+
+    paths: set[Path] = set()
+    with valid_csv.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            sample_dir_value = row.get("sample_dir") or ""
+            hamiltonian_value = row.get("hamiltonian_path") or ""
+            run_fdf_value = row.get("run_fdf") or row.get("structure_path") or ""
+            status_value = row.get("status") or ""
+            valid_value = row.get("valid")
+
+            sample_dir = Path(str(sample_dir_value)) if sample_dir_value else None
+            hamiltonian_path = Path(str(hamiltonian_value)) if hamiltonian_value else None
+            run_fdf_path = Path(str(run_fdf_value)) if run_fdf_value else None
+
+            if sample_dir is None or not sample_dir.exists():
+                continue
+            if hamiltonian_path is None or not hamiltonian_path.exists():
+                continue
+            if run_fdf_path is None or not run_fdf_path.exists():
+                continue
+            if valid_value is not None and not _csv_bool(valid_value):
+                continue
+            if status_value and str(status_value).strip().lower() not in {"valid", "completed", "skipped_validated"}:
+                continue
+
+            paths.add(sample_dir.resolve())
+
+    return paths
+
+
+def is_completed_atom_sample_with_validation_csv(sample_dir: Path, validated_paths: set[Path]) -> bool:
+    if sample_dir.resolve() in validated_paths:
+        return True
+    return is_completed_atom_sample(sample_dir)
 
 
 def completed_atom_samples(source_samples_dir: Path) -> list[Path]:
@@ -1770,6 +2089,7 @@ def plot_data_summary() -> dict[str, Any]:
     groups = {
         "md": RESULTS_ROOT / "results_md",
         "atom_displacement": RESULTS_ROOT / "results_atomdisp",
+        "random_cartesian": RESULTS_ROOT / "results_random_cartesian",
     }
     for key, root in groups.items():
         if not root.exists():
@@ -1800,7 +2120,7 @@ def plot_data_summary() -> dict[str, Any]:
             runs.append(
                 {
                     "pipeline": key,
-                    "label": PIPELINES[key].label,
+                    "label": PIPELINES[key].label if key in PIPELINES else "Random Cartesian",
                     "dataset_size": int(
                         manifest.get(
                             "requested_dataset_size",
@@ -1962,19 +2282,34 @@ class ExperimentRunner:
         test_sets: list[str] | None = None,
         primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
+        selected_methods: list[str] | None = None,
+        run_mode: str = "full_strict_pipeline",
+        random_cartesian_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
+            selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
+            run_mode = parse_run_mode(run_mode)
+            pipeline_keys = pipeline_keys_for_methods(selected_methods)
+            random_cartesian_options = random_cartesian_options or {}
             md_config = load_config(PIPELINES["md"].config_path)
             ratios = split_ratios or split_ratios_from_config(md_config)
-            for size in md_sizes:
-                validate_split_sizes(size, ratios, label=f"MD dataset_{size}")
-            if atom_dataset_specs:
-                atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
-                validate_atom_dataset_specs_for_fc(atom_dataset_specs, ratios)
+            if "md" in pipeline_keys:
+                for size in md_sizes:
+                    validate_split_sizes(size, ratios, label=f"MD dataset_{size}")
             else:
-                validate_atom_sizes_for_fc(atom_sizes, fc_dataset_specs, ratios)
+                md_sizes = []
+            if "atom_displacement" in pipeline_keys:
+                if atom_dataset_specs:
+                    atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
+                    validate_atom_dataset_specs_for_fc(atom_dataset_specs, ratios)
+                else:
+                    validate_atom_sizes_for_fc(atom_sizes, fc_dataset_specs, ratios)
+            else:
+                atom_sizes = []
+                fc_dataset_specs = None
+                atom_dataset_specs = None
             self._logs = []
             self._started_at = time.time()
             self._finished_at = None
@@ -1998,6 +2333,9 @@ class ExperimentRunner:
                     test_sets or list(DEFAULT_COMMON_TEST_SETS),
                     primary_metric,
                     compute_budget_mode,
+                    selected_methods,
+                    run_mode,
+                    random_cartesian_options,
                 ),
                 daemon=True,
             )
@@ -2064,6 +2402,9 @@ class ExperimentRunner:
         test_sets: list[str],
         primary_metric: str,
         compute_budget_mode: str,
+        selected_methods: list[str],
+        run_mode: str,
+        random_cartesian_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         md_config = load_config(PIPELINES["md"].config_path)
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
@@ -2159,11 +2500,22 @@ class ExperimentRunner:
             "basis_hash": files_content_digest([*md_basis_files, *atom_basis_files]),
             "pseudopotential_hash": files_content_digest([*md_pseudo_files, *atom_pseudo_files]),
             "basis_pseudopotential_info": basis_and_pseudos,
-            "train_methods": ["md", "atom_displacement"],
+            "run_mode": run_mode,
+            "scientific_status": "dataset_only" if run_mode == "dataset_only" else (
+                "non_comparative" if len(selected_methods) < 2 else "pending"
+            ),
+            "selected_methods": list(selected_methods),
+            "method_registry": method_registry_payload(),
+            "train_methods": pipeline_keys_for_methods(selected_methods),
             "dataset_sizes": {
                 "md": md_sizes,
+                "siesta_fc_cartesian": atom_sizes,
                 "atom_displacement": atom_sizes,
+                "random_cartesian": [random_cartesian_size_from_options(random_cartesian_options or {})]
+                if "random_cartesian" in selected_methods
+                else [],
             },
+            "random_cartesian_options": random_cartesian_options or {},
             "atom_displacement_dataset_specs": atom_dataset_specs or [],
             "seeds": [random_seed] if random_seed is not None else [],
             "split_ratios": split_ratios,
@@ -2246,12 +2598,19 @@ class ExperimentRunner:
         test_sets: list[str] | None = None,
         primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
+        selected_methods: list[str] | None = None,
+        run_mode: str = "full_strict_pipeline",
+        random_cartesian_options: dict[str, Any] | None = None,
     ) -> None:
         original_configs = {
             key: spec.config_path.read_text(encoding="utf-8")
             for key, spec in PIPELINES.items()
         }
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
+        selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
+        run_mode = parse_run_mode(run_mode)
+        random_cartesian_options = random_cartesian_options or {}
+        pipeline_keys = pipeline_keys_for_methods(selected_methods)
         manifest = self._initial_experiment_manifest(
             run_id,
             md_sizes,
@@ -2263,6 +2622,9 @@ class ExperimentRunner:
             test_sets or list(DEFAULT_COMMON_TEST_SETS),
             primary_metric,
             compute_budget_mode,
+            selected_methods,
+            run_mode,
+            random_cartesian_options,
         )
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
         if manifest.get("siesta_settings_warning"):
@@ -2277,6 +2639,8 @@ class ExperimentRunner:
         returncode = 0
         try:
             self._append(f"[UI] Comparacion {run_id} iniciada.\n")
+            self._append(f"[UI] Run mode: {run_mode}\n")
+            self._append(f"[UI] Selected methods: {', '.join(selected_methods)}\n")
             self._append(f"[UI] MD sizes: {md_sizes}\n")
             self._append(f"[UI] AtomDisplacement sizes: {atom_sizes}\n")
             self._append(
@@ -2334,10 +2698,17 @@ class ExperimentRunner:
                 "los siguientes usan segundos/estructura de runs ya completados.\n"
             )
             previous_by_method: dict[str, dict[str, Any]] = {}
-            for size in md_sizes:
+            for size in (md_sizes if "md" in pipeline_keys else []):
                 self._ensure_not_stopped()
                 self._restore_original_config("md", original_configs)
-                result = self._run_one("md", size, run_id, split_ratios=split_ratios, split_mode=split_mode)
+                result = self._run_one(
+                    "md",
+                    size,
+                    run_id,
+                    split_ratios=split_ratios,
+                    split_mode=split_mode,
+                    run_mode=run_mode,
+                )
                 self._annotate_nested_subset(result, previous_by_method.get("md"))
                 previous_by_method["md"] = result
                 with self._lock:
@@ -2352,7 +2723,7 @@ class ExperimentRunner:
                 }
                 for size in atom_sizes
             ]
-            for atom_spec in atom_runs:
+            for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
                 self._ensure_not_stopped()
                 self._restore_original_config("atom_displacement", original_configs)
                 size = int(atom_spec["size"])
@@ -2365,6 +2736,7 @@ class ExperimentRunner:
                     split_ratios=split_ratios,
                     random_seed=random_seed,
                     split_mode=split_mode,
+                    run_mode=run_mode,
                 )
                 self._annotate_nested_subset(result, previous_by_method.get("atom_displacement"))
                 previous_by_method["atom_displacement"] = result
@@ -2372,7 +2744,54 @@ class ExperimentRunner:
                     self._results.append(result)
                 manifest["runs"].append(result)
                 self._write_experiment_manifest(manifest)
-            manifest["cross_evaluation"] = self._run_cross_evaluation(run_id, manifest)
+            if "random_cartesian" in selected_methods:
+                self._ensure_not_stopped()
+                self._restore_original_config("atom_displacement", original_configs)
+                random_size = random_cartesian_size_from_options(random_cartesian_options)
+                result = self._run_random_cartesian(
+                    random_size,
+                    run_id,
+                    split_ratios=split_ratios,
+                    random_cartesian_options=random_cartesian_options,
+                    run_mode=run_mode,
+                )
+                with self._lock:
+                    self._results.append(result)
+                manifest["runs"].append(result)
+                self._write_experiment_manifest(manifest)
+            if run_mode == "dataset_only":
+                manifest["cross_evaluation"] = {
+                    "ok": False,
+                    "skipped": True,
+                    "reason": "dataset_only",
+                    "warnings": ["dataset_only skips training, prediction, evaluation, cross-evaluation and winner analysis."],
+                }
+                manifest["scientific_status"] = "dataset_only"
+                self._append("[UI] dataset_only: se omiten training, evaluacion cruzada y winners.\n")
+            elif len(selected_methods) < 2:
+                manifest["cross_evaluation"] = {
+                    "ok": False,
+                    "skipped": True,
+                    "reason": "single_method_selected",
+                    "warnings": ["A single selected method is non-comparative; no robust winner is emitted."],
+                }
+                manifest["scientific_status"] = "non_comparative"
+                self._append("[UI] Solo hay un metodo seleccionado; se omite winner robusto.\n")
+            else:
+                manifest["cross_evaluation"] = self._run_cross_evaluation(run_id, manifest)
+                if manifest["cross_evaluation"].get("ok"):
+                    recommendation_path = experiment_root(run_id) / "summary" / "recommendation.json"
+                    if recommendation_path.exists():
+                        try:
+                            recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            recommendation = {}
+                        manifest["scientific_status"] = recommendation.get(
+                            "scientific_status",
+                            "analysis_completed",
+                        )
+                    else:
+                        manifest["scientific_status"] = "analysis_completed"
             self._write_experiment_manifest(manifest)
             self._append("\n[UI] Comparacion experimental finalizada correctamente.\n")
         except Exception as exc:
@@ -2437,6 +2856,7 @@ class ExperimentRunner:
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
         split_mode: str = "block",
+        run_mode: str = "full_strict_pipeline",
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -2453,7 +2873,12 @@ class ExperimentRunner:
         self._append(f"[UI] ETA inicial: {format_duration(eta_seconds)}\n")
         config = load_config(spec.config_path)
         workspace = WORKSPACES_ROOT / run_id / key / dataset_label
-        result_group = "results_md" if key == "md" else "results_atomdisp"
+        if key == "md":
+            result_group = "results_md"
+        elif key == "random_cartesian":
+            result_group = "results_random_cartesian"
+        else:
+            result_group = "results_atomdisp"
         result_dir = RESULTS_ROOT / result_group / dataset_label / f"run_{run_id}"
         workspace.mkdir(parents=True, exist_ok=True)
         self._append(f"[UI] Workspace: {workspace}\n")
@@ -2480,14 +2905,20 @@ class ExperimentRunner:
                     f"{generation_returncode}."
                 )
             self._validate_split_manifests(key, config, size)
-            config["pipeline"]["steps"] = [
-                step
-                for step in original_steps
-                if step in {"run_md_training", "run_md_testing", "run_md_prediction"}
-            ] or ["run_md_training", "run_md_testing", "run_md_prediction"]
-            write_yaml(spec.config_path, config)
-            self._append("[UI] Config temporal MD escrita para entrenar/evaluar tras validacion.\n")
-            returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+            if run_mode == "dataset_only":
+                config["pipeline"]["steps"] = []
+                write_yaml(spec.config_path, config)
+                self._append("[UI] dataset_only: MD validado; no se entrena ni predice.\n")
+                returncode = 0
+            else:
+                config["pipeline"]["steps"] = [
+                    step
+                    for step in original_steps
+                    if step in {"run_md_training", "run_md_testing", "run_md_prediction"}
+                ] or ["run_md_training", "run_md_testing", "run_md_prediction"]
+                write_yaml(spec.config_path, config)
+                self._append("[UI] Config temporal MD escrita para entrenar/evaluar tras validacion.\n")
+                returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         else:
             self._prepare_atom_generation_config(
                 config,
@@ -2520,7 +2951,13 @@ class ExperimentRunner:
                 write_yaml(spec.config_path, config)
                 self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
             self._validate_split_manifests(key, config, size)
-            returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+            if run_mode == "dataset_only":
+                config["pipeline"]["steps"] = []
+                write_yaml(spec.config_path, config)
+                self._append("[UI] dataset_only: SIESTA FC y splits validados; no se entrena ni predice.\n")
+                returncode = 0
+            else:
+                returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
         with self._lock:
             run_log = "".join(self._logs[log_start:])
         pipeline_elapsed = time.time() - started_at
@@ -2535,11 +2972,128 @@ class ExperimentRunner:
             prepare_metadata,
             dataset_label=dataset_label,
             pipeline_elapsed_seconds=pipeline_elapsed,
+            run_mode=run_mode,
         )
         elapsed = time.time() - started_at
         self._update_rate(key, size, elapsed, returncode)
         if returncode != 0:
             raise RuntimeError(f"{spec.label} dataset_{size} fallo con codigo {returncode}.")
+        return archive
+
+    def _run_random_cartesian(
+        self,
+        size: int,
+        run_id: str,
+        *,
+        split_ratios: dict[str, float] | None = None,
+        random_cartesian_options: dict[str, Any] | None = None,
+        run_mode: str = "dataset_only",
+    ) -> dict[str, Any]:
+        spec = PIPELINES["atom_displacement"]
+        dataset_label = f"dataset_{size}"
+        started_at = time.time()
+        self._set_current(
+            "random_cartesian",
+            size,
+            dataset_label=dataset_label,
+            started_at=started_at,
+            eta_seconds=self._estimated_seconds("random_cartesian", size),
+        )
+        self._append(f"\n[UI] === Random Cartesian {dataset_label} ===\n")
+        config = load_config(spec.config_path)
+        workspace = WORKSPACES_ROOT / run_id / "random_cartesian" / dataset_label
+        dataset_dir = workspace / "dataset"
+        training_dir = workspace / "training"
+        base_dir = workspace / "base"
+        relaxed_dir = workspace / "relaxed"
+        workspace.mkdir(parents=True, exist_ok=True)
+        pseudo_count = copy_pseudopotentials(PIPELINES["atom_displacement"].root / "base", base_dir)
+        relaxed_counts = copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
+        random_config = config.setdefault("structure", {}).setdefault("random_cartesian", {})
+        random_config.update(random_cartesian_options or {})
+        random_config["enabled"] = True
+        random_config["n_structures"] = int(size)
+        ratios = split_ratios or split_ratios_from_config(config)
+        validate_split_sizes(size, ratios, label=f"Random Cartesian dataset_{size}")
+        config["paths"]["base_dir"] = str(base_dir)
+        config["paths"]["relaxed_dir"] = str(relaxed_dir)
+        config["paths"]["dataset_dir"] = str(dataset_dir)
+        config["paths"]["samples_dir"] = str(dataset_dir / "RandomCartesian_steps")
+        config["paths"]["collected_dir"] = str(dataset_dir / "collected")
+        config["paths"]["training_dir"] = str(training_dir)
+        config["single_points"]["limit"] = None
+        config["single_points"]["rerun"] = False
+        config["pipeline"]["steps"] = [
+            "render_inputs",
+            "generate_random_cartesian_dataset",
+            "run_single_points",
+            "collect_atom_displacement_dataset",
+        ]
+        write_yaml(spec.config_path, config)
+        self._append(f"[UI] Random Cartesian dataset_dir: {dataset_dir}\n")
+        self._append(f"[UI] Random Cartesian samples_dir: {config['paths']['samples_dir']}\n")
+        self._append(f"[UI] Random Cartesian pseudopotenciales copiados: {pseudo_count}\n")
+        self._append(
+            "[UI] Random Cartesian relaxed copiado: "
+            f"{relaxed_counts['basis_files']} basis .ion.xml, {relaxed_counts['xv_files']} XV.\n"
+        )
+        self._append(f"[UI] Random Cartesian config: {random_config}\n")
+        with self._lock:
+            log_start = len(self._logs)
+        generation_returncode = self._run_pipeline_process(
+            spec,
+            key="random_cartesian",
+            size=size,
+            started_at=started_at,
+        )
+        if generation_returncode != 0:
+            raise RuntimeError(f"Random Cartesian dataset_{size} fallo generando dataset con codigo {generation_returncode}.")
+        prepare_metadata = {
+            "requested_size": size,
+            "effective_size": size,
+            "generated_samples": size,
+            "completed_samples": None,
+            "seed": random_config.get("seed"),
+        }
+        returncode = 0
+        if run_mode != "dataset_only":
+            prepare_metadata = self._prepare_atom_config(
+                config,
+                workspace,
+                size,
+                split_ratios,
+                source_samples_dir=dataset_dir / "RandomCartesian_steps",
+                method_id="random_cartesian",
+            )
+            write_yaml(spec.config_path, config)
+            self._append("[UI] Config temporal Random Cartesian escrita para entrenar/evaluar.\n")
+            self._validate_split_manifests("atom_displacement", config, size)
+            returncode = self._run_pipeline_process(
+                spec,
+                key="random_cartesian",
+                size=size,
+                started_at=started_at,
+            )
+        with self._lock:
+            run_log = "".join(self._logs[log_start:])
+        pipeline_elapsed = time.time() - started_at
+        archive = self._archive_outputs(
+            "random_cartesian",
+            size,
+            run_id,
+            workspace,
+            config,
+            returncode,
+            run_log,
+            prepare_metadata,
+            dataset_label=dataset_label,
+            pipeline_elapsed_seconds=pipeline_elapsed,
+            run_mode=run_mode,
+        )
+        elapsed = time.time() - started_at
+        self._update_rate("random_cartesian", size, elapsed, returncode)
+        if returncode != 0:
+            raise RuntimeError(f"Random Cartesian dataset_{size} fallo con codigo {returncode}.")
         return archive
 
     def _estimated_seconds(self, key: str, size: int, elapsed: float = 0.0) -> float | None:
@@ -2551,16 +3105,27 @@ class ExperimentRunner:
     def _update_rate(self, key: str, size: int, elapsed: float, returncode: int) -> None:
         if returncode != 0 or size <= 0:
             return
+
         new_rate = elapsed / size
         old_rate = self._rate_seconds_per_structure.get(key)
+
         if old_rate is None:
             self._rate_seconds_per_structure[key] = new_rate
         else:
             self._rate_seconds_per_structure[key] = (old_rate * 0.6) + (new_rate * 0.4)
+
+        if key in PIPELINES:
+            label = PIPELINES[key].label
+        elif key in METHOD_REGISTRY:
+            label = METHOD_REGISTRY[key].display_name
+        else:
+            label = key
+
         self._append(
-            f"[UI] ETA actualizado para {PIPELINES[key].label}: "
+            f"[UI] ETA actualizado para {label}: "
             f"{self._rate_seconds_per_structure[key]:.2f}s/estructura.\n"
         )
+
 
     def _prepare_md_config(
         self,
@@ -2689,6 +3254,8 @@ class ExperimentRunner:
         workspace: Path,
         size: int,
         split_ratios: dict[str, float] | None = None,
+        source_samples_dir: Path | None = None,
+        method_id: str = "atom_displacement",
     ) -> dict[str, Any]:
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
@@ -2697,12 +3264,17 @@ class ExperimentRunner:
         validation_samples_dir = dataset_dir / "validation_samples"
         test_samples_dir = dataset_dir / "test_samples"
         basis_dir = dataset_dir / "basis"
-        source_samples_dir = dataset_dir / "FC_steps"
+        source_samples_dir = source_samples_dir or dataset_dir / "FC_steps"
         if not source_samples_dir.exists():
             source_samples_dir = atom_source_samples_dir(PIPELINES["atom_displacement"], config)
         basis_count = copy_basis_files(source_samples_dir, basis_dir)
         all_samples = generated_atom_samples(source_samples_dir)
-        completed_samples = completed_atom_samples(source_samples_dir)
+        validated_sample_paths = validated_atom_sample_paths_from_validation(dataset_dir)
+        completed_samples = [
+            path
+            for path in all_samples
+            if is_completed_atom_sample_with_validation_csv(path, validated_sample_paths)
+        ]
         if not all_samples:
             raise RuntimeError(
                 "AtomDisplacement: SIESTA FC no genero muestras normalizadas en FC_steps. "
@@ -2719,12 +3291,19 @@ class ExperimentRunner:
         validation_needed = counts["validation"]
         test_needed = counts["test"]
         selected_samples = select_spread(all_samples, size)
-        split_samples = split_grouped_exact(selected_samples, counts)
+        split_strategy = "spread" if method_id == "random_cartesian" else "grouped_exact"
+        split_samples = (
+            split_spread(selected_samples, counts)
+            if method_id == "random_cartesian"
+            else split_grouped_exact(selected_samples, counts)
+        )
         train_samples = split_samples["train"]
         validation_samples = split_samples["validation"]
         test_samples = split_samples["test"]
         incomplete_train = [
-            path for path in train_samples if not is_completed_atom_sample(path)
+            path
+            for path in train_samples
+            if not is_completed_atom_sample_with_validation_csv(path, validated_sample_paths)
         ]
         if incomplete_train:
             raise RuntimeError(
@@ -2749,6 +3328,9 @@ class ExperimentRunner:
                 "validation": validation_samples,
                 "test": test_samples,
             },
+            method_id=method_id,
+            sample_prefix="random" if method_id == "random_cartesian" else "atomdisp",
+            split_strategy=split_strategy,
         )
         test_needs_siesta = any(
             not is_completed_atom_sample(path)
@@ -2811,7 +3393,11 @@ class ExperimentRunner:
             "requested_size": size,
             "effective_size": size,
             "generated_samples": len(selected_samples),
-            "completed_samples": sum(1 for path in selected_samples if is_completed_atom_sample(path)),
+            "completed_samples": sum(
+                1
+                for path in selected_samples
+                if is_completed_atom_sample_with_validation_csv(path, validated_sample_paths)
+            ),
             "fc_generated_samples": len(all_samples),
             "fc_completed_samples": len(completed_samples),
             "split_manifest_paths": {key: str(value) for key, value in split_manifest_paths.items()},
@@ -2827,11 +3413,11 @@ class ExperimentRunner:
         started_at: float,
     ) -> int:
         config = load_config(spec.config_path)
+        shell = str(config.get("commands", {}).get("shell", "bash"))
+        python = str(config.get("commands", {}).get("python", "python"))
         venv_activate = resolve_pipeline_path(spec, config["paths"]["venv_activate"])
         if not venv_activate.exists():
             raise RuntimeError(f"{spec.label}: no se encontro el entorno virtual: {venv_activate}")
-        shell = str(config.get("commands", {}).get("shell", "bash"))
-        python = str(config.get("commands", {}).get("python", "python"))
         shell_command = (
             f"source {shlex.quote(str(venv_activate))} "
             f"&& {shlex.quote(python)} {shlex.quote(str(spec.main_script))}"
@@ -2931,6 +3517,99 @@ class ExperimentRunner:
         write_atom_split_manifests(dataset_dir, split_samples)
         self._append("[UI] AtomDisplacement split manifests refrescados tras SIESTA de test.\n")
 
+    def _read_csv_raw(self, path: Path) -> list[dict[str, str]]:
+        if not path.exists():
+            return []
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    def _write_enriched_valid_manifest(
+        self,
+        *,
+        source_manifest: Path,
+        validator_valid_manifest: Path,
+        output_manifest: Path,
+    ) -> None:
+        """Write a training-compatible valid manifest.
+
+        validate_sample_bundle.py writes validator-oriented columns. The training
+        script expects the original split-manifest schema, especially
+        structure_path/sample_dir/status/valid. Therefore, keep rows from the
+        original manifest that passed validation, and normalize common aliases.
+        """
+        source_rows = self._read_csv_raw(source_manifest)
+        validator_rows = self._read_csv_raw(validator_valid_manifest)
+
+        valid_sample_ids = {
+            str(row.get("sample_id") or "").strip()
+            for row in validator_rows
+            if str(row.get("sample_id") or "").strip()
+        }
+        valid_sample_dirs = {
+            str(row.get("sample_dir") or "").strip()
+            for row in validator_rows
+            if str(row.get("sample_dir") or "").strip()
+        }
+        valid_basenames = {
+            Path(item).name
+            for item in valid_sample_dirs
+            if item
+        }
+
+        enriched_rows: list[dict[str, Any]] = []
+        for row in source_rows:
+            sample_id = str(row.get("sample_id") or "").strip()
+            sample_dir = str(row.get("sample_dir") or "").strip()
+            sample_basename = Path(sample_dir).name if sample_dir else ""
+
+            passed = (
+                sample_id in valid_sample_ids
+                or sample_dir in valid_sample_dirs
+                or sample_basename in valid_basenames
+            )
+            if not passed:
+                continue
+
+            row = dict(row)
+
+            # Normalize aliases expected by downstream scripts.
+            if not row.get("structure_path") and row.get("run_fdf"):
+                row["structure_path"] = row["run_fdf"]
+            if not row.get("run_fdf") and row.get("structure_path"):
+                row["run_fdf"] = row["structure_path"]
+
+            if not row.get("run_out_path") and row.get("run_out"):
+                row["run_out_path"] = row["run_out"]
+            if not row.get("output_path") and row.get("run_out_path"):
+                row["output_path"] = row["run_out_path"]
+
+            if not row.get("sample_dir") and row.get("structure_path"):
+                row["sample_dir"] = str(Path(row["structure_path"]).parent)
+
+            row["valid"] = "true"
+            row["status"] = "valid"
+            row["validation_reason"] = "ok"
+
+            enriched_rows.append(row)
+
+        if not enriched_rows:
+            debug = {
+                "source_manifest": str(source_manifest),
+                "validator_valid_manifest": str(validator_valid_manifest),
+                "source_rows": len(source_rows),
+                "validator_rows": len(validator_rows),
+                "valid_sample_ids": sorted(valid_sample_ids)[:10],
+                "valid_basenames": sorted(valid_basenames)[:10],
+                "first_source_row": source_rows[0] if source_rows else {},
+                "first_validator_row": validator_rows[0] if validator_rows else {},
+            }
+            raise RuntimeError(
+                "No se pudo construir un valid manifest compatible con training: "
+                + json.dumps(debug, ensure_ascii=False)
+            )
+
+        write_csv_dicts(output_manifest, enriched_rows, SPLIT_MANIFEST_FIELDS)
+
     def _validate_split_manifests(
         self,
         key: str,
@@ -2982,7 +3661,11 @@ class ExperimentRunner:
             summaries[split_name] = summary
             valid_manifest = output_dir / "valid_samples.csv"
             if valid_manifest.exists():
-                shutil.copy2(valid_manifest, split_root / f"{split_name}_valid_manifest.csv")
+                self._write_enriched_valid_manifest(
+                    source_manifest=manifest_path,
+                    validator_valid_manifest=valid_manifest,
+                    output_manifest=split_root / f"{split_name}_valid_manifest.csv",
+                )
             if result.returncode != 0 or not summary.get("ok"):
                 raise RuntimeError(
                     f"{PIPELINES[key].label}: validacion {split_name} fallo; "
@@ -3003,10 +3686,16 @@ class ExperimentRunner:
         prepare_metadata: dict[str, Any] | None = None,
         dataset_label: str | None = None,
         pipeline_elapsed_seconds: float | None = None,
+        run_mode: str = "full_strict_pipeline",
     ) -> dict[str, Any]:
         prepare_metadata = prepare_metadata or {}
         dataset_label = dataset_label or f"dataset_{size}"
-        result_group = "results_md" if key == "md" else "results_atomdisp"
+        if key == "md":
+            result_group = "results_md"
+        elif key == "random_cartesian":
+            result_group = "results_random_cartesian"
+        else:
+            result_group = "results_atomdisp"
         result_dir = RESULTS_ROOT / result_group / dataset_label / f"run_{run_id}"
         result_dir.mkdir(parents=True, exist_ok=True)
         self._append(f"[UI] Archivando salidas en {result_dir}\n")
@@ -3098,7 +3787,14 @@ class ExperimentRunner:
             copy_if_exists(manifest_file, result_dir / "splits" / manifest_file.name)
         for validation_file in sorted((dataset_dir / "validation").glob("*/*.csv")):
             copy_if_exists(validation_file, result_dir / "validation" / validation_file.parent.name / validation_file.name)
-        evaluation_metrics = self._evaluate_hamiltonian_metrics(key, config, result_dir)
+        if run_mode == "dataset_only":
+            evaluation_metrics = {
+                "skipped": True,
+                "reason": "dataset_only",
+                "evaluation_time_seconds": None,
+            }
+        else:
+            evaluation_metrics = self._evaluate_hamiltonian_metrics(key, config, result_dir)
         timing_breakdown = {
             "md_siesta_generation_seconds": None,
             "atomdisp_siesta_generation_seconds": None,
@@ -3124,10 +3820,17 @@ class ExperimentRunner:
             encoding="utf-8",
         )
         effective_size = int(prepare_metadata.get("effective_size", size))
-        checkpoint_path = find_latest_checkpoint(training_dir, config)
-        signed_checkpoint = checkpoint_metadata(checkpoint_path, training_dir)
-        checkpoint_warning = checkpoint_selection_warning(training_dir, checkpoint_path)
-        checkpoint_manifest_path = write_checkpoint_manifest(training_dir, signed_checkpoint, checkpoint_warning)
+        if run_mode == "dataset_only":
+            checkpoint_path = None
+            signed_checkpoint = {"path": None, "sha256": None, "relative_path": None, "selection": None}
+            checkpoint_warning = "Checkpoint not produced in dataset_only mode."
+            checkpoint_manifest_path = training_dir / "checkpoint_manifest.json"
+        else:
+            training_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = find_latest_checkpoint(training_dir, config)
+            signed_checkpoint = checkpoint_metadata(checkpoint_path, training_dir)
+            checkpoint_warning = checkpoint_selection_warning(training_dir, checkpoint_path)
+            checkpoint_manifest_path = write_checkpoint_manifest(training_dir, signed_checkpoint, checkpoint_warning)
         source_pseudos = (
             sorted((PIPELINES["md"].root / "dataset").glob("*.psf"))
             if key == "md"
@@ -3148,6 +3851,7 @@ class ExperimentRunner:
                     dataset_sample_ids.append(sample_id)
         manifest = {
             "pipeline": key,
+            "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
             "dataset_label": dataset_label,
             "dataset_size": size,
             "requested_dataset_size": size,
@@ -3177,6 +3881,8 @@ class ExperimentRunner:
             "fc_completed_samples": prepare_metadata.get("fc_completed_samples"),
             "metrics": read_metrics_summary(result_dir / "sample_metrics.csv"),
             "hamiltonian_evaluation": evaluation_metrics,
+            "run_mode": run_mode,
+            "scientific_status": "dataset_only" if run_mode == "dataset_only" else "pending",
         }
         (result_dir / "manifest.json").write_text(
             json.dumps(json_safe(manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
@@ -3194,7 +3900,8 @@ class ExperimentRunner:
         config: dict[str, Any],
         result_dir: Path,
     ) -> dict[str, Any]:
-        spec = PIPELINES[key]
+        spec_key = "atom_displacement" if key in {"random_cartesian", "siesta_fc_cartesian"} else key
+        spec = PIPELINES[spec_key]
         venv_activate = resolve_pipeline_path(spec, config["paths"]["venv_activate"])
         python = venv_activate.parent / "python"
         if not python.exists():
@@ -3294,7 +4001,7 @@ class ExperimentRunner:
 
     def _python_for_result(self, result: dict[str, Any], config: dict[str, Any]) -> str:
         pipeline = str(result.get("pipeline"))
-        spec = PIPELINES.get(pipeline)
+        spec = PIPELINES.get("atom_displacement" if pipeline == "random_cartesian" else pipeline)
         venv_activate = config.get("paths", {}).get("venv_activate")
         if spec is not None and venv_activate:
             python = resolve_pipeline_path(spec, str(venv_activate)).parent / "python"
@@ -3629,6 +4336,288 @@ class ExperimentRunner:
         }
         return summary
 
+    def _run_cross_evaluation(self, run_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        runs = [run for run in manifest.get("runs", []) if run.get("returncode") == 0]
+        selected_methods = [str(item) for item in manifest.get("selected_methods") or []]
+        if not selected_methods:
+            selected_methods = sorted({str(run.get("method_id") or run.get("pipeline")) for run in runs})
+        runs_by_method: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for run in runs:
+            method_id = str(run.get("method_id") or run.get("pipeline") or "")
+            if method_id == "atom_displacement":
+                method_id = "siesta_fc_cartesian"
+            if method_id:
+                runs_by_method[method_id].append(run)
+
+        summary: dict[str, Any] = {
+            "ok": False,
+            "warnings": [],
+            "missing_cells": [],
+            "common_tests": [],
+            "cross_evaluations": [],
+            "outputs": {},
+        }
+        missing_methods = [method for method in selected_methods if not runs_by_method.get(method)]
+        if missing_methods:
+            warning = f"Missing successful runs for selected methods: {missing_methods}."
+            summary["warnings"].append(warning)
+            summary["missing_cells"].append(warning)
+            self._append(f"[WARN] {warning}\n")
+            return summary
+        if len(selected_methods) < 2:
+            summary["warnings"].append("At least two selected methods are required for cross evaluation.")
+            return summary
+
+        common_root = experiment_root(run_id) / "common_tests"
+        cross_root = experiment_root(run_id) / "cross_evaluations"
+        prediction_root = experiment_root(run_id) / "cross_predictions"
+        summary_root = experiment_root(run_id) / "summary"
+        test_sets = list(manifest.get("test_sets") or [f"test_{method}" for method in selected_methods] + ["test_mixed"])
+        common_root.mkdir(parents=True, exist_ok=True)
+        cross_root.mkdir(parents=True, exist_ok=True)
+        prediction_root.mkdir(parents=True, exist_ok=True)
+
+        method_run_lists = [
+            sorted(runs_by_method[method], key=lambda run: (int(run.get("dataset_size", 0)), str(run.get("dataset_label", ""))))
+            for method in selected_methods
+        ]
+        for combo in itertools.product(*method_run_lists):
+            combo_by_method = {
+                str(run.get("method_id") or run.get("pipeline")): run
+                for run in combo
+            }
+            if "atom_displacement" in combo_by_method:
+                combo_by_method["siesta_fc_cartesian"] = combo_by_method.pop("atom_displacement")
+            dataset_size_by_method = {
+                method: int(combo_by_method[method].get("dataset_size", 0))
+                for method in selected_methods
+            }
+            pair_id = "__".join(
+                f"{method}_{combo_by_method[method].get('dataset_label', combo_by_method[method].get('dataset_size'))}"
+                for method in selected_methods
+            ).replace("/", "_").replace("\\", "_")
+            pair_common_dir = common_root / pair_id
+            build_command = [
+                sys.executable,
+                str(COMPARISON_ROOT / "scripts" / "build_common_tests.py"),
+                "--output-dir",
+                str(pair_common_dir),
+                "--test-sets",
+                ",".join(test_sets),
+            ]
+            for method in selected_methods:
+                build_command.extend(
+                    [
+                        "--test-manifest",
+                        f"{method}={self._split_manifest_for_result(combo_by_method[method], 'test')}",
+                    ]
+                )
+            train_manifests = []
+            for method in selected_methods:
+                train_manifest = self._split_manifest_for_result(combo_by_method[method], "train")
+                train_manifests.append(train_manifest)
+                build_command.extend(["--train-manifest", str(train_manifest)])
+            build_result = self._run_local_script(build_command, label=f"Construyendo common tests {pair_id}")
+            if build_result.returncode != 0:
+                raise RuntimeError(f"Common test builder failed for {pair_id}.")
+            summary["common_tests"].append(str(pair_common_dir))
+
+            leakage_warnings_by_test_set: dict[str, str] = {}
+            leakage_summary_by_test_set: dict[str, str] = {}
+            for test_set in test_sets:
+                test_manifest = pair_common_dir / test_set / "test_manifest.csv"
+                if not test_manifest.exists():
+                    summary["missing_cells"].append(f"missing test manifest {pair_id} {test_set}")
+                    continue
+                leakage_dir = pair_common_dir / "geometry_leakage" / test_set
+                leakage_command = [
+                    sys.executable,
+                    str(COMPARISON_ROOT / "scripts" / "check_geometry_leakage.py"),
+                    "--test-manifest",
+                    str(test_manifest),
+                    "--output-dir",
+                    str(leakage_dir),
+                ]
+                for train_manifest in train_manifests:
+                    leakage_command.extend(["--train-manifest", str(train_manifest)])
+                leakage_result = self._run_local_script(
+                    leakage_command,
+                    label=f"Chequeando leakage geometrico {pair_id} {test_set}",
+                )
+                leakage_summary_path = leakage_dir / "geometry_leakage_summary.json"
+                if leakage_summary_path.exists():
+                    leakage_summary_by_test_set[test_set] = str(leakage_summary_path)
+                if leakage_result.returncode != 0:
+                    warning = f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
+                    summary["warnings"].append(warning)
+                    leakage_warnings_by_test_set[test_set] = warning
+                    if STRICT_COMPARISON_MODE:
+                        raise RuntimeError(warning)
+
+            for train_method in selected_methods:
+                train_result = combo_by_method[train_method]
+                checkpoint = train_result.get("model_checkpoint")
+                if not checkpoint or not Path(str(checkpoint)).exists():
+                    warning = f"Missing checkpoint for {train_method} {train_result.get('dataset_label')}; skipping cross prediction."
+                    summary["warnings"].append(warning)
+                    summary["missing_cells"].append(warning)
+                    self._append(f"[WARN] {warning}\n")
+                    continue
+                basis_files = self._basis_files_glob_for_result(train_result)
+                train_config = load_config(Path(str(train_result["result_dir"])) / "pipeline_config.yaml")
+                train_python = self._python_for_result(train_result, train_config)
+                n_matrix_components = self._n_matrix_components_for_result(train_config)
+                for test_set in test_sets:
+                    test_manifest = pair_common_dir / test_set / "test_manifest.csv"
+                    test_method = test_set.removeprefix("test_")
+                    if test_method == "atomdisp":
+                        test_method = "siesta_fc_cartesian"
+                    if test_method == "mixed":
+                        test_method = "mixed"
+                    required_cell = f"{train_method} on {test_set}"
+                    if not test_manifest.exists():
+                        summary["missing_cells"].append(required_cell)
+                        continue
+                    frozen_manifest_path = test_manifest.parent / "frozen_test_manifest.json"
+                    frozen_test_hash = None
+                    frozen_test_warning = ""
+                    if frozen_manifest_path.exists():
+                        frozen_payload = json.loads(frozen_manifest_path.read_text(encoding="utf-8"))
+                        frozen_test_hash = frozen_payload.get("frozen_test_hash")
+                    else:
+                        frozen_test_warning = f"Missing frozen test manifest for {pair_id} {test_set}."
+                        summary["missing_cells"].append(required_cell)
+                        if STRICT_COMPARISON_MODE:
+                            raise RuntimeError(frozen_test_warning)
+                    cross_name = f"{pair_id}__{train_method}__on__{test_set}"
+                    prediction_dir = prediction_root / cross_name
+                    predict_command = [
+                        train_python,
+                        str(COMPARISON_ROOT / "scripts" / "predict_model_on_dataset.py"),
+                        "--checkpoint",
+                        str(checkpoint),
+                        "--train-method",
+                        train_method,
+                        "--test-set",
+                        test_set,
+                        "--test-manifest",
+                        str(test_manifest),
+                        "--basis-files",
+                        basis_files,
+                        "--output-dir",
+                        str(prediction_dir),
+                    ]
+                    if n_matrix_components is not None:
+                        predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                    predict_command.append("--patch-graph2mat-basis-loading")
+                    predict_start = time.time()
+                    predict_result = self._run_local_script(predict_command, label=f"Prediccion cruzada {cross_name}")
+                    prediction_time = time.time() - predict_start
+                    if predict_result.returncode != 0:
+                        summary["missing_cells"].append(required_cell)
+                        raise RuntimeError(f"Cross prediction failed for {cross_name}.")
+
+                    cross_result_dir = cross_root / cross_name
+                    copy_counts = self._prepare_cross_result_dir(cross_result_dir, prediction_dir, test_manifest, basis_files)
+                    evaluation_start = time.time()
+                    evaluation_summary = self._evaluate_hamiltonian_metrics(train_method, train_config, cross_result_dir)
+                    evaluation_time = time.time() - evaluation_start
+                    cross_manifest = {
+                        "experiment_id": run_id,
+                        "pair_id": pair_id,
+                        "train_method": train_method,
+                        "test_set": test_set,
+                        "test_method": test_method,
+                        "dataset_size": int(train_result.get("dataset_size", 0)),
+                        "train_dataset_size": int(train_result.get("dataset_size", 0)),
+                        "dataset_size_by_method": dataset_size_by_method,
+                        "md_dataset_size": dataset_size_by_method.get("md"),
+                        "atom_dataset_size": dataset_size_by_method.get("siesta_fc_cartesian"),
+                        "compute_budget_mode": manifest.get("compute_budget_mode", "both"),
+                        "leakage_warning": leakage_warnings_by_test_set.get(test_set, ""),
+                        "leakage_summary": leakage_summary_by_test_set.get(test_set, ""),
+                        "frozen_test_warning": frozen_test_warning,
+                        "frozen_test_hash": frozen_test_hash,
+                        "frozen_test_manifest": str(frozen_manifest_path) if frozen_manifest_path.exists() else "",
+                        "siesta_settings_hash": manifest.get("siesta_settings_hash"),
+                        "siesta_settings_warning": manifest.get("siesta_settings_warning", ""),
+                        "model_config_hash": manifest.get("model_config_hash"),
+                        "model_config_warning": manifest.get("model_config_warning", ""),
+                        "basis_pseudopotential_warning": manifest.get("basis_pseudopotential_warning", ""),
+                        "strict_comparison_mode": manifest.get("strict_comparison_mode", STRICT_COMPARISON_MODE),
+                        "seed": train_result.get("seed"),
+                        "epoch": None,
+                        "model_checkpoint": str(checkpoint),
+                        "model_checkpoint_sha256": train_result.get("model_checkpoint_sha256"),
+                        "checkpoint_manifest": train_result.get("checkpoint_manifest", ""),
+                        "checkpoint_selection_warning": train_result.get("checkpoint_selection_warning", ""),
+                        "reproducibility_warning": manifest.get("reproducibility_warning", ""),
+                        "nested_subset_warning": train_result.get("nested_subset_warning", ""),
+                        "prediction_dir": str(prediction_dir),
+                        "siesta_reference_dir": str(cross_result_dir / "siesta_hamiltonians"),
+                        "prediction_time_seconds": prediction_time,
+                        "evaluation_time_seconds": evaluation_time,
+                        "total_time_seconds": float(train_result.get("pipeline_elapsed_seconds") or 0.0) + prediction_time + evaluation_time,
+                        "references": copy_counts["references"],
+                        "structures": copy_counts["structures"],
+                        "evaluation": evaluation_summary,
+                    }
+                    (cross_result_dir / "cross_evaluation_manifest.json").write_text(
+                        json.dumps(json_safe(cross_manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    summary["cross_evaluations"].append(cross_manifest)
+
+        aggregate_command = [
+            sys.executable,
+            str(COMPARISON_ROOT / "scripts" / "aggregate_cross_metrics.py"),
+            "--experiment-id",
+            run_id,
+            "--cross-root",
+            str(cross_root),
+            "--output-dir",
+            str(summary_root),
+        ]
+        aggregate_result = self._run_local_script(aggregate_command, label="Agregando metricas cruzadas")
+        if aggregate_result.returncode != 0:
+            raise RuntimeError("Cross metric aggregation failed.")
+
+        winner_command = [
+            sys.executable,
+            str(COMPARISON_ROOT / "scripts" / "analyze_winners.py"),
+            "--metrics-csv",
+            str(summary_root / "cross_evaluation_metrics.csv"),
+            "--output-dir",
+            str(summary_root),
+            "--primary-metric",
+            str((manifest.get("selected_metrics") or {}).get("primary_metric", DEFAULT_PRIMARY_METRIC)),
+            "--minimum-robust-seeds",
+            str(manifest.get("minimum_robust_seeds", MINIMUM_ROBUST_SEEDS)),
+        ]
+        winner_result = self._run_local_script(winner_command, label="Analizando winners")
+        if winner_result.returncode != 0:
+            raise RuntimeError("Winner analysis failed.")
+
+        expected_cells = {
+            f"{train_method} on {test_set}"
+            for train_method in selected_methods
+            for test_set in test_sets
+        }
+        actual_cells = {
+            f"{item.get('train_method')} on {item.get('test_set')}"
+            for item in summary["cross_evaluations"]
+        }
+        summary["missing_cells"].extend(sorted(expected_cells - actual_cells))
+        summary["ok"] = not summary["missing_cells"]
+        summary["outputs"] = {
+            "common_tests": str(common_root),
+            "cross_evaluations": str(cross_root),
+            "cross_evaluation_metrics": str(summary_root / "cross_evaluation_metrics.csv"),
+            "winner_summary": str(summary_root / "winner_summary.csv"),
+            "recommendation": str(summary_root / "recommendation.json"),
+        }
+        return summary
+
 
 EXPERIMENT_RUNNER = ExperimentRunner()
 
@@ -3641,7 +4630,8 @@ def all_status() -> dict[str, Any]:
     }
 
 
-def run_all() -> dict[str, Any]:
+def run_all(*, venv_activate_command: str | None = None) -> dict[str, Any]:
+    venv_activate_path = apply_venv_activate_to_pipeline_configs(venv_activate_command)
     started: dict[str, Any] = {}
     errors: dict[str, str] = {}
     for key, runner in RUNNERS.items():
@@ -3652,6 +4642,7 @@ def run_all() -> dict[str, Any]:
     payload = all_status()
     payload["started"] = started
     payload["errors"] = errors
+    payload["venv_activate"] = venv_activate_path
     if errors and not started:
         raise RuntimeError("; ".join(errors.values()))
     return payload
@@ -3689,10 +4680,11 @@ def result_summary() -> dict[str, Any]:
 
 
 def archived_results_summary() -> dict[str, Any]:
-    summary: dict[str, Any] = {"md": [], "atom_displacement": []}
+    summary: dict[str, Any] = {"md": [], "atom_displacement": [], "random_cartesian": []}
     groups = {
         "md": RESULTS_ROOT / "results_md",
         "atom_displacement": RESULTS_ROOT / "results_atomdisp",
+        "random_cartesian": RESULTS_ROOT / "results_random_cartesian",
     }
     for key, root in groups.items():
         if not root.exists():
@@ -3765,6 +4757,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, plot_data_summary())
             elif path == "/api/atom-fc-config":
                 json_response(self, atom_fc_ui_config())
+            elif path == "/api/methods":
+                json_response(self, {"methods": method_registry_payload(), "run_modes": sorted(RUN_MODES)})
             elif path == "/api/experiment/status":
                 json_response(self, EXPERIMENT_RUNNER.status())
             elif path == "/api/experiment/logs":
@@ -3787,11 +4781,28 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             if path == "/api/run":
-                json_response(self, run_all(), status=HTTPStatus.ACCEPTED)
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    run_all(venv_activate_command=payload.get("venv_activate_command")),
+                    status=HTTPStatus.ACCEPTED,
+                )
             elif path == "/api/run/stop":
                 json_response(self, stop_all(), status=HTTPStatus.ACCEPTED)
             elif path == "/api/experiment":
                 payload = read_json_body(self)
+                selected_methods = normalize_selected_methods(payload.get("selected_methods"))
+                run_mode = parse_run_mode(payload.get("run_mode"))
+                selected_pipeline_keys = pipeline_keys_for_methods(selected_methods)
+                method_options = payload.get("method_options") or {}
+                method_random_options = (
+                    method_options.get("random_cartesian")
+                    if isinstance(method_options, dict)
+                    else None
+                )
+                random_cartesian_options = parse_random_cartesian_options(
+                    payload.get("random_cartesian_options") or method_random_options
+                )
                 raw_md_sizes = payload.get("md_sizes")
                 displacement_options = parse_fc_displacement_options(
                     payload.get("fc_displacement_options")
@@ -3806,46 +4817,66 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 max_datasets = parse_max_datasets(payload.get("max_datasets"))
                 combination_mode = parse_combination_mode(payload.get("combination_mode"))
                 split_mode = parse_split_mode(payload.get("split_mode"))
-                test_sets = parse_test_sets(payload.get("test_sets"))
+                raw_test_sets = payload.get("test_sets")
+                if raw_test_sets in (None, "", []):
+                    test_sets = [f"test_{method}" for method in selected_methods] + ["test_mixed"]
+                else:
+                    test_sets = parse_test_sets(raw_test_sets)
                 primary_metric = str(payload.get("primary_metric") or DEFAULT_PRIMARY_METRIC).strip()
                 compute_budget_mode = parse_compute_budget_mode(payload.get("compute_budget_mode"))
+                raw_venv_activate_command = payload.get("venv_activate_command")
+                venv_activate_command = (
+                    str(raw_venv_activate_command).strip()
+                    if raw_venv_activate_command is not None
+                    else DEFAULT_VENV_ACTIVATE_COMMAND
+                )
+                if not venv_activate_command:
+                    venv_activate_command = DEFAULT_VENV_ACTIVATE_COMMAND
+                apply_venv_activate_to_pipeline_configs(venv_activate_command)
                 raw_atom_sizes = payload.get("atom_sizes")
-                atom_config = load_config(PIPELINES["atom_displacement"].config_path)
-                force_constants = atom_config.get("structure", {}).get("force_constants", {}) or {}
-                if payload.get("max_datasets") in (None, ""):
-                    max_datasets = parse_max_datasets(force_constants.get("max_datasets"), 100)
-                if payload.get("combination_mode") in (None, ""):
-                    combination_mode = parse_combination_mode(
-                        force_constants.get("combination_mode", "aligned")
-                    )
-                limit = atom_fc_sample_limit(atom_config)
-                if limit is None:
-                    raise RuntimeError("AtomDisplacement: FC no esta habilitado en la configuracion.")
                 atom_dataset_specs = None
-                if displacement_options:
-                    atom_dataset_specs = build_fc_dataset_specs_from_options(
-                        displacement_options,
-                        combination_mode=combination_mode,
-                        per_displacement_limit=limit,
-                        split_ratios=split_ratios,
-                        max_datasets=max_datasets,
-                    )
-                    atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
-                    if parse_bool(payload.get("sync_md_sizes"), True):
+                fc_dataset_specs = None
+                atom_sizes = []
+                if "atom_displacement" in selected_pipeline_keys:
+                    atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+                    force_constants = atom_config.get("structure", {}).get("force_constants", {}) or {}
+                    if payload.get("max_datasets") in (None, ""):
+                        max_datasets = parse_max_datasets(force_constants.get("max_datasets"), 100)
+                    if payload.get("combination_mode") in (None, ""):
+                        combination_mode = parse_combination_mode(
+                            force_constants.get("combination_mode", "aligned")
+                        )
+                    limit = atom_fc_sample_limit(atom_config)
+                    if limit is None:
+                        raise RuntimeError("AtomDisplacement: FC no esta habilitado en la configuracion.")
+                    if displacement_options:
+                        atom_dataset_specs = build_fc_dataset_specs_from_options(
+                            displacement_options,
+                            combination_mode=combination_mode,
+                            per_displacement_limit=limit,
+                            split_ratios=split_ratios,
+                            max_datasets=max_datasets,
+                        )
+                        atom_sizes = [int(spec["size"]) for spec in atom_dataset_specs]
+                    else:
+                        requested_atom_sizes = parse_sizes(raw_atom_sizes, [10])
+                        atom_sizes, fc_dataset_specs = build_fc_dataset_specs(
+                            requested_atom_sizes,
+                            fc_displacements,
+                            structures_per_displacement,
+                            per_displacement_limit=limit,
+                            split_ratios=split_ratios,
+                        )
+                if "md" in selected_pipeline_keys:
+                    if atom_sizes and parse_bool(payload.get("sync_md_sizes"), True):
                         md_sizes = unique_ints_preserve_order(atom_sizes)
                     else:
-                        md_sizes = parse_sizes(raw_md_sizes, atom_sizes)
-                    fc_dataset_specs = None
+                        md_sizes = parse_sizes(raw_md_sizes, atom_sizes or [10, 20])
                 else:
-                    md_sizes = parse_sizes(raw_md_sizes, [10, 20])
-                    requested_atom_sizes = parse_sizes(raw_atom_sizes, [10])
-                    atom_sizes, fc_dataset_specs = build_fc_dataset_specs(
-                        requested_atom_sizes,
-                        fc_displacements,
-                        structures_per_displacement,
-                        per_displacement_limit=limit,
-                        split_ratios=split_ratios,
-                    )
+                    md_sizes = []
+                if "atom_displacement" not in selected_pipeline_keys:
+                    fc_dataset_specs = None
+                    atom_dataset_specs = None
                 json_response(
                     self,
                     EXPERIMENT_RUNNER.start(
@@ -3859,6 +4890,9 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         test_sets,
                         primary_metric,
                         compute_budget_mode,
+                        selected_methods,
+                        run_mode,
+                        random_cartesian_options,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

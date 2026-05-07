@@ -1,17 +1,17 @@
 paths:
-  dataset_dir: ${REPO_ROOT}/MD/dataset
-  training_dir: ${REPO_ROOT}/MD/training
+  dataset_dir: /home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/Comparison/workspaces/20260507_151313/md/dataset_30/dataset
+  training_dir: /home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/Comparison/workspaces/20260507_151313/md/dataset_30/training
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
-  venv_activate: ${GRAPH2MAT_VENV}/bin/activate
+  venv_activate: /home/christian/graph2mat-env/bin/activate
 commands:
   graph2mat: graph2mat
   siesta: siesta
   shell: bash
 md:
   type_of_run: verlet
-  steps: 10
+  steps: 30
   basis_size: DZP
   basis_type: split
   energy_shift: 0.03 eV
@@ -116,13 +116,12 @@ prediction:
     matrix_writer: true
 pipeline:
   steps:
-  - generate_md_dataset
   - run_md_training
   - run_md_testing
   - run_md_prediction
 splits:
   enabled: true
-  strategy: spread
-  train: 8
-  validation: 1
-  test: 1
+  strategy: block
+  train: 24
+  validation: 3
+  test: 3

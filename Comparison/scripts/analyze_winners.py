@@ -22,12 +22,18 @@ from typing import Any
 
 METHOD_MD = "md"
 METHOD_ATOM = "atom_displacement"
+METHOD_ALIASES = {
+    "siesta_fc_cartesian": METHOD_ATOM,
+    "atomdisp": METHOD_ATOM,
+}
 METADATA_COLUMNS = {
     "experiment_id",
     "train_method",
     "test_set",
+    "test_method",
     "dataset_size",
     "train_dataset_size",
+    "dataset_size_by_method",
     "md_dataset_size",
     "atom_dataset_size",
     "md_dataset_label",
@@ -50,6 +56,14 @@ METADATA_COLUMNS = {
     "checkpoint_selection_warning",
     "reproducibility_warning",
     "nested_subset_warning",
+    "manifest_warning",
+    "artifact_hash_warning",
+    "matrix_warning",
+    "prediction_warning",
+    "evaluation_warning",
+    "warning_status",
+    "severe_warning_status",
+    "severe_warnings",
     "strict_comparison_mode",
     "seed",
     "epoch",
@@ -71,6 +85,9 @@ ERROR_METRICS = {
     "global_mae_eV",
     "global_rmse_eV",
     "global_max_abs_error_eV",
+    "low_energy_mae_eV",
+    "low_energy_rmse_eV",
+    "low_energy_max_abs_error_eV",
     "occupied_mae_eV",
     "occupied_rmse_eV",
     "fermi_window_mae_eV",
@@ -104,12 +121,32 @@ def parse_value(value: str | None) -> Any:
     return number if math.isfinite(number) else None
 
 
+def canonical_method(value: Any) -> str:
+    text = str(value or "")
+    return METHOD_ALIASES.get(text, text)
+
+
+def canonical_test_set(value: Any) -> str:
+    text = str(value or "")
+    if text == "test_siesta_fc_cartesian":
+        return "test_atomdisp"
+    return text
+
+
 def read_rows(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
-        return [
+        rows = [
             {key: parse_value(value) for key, value in row.items()}
             for row in csv.DictReader(handle)
         ]
+    for row in rows:
+        if row.get("train_method") not in (None, ""):
+            row["train_method"] = canonical_method(row.get("train_method"))
+        if row.get("test_set") not in (None, ""):
+            row["test_set"] = canonical_test_set(row.get("test_set"))
+        if row.get("test_method") == "siesta_fc_cartesian":
+            row["test_method"] = METHOD_ATOM
+    return rows
 
 
 def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -484,6 +521,20 @@ def build_recommendation(
 ) -> dict[str, Any]:
     test_sets = sorted({str(row.get("test_set")) for row in rows})
     methods = sorted({str(row.get("train_method")) for row in rows})
+    if len(methods) < 2:
+        return {
+            "status": "non_comparative",
+            "scientific_status": "non_comparative",
+            "primary_metric": primary_metric,
+            "reason": "Only one training method is present; no scientific winner is emitted.",
+            "methods_seen": methods,
+            "test_sets_seen": test_sets,
+            "missing_required_cells": [],
+            "missing_primary_metric_cells": [],
+            "severe_warnings": [],
+            "n_seeds": len({row_seed(row) for row in rows}),
+            "minimum_robust_seeds": minimum_robust_seeds,
+        }
     frozen_test_hashes = sorted(
         {
             str(row.get("frozen_test_hash"))
@@ -498,13 +549,11 @@ def build_recommendation(
             if row.get("model_checkpoint_sha256") not in (None, "", False)
         }
     )
+    required_test_sets = set(test_sets)
     required_cells = {
-        (METHOD_MD, "test_md"),
-        (METHOD_MD, "test_atomdisp"),
-        (METHOD_MD, "test_mixed"),
-        (METHOD_ATOM, "test_md"),
-        (METHOD_ATOM, "test_atomdisp"),
-        (METHOD_ATOM, "test_mixed"),
+        (method, test_set)
+        for method in methods
+        for test_set in required_test_sets
     }
     available_cells = {
         (str(row.get("train_method")), str(row.get("test_set")))
@@ -534,11 +583,17 @@ def build_recommendation(
                 row.get("checkpoint_selection_warning"),
                 row.get("reproducibility_warning"),
                 row.get("nested_subset_warning"),
+                row.get("manifest_warning"),
+                row.get("artifact_hash_warning"),
+                row.get("matrix_warning"),
+                row.get("prediction_warning"),
+                row.get("evaluation_warning"),
+                row.get("severe_warnings"),
             )
             if value not in (None, "", False)
         }
     )
-    allowed_test_sets = {"test_md", "test_mixed"}
+    allowed_test_sets = set(test_sets)
     primary_summary = [
         row
         for row in summary_rows
@@ -546,7 +601,7 @@ def build_recommendation(
     ]
     max_seeds = max(
         (int(row.get("n_seeds") or row.get("seeds_compared") or 0) for row in primary_summary),
-        default=0,
+        default=len({row_seed(row) for row in rows}),
     )
     single_seed_only = max_seeds <= 1
     insufficient_robust_seeds = max_seeds < minimum_robust_seeds
@@ -634,6 +689,7 @@ def build_recommendation(
             "AtomDisplacement only wins on test_atomdisp; this is distribution-specific "
             "and is not enough for a conservative recommendation."
         )
+    nway_methods = set(methods) - {METHOD_MD, METHOD_ATOM}
     if missing_cells:
         status = "insufficient_cross_evaluation"
         reason = "The cross-evaluation grid is incomplete; no winner should be declared."
@@ -662,10 +718,18 @@ def build_recommendation(
         else:
             status = "mixed_available_single_seed_result"
             reason = "Single-seed winners disagree across allowed test distributions; no robust winner."
+    elif nway_methods and not missing_cells and not missing_primary_metric_cells and not severe_warnings:
+        status = "nway_complete_no_global_winner"
+        reason = (
+            "N-way comparison cells are complete, but the conservative legacy "
+            "global-winner rule is not yet reduced to one robust winner."
+        )
 
     robust_statuses = {"md_conservative_win", "atom_displacement_conservative_win", "mixed_conservative_result"}
-    if status in robust_statuses and not insufficient_robust_seeds:
+    if status in robust_statuses and not insufficient_robust_seeds and not underpowered_stable_wins:
         scientific_status = "robust_comparison"
+    elif not missing_cells and not missing_primary_metric_cells and not severe_warnings and insufficient_robust_seeds:
+        scientific_status = "exploratory"
     elif (
         (insufficient_robust_seeds or bool(underpowered_stable_wins))
         and not missing_cells
@@ -676,6 +740,24 @@ def build_recommendation(
         scientific_status = "exploratory"
     else:
         scientific_status = "scientifically_inconclusive"
+
+    rankings_by_test_set: dict[str, list[dict[str, Any]]] = {}
+    for test_set in test_sets:
+        ranking_rows = []
+        for method in methods:
+            values = [
+                float(row[primary_metric])
+                for row in rows
+                if str(row.get("train_method")) == method
+                and str(row.get("test_set")) == test_set
+                and finite(row.get(primary_metric))
+            ]
+            if values:
+                ranking_rows.append({"method": method, "mean": mean(values), "n": len(values)})
+        rankings_by_test_set[test_set] = sorted(
+            ranking_rows,
+            key=lambda item: float(item["mean"]) if item["mean"] is not None else math.inf,
+        )
 
     return {
         "status": status,
@@ -694,6 +776,7 @@ def build_recommendation(
         "missing_required_cells": missing_cells,
         "missing_primary_metric_cells": missing_primary_metric_cells,
         "severe_warnings": severe_warnings,
+        "rankings_by_test_set": rankings_by_test_set,
         "first_dataset_size_where_md_beats_atom_displacement": first_md_size,
         "first_dataset_size_where_atom_displacement_beats_md": first_atom_size,
         "first_compute_budget_where_md_beats_atom_displacement": first_md_compute,

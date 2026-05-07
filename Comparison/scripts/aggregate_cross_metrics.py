@@ -42,6 +42,12 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def json_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value if value is not None else {}, sort_keys=True, ensure_ascii=False)
+
+
 def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
@@ -90,15 +96,48 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
     prediction_summary = read_json(result_dir / "prediction_summary.json")
     evaluation_manifest = read_json(metrics_root / "manifest.json")
     joined = join_by_sample(sparse, spectral, dos)
+    evaluation_warning = manifest.get("evaluation_warning")
+    low_energy_warnings = sorted(
+        {
+            str(item.get("error"))
+            for item in evaluation_manifest.get("errors", [])
+            if isinstance(item, dict)
+            and item.get("kind") == "low_energy_metrics"
+            and item.get("error")
+        }
+    )
+    if low_energy_warnings:
+        warning_parts = [str(evaluation_warning)] if evaluation_warning else []
+        warning_parts.extend(low_energy_warnings)
+        evaluation_warning = " | ".join(warning_parts)
     rows = []
     for sample, row in sorted(joined.items()):
+        warnings = [
+            manifest.get("budget_mismatch_warning"),
+            manifest.get("leakage_warning"),
+            manifest.get("frozen_test_warning"),
+            manifest.get("siesta_settings_warning"),
+            manifest.get("model_config_warning"),
+            manifest.get("basis_pseudopotential_warning"),
+            manifest.get("checkpoint_selection_warning"),
+            manifest.get("reproducibility_warning"),
+            manifest.get("nested_subset_warning"),
+            manifest.get("manifest_warning"),
+            manifest.get("artifact_hash_warning"),
+            manifest.get("matrix_warning"),
+            manifest.get("prediction_warning"),
+            evaluation_warning,
+        ]
+        warning_text = " | ".join(str(item) for item in warnings if item not in (None, "", False))
         rows.append(
             {
                 "experiment_id": experiment_id,
                 "train_method": manifest.get("train_method"),
                 "test_set": manifest.get("test_set"),
+                "test_method": manifest.get("test_method"),
                 "dataset_size": manifest.get("dataset_size"),
                 "train_dataset_size": manifest.get("train_dataset_size", manifest.get("dataset_size")),
+                "dataset_size_by_method": json_text(manifest.get("dataset_size_by_method")),
                 "md_dataset_size": manifest.get("md_dataset_size"),
                 "atom_dataset_size": manifest.get("atom_dataset_size"),
                 "compute_budget_mode": manifest.get("compute_budget_mode"),
@@ -126,6 +165,14 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "checkpoint_selection_warning": manifest.get("checkpoint_selection_warning"),
                 "reproducibility_warning": manifest.get("reproducibility_warning"),
                 "nested_subset_warning": manifest.get("nested_subset_warning"),
+                "manifest_warning": manifest.get("manifest_warning"),
+                "artifact_hash_warning": manifest.get("artifact_hash_warning"),
+                "matrix_warning": manifest.get("matrix_warning"),
+                "prediction_warning": manifest.get("prediction_warning"),
+                "evaluation_warning": evaluation_warning,
+                "warning_status": "warning" if warning_text else "ok",
+                "severe_warning_status": "severe" if warning_text else "ok",
+                "severe_warnings": warning_text,
                 "prediction_dir": manifest.get("prediction_dir"),
                 "siesta_reference_dir": manifest.get("siesta_reference_dir"),
                 "sample_id": sample,
