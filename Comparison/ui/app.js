@@ -9,6 +9,12 @@ const pipelines = [
   },
 ];
 
+const resultPipelines = [
+  { key: "md", label: "MD", resultsDir: "results_md" },
+  { key: "atom_displacement", label: "AtomDisplacement", resultsDir: "results_atomdisp" },
+  { key: "random_cartesian", label: "Random Cartesian", resultsDir: "results_random_cartesian" },
+];
+
 const DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate";
 
 const state = {
@@ -18,6 +24,7 @@ const state = {
   plotsEnabled: false,
   plotData: null,
   fcMaxPerDisplacement: null,
+  experimentWasRunning: false,
 };
 
 function showToast(message) {
@@ -311,15 +318,33 @@ function selectedMethods() {
   return Array.from(document.querySelectorAll(".method-checkbox:checked")).map((item) => item.value);
 }
 
+function pipelineLabel(key) {
+  return resultPipelines.find((item) => item.key === key)?.label || key;
+}
+
 function parseRandomCartesianOptions(methods) {
   const input = document.getElementById("random-cartesian-n-structures");
-  const nStructures = Number(input?.value);
+  const rawItems = String(input?.value || "")
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const sizes = rawItems.map((item) => Number(item));
   if (methods.includes("random_cartesian")) {
-    if (!Number.isInteger(nStructures) || nStructures < 3) {
-      throw new Error("Random Cartesian requiere un numero entero de estructuras >= 3.");
+    if (!sizes.length || sizes.some((size) => !Number.isInteger(size) || size < 3)) {
+      throw new Error("Random Cartesian requiere tamanos enteros >= 3, separados por comas.");
     }
   }
-  return Number.isInteger(nStructures) && nStructures > 0 ? { n_structures: nStructures } : {};
+  if (!sizes.length || sizes.some((size) => !Number.isInteger(size) || size <= 0)) return {};
+  return sizes.length === 1 ? { n_structures: sizes[0] } : { n_structures: sizes };
+}
+
+function syncRandomCartesianSizeFromAtomPlan(sizes) {
+  const input = document.getElementById("random-cartesian-n-structures");
+  if (!input) return;
+  const validSizes = sizes.filter((size) => Number.isInteger(size) && size >= 3);
+  if (validSizes.length) {
+    input.value = validSizes.join(", ");
+  }
 }
 
 function cartesianProduct(arrays) {
@@ -427,6 +452,7 @@ function updateAtomSizesFromFcPlan() {
     const sizesText = sizes.join(", ");
     document.getElementById("atom-sizes").value = sizesText;
     document.getElementById("md-sizes").value = [...new Set(sizes)].join(", ");
+    syncRandomCartesianSizeFromAtomPlan(sizes);
     renderFcPreview(specs);
     const modeLabel = currentCombinationMode() === "cartesian" ? "cartesian datasets" : "aligned datasets";
     document.getElementById("atom-combination-count").value = specs.length
@@ -463,6 +489,8 @@ async function loadFcConfig() {
 function updateExperimentStatus(status) {
   const text = document.getElementById("experiment-status-text");
   const root = document.getElementById("experiment-results-root");
+  const wasRunning = state.experimentWasRunning;
+  state.experimentWasRunning = Boolean(status.running);
   if (status.running && status.current) {
     const elapsed = formatDuration(status.current.elapsed_seconds);
     const eta = formatDuration(status.current.eta_seconds);
@@ -477,6 +505,9 @@ function updateExperimentStatus(status) {
   }
   root.textContent = status.results_root || "Comparison/results";
   renderExperimentResults(status.results || []);
+  if (wasRunning && !status.running && state.plotsEnabled) {
+    loadPlots().catch((error) => showToast(error.message));
+  }
 }
 
 function renderExperimentResults(results) {
@@ -545,6 +576,7 @@ async function runExperiment() {
       test_sets: selectedTestSets(),
       primary_metric: document.getElementById("primary-metric").value,
       compute_budget_mode: document.getElementById("compute-budget-mode").value,
+      compute_accelerator: document.getElementById("compute-accelerator").value,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
       venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
@@ -576,8 +608,9 @@ async function loadResults() {
   const results = await request("/api/results");
   const grid = document.getElementById("results-grid");
   grid.innerHTML = "";
-  for (const pipeline of pipelines) {
+  for (const pipeline of resultPipelines) {
     const data = results[pipeline.key];
+    if (!data) continue;
     const panel = document.createElement("section");
     panel.className = "panel result-row";
     panel.innerHTML = `
@@ -593,7 +626,7 @@ async function loadResults() {
     grid.appendChild(panel);
   }
   const archived = results.archived || {};
-  for (const pipeline of pipelines) {
+  for (const pipeline of resultPipelines) {
     const items = archived[pipeline.key] || [];
     const panel = document.createElement("section");
     panel.className = "panel result-row";
@@ -603,7 +636,7 @@ async function loadResults() {
         <h3>${pipeline.label}</h3>
       </div>
       <p><strong>${items.length}</strong> archived experiment runs</p>
-      <code>Comparison/results/${pipeline.key === "md" ? "results_md" : "results_atomdisp"}</code>
+      <code>Comparison/results/${pipeline.resultsDir}</code>
     `;
     grid.appendChild(panel);
   }
@@ -626,7 +659,7 @@ function sampleMetricValues(run, group, metric) {
 function missingFermiSummary(runs) {
   const pieces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const label = pipelineLabel(pipeline);
     const missing = items.reduce(
       (sum, run) => sum + Number(run.diagnostics?.missing_fermi_level_samples || 0),
       0,
@@ -664,7 +697,7 @@ function groupedRuns(runs) {
 function lineTraces(runs, group, metrics) {
   const traces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const label = pipelineLabel(pipeline);
     for (const metric of metrics) {
       const points = items
         .map((run) => ({ x: run.dataset_size, y: metricValue(run, group, metric.key), text: run.run_id }))
@@ -754,7 +787,7 @@ function renderBoxPlot(id, runs) {
 function renderScatterPlot(id, runs) {
   const traces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const label = pipelineLabel(pipeline);
     const x = [];
     const y = [];
     const text = [];
@@ -868,7 +901,7 @@ function renderHeatmap(id, runs) {
 function renderSensitivitySweeps(id, runs) {
   const traces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelines.find((item) => item.key === pipeline)?.label || pipeline;
+    const label = pipelineLabel(pipeline);
     const sparseSweepRows = items.flatMap((run) => run.samples?.sparse_sweep || []);
     const dosSweepRows = items.flatMap((run) => run.samples?.dos_sweep || []);
     const sparseByThreshold = new Map();

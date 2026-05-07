@@ -1,6 +1,6 @@
 paths:
-  dataset_dir: /home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/Comparison/workspaces/20260507_151313/md/dataset_30/dataset
-  training_dir: /home/christian/Escritorio/CINN/repositorios/MD_vs_OnlyAtomDisplacement/Comparison/workspaces/20260507_151313/md/dataset_30/training
+  dataset_dir: ${REPO_ROOT}/MD/dataset
+  training_dir: ${REPO_ROOT}/MD/training
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
@@ -11,7 +11,7 @@ commands:
   shell: bash
 md:
   type_of_run: verlet
-  steps: 30
+  steps: 10
   basis_size: DZP
   basis_type: split
   energy_shift: 0.03 eV
@@ -116,12 +116,13 @@ prediction:
     matrix_writer: true
 pipeline:
   steps:
+  - generate_md_dataset
   - run_md_training
   - run_md_testing
   - run_md_prediction
 splits:
   enabled: true
-  strategy: block
-  train: 24
-  validation: 3
-  test: 3
+  strategy: spread
+  train: 8
+  validation: 1
+  test: 1

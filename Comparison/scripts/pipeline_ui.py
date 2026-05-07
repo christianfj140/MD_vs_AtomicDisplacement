@@ -217,16 +217,26 @@ def parse_random_cartesian_options(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def random_cartesian_size_from_options(options: dict[str, Any]) -> int:
-    if options.get("n_structures") not in (None, ""):
-        size = int(options["n_structures"])
-    else:
+def random_cartesian_sizes_from_options(options: dict[str, Any]) -> list[int]:
+    raw_sizes = options.get("n_structures")
+    if raw_sizes in (None, ""):
         config = load_config(PIPELINES["atom_displacement"].config_path)
         random_config = (config.get("structure", {}) or {}).get("random_cartesian", {}) or {}
-        size = int(random_config.get("n_structures", 100))
-    if size <= 0:
-        raise RuntimeError("random_cartesian.n_structures debe ser mayor que cero.")
-    return size
+        raw_sizes = random_config.get("n_structures", 100)
+    if isinstance(raw_sizes, str):
+        values = [item.strip() for item in raw_sizes.replace(";", ",").split(",") if item.strip()]
+    elif isinstance(raw_sizes, (list, tuple)):
+        values = list(raw_sizes)
+    else:
+        values = [raw_sizes]
+    sizes = [int(value) for value in values]
+    if not sizes or any(size < 3 for size in sizes):
+        raise RuntimeError("random_cartesian.n_structures debe contener tamanos enteros >= 3.")
+    return sizes
+
+
+def random_cartesian_size_from_options(options: dict[str, Any]) -> int:
+    return random_cartesian_sizes_from_options(options)[0]
 
 
 def pipeline_keys_for_methods(method_ids: list[str]) -> list[str]:
@@ -1017,6 +1027,21 @@ def parse_compute_budget_mode(value: Any) -> str:
             f"(recibido: {value!r})."
         )
     return mode
+
+
+def parse_compute_accelerator(value: Any) -> str:
+    accelerator = "cpu" if value in (None, "") else str(value).strip().lower()
+    allowed = {"cpu", "gpu", "auto"}
+    if accelerator not in allowed:
+        raise RuntimeError(
+            "compute_accelerator debe ser cpu, gpu o auto "
+            f"(recibido: {value!r})."
+        )
+    return accelerator
+
+
+def apply_training_accelerator(config: dict[str, Any], accelerator: str) -> None:
+    config.setdefault("training", {}).setdefault("trainer", {})["accelerator"] = accelerator
 
 
 def reference_budget_for_run(run: dict[str, Any]) -> int:
@@ -2282,6 +2307,7 @@ class ExperimentRunner:
         test_sets: list[str] | None = None,
         primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
+        compute_accelerator: str = "cpu",
         selected_methods: list[str] | None = None,
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
@@ -2291,6 +2317,7 @@ class ExperimentRunner:
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
             selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
             run_mode = parse_run_mode(run_mode)
+            compute_accelerator = parse_compute_accelerator(compute_accelerator)
             pipeline_keys = pipeline_keys_for_methods(selected_methods)
             random_cartesian_options = random_cartesian_options or {}
             md_config = load_config(PIPELINES["md"].config_path)
@@ -2333,6 +2360,7 @@ class ExperimentRunner:
                     test_sets or list(DEFAULT_COMMON_TEST_SETS),
                     primary_metric,
                     compute_budget_mode,
+                    compute_accelerator,
                     selected_methods,
                     run_mode,
                     random_cartesian_options,
@@ -2402,6 +2430,7 @@ class ExperimentRunner:
         test_sets: list[str],
         primary_metric: str,
         compute_budget_mode: str,
+        compute_accelerator: str,
         selected_methods: list[str],
         run_mode: str,
         random_cartesian_options: dict[str, Any] | None = None,
@@ -2511,7 +2540,7 @@ class ExperimentRunner:
                 "md": md_sizes,
                 "siesta_fc_cartesian": atom_sizes,
                 "atom_displacement": atom_sizes,
-                "random_cartesian": [random_cartesian_size_from_options(random_cartesian_options or {})]
+                "random_cartesian": random_cartesian_sizes_from_options(random_cartesian_options or {})
                 if "random_cartesian" in selected_methods
                 else [],
             },
@@ -2533,6 +2562,7 @@ class ExperimentRunner:
                 "primary_metric": primary_metric,
             },
             "compute_budget_mode": compute_budget_mode,
+            "compute_accelerator": compute_accelerator,
             "strict_comparison_mode": STRICT_COMPARISON_MODE,
             "output_directories": {
                 "experiment_root": str(experiment_root(run_id)),
@@ -2598,6 +2628,7 @@ class ExperimentRunner:
         test_sets: list[str] | None = None,
         primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
+        compute_accelerator: str = "cpu",
         selected_methods: list[str] | None = None,
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
@@ -2609,6 +2640,7 @@ class ExperimentRunner:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
         run_mode = parse_run_mode(run_mode)
+        compute_accelerator = parse_compute_accelerator(compute_accelerator)
         random_cartesian_options = random_cartesian_options or {}
         pipeline_keys = pipeline_keys_for_methods(selected_methods)
         manifest = self._initial_experiment_manifest(
@@ -2622,6 +2654,7 @@ class ExperimentRunner:
             test_sets or list(DEFAULT_COMMON_TEST_SETS),
             primary_metric,
             compute_budget_mode,
+            compute_accelerator,
             selected_methods,
             run_mode,
             random_cartesian_options,
@@ -2650,7 +2683,10 @@ class ExperimentRunner:
             )
             self._append(f"[UI] Split mode MD: {split_mode}\n")
             self._append(f"[UI] Common test sets: {', '.join(test_sets or DEFAULT_COMMON_TEST_SETS)}\n")
-            self._append(f"[UI] Primary metric: {primary_metric}; compute mode: {compute_budget_mode}\n")
+            self._append(
+                f"[UI] Primary metric: {primary_metric}; compute mode: {compute_budget_mode}; "
+                f"accelerator: {compute_accelerator}\n"
+            )
             if manifest.get("siesta_settings_warning"):
                 self._append(f"[WARN] {manifest['siesta_settings_warning']}\n")
             if manifest.get("model_config_warning"):
@@ -2708,6 +2744,7 @@ class ExperimentRunner:
                     split_ratios=split_ratios,
                     split_mode=split_mode,
                     run_mode=run_mode,
+                    compute_accelerator=compute_accelerator,
                 )
                 self._annotate_nested_subset(result, previous_by_method.get("md"))
                 previous_by_method["md"] = result
@@ -2737,6 +2774,7 @@ class ExperimentRunner:
                     random_seed=random_seed,
                     split_mode=split_mode,
                     run_mode=run_mode,
+                    compute_accelerator=compute_accelerator,
                 )
                 self._annotate_nested_subset(result, previous_by_method.get("atom_displacement"))
                 previous_by_method["atom_displacement"] = result
@@ -2747,18 +2785,21 @@ class ExperimentRunner:
             if "random_cartesian" in selected_methods:
                 self._ensure_not_stopped()
                 self._restore_original_config("atom_displacement", original_configs)
-                random_size = random_cartesian_size_from_options(random_cartesian_options)
-                result = self._run_random_cartesian(
-                    random_size,
-                    run_id,
-                    split_ratios=split_ratios,
-                    random_cartesian_options=random_cartesian_options,
-                    run_mode=run_mode,
-                )
-                with self._lock:
-                    self._results.append(result)
-                manifest["runs"].append(result)
-                self._write_experiment_manifest(manifest)
+                for random_size in random_cartesian_sizes_from_options(random_cartesian_options):
+                    self._ensure_not_stopped()
+                    size_options = {**random_cartesian_options, "n_structures": random_size}
+                    result = self._run_random_cartesian(
+                        random_size,
+                        run_id,
+                        split_ratios=split_ratios,
+                        random_cartesian_options=size_options,
+                        run_mode=run_mode,
+                        compute_accelerator=compute_accelerator,
+                    )
+                    with self._lock:
+                        self._results.append(result)
+                    manifest["runs"].append(result)
+                    self._write_experiment_manifest(manifest)
             if run_mode == "dataset_only":
                 manifest["cross_evaluation"] = {
                     "ok": False,
@@ -2857,6 +2898,7 @@ class ExperimentRunner:
         random_seed: int | None = None,
         split_mode: str = "block",
         run_mode: str = "full_strict_pipeline",
+        compute_accelerator: str = "cpu",
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -2884,6 +2926,8 @@ class ExperimentRunner:
         self._append(f"[UI] Workspace: {workspace}\n")
         self._append(f"[UI] Result dir previsto: {result_dir}\n")
         self._append(f"[UI] Config temporal: {spec.config_path}\n")
+        apply_training_accelerator(config, compute_accelerator)
+        self._append(f"[UI] Accelerator: {compute_accelerator}\n")
         with self._lock:
             log_start = len(self._logs)
         prepare_metadata: dict[str, Any] = {}
@@ -2988,6 +3032,7 @@ class ExperimentRunner:
         split_ratios: dict[str, float] | None = None,
         random_cartesian_options: dict[str, Any] | None = None,
         run_mode: str = "dataset_only",
+        compute_accelerator: str = "cpu",
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
         dataset_label = f"dataset_{size}"
@@ -3001,6 +3046,8 @@ class ExperimentRunner:
         )
         self._append(f"\n[UI] === Random Cartesian {dataset_label} ===\n")
         config = load_config(spec.config_path)
+        apply_training_accelerator(config, compute_accelerator)
+        self._append(f"[UI] Accelerator: {compute_accelerator}\n")
         workspace = WORKSPACES_ROOT / run_id / "random_cartesian" / dataset_label
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
@@ -4215,6 +4262,12 @@ class ExperimentRunner:
                             basis_files,
                             "--output-dir",
                             str(prediction_dir),
+                            "--accelerator",
+                            str(
+                                train_config.get("training", {})
+                                .get("trainer", {})
+                                .get("accelerator", "cpu")
+                            ),
                         ]
                         if n_matrix_components is not None:
                             predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
@@ -4506,6 +4559,12 @@ class ExperimentRunner:
                         basis_files,
                         "--output-dir",
                         str(prediction_dir),
+                        "--accelerator",
+                        str(
+                            train_config.get("training", {})
+                            .get("trainer", {})
+                            .get("accelerator", "cpu")
+                        ),
                     ]
                     if n_matrix_components is not None:
                         predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
@@ -4659,6 +4718,9 @@ def result_summary() -> dict[str, Any]:
     atdisp_predictions = sorted(
         (REPO_ROOT / "AtomDisplacement" / "dataset" / "samples").glob("*/ML_prediction.HSX")
     )
+    random_predictions = sorted(
+        (REPO_ROOT / "AtomDisplacement" / "dataset" / "RandomCartesian_steps").glob("*/ML_prediction.HSX")
+    )
     archived = archived_results_summary()
     return {
         "md": {
@@ -4674,6 +4736,13 @@ def result_summary() -> dict[str, Any]:
             "metrics_exists": (REPO_ROOT / "AtomDisplacement" / "training" / "sample_metrics.csv").exists(),
             "predictions": len(atdisp_predictions),
             "prediction_glob": "AtomDisplacement/dataset/samples/*/ML_prediction.HSX",
+        },
+        "random_cartesian": {
+            "root": str(REPO_ROOT / "AtomDisplacement"),
+            "metrics": str(REPO_ROOT / "AtomDisplacement" / "training" / "sample_metrics.csv"),
+            "metrics_exists": (REPO_ROOT / "AtomDisplacement" / "training" / "sample_metrics.csv").exists(),
+            "predictions": len(random_predictions),
+            "prediction_glob": "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
         },
         "archived": archived,
     }
@@ -4824,6 +4893,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     test_sets = parse_test_sets(raw_test_sets)
                 primary_metric = str(payload.get("primary_metric") or DEFAULT_PRIMARY_METRIC).strip()
                 compute_budget_mode = parse_compute_budget_mode(payload.get("compute_budget_mode"))
+                compute_accelerator = parse_compute_accelerator(payload.get("compute_accelerator"))
                 raw_venv_activate_command = payload.get("venv_activate_command")
                 venv_activate_command = (
                     str(raw_venv_activate_command).strip()
@@ -4890,6 +4960,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         test_sets,
                         primary_metric,
                         compute_budget_mode,
+                        compute_accelerator,
                         selected_methods,
                         run_mode,
                         random_cartesian_options,

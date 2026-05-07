@@ -287,7 +287,7 @@ def main() -> int:
 
     selected_methods = sorted(manifest_paths)
     method_test_sets = {f"test_{method}" for method in selected_methods}
-    if legacy_atomdisp and "siesta_fc_cartesian" in selected_methods:
+    if "siesta_fc_cartesian" in selected_methods:
         method_test_sets.add("test_atomdisp")
     allowed = set(method_test_sets) | {"test_mixed"}
     if args.test_sets:

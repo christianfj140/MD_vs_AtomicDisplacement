@@ -115,8 +115,26 @@ class ComparisonWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "run_mode"):
             module.parse_run_mode("training_only")
 
+    def test_compute_accelerator_validation_and_config_application(self) -> None:
+        module = self.load_pipeline_ui_module()
+        self.assertEqual(module.parse_compute_accelerator(None), "cpu")
+        self.assertEqual(module.parse_compute_accelerator("GPU"), "gpu")
+        self.assertEqual(module.parse_compute_accelerator("auto"), "auto")
+        with self.assertRaisesRegex(RuntimeError, "compute_accelerator"):
+            module.parse_compute_accelerator("tpu")
+        config = {"training": {"trainer": {"accelerator": "cpu"}}}
+        module.apply_training_accelerator(config, "gpu")
+        self.assertEqual(config["training"]["trainer"]["accelerator"], "gpu")
+
+    def test_random_cartesian_options_support_multiple_sizes(self) -> None:
+        module = self.load_pipeline_ui_module()
+        self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": 3}), [3])
+        self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": [11, 23, 30]}), [11, 23, 30])
+        self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": "11, 23, 30"}), [11, 23, 30])
+
     def test_dataset_only_records_status_and_skips_cross_evaluation(self) -> None:
         module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
         with workspace_tempdir() as tmp:
             root = Path(tmp)
             module.RESULTS_ROOT = root / "results"
@@ -125,7 +143,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             calls = {"run_one": [], "cross": 0}
 
             def fake_run_one(key, size, run_id, **kwargs):
-                calls["run_one"].append((key, kwargs.get("run_mode")))
+                calls["run_one"].append((key, kwargs.get("run_mode"), kwargs.get("compute_accelerator")))
                 return {
                     "pipeline": key,
                     "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
@@ -151,13 +169,18 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
                 selected_methods=["md", "siesta_fc_cartesian"],
                 run_mode="dataset_only",
+                compute_accelerator="gpu",
             )
             manifest = module.load_config(root / "results" / "dataset_only_case" / "experiment_manifest.yaml")
             self.assertEqual(manifest["run_mode"], "dataset_only")
             self.assertEqual(manifest["scientific_status"], "dataset_only")
             self.assertEqual(manifest["selected_methods"], ["md", "siesta_fc_cartesian"])
+            self.assertEqual(manifest["compute_accelerator"], "gpu")
             self.assertEqual(calls["cross"], 0)
-            self.assertEqual(calls["run_one"], [("md", "dataset_only"), ("atom_displacement", "dataset_only")])
+            self.assertEqual(
+                calls["run_one"],
+                [("md", "dataset_only", "gpu"), ("atom_displacement", "dataset_only", "gpu")],
+            )
             self.assertTrue(manifest["cross_evaluation"]["skipped"])
 
     def test_single_method_full_pipeline_is_non_comparative(self) -> None:
@@ -230,12 +253,14 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     [],
                     selected_methods=["random_cartesian"],
                     run_mode="full_strict_pipeline",
+                    compute_accelerator="gpu",
                     random_cartesian_options={"n_structures": 3},
                     split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
                 )
             finally:
                 module.threading.Thread = original_thread
             self.assertEqual(status["run_id"], runner._run_id)
+            self.assertEqual(started["args"][-4], "gpu")
             self.assertEqual(started["args"][-3], ["random_cartesian"])
             self.assertEqual(started["args"][-2], "full_strict_pipeline")
             self.assertEqual(started["args"][-1], {"n_structures": 3})
@@ -246,16 +271,33 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('value="md"', index_html)
         self.assertIn('value="siesta_fc_cartesian"', index_html)
         self.assertIn('value="random_cartesian"', index_html)
+        self.assertIn('value="random_cartesian" checked', index_html)
         self.assertIn('id="random-cartesian-n-structures"', index_html)
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
         self.assertIn('run_mode: document.getElementById("run-mode").value', app_js)
+        self.assertIn('id="compute-accelerator"', index_html)
+        self.assertIn('value="cpu"', index_html)
+        self.assertIn('value="gpu"', index_html)
+        self.assertIn('value="auto"', index_html)
+        self.assertIn('compute_accelerator: document.getElementById("compute-accelerator").value', app_js)
         self.assertIn("parseRandomCartesianOptions(methods)", app_js)
         self.assertIn("random_cartesian_options: randomCartesianOptions", app_js)
         self.assertIn("n_structures", app_js)
+        self.assertIn("syncRandomCartesianSizeFromAtomPlan(sizes)", app_js)
+        self.assertIn("validSizes.join", app_js)
+        self.assertIn("resultPipelines", app_js)
+        self.assertIn("results_random_cartesian", app_js)
+        self.assertIn("wasRunning && !status.running && state.plotsEnabled", app_js)
+        self.assertIn('<option value="test_random_cartesian" selected>', index_html)
         self.assertIn("crossTrainMethods(experiment)", app_js)
         self.assertIn("crossTestSets(experiment)", app_js)
         self.assertNotIn('const trainMethods = ["md", "atom_displacement"]', app_js)
+
+    def test_cross_prediction_command_uses_training_accelerator(self) -> None:
+        script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
+        self.assertIn('"--accelerator"', script)
+        self.assertIn('.get("accelerator", "cpu")', script)
 
     def test_random_cartesian_archived_results_are_in_plot_summary(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -293,6 +335,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
             archived = module.archived_results_summary()
             self.assertIn("random_cartesian", archived)
             self.assertEqual(len(archived["random_cartesian"]), 1)
+            results = module.result_summary()
+            self.assertIn("random_cartesian", results)
+            self.assertEqual(
+                results["random_cartesian"]["prediction_glob"],
+                "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
+            )
 
     def load_random_cartesian_module(self):
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
@@ -844,6 +892,37 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(mixed["random_seed"], 99)
             self.assertTrue(mixed["composition_hash"])
             self.assertIn("md", mixed["source_manifest_hashes"])
+
+    def test_build_common_tests_accepts_atomdisp_alias_with_method_manifest(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root / "siesta_fc_cartesian", "001")
+            manifest = root / "siesta_fc_cartesian.csv"
+            write_csv(
+                manifest,
+                [
+                    {
+                        "sample_id": "siesta_fc_cartesian_001",
+                        "method": "siesta_fc_cartesian",
+                        "structure_path": str(sample / "RUN.fdf"),
+                        "hamiltonian_path": str(sample / "siesta.TSHS"),
+                        "run_out_path": str(sample / "RUN.out"),
+                        "status": "valid",
+                    }
+                ],
+            )
+            result = run_script(
+                "Comparison/scripts/build_common_tests.py",
+                "--test-manifest",
+                f"siesta_fc_cartesian={manifest}",
+                "--test-sets",
+                "test_siesta_fc_cartesian,test_atomdisp",
+                "--output-dir",
+                str(root / "common"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((root / "common" / "test_siesta_fc_cartesian" / "test_manifest.csv").exists())
+            self.assertTrue((root / "common" / "test_atomdisp" / "test_manifest.csv").exists())
 
     def test_evaluate_cross_requires_complete_grid_by_default(self) -> None:
         with workspace_tempdir() as tmp:
