@@ -25,8 +25,22 @@ BASIS_ENTHALPY
 BASIS_HARRIS_ENTHALPY
 
 # Generated datasets and SIESTA/Graph2Mat outputs
-MD/dataset/
-AtomDisplacement/dataset/
+MD/dataset/**
+AtomDisplacement/dataset/**
+!MD/dataset/
+!AtomDisplacement/dataset/
+!MD/dataset/*.psf
+!AtomDisplacement/dataset/*.psf
+!MD/dataset/*.psml
+!AtomDisplacement/dataset/*.psml
+!MD/dataset/*.vps
+!AtomDisplacement/dataset/*.vps
+!MD/dataset/*.upf
+!AtomDisplacement/dataset/*.upf
+!MD/dataset/*.psp
+!AtomDisplacement/dataset/*.psp
+!MD/dataset/*.tm2
+!AtomDisplacement/dataset/*.tm2
 **/train_samples/
 **/validation_samples/
 **/test_samples/
