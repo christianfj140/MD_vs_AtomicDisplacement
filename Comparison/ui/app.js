@@ -15,7 +15,7 @@ const resultPipelines = [
   { key: "random_cartesian", label: "Random Cartesian", resultsDir: "results_random_cartesian" },
 ];
 
-const DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate";
+const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
 
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),

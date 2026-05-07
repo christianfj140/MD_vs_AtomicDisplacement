@@ -5,7 +5,7 @@ cd dataset
 graph2mat siesta md setup-store
 cd ..
 crear {nombre de archivo de extension .fdf}.fdf
-source /home/christian/graph2mat-env/bin/activate (#activacion del entorno virtual)
+source ../.venv/bin/activate (#activacion del entorno virtual)
 siesta < {nombre de archivo de extension .fdf}.fdf | tee {nombre de archivo de extension .fdf}.out
 cd .. 
 mkdir training

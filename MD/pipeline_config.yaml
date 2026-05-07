@@ -4,7 +4,7 @@ paths:
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${REPO_ROOT}/.venv/bin/activate
 commands:
   graph2mat: graph2mat
   siesta: siesta

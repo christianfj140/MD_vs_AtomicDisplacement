@@ -1,0 +1,33 @@
+# Portable environment for the MD_vs_OnlyAtomDisplacement pipelines.
+#
+# Create it with:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   python -m pip install --upgrade pip setuptools wheel
+#   python -m pip install -r requirements-graph2mat.txt
+#
+# graph2mat is required by the training/testing/prediction scripts. If this
+# repository is private on your machine, install graph2mat manually inside the
+# venv instead:
+#   python -m pip install -e /path/to/graph2mat
+
+numpy
+scipy
+ase
+sisl[viz]>=0.15.0
+PyYAML
+pandas
+plotly
+kaleido
+h5py
+netCDF4
+lmdb
+scikit-image
+pytorch-lightning
+jsonargparse[signatures]
+tensorboard
+torch
+torch-geometric
+e3nn
+mace-torch
+graph2mat @ git+https://github.com/christianfj140/graph2mat.git

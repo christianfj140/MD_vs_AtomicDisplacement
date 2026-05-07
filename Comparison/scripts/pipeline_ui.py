@@ -44,7 +44,7 @@ RESULTS_ROOT = COMPARISON_ROOT / "results"
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
 LOG_HEARTBEAT_SECONDS = 30.0
 METRIC_VERSION = "2026-05-04.strict-validation-v1"
-DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"
+DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -544,6 +544,11 @@ def resolve_venv_activate_from_command(command: str) -> str:
     text = text.strip("\"'")
     if not text:
         raise RuntimeError("No se pudo extraer la ruta del entorno virtual desde el comando.")
+    if (
+        not Path(os.path.expandvars(text.replace("${REPO_ROOT}", str(REPO_ROOT)))).expanduser().is_absolute()
+        and not text.startswith("${GRAPH2MAT_VENV}")
+    ):
+        text = "${REPO_ROOT}/" + text
     return text
 
 

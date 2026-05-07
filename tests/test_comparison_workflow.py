@@ -126,6 +126,21 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module.apply_training_accelerator(config, "gpu")
         self.assertEqual(config["training"]["trainer"]["accelerator"], "gpu")
 
+    def test_default_venv_command_is_repo_portable(self) -> None:
+        module = self.load_pipeline_ui_module()
+        self.assertEqual(
+            module.DEFAULT_VENV_ACTIVATE_COMMAND,
+            "source ${REPO_ROOT}/.venv/bin/activate",
+        )
+        self.assertEqual(
+            module.resolve_venv_activate_from_command("source .venv/bin/activate"),
+            "${REPO_ROOT}/.venv/bin/activate",
+        )
+        self.assertEqual(
+            module.resolve_venv_activate_from_command("source ${REPO_ROOT}/.venv/bin/activate"),
+            "${REPO_ROOT}/.venv/bin/activate",
+        )
+
     def test_random_cartesian_options_support_multiple_sizes(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": 3}), [3])
@@ -276,6 +291,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
         self.assertIn('run_mode: document.getElementById("run-mode").value', app_js)
+        self.assertIn('value="source ${REPO_ROOT}/.venv/bin/activate"', index_html)
+        self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"', app_js)
+        self.assertNotIn("graph2mat-env", index_html)
+        self.assertNotIn("graph2mat-env", app_js)
         self.assertIn('id="compute-accelerator"', index_html)
         self.assertIn('value="cpu"', index_html)
         self.assertIn('value="gpu"', index_html)

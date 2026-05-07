@@ -5,7 +5,7 @@ cd dataset
 graph2mat siesta md setup-store
 cd ..
 crear RUN.fdf
-source /home/christian/graph2mat-env/bin/activate
+source ../.venv/bin/activate
 siesta < RUN.fdf | tee RUN.out
 cd .. 
 mkdir training

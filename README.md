@@ -61,9 +61,29 @@ Este repo asume que existen al menos estas herramientas:
 
 - `siesta`
 - `graph2mat`
-- un entorno virtual en ``
+- un entorno virtual local en `.venv`
 
-Los scripts de `AtomDisplacement` activan automáticamente ese entorno cuando llaman a `graph2mat` o a `siesta`.
+Para crear un entorno portable dentro del repo:
+
+```bash
+./scripts/create_graph2mat_venv.sh
+```
+
+La UI de comparacion usa por defecto:
+
+```bash
+source ${REPO_ROOT}/.venv/bin/activate
+```
+
+Si `graph2mat` no se puede instalar desde la URL configurada en
+`requirements-graph2mat.txt`, activa `.venv` e instala tu copia local:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e /ruta/a/graph2mat
+```
+
+Los scripts activan automáticamente ese entorno cuando llaman a `graph2mat` o a `siesta`.
 
 ## Flujo `MD`
 
