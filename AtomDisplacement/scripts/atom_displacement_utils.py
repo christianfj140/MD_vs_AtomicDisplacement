@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import csv
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ PIPELINE_CONFIG = load_pipeline_config()
 PIPELINE_PATHS = paths(PIPELINE_CONFIG)
 DEFAULT_VENV_ACTIVATE = PIPELINE_PATHS["venv_activate"]
 TORCH_COMPAT_DIR = ATOM_ROOT.parent / "scripts" / "torch_serialization_compat"
+sys.path.insert(0, str(TORCH_COMPAT_DIR))
+from torch_safe_globals import env_with_torch_compat
 
 BASE_DIR = PIPELINE_PATHS["base_dir"]
 RELAXED_DIR = PIPELINE_PATHS["relaxed_dir"]
@@ -134,9 +137,22 @@ def run_command_in_venv(
 
     quoted_cmd = " ".join(shlex_quote(token) for token in cmd)
     shell = command(PIPELINE_CONFIG, "shell")
+    env = env_with_torch_compat(
+        matmul_precision=PIPELINE_CONFIG.get("training", {}).get("torch_float32_matmul_precision"),
+        performance=PIPELINE_CONFIG.get("performance", {}),
+    )
+    export_names = [
+        "PYTHONPATH",
+        "TORCH_FLOAT32_MATMUL_PRECISION",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "TORCH_NUM_THREADS",
+    ]
+    exports = [f"export {name}={shlex.quote(env[name])}" for name in export_names if env.get(name)]
     bash_cmd = (
         f"source {shlex.quote(str(activate_path))} && "
-        f"export PYTHONPATH={shlex.quote(str(TORCH_COMPAT_DIR))}:$PYTHONPATH && "
+        f"{' && '.join(exports)} && "
         f"{quoted_cmd}"
     )
     print(f"\n[RUN] {shell} -lc \"{bash_cmd}\"")
@@ -160,9 +176,13 @@ def run_siesta_in_dir(
     shell = command(PIPELINE_CONFIG, "shell")
     siesta = command(PIPELINE_CONFIG, "siesta")
     run_fdf_name = PIPELINE_CONFIG["paths"]["run_fdf_name"]
+    env = env_with_torch_compat(performance=PIPELINE_CONFIG.get("performance", {}))
+    export_names = ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]
+    exports = [f"export {name}={shlex.quote(env[name])}" for name in export_names if env.get(name)]
+    export_prefix = f"{' && '.join(exports)} && " if exports else ""
     bash_cmd = (
         f"source {shlex.quote(str(activate_path))} "
-        f"&& {shlex.quote(siesta)} < {shlex.quote(str(run_fdf_name))}"
+        f"&& {export_prefix}{shlex.quote(siesta)} < {shlex.quote(str(run_fdf_name))}"
     )
     with run_out_path.open("w", encoding="utf-8") as run_out:
         process = subprocess.Popen(

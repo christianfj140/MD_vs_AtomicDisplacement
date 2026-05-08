@@ -11,9 +11,21 @@ from pathlib import Path
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
 sys.path.insert(0, str(TORCH_COMPAT_DIR))
-from torch_safe_globals import allow_graph2mat_checkpoint_globals
+from torch_safe_globals import (
+    allow_graph2mat_checkpoint_globals,
+    apply_torch_float32_matmul_precision,
+    apply_torch_num_threads,
+)
 
 allow_graph2mat_checkpoint_globals()
+
+from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint, write_checkpoint_manifest
+
+_PIPELINE_CONFIG = load_pipeline_config()
+apply_torch_float32_matmul_precision(
+    _PIPELINE_CONFIG.get("training", {}).get("torch_float32_matmul_precision")
+)
+apply_torch_num_threads((_PIPELINE_CONFIG.get("performance") or {}).get("torch_num_threads"))
 
 import pytorch_lightning as pl
 from graph2mat.tools.lightning import (
@@ -22,8 +34,6 @@ from graph2mat.tools.lightning import (
     SamplewiseMetricsLogger,
 )
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
-
-from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint, write_checkpoint_manifest
 
 
 def require_command(command_name: str) -> None:

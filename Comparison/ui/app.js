@@ -241,6 +241,44 @@ function parseSplitRatios() {
   };
 }
 
+function optionalPositiveInteger(id, label) {
+  const raw = String(document.getElementById(id)?.value || "").trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} debe ser un entero positivo.`);
+  }
+  return value;
+}
+
+function optionalBooleanSelect(id) {
+  const raw = String(document.getElementById(id)?.value || "").trim();
+  if (raw === "") return null;
+  return raw === "true";
+}
+
+function performanceSettings() {
+  const accelerator =
+    document.getElementById("performance-compute-accelerator")?.value ||
+    document.getElementById("compute-accelerator")?.value ||
+    "cpu";
+  return {
+    max_parallel_siesta_jobs: optionalPositiveInteger(
+      "performance-max-parallel-siesta-jobs",
+      "Max parallel SIESTA jobs",
+    ) || 1,
+    omp_num_threads: optionalPositiveInteger("performance-omp-num-threads", "OMP threads"),
+    mkl_num_threads: optionalPositiveInteger("performance-mkl-num-threads", "MKL threads"),
+    openblas_num_threads: optionalPositiveInteger("performance-openblas-num-threads", "OpenBLAS threads"),
+    torch_num_threads: optionalPositiveInteger("performance-torch-num-threads", "Torch threads"),
+    compute_accelerator: accelerator,
+    batch_size: optionalPositiveInteger("performance-batch-size", "Batch size override"),
+    store_in_memory: optionalBooleanSelect("performance-store-in-memory"),
+    torch_float32_matmul_precision:
+      document.getElementById("performance-torch-float32-matmul-precision")?.value || null,
+  };
+}
+
 function parseFcDisplacementOptionsText() {
   const rows = document
     .getElementById("fc-displacement-options")
@@ -556,6 +594,7 @@ async function runExperiment() {
   const splitRatios = parseSplitRatios();
   const randomSeed = Number(document.getElementById("fc-random-seed").value);
   const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
+  const performance = performanceSettings();
   const venvActivateCommandInput = document.getElementById("venv-activate-command");
   const venvActivateCommand = String(venvActivateCommandInput?.value || "").trim();
   state.experimentOffset = 0;
@@ -576,7 +615,8 @@ async function runExperiment() {
       test_sets: selectedTestSets(),
       primary_metric: document.getElementById("primary-metric").value,
       compute_budget_mode: document.getElementById("compute-budget-mode").value,
-      compute_accelerator: document.getElementById("compute-accelerator").value,
+      compute_accelerator: performance.compute_accelerator,
+      performance,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
       venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
@@ -1372,6 +1412,16 @@ function setupTabs() {
 }
 
 function setupEvents() {
+  const experimentAccelerator = document.getElementById("compute-accelerator");
+  const performanceAccelerator = document.getElementById("performance-compute-accelerator");
+  if (experimentAccelerator && performanceAccelerator) {
+    experimentAccelerator.addEventListener("change", () => {
+      performanceAccelerator.value = experimentAccelerator.value;
+    });
+    performanceAccelerator.addEventListener("change", () => {
+      experimentAccelerator.value = performanceAccelerator.value;
+    });
+  }
   document.getElementById("run-all").addEventListener("click", () => {
     runAll().catch((error) => showToast(error.message));
   });

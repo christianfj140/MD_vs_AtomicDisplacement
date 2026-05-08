@@ -1083,6 +1083,115 @@ def apply_training_accelerator(config: dict[str, Any], accelerator: str) -> None
     config.setdefault("training", {}).setdefault("trainer", {})["accelerator"] = accelerator
 
 
+DEFAULT_PERFORMANCE_SETTINGS: dict[str, Any] = {
+    "max_parallel_siesta_jobs": 1,
+    "omp_num_threads": None,
+    "mkl_num_threads": None,
+    "openblas_num_threads": None,
+    "torch_num_threads": None,
+    "compute_accelerator": "cpu",
+    "batch_size": None,
+    "store_in_memory": None,
+    "torch_float32_matmul_precision": None,
+}
+
+
+def parse_optional_positive_int(value: Any, name: str) -> int | None:
+    if value in (None, "", "null"):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} debe ser un entero positivo.") from exc
+    if number <= 0:
+        raise RuntimeError(f"{name} debe ser un entero positivo.")
+    return number
+
+
+def parse_performance_settings(value: Any, *, compute_accelerator: str | None = None) -> dict[str, Any]:
+    if value in (None, ""):
+        raw: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        raw = value
+    else:
+        raise RuntimeError("performance debe ser un objeto.")
+    settings = dict(DEFAULT_PERFORMANCE_SETTINGS)
+    settings["compute_accelerator"] = parse_compute_accelerator(
+        raw.get("compute_accelerator", compute_accelerator)
+    )
+    settings["max_parallel_siesta_jobs"] = parse_optional_positive_int(
+        raw.get("max_parallel_siesta_jobs", settings["max_parallel_siesta_jobs"]),
+        "performance.max_parallel_siesta_jobs",
+    ) or 1
+    for key in ("omp_num_threads", "mkl_num_threads", "openblas_num_threads", "torch_num_threads", "batch_size"):
+        settings[key] = parse_optional_positive_int(raw.get(key), f"performance.{key}")
+    if "store_in_memory" in raw and raw.get("store_in_memory") not in (None, ""):
+        store_raw = raw.get("store_in_memory")
+        if isinstance(store_raw, bool):
+            settings["store_in_memory"] = store_raw
+        else:
+            store_text = str(store_raw).strip().lower()
+            if store_text not in {"1", "0", "true", "false", "yes", "no", "on", "off", "si", "sí"}:
+                raise RuntimeError("performance.store_in_memory debe ser booleano o null.")
+            settings["store_in_memory"] = store_text in {"1", "true", "yes", "on", "si", "sí"}
+    precision = raw.get("torch_float32_matmul_precision")
+    if precision in (None, "", "null"):
+        settings["torch_float32_matmul_precision"] = None
+    else:
+        precision = str(precision).strip().lower()
+        if precision not in {"high", "medium"}:
+            raise RuntimeError("performance.torch_float32_matmul_precision debe ser null, high o medium.")
+        settings["torch_float32_matmul_precision"] = precision
+    return settings
+
+
+def performance_env(settings: dict[str, Any]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for key, env_name in (
+        ("omp_num_threads", "OMP_NUM_THREADS"),
+        ("mkl_num_threads", "MKL_NUM_THREADS"),
+        ("openblas_num_threads", "OPENBLAS_NUM_THREADS"),
+        ("torch_num_threads", "TORCH_NUM_THREADS"),
+    ):
+        value = settings.get(key)
+        if value not in (None, ""):
+            env[env_name] = str(int(value))
+    if settings.get("torch_float32_matmul_precision"):
+        env["TORCH_FLOAT32_MATMUL_PRECISION"] = str(settings["torch_float32_matmul_precision"])
+    return env
+
+
+def apply_performance_to_config(config: dict[str, Any], settings: dict[str, Any]) -> None:
+    config["performance"] = dict(settings)
+    apply_training_accelerator(config, str(settings["compute_accelerator"]))
+    training_data = config.setdefault("training", {}).setdefault("data", {})
+    if settings.get("batch_size") is not None:
+        training_data["batch_size"] = int(settings["batch_size"])
+    if settings.get("store_in_memory") is not None:
+        training_data["store_in_memory"] = bool(settings["store_in_memory"])
+        config.setdefault("testing", {}).setdefault("data", {})["store_in_memory"] = bool(settings["store_in_memory"])
+        config.setdefault("prediction", {}).setdefault("data", {})["store_in_memory"] = bool(settings["store_in_memory"])
+    config.setdefault("single_points", {})["workers"] = int(settings["max_parallel_siesta_jobs"])
+    config.setdefault("training", {})["torch_float32_matmul_precision"] = settings.get(
+        "torch_float32_matmul_precision"
+    )
+
+
+def cuda_available(python_executable: Path | str) -> bool:
+    result = subprocess.run(
+        [
+            str(python_executable),
+            "-c",
+            "import torch; print('1' if torch.cuda.is_available() else '0')",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip().endswith("1")
+
+
 def reference_budget_for_run(run: dict[str, Any]) -> int:
     for key in ("completed_samples", "effective_dataset_size", "dataset_size"):
         value = run.get(key)
@@ -2377,13 +2486,18 @@ class ExperimentRunner:
         selected_methods: list[str] | None = None,
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
+        performance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
             selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
             run_mode = parse_run_mode(run_mode)
-            compute_accelerator = parse_compute_accelerator(compute_accelerator)
+            performance_settings = parse_performance_settings(
+                performance,
+                compute_accelerator=compute_accelerator,
+            )
+            compute_accelerator = str(performance_settings["compute_accelerator"])
             pipeline_keys = pipeline_keys_for_methods(selected_methods)
             random_cartesian_options = random_cartesian_options or {}
             md_config = load_config(PIPELINES["md"].config_path)
@@ -2430,6 +2544,7 @@ class ExperimentRunner:
                     selected_methods,
                     run_mode,
                     random_cartesian_options,
+                    performance_settings,
                 ),
                 daemon=True,
             )
@@ -2500,6 +2615,7 @@ class ExperimentRunner:
         selected_methods: list[str],
         run_mode: str,
         random_cartesian_options: dict[str, Any] | None = None,
+        performance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         md_config = load_config(PIPELINES["md"].config_path)
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
@@ -2629,6 +2745,8 @@ class ExperimentRunner:
             },
             "compute_budget_mode": compute_budget_mode,
             "compute_accelerator": compute_accelerator,
+            "performance": dict(performance or DEFAULT_PERFORMANCE_SETTINGS),
+            "optimization_settings": dict(performance or DEFAULT_PERFORMANCE_SETTINGS),
             "strict_comparison_mode": STRICT_COMPARISON_MODE,
             "output_directories": {
                 "experiment_root": str(experiment_root(run_id)),
@@ -2638,6 +2756,17 @@ class ExperimentRunner:
                 "summary": str(experiment_root(run_id) / "summary"),
             },
             "timing": {
+                "stages": [],
+                "by_method": {},
+                "by_dataset": {},
+                "counters": {
+                    "siesta_launched": 0,
+                    "siesta_skipped_or_reused": 0,
+                    "siesta_failed": 0,
+                    "graph2mat_trainings": 0,
+                    "predictions": 0,
+                    "cross_evaluations": 0,
+                },
                 "md_siesta_generation_seconds": None,
                 "atom_displacement_siesta_generation_seconds": None,
                 "dataset_preparation_seconds": None,
@@ -2662,6 +2791,53 @@ class ExperimentRunner:
         path = experiment_manifest_path(str(manifest["experiment_id"]))
         path.parent.mkdir(parents=True, exist_ok=True)
         write_yaml(path, json_safe(manifest))
+
+    def _merge_run_timing(self, manifest: dict[str, Any], result: dict[str, Any]) -> None:
+        timing = manifest.setdefault("timing", {})
+        stages = timing.setdefault("stages", [])
+        by_method = timing.setdefault("by_method", {})
+        by_dataset = timing.setdefault("by_dataset", {})
+        counters = timing.setdefault("counters", {})
+        method = str(result.get("method_id") or result.get("pipeline") or "")
+        dataset = str(result.get("dataset_label") or f"dataset_{result.get('dataset_size', '')}")
+        elapsed = result.get("pipeline_elapsed_seconds")
+        if isinstance(elapsed, (int, float)):
+            self._append(f"[TIMING] {method} {dataset} method_run={float(elapsed):.3f}s\n")
+            stages.append(
+                {
+                    "method": method,
+                    "dataset": dataset,
+                    "stage": "method_run",
+                    "wall_time_seconds": float(elapsed),
+                }
+            )
+            by_method[method] = float(by_method.get(method, 0.0)) + float(elapsed)
+            by_dataset[dataset] = float(by_dataset.get(dataset, 0.0)) + float(elapsed)
+        breakdown = result.get("timing_breakdown") or {}
+        for stage, seconds in {
+            "siesta_generation": breakdown.get("md_siesta_generation_seconds")
+            or breakdown.get("atomdisp_siesta_generation_seconds"),
+            "dataset_preparation": breakdown.get("dataset_preparation_seconds"),
+            "test_single_points": breakdown.get("test_single_points_seconds"),
+            "training_prediction": breakdown.get("training_prediction_seconds"),
+            "hamiltonian_metrics": breakdown.get("evaluation_seconds"),
+        }.items():
+            if isinstance(seconds, (int, float)):
+                stages.append(
+                    {
+                        "method": method,
+                        "dataset": dataset,
+                        "stage": stage,
+                        "wall_time_seconds": float(seconds),
+                    }
+                )
+        counts = result.get("siesta_counts") or {}
+        counters["siesta_launched"] = int(counters.get("siesta_launched", 0)) + int(counts.get("launched", 0) or 0)
+        counters["siesta_skipped_or_reused"] = int(counters.get("siesta_skipped_or_reused", 0)) + int(counts.get("skipped_or_reused", 0) or 0)
+        counters["siesta_failed"] = int(counters.get("siesta_failed", 0)) + int(counts.get("failed", 0) or 0)
+        if result.get("run_mode", manifest.get("run_mode")) != "dataset_only":
+            counters["graph2mat_trainings"] = int(counters.get("graph2mat_trainings", 0)) + 1
+            counters["predictions"] = int(counters.get("predictions", 0)) + (1 if int(result.get("predicted_hamiltonians") or 0) > 0 else 0)
 
     def _set_current(
         self,
@@ -2698,6 +2874,7 @@ class ExperimentRunner:
         selected_methods: list[str] | None = None,
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
+        performance: dict[str, Any] | None = None,
     ) -> None:
         original_configs = {
             key: spec.config_path.read_text(encoding="utf-8")
@@ -2706,7 +2883,11 @@ class ExperimentRunner:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
         run_mode = parse_run_mode(run_mode)
-        compute_accelerator = parse_compute_accelerator(compute_accelerator)
+        performance_settings = parse_performance_settings(
+            performance,
+            compute_accelerator=compute_accelerator,
+        )
+        compute_accelerator = str(performance_settings["compute_accelerator"])
         random_cartesian_options = random_cartesian_options or {}
         pipeline_keys = pipeline_keys_for_methods(selected_methods)
         manifest = self._initial_experiment_manifest(
@@ -2724,6 +2905,7 @@ class ExperimentRunner:
             selected_methods,
             run_mode,
             random_cartesian_options,
+            performance_settings,
         )
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
         if manifest.get("siesta_settings_warning"):
@@ -2753,6 +2935,7 @@ class ExperimentRunner:
                 f"[UI] Primary metric: {primary_metric}; compute mode: {compute_budget_mode}; "
                 f"accelerator: {compute_accelerator}\n"
             )
+            self._append(f"[PERF] Effective settings: {json.dumps(json_safe(performance_settings), sort_keys=True)}\n")
             if manifest.get("siesta_settings_warning"):
                 self._append(f"[WARN] {manifest['siesta_settings_warning']}\n")
             if manifest.get("model_config_warning"):
@@ -2811,12 +2994,14 @@ class ExperimentRunner:
                     split_mode=split_mode,
                     run_mode=run_mode,
                     compute_accelerator=compute_accelerator,
+                    performance=performance_settings,
                 )
                 self._annotate_nested_subset(result, previous_by_method.get("md"))
                 previous_by_method["md"] = result
                 with self._lock:
                     self._results.append(result)
                 manifest["runs"].append(result)
+                self._merge_run_timing(manifest, result)
                 self._write_experiment_manifest(manifest)
             atom_runs = atom_dataset_specs or [
                 {
@@ -2841,12 +3026,14 @@ class ExperimentRunner:
                     split_mode=split_mode,
                     run_mode=run_mode,
                     compute_accelerator=compute_accelerator,
+                    performance=performance_settings,
                 )
                 self._annotate_nested_subset(result, previous_by_method.get("atom_displacement"))
                 previous_by_method["atom_displacement"] = result
                 with self._lock:
                     self._results.append(result)
                 manifest["runs"].append(result)
+                self._merge_run_timing(manifest, result)
                 self._write_experiment_manifest(manifest)
             if "random_cartesian" in selected_methods:
                 self._ensure_not_stopped()
@@ -2861,10 +3048,12 @@ class ExperimentRunner:
                         random_cartesian_options=size_options,
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
+                        performance=performance_settings,
                     )
                     with self._lock:
                         self._results.append(result)
                     manifest["runs"].append(result)
+                    self._merge_run_timing(manifest, result)
                     self._write_experiment_manifest(manifest)
             if run_mode == "dataset_only":
                 manifest["cross_evaluation"] = {
@@ -2886,6 +3075,11 @@ class ExperimentRunner:
                 self._append("[UI] Solo hay un metodo seleccionado; se omite winner robusto.\n")
             else:
                 manifest["cross_evaluation"] = self._run_cross_evaluation(run_id, manifest)
+                cross_items = manifest["cross_evaluation"].get("cross_evaluations", [])
+                if isinstance(cross_items, list):
+                    counters = manifest.setdefault("timing", {}).setdefault("counters", {})
+                    counters["cross_evaluations"] = int(counters.get("cross_evaluations", 0)) + len(cross_items)
+                    counters["predictions"] = int(counters.get("predictions", 0)) + len(cross_items)
                 if manifest["cross_evaluation"].get("ok"):
                     recommendation_path = experiment_root(run_id) / "summary" / "recommendation.json"
                     if recommendation_path.exists():
@@ -2965,6 +3159,7 @@ class ExperimentRunner:
         split_mode: str = "block",
         run_mode: str = "full_strict_pipeline",
         compute_accelerator: str = "cpu",
+        performance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -2992,8 +3187,11 @@ class ExperimentRunner:
         self._append(f"[UI] Workspace: {workspace}\n")
         self._append(f"[UI] Result dir previsto: {result_dir}\n")
         self._append(f"[UI] Config temporal: {spec.config_path}\n")
-        apply_training_accelerator(config, compute_accelerator)
+        performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
+        apply_performance_to_config(config, performance)
+        compute_accelerator = str(performance["compute_accelerator"])
         self._append(f"[UI] Accelerator: {compute_accelerator}\n")
+        self._append(f"[PERF] {key} {dataset_label}: {json.dumps(json_safe(performance), sort_keys=True)}\n")
         with self._lock:
             log_start = len(self._logs)
         prepare_metadata: dict[str, Any] = {}
@@ -3003,12 +3201,14 @@ class ExperimentRunner:
             config.setdefault("pipeline", {})["steps"] = ["generate_md_dataset"]
             write_yaml(spec.config_path, config)
             self._append("[UI] Config temporal MD escrita para generar dataset y manifests.\n")
+            generation_started = time.time()
             generation_returncode = self._run_pipeline_process(
                 spec,
                 key=key,
                 size=size,
                 started_at=started_at,
             )
+            prepare_metadata["generation_seconds"] = time.time() - generation_started
             if generation_returncode != 0:
                 raise RuntimeError(
                     f"{spec.label} dataset_{size} fallo generando dataset con codigo "
@@ -3028,7 +3228,9 @@ class ExperimentRunner:
                 ] or ["run_md_training", "run_md_testing", "run_md_prediction"]
                 write_yaml(spec.config_path, config)
                 self._append("[UI] Config temporal MD escrita para entrenar/evaluar tras validacion.\n")
+                training_started = time.time()
                 returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+                prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         else:
             self._prepare_atom_generation_config(
                 config,
@@ -3041,12 +3243,14 @@ class ExperimentRunner:
             self._append(
                 "[UI] Config temporal FC escrita; SIESTA generara AtDis_steps en el workspace.\n"
             )
+            generation_started = time.time()
             generation_returncode = self._run_pipeline_process(
                 spec,
                 key=key,
                 size=size,
                 started_at=started_at,
             )
+            prepare_metadata["generation_seconds"] = time.time() - generation_started
             if generation_returncode != 0:
                 raise RuntimeError(
                     f"{spec.label} dataset_{size} fallo generando FC con codigo "
@@ -3056,7 +3260,9 @@ class ExperimentRunner:
             write_yaml(spec.config_path, config)
             self._append("[UI] Config temporal de entrenamiento escrita tras FC.\n")
             if prepare_metadata.get("test_needs_siesta"):
+                test_siesta_started = time.time()
                 self._run_atom_test_single_points(spec, config, Path(prepare_metadata["test_samples_dir"]))
+                prepare_metadata["test_single_points_seconds"] = time.time() - test_siesta_started
                 self._refresh_atom_split_manifests(config)
                 write_yaml(spec.config_path, config)
                 self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
@@ -3067,7 +3273,9 @@ class ExperimentRunner:
                 self._append("[UI] dataset_only: SIESTA FC y splits validados; no se entrena ni predice.\n")
                 returncode = 0
             else:
+                training_started = time.time()
                 returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+                prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         with self._lock:
             run_log = "".join(self._logs[log_start:])
         pipeline_elapsed = time.time() - started_at
@@ -3099,6 +3307,7 @@ class ExperimentRunner:
         random_cartesian_options: dict[str, Any] | None = None,
         run_mode: str = "dataset_only",
         compute_accelerator: str = "cpu",
+        performance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
         dataset_label = f"dataset_{size}"
@@ -3112,8 +3321,11 @@ class ExperimentRunner:
         )
         self._append(f"\n[UI] === Random Cartesian {dataset_label} ===\n")
         config = load_config(spec.config_path)
-        apply_training_accelerator(config, compute_accelerator)
+        performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
+        apply_performance_to_config(config, performance)
+        compute_accelerator = str(performance["compute_accelerator"])
         self._append(f"[UI] Accelerator: {compute_accelerator}\n")
+        self._append(f"[PERF] random_cartesian {dataset_label}: {json.dumps(json_safe(performance), sort_keys=True)}\n")
         workspace = WORKSPACES_ROOT / run_id / "random_cartesian" / dataset_label
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
@@ -3159,6 +3371,7 @@ class ExperimentRunner:
             size=size,
             started_at=started_at,
         )
+        generation_seconds = time.time() - started_at
         if generation_returncode != 0:
             raise RuntimeError(f"Random Cartesian dataset_{size} fallo generando dataset con codigo {generation_returncode}.")
         prepare_metadata = {
@@ -3167,6 +3380,7 @@ class ExperimentRunner:
             "generated_samples": size,
             "completed_samples": None,
             "seed": random_config.get("seed"),
+            "generation_seconds": generation_seconds,
         }
         returncode = 0
         if run_mode != "dataset_only":
@@ -3181,12 +3395,14 @@ class ExperimentRunner:
             write_yaml(spec.config_path, config)
             self._append("[UI] Config temporal Random Cartesian escrita para entrenar/evaluar.\n")
             self._validate_split_manifests("atom_displacement", config, size)
+            training_started = time.time()
             returncode = self._run_pipeline_process(
                 spec,
                 key="random_cartesian",
                 size=size,
                 started_at=started_at,
             )
+            prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         with self._lock:
             run_log = "".join(self._logs[log_start:])
         pipeline_elapsed = time.time() - started_at
@@ -3531,11 +3747,31 @@ class ExperimentRunner:
         venv_activate = resolve_pipeline_path(spec, config["paths"]["venv_activate"])
         if not venv_activate.exists():
             raise RuntimeError(f"{spec.label}: no se encontro el entorno virtual: {venv_activate}")
+        python_executable = venv_activate.parent / "python"
+        if not python_executable.exists():
+            python_executable = Path(sys.executable)
+        accelerator = str(config.get("training", {}).get("trainer", {}).get("accelerator", "cpu"))
+        if accelerator in {"gpu", "auto"}:
+            has_cuda = cuda_available(python_executable)
+            if accelerator == "gpu" and not has_cuda:
+                raise RuntimeError(f"{spec.label}: accelerator=gpu solicitado pero CUDA no esta disponible.")
+            if accelerator == "auto":
+                resolved = "gpu" if has_cuda else "cpu"
+                config.setdefault("training", {}).setdefault("trainer", {})["accelerator"] = resolved
+                config.setdefault("performance", {})["compute_accelerator"] = resolved
+                write_yaml(spec.config_path, config)
+                message = "GPU disponible; usando accelerator=gpu." if has_cuda else "CUDA no disponible; auto usa accelerator=cpu."
+                self._append(f"[PERF] {spec.label}: {message}\n")
         shell_command = (
             f"source {shlex.quote(str(venv_activate))} "
             f"&& {shlex.quote(python)} {shlex.quote(str(spec.main_script))}"
         )
         command = [shell, "-lc", shell_command]
+        env = {
+            **os.environ,
+            "PYTHONUNBUFFERED": "1",
+            **performance_env(config.get("performance", {})),
+        }
         self._append(f"[RUN] {' '.join(command)}\n")
         master_fd: int | None = None
         if pty is not None:
@@ -3546,7 +3782,7 @@ class ExperimentRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=slave_fd,
                 stderr=slave_fd,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env=env,
             )
             os.close(slave_fd)
         else:
@@ -3557,7 +3793,7 @@ class ExperimentRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env=env,
             )
         with self._lock:
             self._process = process
@@ -3787,6 +4023,39 @@ class ExperimentRunner:
         self._append(f"[UI] Validacion de muestras completada para {PIPELINES[key].label} dataset_{size}.\n")
         return summaries
 
+    def _single_point_counts(self, summary_path: Path) -> dict[str, int]:
+        counts = {
+            "launched": 0,
+            "skipped_or_reused": 0,
+            "failed": 0,
+            "valid": 0,
+            "total": 0,
+        }
+        if not summary_path.exists():
+            return counts
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            return counts
+        samples = payload if isinstance(payload, list) else payload.get("samples", [])
+        if not isinstance(samples, list):
+            return counts
+        for row in samples:
+            if not isinstance(row, dict):
+                continue
+            counts["total"] += 1
+            status = str(row.get("status") or "")
+            if status == "skipped_validated":
+                counts["skipped_or_reused"] += 1
+            elif status == "failed":
+                counts["failed"] += 1
+                counts["launched"] += 1
+            elif status:
+                counts["launched"] += 1
+            if row.get("valid") is True:
+                counts["valid"] += 1
+        return counts
+
     def _archive_outputs(
         self,
         key: str,
@@ -3900,6 +4169,7 @@ class ExperimentRunner:
             copy_if_exists(manifest_file, result_dir / "splits" / manifest_file.name)
         for validation_file in sorted((dataset_dir / "validation").glob("*/*.csv")):
             copy_if_exists(validation_file, result_dir / "validation" / validation_file.parent.name / validation_file.name)
+        siesta_counts = self._single_point_counts(result_dir / "run_summary.json")
         if run_mode == "dataset_only":
             evaluation_metrics = {
                 "skipped": True,
@@ -3928,6 +4198,8 @@ class ExperimentRunner:
         else:
             timing_breakdown["atomdisp_siesta_generation_seconds"] = prepare_metadata.get("generation_seconds")
             timing_breakdown["dataset_preparation_seconds"] = prepare_metadata.get("dataset_preparation_seconds")
+            timing_breakdown["test_single_points_seconds"] = prepare_metadata.get("test_single_points_seconds")
+        timing_breakdown["training_prediction_seconds"] = prepare_metadata.get("training_prediction_seconds")
         (result_dir / "timing_breakdown.json").write_text(
             json.dumps(json_safe(timing_breakdown), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
             encoding="utf-8",
@@ -3988,6 +4260,8 @@ class ExperimentRunner:
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
             "timing_breakdown": timing_breakdown,
+            "siesta_counts": siesta_counts,
+            "performance": config.get("performance", {}),
             "generated_samples": prepare_metadata.get("generated_samples"),
             "completed_samples": prepare_metadata.get("completed_samples"),
             "fc_generated_samples": prepare_metadata.get("fc_generated_samples"),
@@ -4069,6 +4343,7 @@ class ExperimentRunner:
         *,
         label: str,
         cwd: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self._append(f"[UI] {label}: {' '.join(command)}\n")
         result = subprocess.run(
@@ -4077,6 +4352,7 @@ class ExperimentRunner:
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
         if result.stdout.strip():
             self._append(result.stdout.strip() + "\n")
@@ -4337,11 +4613,15 @@ class ExperimentRunner:
                         ]
                         if n_matrix_components is not None:
                             predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                        matmul_precision = train_config.get("training", {}).get("torch_float32_matmul_precision")
+                        if matmul_precision in {"high", "medium"}:
+                            predict_command.extend(["--torch-float32-matmul-precision", str(matmul_precision)])
                         predict_command.append("--patch-graph2mat-basis-loading")
                         predict_start = time.time()
                         predict_result = self._run_local_script(
                             predict_command,
                             label=f"Prediccion cruzada {cross_name}",
+                            env={**os.environ, **performance_env(train_config.get("performance", {}))},
                         )
                         prediction_time = time.time() - predict_start
                         if predict_result.returncode != 0:
@@ -4425,7 +4705,11 @@ class ExperimentRunner:
             "--output-dir",
             str(summary_root),
         ]
-        aggregate_result = self._run_local_script(aggregate_command, label="Agregando metricas cruzadas")
+        aggregate_result = self._run_local_script(
+            aggregate_command,
+            label="Agregando metricas cruzadas",
+            env={**os.environ, **performance_env(manifest.get("performance", {}))},
+        )
         if aggregate_result.returncode != 0:
             raise RuntimeError("Cross metric aggregation failed.")
 
@@ -4441,7 +4725,11 @@ class ExperimentRunner:
             "--minimum-robust-seeds",
             str(manifest.get("minimum_robust_seeds", MINIMUM_ROBUST_SEEDS)),
         ]
-        winner_result = self._run_local_script(winner_command, label="Analizando winners")
+        winner_result = self._run_local_script(
+            winner_command,
+            label="Analizando winners",
+            env={**os.environ, **performance_env(manifest.get("performance", {}))},
+        )
         if winner_result.returncode != 0:
             raise RuntimeError("Winner analysis failed.")
 
@@ -4634,9 +4922,16 @@ class ExperimentRunner:
                     ]
                     if n_matrix_components is not None:
                         predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                    matmul_precision = train_config.get("training", {}).get("torch_float32_matmul_precision")
+                    if matmul_precision in {"high", "medium"}:
+                        predict_command.extend(["--torch-float32-matmul-precision", str(matmul_precision)])
                     predict_command.append("--patch-graph2mat-basis-loading")
                     predict_start = time.time()
-                    predict_result = self._run_local_script(predict_command, label=f"Prediccion cruzada {cross_name}")
+                    predict_result = self._run_local_script(
+                        predict_command,
+                        label=f"Prediccion cruzada {cross_name}",
+                        env={**os.environ, **performance_env(train_config.get("performance", {}))},
+                    )
                     prediction_time = time.time() - predict_start
                     if predict_result.returncode != 0:
                         summary["missing_cells"].append(required_cell)
@@ -4703,7 +4998,11 @@ class ExperimentRunner:
             "--output-dir",
             str(summary_root),
         ]
-        aggregate_result = self._run_local_script(aggregate_command, label="Agregando metricas cruzadas")
+        aggregate_result = self._run_local_script(
+            aggregate_command,
+            label="Agregando metricas cruzadas",
+            env={**os.environ, **performance_env(manifest.get("performance", {}))},
+        )
         if aggregate_result.returncode != 0:
             raise RuntimeError("Cross metric aggregation failed.")
 
@@ -4719,7 +5018,11 @@ class ExperimentRunner:
             "--minimum-robust-seeds",
             str(manifest.get("minimum_robust_seeds", MINIMUM_ROBUST_SEEDS)),
         ]
-        winner_result = self._run_local_script(winner_command, label="Analizando winners")
+        winner_result = self._run_local_script(
+            winner_command,
+            label="Analizando winners",
+            env={**os.environ, **performance_env(manifest.get("performance", {}))},
+        )
         if winner_result.returncode != 0:
             raise RuntimeError("Winner analysis failed.")
 
@@ -4960,6 +5263,11 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 primary_metric = str(payload.get("primary_metric") or DEFAULT_PRIMARY_METRIC).strip()
                 compute_budget_mode = parse_compute_budget_mode(payload.get("compute_budget_mode"))
                 compute_accelerator = parse_compute_accelerator(payload.get("compute_accelerator"))
+                performance_settings = parse_performance_settings(
+                    payload.get("performance"),
+                    compute_accelerator=compute_accelerator,
+                )
+                compute_accelerator = str(performance_settings["compute_accelerator"])
                 raw_venv_activate_command = payload.get("venv_activate_command")
                 venv_activate_command = (
                     str(raw_venv_activate_command).strip()
@@ -5030,6 +5338,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         selected_methods,
                         run_mode,
                         random_cartesian_options,
+                        performance_settings,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

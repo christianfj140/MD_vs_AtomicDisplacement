@@ -12,16 +12,25 @@ from pathlib import Path
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
 sys.path.insert(0, str(TORCH_COMPAT_DIR))
-from torch_safe_globals import allow_graph2mat_checkpoint_globals
+from torch_safe_globals import (
+    allow_graph2mat_checkpoint_globals,
+    apply_torch_float32_matmul_precision,
+    apply_torch_num_threads,
+)
 
 allow_graph2mat_checkpoint_globals()
+
+from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, resolve_ckpt_rel_path
+
+apply_torch_float32_matmul_precision(
+    PIPELINE_CONFIG.get("training", {}).get("torch_float32_matmul_precision")
+)
+apply_torch_num_threads((PIPELINE_CONFIG.get("performance") or {}).get("torch_num_threads"))
 
 import pytorch_lightning as pl
 from graph2mat.core.data.processing import MatrixDataProcessor
 from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
-
-from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, resolve_ckpt_rel_path
 
 
 SPLITS_DIR = DATASET_DIR / "splits"

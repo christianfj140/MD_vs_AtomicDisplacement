@@ -177,7 +177,9 @@ single_points:
   limit: null
   rerun: false
   allow_unvalidated_matrices: true
+  workers: 1
 training:
+  torch_float32_matmul_precision: null
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
@@ -244,6 +246,7 @@ prediction:
     matrix_writer: true
     output_file: ML_prediction.HSX
 pipeline:
+  skip_model_test: false
   steps:
   - render_inputs
   - generate_atom_displacement_dataset
@@ -253,3 +256,13 @@ pipeline:
   - run_atdisp_training
   - run_atdisp_testing
   - run_atdisp_prediction
+performance:
+  max_parallel_siesta_jobs: 1
+  omp_num_threads: null
+  mkl_num_threads: null
+  openblas_num_threads: null
+  torch_num_threads: null
+  compute_accelerator: cpu
+  batch_size: null
+  store_in_memory: null
+  torch_float32_matmul_precision: null

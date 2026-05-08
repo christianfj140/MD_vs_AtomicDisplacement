@@ -197,7 +197,8 @@ def render_run_fdf(config: dict[str, Any]) -> str:
 
 
 def render_training_config(config: dict[str, Any]) -> str:
-    training_config = config["training"]
+    training_config = dict(config["training"])
+    training_config.pop("torch_float32_matmul_precision", None)
     return "# Generated from ../pipeline_config.yaml\n" + yaml.safe_dump(
         training_config,
         sort_keys=False,

@@ -16,6 +16,7 @@ SCRIPT_BY_STEP = {
     "run_md_testing": SCRIPTS_DIR / "run_md_testing.py",
     "run_md_prediction": SCRIPTS_DIR / "run_md_prediction.py",
 }
+TEST_STEPS = {"run_md_testing"}
 
 
 def run_step(script_path: Path) -> None:
@@ -34,7 +35,13 @@ def run_step(script_path: Path) -> None:
 
 def main() -> int:
     config = load_pipeline_config()
-    pipeline_scripts = [SCRIPT_BY_STEP[step] for step in config["pipeline"]["steps"]]
+    skip_model_test = bool(config.get("pipeline", {}).get("skip_model_test", False))
+    pipeline_scripts = []
+    for step in config["pipeline"]["steps"]:
+        if skip_model_test and step in TEST_STEPS:
+            print(f"[SKIP] {step}: pipeline.skip_model_test=true")
+            continue
+        pipeline_scripts.append(SCRIPT_BY_STEP[step])
 
     print("=== Pipeline MD completo ===")
     for step in pipeline_scripts:

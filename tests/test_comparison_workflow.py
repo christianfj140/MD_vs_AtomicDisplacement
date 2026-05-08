@@ -126,6 +126,46 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module.apply_training_accelerator(config, "gpu")
         self.assertEqual(config["training"]["trainer"]["accelerator"], "gpu")
 
+    def test_performance_settings_validation_env_and_config_application(self) -> None:
+        module = self.load_pipeline_ui_module()
+        settings = module.parse_performance_settings(
+            {
+                "max_parallel_siesta_jobs": "2",
+                "omp_num_threads": "3",
+                "mkl_num_threads": None,
+                "openblas_num_threads": "",
+                "torch_num_threads": "4",
+                "compute_accelerator": "auto",
+                "batch_size": "16",
+                "store_in_memory": "false",
+                "torch_float32_matmul_precision": "high",
+            }
+        )
+        self.assertEqual(settings["max_parallel_siesta_jobs"], 2)
+        self.assertEqual(settings["compute_accelerator"], "auto")
+        self.assertEqual(settings["batch_size"], 16)
+        self.assertIs(settings["store_in_memory"], False)
+        env = module.performance_env(settings)
+        self.assertEqual(env["OMP_NUM_THREADS"], "3")
+        self.assertEqual(env["TORCH_NUM_THREADS"], "4")
+        self.assertEqual(env["TORCH_FLOAT32_MATMUL_PRECISION"], "high")
+        config = {
+            "training": {"trainer": {"accelerator": "cpu"}, "data": {}},
+            "testing": {"data": {}},
+            "prediction": {"data": {}},
+            "single_points": {},
+        }
+        module.apply_performance_to_config(config, settings)
+        self.assertEqual(config["training"]["trainer"]["accelerator"], "auto")
+        self.assertEqual(config["training"]["data"]["batch_size"], 16)
+        self.assertIs(config["training"]["data"]["store_in_memory"], False)
+        self.assertIs(config["testing"]["data"]["store_in_memory"], False)
+        self.assertEqual(config["single_points"]["workers"], 2)
+        with self.assertRaisesRegex(RuntimeError, "performance.max_parallel_siesta_jobs"):
+            module.parse_performance_settings({"max_parallel_siesta_jobs": 0})
+        with self.assertRaisesRegex(RuntimeError, "store_in_memory"):
+            module.parse_performance_settings({"store_in_memory": "maybe"})
+
     def test_default_venv_command_is_repo_portable(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
@@ -168,6 +208,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     "result_dir": str(root / "fake" / key / f"dataset_{size}"),
                     "dataset_sample_ids": [f"{key}-{size}"],
                     "dataset_sample_hash": f"hash-{key}-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 1.25,
+                    "siesta_counts": {"launched": 1, "skipped_or_reused": 0, "failed": 0},
                 }
 
             def fake_cross(*_args, **_kwargs):
@@ -185,12 +228,16 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 selected_methods=["md", "siesta_fc_cartesian"],
                 run_mode="dataset_only",
                 compute_accelerator="gpu",
+                performance={"compute_accelerator": "gpu", "max_parallel_siesta_jobs": 2},
             )
             manifest = module.load_config(root / "results" / "dataset_only_case" / "experiment_manifest.yaml")
             self.assertEqual(manifest["run_mode"], "dataset_only")
             self.assertEqual(manifest["scientific_status"], "dataset_only")
             self.assertEqual(manifest["selected_methods"], ["md", "siesta_fc_cartesian"])
             self.assertEqual(manifest["compute_accelerator"], "gpu")
+            self.assertEqual(manifest["performance"]["max_parallel_siesta_jobs"], 2)
+            self.assertEqual(manifest["timing"]["counters"]["siesta_launched"], 2)
+            self.assertTrue(manifest["timing"]["stages"])
             self.assertEqual(calls["cross"], 0)
             self.assertEqual(
                 calls["run_one"],
@@ -275,10 +322,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
             finally:
                 module.threading.Thread = original_thread
             self.assertEqual(status["run_id"], runner._run_id)
-            self.assertEqual(started["args"][-4], "gpu")
-            self.assertEqual(started["args"][-3], ["random_cartesian"])
-            self.assertEqual(started["args"][-2], "full_strict_pipeline")
-            self.assertEqual(started["args"][-1], {"n_structures": 3})
+            self.assertEqual(started["args"][-5], "gpu")
+            self.assertEqual(started["args"][-4], ["random_cartesian"])
+            self.assertEqual(started["args"][-3], "full_strict_pipeline")
+            self.assertEqual(started["args"][-2], {"n_structures": 3})
+            self.assertEqual(started["args"][-1]["compute_accelerator"], "gpu")
 
     def test_ui_experiment_payload_includes_methods_and_run_mode(self) -> None:
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
@@ -299,7 +347,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('value="cpu"', index_html)
         self.assertIn('value="gpu"', index_html)
         self.assertIn('value="auto"', index_html)
-        self.assertIn('compute_accelerator: document.getElementById("compute-accelerator").value', app_js)
+        self.assertIn('id="performance-compute-accelerator"', index_html)
+        self.assertIn('id="performance-max-parallel-siesta-jobs"', index_html)
+        self.assertIn("performanceSettings()", app_js)
+        self.assertIn("performance,", app_js)
+        self.assertIn("compute_accelerator: performance.compute_accelerator", app_js)
         self.assertIn("parseRandomCartesianOptions(methods)", app_js)
         self.assertIn("random_cartesian_options: randomCartesianOptions", app_js)
         self.assertIn("n_structures", app_js)
@@ -771,6 +823,82 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(calls, [sample])
             summary = json.loads((root / "validation" / "validation_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["valid_samples"], 1)
+
+    def test_run_single_points_workers_keep_summary_order(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "run_single_points",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "run_single_points.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            samples = [make_sample(root, f"{index:03d}", hamiltonian=False) for index in range(4)]
+            for sample in samples:
+                (sample / "RUN.out").unlink()
+            calls: list[str] = []
+
+            module.generated_sample_dirs = lambda: list(samples)
+            module.require_command = lambda command: None
+            module.DATASET_DIR = root
+            module.PIPELINE_PATHS["run_summary_path"] = root / "run_summary.json"
+            module.PIPELINE_CONFIG.setdefault("single_points", {})["allow_unvalidated_matrices"] = False
+
+            def fake_run_siesta(sample_dir: Path, output_path: Path) -> int:
+                calls.append(sample_dir.name)
+                output_path.write_text("Job completed\nSCF cycle converged\n", encoding="utf-8")
+                (sample_dir / "siesta.TSHS").write_bytes(b"matrix")
+                return 0
+
+            module.run_siesta_in_dir = fake_run_siesta
+            argv = sys.argv
+            try:
+                sys.argv = ["run_single_points.py", "--workers", "2"]
+                rc = module.main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(rc, 0)
+            self.assertCountEqual(calls, [sample.name for sample in samples])
+            summary = json.loads((root / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual([row["id"] for row in summary], [sample.name for sample in samples])
+
+    def test_run_single_points_reuses_local_validated_outputs(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "run_single_points",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "run_single_points.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root, "001")
+
+            module.generated_sample_dirs = lambda: [sample]
+            module.require_command = lambda command: None
+            module.DATASET_DIR = root
+            module.PIPELINE_PATHS["run_summary_path"] = root / "run_summary.json"
+            module.PIPELINE_CONFIG.setdefault("single_points", {})["allow_unvalidated_matrices"] = False
+
+            def fail_if_called(sample_dir: Path, output_path: Path) -> int:
+                raise AssertionError("SIESTA should not run when the local sample is already validated")
+
+            module.run_siesta_in_dir = fail_if_called
+            argv = sys.argv
+            try:
+                sys.argv = ["run_single_points.py"]
+                self.assertEqual(module.main(), 0)
+            finally:
+                sys.argv = argv
+            summary = json.loads((root / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary[0]["status"], "skipped_validated")
 
     def test_build_common_tests_refuses_train_test_overlap(self) -> None:
         with workspace_tempdir() as tmp:

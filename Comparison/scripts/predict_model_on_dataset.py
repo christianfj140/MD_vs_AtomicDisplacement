@@ -29,7 +29,10 @@ from typing import Any
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
 sys.path.insert(0, str(TORCH_COMPAT_DIR))
-from torch_safe_globals import allow_graph2mat_checkpoint_globals
+from torch_safe_globals import (
+    allow_graph2mat_checkpoint_globals,
+    apply_torch_float32_matmul_precision,
+)
 
 allow_graph2mat_checkpoint_globals()
 
@@ -219,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--store-in-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--accelerator", default="cpu")
     parser.add_argument("--n-matrix-components", type=int, default=None)
+    parser.add_argument("--torch-float32-matmul-precision", choices=["high", "medium"], default=None)
     parser.add_argument("--patch-graph2mat-basis-loading", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -226,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    apply_torch_float32_matmul_precision(args.torch_float32_matmul_precision)
     if not args.checkpoint.exists():
         raise RuntimeError(f"Checkpoint does not exist: {args.checkpoint}")
     args.output_dir.mkdir(parents=True, exist_ok=True)

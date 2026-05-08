@@ -17,6 +17,7 @@
         <nav class="tabs" aria-label="Views">
           <button class="tab active" data-view="run">Run</button>
           <button class="tab" data-view="experiment">Experiment</button>
+          <button class="tab" data-view="performance">Rendimiento</button>
           <button class="tab" data-view="results">Results</button>
           <button class="tab" data-view="api">API</button>
         </nav>
@@ -279,6 +280,86 @@
             <code id="venv-command-preview">source "/ruta/al/venv/bin/activate"</code>
             <div id="experiment-results" class="result-list"></div>
             <pre id="experiment-log" class="log-output experiment-log"></pre>
+          </section>
+        </section>
+
+        <section id="view-performance" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Execution controls</p>
+              <h2>Rendimiento</h2>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">SIESTA</p>
+                <h3>Single-point parallelism</h3>
+              </div>
+            </div>
+            <div class="grid four split-grid">
+              <label class="field">
+                <span>Max parallel SIESTA jobs</span>
+                <input id="performance-max-parallel-siesta-jobs" type="number" step="1" min="1" value="1" />
+                <small>Only independent AtomDisplacement / Random Cartesian samples. MD trajectories stay sequential.</small>
+              </label>
+              <label class="field">
+                <span>OMP threads</span>
+                <input id="performance-omp-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
+              </label>
+              <label class="field">
+                <span>MKL threads</span>
+                <input id="performance-mkl-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
+              </label>
+              <label class="field">
+                <span>OpenBLAS threads</span>
+                <input id="performance-openblas-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
+              </label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Graph2Mat / PyTorch</p>
+                <h3>Training and prediction resources</h3>
+              </div>
+            </div>
+            <div class="grid four split-grid">
+              <label class="field">
+                <span>Processor</span>
+                <select id="performance-compute-accelerator">
+                  <option value="cpu" selected>CPU</option>
+                  <option value="gpu">GPU</option>
+                  <option value="auto">Auto</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Batch size override</span>
+                <input id="performance-batch-size" type="number" step="1" min="1" placeholder="sin cambio" />
+              </label>
+              <label class="field">
+                <span>Store in memory</span>
+                <select id="performance-store-in-memory">
+                  <option value="">Sin cambio</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Torch matmul precision</span>
+                <select id="performance-torch-float32-matmul-precision">
+                  <option value="">Sin cambio</option>
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Torch threads</span>
+                <input id="performance-torch-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
+              </label>
+            </div>
           </section>
         </section>
 

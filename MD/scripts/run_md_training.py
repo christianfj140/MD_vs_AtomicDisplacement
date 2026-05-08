@@ -30,9 +30,17 @@ def require_command(command_name: str) -> None:
         )
 
 
-def run_command(cmd: list[str], cwd: Path) -> None:
+def run_command(cmd: list[str], cwd: Path, config: dict) -> None:
     print(f"\n[RUN] {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, check=False, env=env_with_torch_compat())
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=False,
+        env=env_with_torch_compat(
+            matmul_precision=config.get("training", {}).get("torch_float32_matmul_precision"),
+            performance=config.get("performance", {}),
+        ),
+    )
     if result.returncode != 0:
         raise RuntimeError(
             f"El comando falló con código {result.returncode}: {' '.join(cmd)}"
@@ -70,7 +78,7 @@ def main() -> int:
 
     pipeline_paths["training_dir"].mkdir(parents=True, exist_ok=True)
     write_config_yaml(config)
-    run_command(fit_command, cwd=pipeline_paths["training_dir"])
+    run_command(fit_command, cwd=pipeline_paths["training_dir"], config=config)
     ckpt_path = resolve_checkpoint(config)
     selection_mode = "configured_path" if config.get("checkpoint", {}).get("path") else str(config.get("checkpoint", {}).get("selection", "latest_version"))
     manifest_path = write_checkpoint_manifest(

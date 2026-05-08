@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import shutil
+import contextlib
+import io
 from pathlib import Path
+from typing import Any
 
 from atom_displacement_utils import (
     ATDIS_STEPS_DIR_NAME,
@@ -70,6 +74,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Lanza SIESTA para todas las muestras generadas.")
     parser.add_argument("--limit", type=int, default=single_points["limit"])
     parser.add_argument("--rerun", action="store_true", default=bool(single_points["rerun"]))
+    parser.add_argument("--workers", type=int, default=int(single_points.get("workers", 1)))
     parser.add_argument(
         "--allow-unvalidated-matrices",
         action="store_true",
@@ -80,6 +85,59 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def process_sample(sample_dir: Path, args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], str]:
+    log = io.StringIO()
+    def emit(message: str) -> None:
+        log.write(f"[{sample_dir.name}] {message}\n")
+
+    validation = validate_sample_dir(
+        sample_dir,
+        allow_unvalidated_matrices=args.allow_unvalidated_matrices,
+    )
+    if validation["valid"] and not args.rerun:
+        emit("SKIP validada: Hamiltoniano y SIESTA convergido")
+        return (
+            {
+                "id": sample_dir.name,
+                "status": "skipped_validated",
+                "validation_reason": validation["validation_reason"],
+            },
+            validation,
+            log.getvalue(),
+        )
+
+    emit("RUN")
+    try:
+        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+            run_siesta_in_dir(sample_dir, sample_dir / PIPELINE_CONFIG["paths"]["run_out_name"])
+        validation = validate_sample_dir(
+            sample_dir,
+            allow_unvalidated_matrices=args.allow_unvalidated_matrices,
+        )
+        summary_row = {
+            "id": sample_dir.name,
+            "status": "completed" if validation["valid"] else "completed_invalid",
+            "validation_reason": validation["validation_reason"],
+        }
+        return summary_row, validation, log.getvalue()
+    except Exception as exc:
+        validation = validate_sample_dir(
+            sample_dir,
+            allow_unvalidated_matrices=args.allow_unvalidated_matrices,
+        )
+        emit(f"ERROR {exc}")
+        return (
+            {
+                "id": sample_dir.name,
+                "status": "failed",
+                "error": str(exc),
+                "validation_reason": validation["validation_reason"],
+            },
+            validation,
+            log.getvalue(),
+        )
 
 
 def main() -> int:
@@ -98,55 +156,32 @@ def main() -> int:
 
     print("=== Single-point SIESTA runs ===")
     print(f"[INFO] Muestras detectadas: {len(sample_dirs)}")
+    workers = max(1, int(args.workers or 1))
+    print(f"[INFO] Workers single-point: {workers}")
 
-    summary = []
-    validation_rows = []
-    for sample_dir in sample_dirs:
-        validation = validate_sample_dir(
-            sample_dir,
-            allow_unvalidated_matrices=args.allow_unvalidated_matrices,
-        )
-        if validation["valid"] and not args.rerun:
-            print(f"[SKIP] {sample_dir.name} validada: Hamiltoniano y SIESTA convergido")
-            summary.append(
-                {
-                    "id": sample_dir.name,
-                    "status": "skipped_validated",
-                    "validation_reason": validation["validation_reason"],
-                }
-            )
-            validation_rows.append(validation)
-            continue
+    if workers == 1 or len(sample_dirs) <= 1:
+        results = []
+        for sample_dir in sample_dirs:
+            result = process_sample(sample_dir, args)
+            print(result[2], end="")
+            results.append(result)
+    else:
+        indexed_results: list[tuple[int, dict[str, Any], dict[str, Any], str]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(process_sample, sample_dir, args): index
+                for index, sample_dir in enumerate(sample_dirs)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                summary_row, validation, log = future.result()
+                indexed_results.append((futures[future], summary_row, validation, log))
+        indexed_results.sort(key=lambda item: item[0])
+        for _index, _summary_row, _validation, log in indexed_results:
+            print(log, end="")
+        results = [(summary_row, validation, log) for _, summary_row, validation, log in indexed_results]
 
-        print(f"[RUN] {sample_dir.name}")
-        try:
-            run_siesta_in_dir(sample_dir, sample_dir / PIPELINE_CONFIG["paths"]["run_out_name"])
-            validation = validate_sample_dir(
-                sample_dir,
-                allow_unvalidated_matrices=args.allow_unvalidated_matrices,
-            )
-            summary.append(
-                {
-                    "id": sample_dir.name,
-                    "status": "completed" if validation["valid"] else "completed_invalid",
-                    "validation_reason": validation["validation_reason"],
-                }
-            )
-        except Exception as exc:
-            validation = validate_sample_dir(
-                sample_dir,
-                allow_unvalidated_matrices=args.allow_unvalidated_matrices,
-            )
-            summary.append(
-                {
-                    "id": sample_dir.name,
-                    "status": "failed",
-                    "error": str(exc),
-                    "validation_reason": validation["validation_reason"],
-                }
-            )
-            print(f"[ERROR] {sample_dir.name}: {exc}")
-        validation_rows.append(validation)
+    summary = [summary_row for summary_row, _validation, _log in results]
+    validation_rows = [validation for _summary_row, validation, _log in results]
 
     write_json(PIPELINE_PATHS["run_summary_path"], summary)
     validation_summary = write_validation_outputs(DATASET_DIR / "validation", validation_rows)

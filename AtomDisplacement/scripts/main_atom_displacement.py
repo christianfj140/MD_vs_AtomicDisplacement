@@ -21,6 +21,7 @@ STEP_SCRIPTS = {
     "run_atdisp_testing": SCRIPTS_DIR / "run_atdisp_testing.py",
     "run_atdisp_prediction": SCRIPTS_DIR / "run_atdisp_prediction.py",
 }
+TEST_STEPS = {"run_atdisp_testing"}
 
 
 def run_step(script_path: Path) -> None:
@@ -35,8 +36,12 @@ def run_step(script_path: Path) -> None:
 
 def main() -> int:
     config = load_pipeline_config()
+    skip_model_test = bool(config.get("pipeline", {}).get("skip_model_test", False))
     print("=== Full atom-displacement pipeline ===")
     for step in config["pipeline"]["steps"]:
+        if skip_model_test and step in TEST_STEPS:
+            print(f"[SKIP] {step}: pipeline.skip_model_test=true")
+            continue
         if step == "render_inputs":
             write_generated_inputs(config)
             print("[OK] Archivos derivados sincronizados desde pipeline_config.yaml")

@@ -1,6 +1,6 @@
 paths:
-  dataset_dir: /home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260508_120125/md/dataset_60/dataset
-  training_dir: /home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260508_120125/md/dataset_60/training
+  dataset_dir: ${REPO_ROOT}/MD/dataset
+  training_dir: ${REPO_ROOT}/MD/training
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
@@ -11,7 +11,7 @@ commands:
   shell: bash
 md:
   type_of_run: verlet
-  steps: 60
+  steps: 10
   basis_size: DZP
   basis_type: split
   energy_shift: 0.03 eV
@@ -74,6 +74,7 @@ md:
     - 4.336839
     - -0.477047
 training:
+  torch_float32_matmul_precision: null
   data:
     out_matrix: hamiltonian
     symmetric_matrix: true
@@ -91,7 +92,7 @@ training:
     loss: graph2mat.metrics.block_type_mae
     optim_lr: 0.005
   trainer:
-    accelerator: gpu
+    accelerator: cpu
     logger:
       class_path: TensorBoardLogger
       init_args:
@@ -115,11 +116,25 @@ prediction:
   callbacks:
     matrix_writer: true
 pipeline:
+  skip_model_test: false
   steps:
   - generate_md_dataset
+  - run_md_training
+  - run_md_testing
+  - run_md_prediction
+performance:
+  max_parallel_siesta_jobs: 1
+  omp_num_threads: null
+  mkl_num_threads: null
+  openblas_num_threads: null
+  torch_num_threads: null
+  compute_accelerator: cpu
+  batch_size: null
+  store_in_memory: null
+  torch_float32_matmul_precision: null
 splits:
   enabled: true
-  strategy: block
-  train: 48
-  validation: 6
-  test: 6
+  strategy: spread
+  train: 8
+  validation: 1
+  test: 1

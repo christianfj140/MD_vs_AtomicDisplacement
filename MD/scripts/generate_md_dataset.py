@@ -62,6 +62,24 @@ def run_command(cmd: list[str], cwd: Path) -> None:
         )
 
 
+def performance_env(config: dict) -> dict[str, str]:
+    env = os.environ.copy()
+    mapping = {
+        "omp_num_threads": "OMP_NUM_THREADS",
+        "mkl_num_threads": "MKL_NUM_THREADS",
+        "openblas_num_threads": "OPENBLAS_NUM_THREADS",
+    }
+    for key, env_name in mapping.items():
+        value = (config.get("performance") or {}).get(key)
+        if value in (None, "", "null"):
+            continue
+        threads = int(value)
+        if threads <= 0:
+            raise RuntimeError(f"performance.{key} debe ser un entero positivo.")
+        env[env_name] = str(threads)
+    return env
+
+
 def setup_store(config: dict) -> None:
     pipeline_paths = paths(config)
     # Asumimos que `graph2mat siesta md setup-store` puede re-ejecutarse sobre el
@@ -102,6 +120,7 @@ def run_siesta_with_venv(config: dict) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=performance_env(config),
         )
 
         assert process.stdout is not None
