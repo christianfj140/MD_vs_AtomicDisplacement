@@ -10,6 +10,7 @@ import json
 import shutil
 import contextlib
 import io
+import time
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def process_sample(sample_dir: Path, args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], str]:
+    started_at = time.time()
     log = io.StringIO()
     def emit(message: str) -> None:
         log.write(f"[{sample_dir.name}] {message}\n")
@@ -103,6 +105,7 @@ def process_sample(sample_dir: Path, args: argparse.Namespace) -> tuple[dict[str
                 "id": sample_dir.name,
                 "status": "skipped_validated",
                 "validation_reason": validation["validation_reason"],
+                "wall_time_seconds": time.time() - started_at,
             },
             validation,
             log.getvalue(),
@@ -120,6 +123,7 @@ def process_sample(sample_dir: Path, args: argparse.Namespace) -> tuple[dict[str
             "id": sample_dir.name,
             "status": "completed" if validation["valid"] else "completed_invalid",
             "validation_reason": validation["validation_reason"],
+            "wall_time_seconds": time.time() - started_at,
         }
         return summary_row, validation, log.getvalue()
     except Exception as exc:
@@ -134,6 +138,7 @@ def process_sample(sample_dir: Path, args: argparse.Namespace) -> tuple[dict[str
                 "status": "failed",
                 "error": str(exc),
                 "validation_reason": validation["validation_reason"],
+                "wall_time_seconds": time.time() - started_at,
             },
             validation,
             log.getvalue(),

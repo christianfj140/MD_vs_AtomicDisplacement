@@ -24,7 +24,8 @@ GENERATED_HEADER = "# Generated from ../pipeline_config.yaml\n"
 
 
 def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
-    path = config_path or DEFAULT_CONFIG_PATH
+    env_path = os.environ.get("PIPELINE_CONFIG_PATH")
+    path = Path(env_path).expanduser() if config_path is None and env_path else config_path or DEFAULT_CONFIG_PATH
     if not path.exists():
         raise RuntimeError(f"No existe el archivo de configuracion: {path}")
     with path.open("r", encoding="utf-8") as handle:

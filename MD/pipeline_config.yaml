@@ -124,13 +124,22 @@ pipeline:
   - run_md_prediction
 performance:
   max_parallel_siesta_jobs: 1
+  max_parallel_dataset_jobs: 1
+  max_parallel_prediction_jobs: 1
+  max_parallel_evaluation_jobs: 1
+  max_parallel_metric_jobs: 1
   omp_num_threads: null
   mkl_num_threads: null
   openblas_num_threads: null
+  numexpr_num_threads: null
   torch_num_threads: null
   compute_accelerator: cpu
   batch_size: null
   store_in_memory: null
+  reuse_validated_siesta_outputs: true
+  enable_experiment_cache: false
+  error_policy: fail_fast
+  preset: null
   torch_float32_matmul_precision: null
 splits:
   enabled: true

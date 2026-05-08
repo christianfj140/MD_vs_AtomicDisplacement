@@ -95,6 +95,14 @@ class ComparisonWorkflowTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def load_module_from_path(self, name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
     def test_method_selection_normalization_and_validation(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
@@ -126,27 +134,74 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module.apply_training_accelerator(config, "gpu")
         self.assertEqual(config["training"]["trainer"]["accelerator"], "gpu")
 
+    def test_pipeline_config_path_env_selects_snapshot_config(self) -> None:
+        md_module = self.load_module_from_path(
+            "md_pipeline_config_snapshot_test",
+            REPO_ROOT / "MD" / "scripts" / "md_pipeline_config.py",
+        )
+        atom_module = self.load_module_from_path(
+            "atom_pipeline_config_snapshot_test",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "pipeline_config_utils.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            md_snapshot = root / "md_snapshot.yaml"
+            atom_snapshot = root / "atom_snapshot.yaml"
+            shutil.copyfile(REPO_ROOT / "MD" / "pipeline_config.yaml", md_snapshot)
+            shutil.copyfile(REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml", atom_snapshot)
+            old_env = os.environ.get("PIPELINE_CONFIG_PATH")
+            try:
+                os.environ["PIPELINE_CONFIG_PATH"] = str(md_snapshot)
+                md_config = md_module.load_pipeline_config()
+                self.assertEqual(Path(md_config["_config_path"]), md_snapshot)
+                self.assertEqual(Path(md_config["_config_dir"]), root)
+                os.environ["PIPELINE_CONFIG_PATH"] = str(atom_snapshot)
+                atom_config = atom_module.load_pipeline_config()
+                self.assertEqual(Path(atom_config["_config_path"]), atom_snapshot)
+                self.assertEqual(Path(atom_config["_config_dir"]), root)
+            finally:
+                if old_env is None:
+                    os.environ.pop("PIPELINE_CONFIG_PATH", None)
+                else:
+                    os.environ["PIPELINE_CONFIG_PATH"] = old_env
+
     def test_performance_settings_validation_env_and_config_application(self) -> None:
         module = self.load_pipeline_ui_module()
         settings = module.parse_performance_settings(
             {
                 "max_parallel_siesta_jobs": "2",
+                "max_parallel_dataset_jobs": "3",
+                "max_parallel_prediction_jobs": "4",
+                "max_parallel_evaluation_jobs": "5",
+                "max_parallel_metric_jobs": "6",
                 "omp_num_threads": "3",
                 "mkl_num_threads": None,
                 "openblas_num_threads": "",
+                "numexpr_num_threads": "7",
                 "torch_num_threads": "4",
                 "compute_accelerator": "auto",
                 "batch_size": "16",
                 "store_in_memory": "false",
+                "reuse_validated_siesta_outputs": "true",
+                "enable_experiment_cache": "false",
+                "error_policy": "continue_on_error",
                 "torch_float32_matmul_precision": "high",
             }
         )
         self.assertEqual(settings["max_parallel_siesta_jobs"], 2)
+        self.assertEqual(settings["max_parallel_dataset_jobs"], 3)
+        self.assertEqual(settings["max_parallel_prediction_jobs"], 4)
+        self.assertEqual(settings["max_parallel_evaluation_jobs"], 5)
+        self.assertEqual(settings["max_parallel_metric_jobs"], 6)
         self.assertEqual(settings["compute_accelerator"], "auto")
         self.assertEqual(settings["batch_size"], 16)
         self.assertIs(settings["store_in_memory"], False)
+        self.assertIs(settings["reuse_validated_siesta_outputs"], True)
+        self.assertIs(settings["enable_experiment_cache"], False)
+        self.assertEqual(settings["error_policy"], "continue_on_error")
         env = module.performance_env(settings)
         self.assertEqual(env["OMP_NUM_THREADS"], "3")
+        self.assertEqual(env["NUMEXPR_NUM_THREADS"], "7")
         self.assertEqual(env["TORCH_NUM_THREADS"], "4")
         self.assertEqual(env["TORCH_FLOAT32_MATMUL_PRECISION"], "high")
         config = {
@@ -161,8 +216,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIs(config["training"]["data"]["store_in_memory"], False)
         self.assertIs(config["testing"]["data"]["store_in_memory"], False)
         self.assertEqual(config["single_points"]["workers"], 2)
+        self.assertFalse(config["single_points"]["rerun"])
         with self.assertRaisesRegex(RuntimeError, "performance.max_parallel_siesta_jobs"):
             module.parse_performance_settings({"max_parallel_siesta_jobs": 0})
+        with self.assertRaisesRegex(RuntimeError, "error_policy"):
+            module.parse_performance_settings({"error_policy": "ignore"})
+        with self.assertRaisesRegex(RuntimeError, "enable_experiment_cache"):
+            module.parse_performance_settings({"enable_experiment_cache": True})
         with self.assertRaisesRegex(RuntimeError, "store_in_memory"):
             module.parse_performance_settings({"store_in_memory": "maybe"})
 
@@ -187,6 +247,70 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": [11, 23, 30]}), [11, 23, 30])
         self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": "11, 23, 30"}), [11, 23, 30])
 
+    def test_dataset_recipes_parse_specs_and_reject_unverified_md_temperature(self) -> None:
+        module = self.load_pipeline_ui_module()
+        recipes = {
+            "md": [
+                {
+                    "recipe_id": "md_plain",
+                    "label": "MD plain",
+                    "blocks": [{"block_id": "md_9", "n_snapshots": 9, "seed": 1}],
+                }
+            ],
+            "random_cartesian": [
+                {
+                    "recipe_id": "rc_sigma",
+                    "blocks": [
+                        {
+                            "block_id": "rc_sigma_0p03",
+                            "n_structures": 6,
+                            "distribution": "gaussian",
+                            "sigma_ang": 0.03,
+                            "seed": 7,
+                        }
+                    ],
+                }
+            ],
+        }
+        info = module.dataset_recipes_to_execution_specs(
+            recipes,
+            selected_methods=["md", "random_cartesian"],
+            split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            random_cartesian_defaults={"min_distance_ang": 0.65},
+        )
+        self.assertIsNotNone(info)
+        self.assertEqual(info["md_dataset_specs"][0]["size"], 9)
+        self.assertIn("md_plain", info["md_dataset_specs"][0]["label"])
+        self.assertEqual(info["random_cartesian_dataset_specs"][0]["size"], 6)
+        self.assertEqual(info["random_cartesian_dataset_specs"][0]["options"]["sigma_ang"], 0.03)
+        with self.assertRaisesRegex(RuntimeError, "temperatura/termostato"):
+            module.dataset_recipes_to_execution_specs(
+                {"md": [{"recipe_id": "md_300K", "blocks": [{"n_snapshots": 9, "temperature_K": 300}]}]},
+                selected_methods=["md"],
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                random_cartesian_defaults={},
+            )
+
+    def test_legacy_payload_converts_to_dataset_recipes_without_sync(self) -> None:
+        module = self.load_pipeline_ui_module()
+        recipes = module.legacy_payload_to_dataset_recipes(
+            md_sizes=[5, 9],
+            atom_dataset_specs=[
+                {
+                    "label": "dataset_fc",
+                    "size": 7,
+                    "displacements": [{"value": "0.02 Ang", "n_structures": 3}],
+                }
+            ],
+            atom_sizes=[7],
+            fc_dataset_specs=None,
+            random_cartesian_options={"n_structures": [6, 8]},
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertEqual([item["blocks"][0]["n_snapshots"] for item in recipes["md"]], [5, 9])
+        self.assertEqual(recipes["siesta_fc_cartesian"][0]["blocks"][0]["n_structures"], 3)
+        self.assertEqual([item["blocks"][0]["n_structures"] for item in recipes["random_cartesian"]], [6, 8])
+
     def test_dataset_only_records_status_and_skips_cross_evaluation(self) -> None:
         module = self.load_pipeline_ui_module()
         module.STRICT_COMPARISON_MODE = False
@@ -196,6 +320,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
             module.WORKSPACES_ROOT = root / "workspaces"
             runner = module.ExperimentRunner()
             calls = {"run_one": [], "cross": 0}
+            md_yaml_before = (REPO_ROOT / "MD" / "pipeline_config.yaml").read_text(encoding="utf-8")
+            atom_yaml_before = (REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml").read_text(encoding="utf-8")
 
             def fake_run_one(key, size, run_id, **kwargs):
                 calls["run_one"].append((key, kwargs.get("run_mode"), kwargs.get("compute_accelerator")))
@@ -244,6 +370,37 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 [("md", "dataset_only", "gpu"), ("atom_displacement", "dataset_only", "gpu")],
             )
             self.assertTrue(manifest["cross_evaluation"]["skipped"])
+            self.assertEqual((REPO_ROOT / "MD" / "pipeline_config.yaml").read_text(encoding="utf-8"), md_yaml_before)
+            self.assertEqual(
+                (REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml").read_text(encoding="utf-8"),
+                atom_yaml_before,
+            )
+            self.assertTrue((root / "results" / "dataset_only_case" / "performance_report.json").exists())
+
+    def test_parallel_callable_tasks_honor_continue_and_fail_fast(self) -> None:
+        module = self.load_pipeline_ui_module()
+        runner = module.ExperimentRunner()
+        tasks = [
+            ("ok-1", lambda: "a"),
+            ("bad", lambda: (_ for _ in ()).throw(RuntimeError("boom"))),
+            ("ok-2", lambda: "b"),
+        ]
+        results, failures = runner._run_callable_tasks(  # type: ignore[attr-defined]
+            tasks,
+            workers=2,
+            error_policy="continue_on_error",
+            stage="unit_stage",
+        )
+        self.assertEqual(results, ["a", "b"])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("boom", failures[0])
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            runner._run_callable_tasks(  # type: ignore[attr-defined]
+                tasks,
+                workers=2,
+                error_policy="fail_fast",
+                stage="unit_stage",
+            )
 
     def test_single_method_full_pipeline_is_non_comparative(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -322,11 +479,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
             finally:
                 module.threading.Thread = original_thread
             self.assertEqual(status["run_id"], runner._run_id)
-            self.assertEqual(started["args"][-5], "gpu")
-            self.assertEqual(started["args"][-4], ["random_cartesian"])
-            self.assertEqual(started["args"][-3], "full_strict_pipeline")
-            self.assertEqual(started["args"][-2], {"n_structures": 3})
-            self.assertEqual(started["args"][-1]["compute_accelerator"], "gpu")
+            self.assertEqual(started["args"][-7], "gpu")
+            self.assertEqual(started["args"][-6], ["random_cartesian"])
+            self.assertEqual(started["args"][-5], "full_strict_pipeline")
+            self.assertEqual(started["args"][-4], {"n_structures": 3})
+            self.assertEqual(started["args"][-3]["compute_accelerator"], "gpu")
+            self.assertIsNone(started["args"][-2])
+            self.assertIn("recipes", started["args"][-1])
 
     def test_ui_experiment_payload_includes_methods_and_run_mode(self) -> None:
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
@@ -349,17 +508,45 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('value="auto"', index_html)
         self.assertIn('id="performance-compute-accelerator"', index_html)
         self.assertIn('id="performance-max-parallel-siesta-jobs"', index_html)
+        self.assertIn('id="performance-max-parallel-dataset-jobs"', index_html)
+        self.assertIn('id="performance-max-parallel-prediction-jobs"', index_html)
+        self.assertIn('id="performance-max-parallel-evaluation-jobs"', index_html)
+        self.assertIn('id="performance-max-parallel-metric-jobs"', index_html)
+        self.assertIn('id="performance-numexpr-num-threads"', index_html)
+        self.assertIn('id="performance-reuse-validated-siesta-outputs"', index_html)
+        self.assertIn('id="performance-enable-experiment-cache"', index_html)
+        self.assertIn('id="performance-error-policy"', index_html)
         self.assertIn("performanceSettings()", app_js)
+        self.assertIn('id="sync-md-sizes"', index_html)
+        self.assertIn('id="dataset-recipes-json"', index_html)
+        self.assertIn('id="use-dataset-recipes-json"', index_html)
+        self.assertIn('id="export-dataset-recipes"', index_html)
+        self.assertIn('id="random-cartesian-distribution"', index_html)
+        self.assertIn('id="random-cartesian-sigma-ang"', index_html)
+        self.assertIn('id="random-cartesian-min-distance-ang"', index_html)
+        self.assertIn("Dataset builder", index_html)
+        self.assertIn("parseDatasetRecipes()", app_js)
+        self.assertIn("builderDatasetRecipes", app_js)
+        self.assertIn("exportCurrentDatasetRecipes", app_js)
+        self.assertIn("dataset_recipes: datasetRecipes", app_js)
+        self.assertIn('sync_md_sizes: Boolean(document.getElementById("sync-md-sizes")?.checked)', app_js)
+        self.assertIn("max_parallel_dataset_jobs", app_js)
+        self.assertIn("reuse_validated_siesta_outputs", app_js)
+        self.assertIn("error_policy", app_js)
         self.assertIn("performance,", app_js)
         self.assertIn("compute_accelerator: performance.compute_accelerator", app_js)
         self.assertIn("parseRandomCartesianOptions(methods)", app_js)
         self.assertIn("random_cartesian_options: randomCartesianOptions", app_js)
         self.assertIn("n_structures", app_js)
-        self.assertIn("syncRandomCartesianSizeFromAtomPlan(sizes)", app_js)
-        self.assertIn("validSizes.join", app_js)
+        self.assertNotIn("syncRandomCartesianSizeFromAtomPlan", app_js)
+        self.assertNotIn("validSizes.join", app_js)
         self.assertIn("resultPipelines", app_js)
         self.assertIn("results_random_cartesian", app_js)
         self.assertIn("wasRunning && !status.running && state.plotsEnabled", app_js)
+        self.assertIn('id="plot-cross-selection"', index_html)
+        self.assertIn("selectedCrossExperimentSet(payload)", app_js)
+        self.assertNotIn("function latestCrossExperiment", app_js)
+        self.assertNotIn("sync_md_sizes: true", app_js)
         self.assertIn('<option value="test_random_cartesian" selected>', index_html)
         self.assertIn("crossTrainMethods(experiment)", app_js)
         self.assertIn("crossTestSets(experiment)", app_js)
@@ -411,6 +598,53 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 results["random_cartesian"]["prediction_glob"],
                 "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
+            )
+
+    def test_plot_summary_keeps_all_compatible_cross_experiments(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            for experiment_id, size in (("20260101_000001", 5), ("20260101_000002", 9)):
+                summary_dir = module.RESULTS_ROOT / experiment_id / "summary"
+                summary_dir.mkdir(parents=True)
+                write_csv(
+                    summary_dir / "cross_evaluation_metrics.csv",
+                    [
+                        {
+                            "experiment_id": experiment_id,
+                            "sample_id": "s1",
+                            "train_method": "md",
+                            "test_set": "test_mixed",
+                            "md_dataset_size": str(size),
+                            "atom_dataset_size": str(size),
+                            "train_dataset_size": str(size),
+                            "frontier_window_rmse_eV": "1.0",
+                        }
+                    ],
+                )
+                (summary_dir / "recommendation.json").write_text(
+                    json.dumps({"status": "ok", "scientific_status": "exploratory"}),
+                    encoding="utf-8",
+                )
+                module.write_yaml(
+                    module.RESULTS_ROOT / experiment_id / "experiment_manifest.yaml",
+                    {
+                        "metric_version": "test_metric",
+                        "molecule_system_name": "water",
+                        "siesta_settings_hash": "same",
+                        "model_config_hash": "same",
+                        "test_sets": ["test_mixed"],
+                        "selected_methods": ["md", "siesta_fc_cartesian"],
+                    },
+                )
+            plots = module.plot_data_summary()
+            self.assertEqual(len(plots["cross_experiments"]), 2)
+            self.assertEqual(len(plots["compatible_experiment_groups"]), 1)
+            self.assertEqual(plots["compatible_experiment_groups"][0]["rows"], 2)
+            self.assertEqual(
+                plots["default_plot_selection"]["experiment_ids"],
+                ["20260101_000001", "20260101_000002"],
             )
 
     def test_repo_local_paths_do_not_raise_reproducibility_warning(self) -> None:

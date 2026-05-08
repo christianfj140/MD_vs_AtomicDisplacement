@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import csv
+import json
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,13 @@ MANIFEST_FIELDS = [
     "seed",
     "status",
     "sample_dir",
+    "recipe_id",
+    "recipe_label",
+    "block_id",
+    "block_label",
+    "generation_parameters_json",
+    "sample_index_within_block",
+    "global_sample_id",
 ]
 
 
@@ -50,6 +58,26 @@ def require_command(command_name: str) -> None:
             f"No se encontró '{command_name}' en PATH. "
             "Activa tu entorno antes de ejecutar este script."
         )
+
+
+def recipe_manifest_fields(config: dict, *, sample_index: str = "") -> dict[str, str]:
+    recipe = config.get("dataset_recipe") or {}
+    generation_parameters = recipe.get("generation_parameters_json")
+    if generation_parameters in (None, "") and recipe.get("generation_parameters") is not None:
+        generation_parameters = json.dumps(
+            recipe.get("generation_parameters"),
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    return {
+        "recipe_id": str(recipe.get("recipe_id") or ""),
+        "recipe_label": str(recipe.get("recipe_label") or ""),
+        "block_id": str(recipe.get("block_id") or ""),
+        "block_label": str(recipe.get("block_label") or ""),
+        "generation_parameters_json": str(generation_parameters or ""),
+        "sample_index_within_block": str(sample_index),
+        "global_sample_id": "",
+    }
 
 
 def run_command(cmd: list[str], cwd: Path) -> None:
@@ -68,6 +96,7 @@ def performance_env(config: dict) -> dict[str, str]:
         "omp_num_threads": "OMP_NUM_THREADS",
         "mkl_num_threads": "MKL_NUM_THREADS",
         "openblas_num_threads": "OPENBLAS_NUM_THREADS",
+        "numexpr_num_threads": "NUMEXPR_NUM_THREADS",
     }
     for key, env_name in mapping.items():
         value = (config.get("performance") or {}).get(key)
@@ -490,6 +519,7 @@ def write_excluded_gap_manifest(
             "seed": "",
             "status": "excluded",
             "sample_dir": str(sample),
+            **recipe_manifest_fields(config, sample_index=sample.name),
         }
         for sample, reason in excluded_samples
     ]
@@ -541,6 +571,7 @@ def write_split_manifests(
                     "seed": "",
                     "status": "completed" if structure_path.exists() and hamiltonian_path and run_out_path.exists() else "incomplete",
                     "sample_dir": str(sample_dir),
+                    **recipe_manifest_fields(config, sample_index=source_sample.name),
                 }
             )
         _write_manifest(split_root / f"{split_name}_manifest.csv", rows)

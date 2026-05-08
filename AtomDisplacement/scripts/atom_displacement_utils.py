@@ -147,6 +147,7 @@ def run_command_in_venv(
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
         "TORCH_NUM_THREADS",
     ]
     exports = [f"export {name}={shlex.quote(env[name])}" for name in export_names if env.get(name)]
@@ -177,7 +178,7 @@ def run_siesta_in_dir(
     siesta = command(PIPELINE_CONFIG, "siesta")
     run_fdf_name = PIPELINE_CONFIG["paths"]["run_fdf_name"]
     env = env_with_torch_compat(performance=PIPELINE_CONFIG.get("performance", {}))
-    export_names = ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]
+    export_names = ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"]
     exports = [f"export {name}={shlex.quote(env[name])}" for name in export_names if env.get(name)]
     export_prefix = f"{' && '.join(exports)} && " if exports else ""
     bash_cmd = (

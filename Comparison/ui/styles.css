@@ -275,8 +275,103 @@ h3 {
   gap: 14px;
 }
 
+.dataset-builder-panel {
+  margin: 18px 0;
+}
+
+.dataset-method-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.method-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.method-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.method-toggle {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.method-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.method-summary {
+  max-width: 52%;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.method-note {
+  padding: 10px 12px;
+  border-left: 3px solid #a66f2b;
+  background: #fff6ea;
+  color: #6f5234;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.disabled-method {
+  opacity: 0.58;
+}
+
+.error-text {
+  color: var(--danger);
+}
+
+.inline-toggle {
+  margin-top: 0;
+}
+
+.advanced-recipes {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.advanced-recipes summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.advanced-recipes-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
 .fc-panel {
-  margin-bottom: 18px;
+  margin-bottom: 0;
 }
 
 .fc-layout {
@@ -564,6 +659,7 @@ h3 {
   .grid.two,
   .grid.three,
   .grid.four,
+  .dataset-method-grid,
   .fc-layout {
     grid-template-columns: 1fr;
   }

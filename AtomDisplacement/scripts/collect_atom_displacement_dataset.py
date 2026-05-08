@@ -62,6 +62,13 @@ def collect_sample(sample_dir: Path) -> dict:
         "geometry_metrics": metrics,
         "reference_source": metadata.get("reference_source"),
         "force_constants": metadata.get("force_constants"),
+        "recipe_id": metadata.get("recipe_id"),
+        "recipe_label": metadata.get("recipe_label"),
+        "block_id": metadata.get("block_id"),
+        "block_label": metadata.get("block_label"),
+        "generation_parameters_json": metadata.get("generation_parameters_json"),
+        "sample_index_within_block": metadata.get("sample_index_within_block"),
+        "global_sample_id": metadata.get("global_sample_id", metadata.get("id", sample_dir.name)),
         "files": {
             "run_fdf": str(sample_dir / "RUN.fdf"),
             "run_out": str(run_out_path),
@@ -90,6 +97,13 @@ def write_summary_csv(rows: list[dict], csv_path: Path) -> None:
         "oh_2_ang",
         "hh_ang",
         "hoh_angle_deg",
+        "recipe_id",
+        "recipe_label",
+        "block_id",
+        "block_label",
+        "generation_parameters_json",
+        "sample_index_within_block",
+        "global_sample_id",
     ]
 
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
@@ -121,6 +135,13 @@ def write_summary_csv(rows: list[dict], csv_path: Path) -> None:
                     ),
                     "energy_ev": row["energy_ev"],
                     **row["geometry_metrics"],
+                    "recipe_id": row.get("recipe_id") or "",
+                    "recipe_label": row.get("recipe_label") or "",
+                    "block_id": row.get("block_id") or "",
+                    "block_label": row.get("block_label") or "",
+                    "generation_parameters_json": row.get("generation_parameters_json") or "",
+                    "sample_index_within_block": row.get("sample_index_within_block") or "",
+                    "global_sample_id": row.get("global_sample_id") or row["id"],
                 }
             )
 

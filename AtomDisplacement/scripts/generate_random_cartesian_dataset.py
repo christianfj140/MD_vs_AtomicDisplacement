@@ -302,10 +302,18 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
         metadata = {
             "id": sample_id,
             "generation_method": "random_cartesian",
+            "method": "random_cartesian",
+            "recipe_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_id"),
+            "recipe_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_label"),
+            "block_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_id"),
+            "block_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_label"),
+            "generation_parameters_json": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("generation_parameters_json"),
             "base_geometry_hash": base_geometry_hash,
             "base_geometry_source": source_path,
             "seed": int(rc_config["seed"]),
             "sample_index": sample_index,
+            "sample_index_within_block": sample_index,
+            "global_sample_id": sample_id,
             "distribution": rc_config["distribution"],
             "sigma_ang": float(rc_config["sigma_ang"]) if rc_config["distribution"] == "gaussian" else None,
             "uniform_range_ang": float(rc_config["uniform_range_ang"]) if rc_config["distribution"] == "uniform" else None,
@@ -323,6 +331,14 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
                 "metadata": str(sample_dir / "metadata.json"),
                 "split_group_id": split_group_id,
                 "accepted_attempt": accepted_attempt,
+                "method": "random_cartesian",
+                "recipe_id": metadata.get("recipe_id"),
+                "recipe_label": metadata.get("recipe_label"),
+                "block_id": metadata.get("block_id"),
+                "block_label": metadata.get("block_label"),
+                "generation_parameters_json": metadata.get("generation_parameters_json"),
+                "sample_index_within_block": sample_index,
+                "global_sample_id": sample_id,
             }
         )
 
@@ -335,6 +351,7 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "base_geometry_hash": base_geometry_hash,
         "base_geometry_source": source_path,
         "config_snapshot": rc_config,
+        "dataset_recipe": PIPELINE_CONFIG.get("dataset_recipe") or {},
         "samples": samples,
         "siesta_input_hashes": {
             sample["sample_id"]: file_sha256(Path(sample["run_fdf"]))

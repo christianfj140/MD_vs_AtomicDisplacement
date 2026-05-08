@@ -233,6 +233,13 @@ def main() -> int:
         metadata = {
             "id": system_label,
             "generation_mode": "siesta_fc_run",
+            "method": "siesta_fc_cartesian",
+            "dataset_recipe": PIPELINE_CONFIG.get("dataset_recipe") or {},
+            "recipe_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_id"),
+            "recipe_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_label"),
+            "block_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_id"),
+            "block_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_label"),
+            "generation_parameters_json": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("generation_parameters_json"),
             "reference_source": source_path,
             "positions_ang": reference.positions_ang,
             "geometry_metrics": metrics,
@@ -256,11 +263,17 @@ def main() -> int:
                 "include_reference": include_reference,
                 "first_atom": first_atom,
                 "last_atom": last_atom,
+                "recipe_id": metadata.get("recipe_id"),
+                "recipe_label": metadata.get("recipe_label"),
+                "block_id": metadata.get("block_id"),
+                "block_label": metadata.get("block_label"),
+                "generation_parameters_json": metadata.get("generation_parameters_json"),
             }
         )
 
     manifest = {
         "generation_mode": "siesta_fc_multi_run",
+        "dataset_recipe": PIPELINE_CONFIG.get("dataset_recipe") or {},
         "reference_source": source_path,
         "fc_runs_dir": str(fc_runs_dir),
         "subsampling": force_constants.get("subsampling", {"method": "spread", "seed": 0}),

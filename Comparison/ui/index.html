@@ -83,48 +83,14 @@
             </div>
           </header>
 
-          <div class="grid two compact-grid experiment-inputs">
-            <section class="panel">
-              <h3>MD sizes</h3>
-              <p class="field-help">MD baselines are generated once per unique dataset size.</p>
-              <label class="field">
-                <span>Structures</span>
-                <input id="md-sizes" type="text" value="10, 20, 30" />
-              </label>
-            </section>
-
-            <section class="panel">
-              <h3>AtomDisplacement sizes</h3>
-              <p class="field-help">Computed from the FC displacement plan below.</p>
-              <label class="field">
-                <span>Generated structures</span>
-                <input id="atom-sizes" type="text" value="10, 20, 30" readonly />
-              </label>
-            </section>
-          </div>
-
           <section class="panel comparison-design-panel">
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">Scientific comparison</p>
-                <h3>Common-test workflow</h3>
+                <h3>Experiment design</h3>
               </div>
             </div>
-            <div class="grid two split-grid">
-              <label class="field">
-                <span>Methods</span>
-                <label><input class="method-checkbox" type="checkbox" value="md" checked /> MD</label>
-                <label><input class="method-checkbox" type="checkbox" value="siesta_fc_cartesian" checked /> SIESTA FC Cartesian</label>
-                <label>
-                  <input class="method-checkbox" type="checkbox" value="random_cartesian" checked />
-                  Random Cartesian
-                </label>
-                <label class="field compact-field">
-                  <span>Random Cartesian structures</span>
-                  <input id="random-cartesian-n-structures" type="text" value="100" />
-                </label>
-                <small>Random Cartesian can join dataset-only or full strict comparison.</small>
-              </label>
+            <div class="grid three split-grid">
               <label class="field">
                 <span>Run mode</span>
                 <select id="run-mode">
@@ -133,8 +99,6 @@
                 </select>
                 <small>Dataset only stops before training, prediction, cross-evaluation and winner analysis.</small>
               </label>
-            </div>
-            <div class="grid four split-grid">
               <label class="field">
                 <span>MD split mode</span>
                 <select id="split-mode">
@@ -162,6 +126,8 @@
                   <option value="equal_siesta_budget">Equal SIESTA budget</option>
                 </select>
               </label>
+            </div>
+            <div class="grid four split-grid">
               <label class="field">
                 <span>Processor</span>
                 <select id="compute-accelerator">
@@ -180,6 +146,18 @@
                   <option value="test_mixed" selected>Mixed test</option>
                 </select>
               </label>
+              <label class="field">
+                <span>Train</span>
+                <input id="split-train" type="number" step="0.01" min="0.01" max="0.98" value="0.8" />
+              </label>
+              <label class="field">
+                <span>Validation</span>
+                <input id="split-validation" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
+              </label>
+              <label class="field">
+                <span>Test</span>
+                <input id="split-test" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
+              </label>
             </div>
             <label class="field">
               <span>Comando de activacion del entorno</span>
@@ -194,53 +172,72 @@
             </label>
           </section>
 
-          <section class="panel fc-panel">
+          <section class="panel dataset-builder-panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">SIESTA FC</p>
-                <h3>AtomDisplacement displacements</h3>
-                <p class="field-help">Choose how per-displacement structure counts are combined into datasets.</p>
+                <p class="eyebrow">Dataset recipes</p>
+                <h3>Dataset builder</h3>
+                <p class="field-help">Cada método tiene su propia receta. El JSON avanzado queda como import/export, no como camino principal.</p>
               </div>
               <div class="button-row">
-                <span id="fc-limit" class="muted-text">Max per displacement: -</span>
+                <button id="export-dataset-recipes" class="button secondary" type="button">Exportar recetas</button>
               </div>
             </div>
-            <div class="fc-layout">
-              <label class="field fc-options-field">
-                <span>Displacement options</span>
-                <small>One displacement per line: magnitude followed by structure-count choices.</small>
-                <textarea id="fc-displacement-options" rows="6">0.02 Ang: 5, 7, 9
+
+            <div class="dataset-method-grid">
+              <section class="method-card method-md">
+                <div class="method-card-header">
+                  <label class="method-toggle">
+                    <input class="method-checkbox" type="checkbox" value="md" checked />
+                    <span>MD</span>
+                  </label>
+                  <span id="md-preview-summary" class="method-summary">3 datasets</span>
+                </div>
+                <p class="field-help">
+                  Genera trayectorias MD independientes por tamaño. La trayectoria interna sigue siendo secuencial.
+                </p>
+                <label class="field">
+                  <span>Snapshots por dataset</span>
+                  <input id="md-sizes" type="text" value="10, 20, 30" />
+                  <small>Lista separada por comas. Ejemplo: 25, 50, 100.</small>
+                </label>
+                <label class="toggle-field inline-toggle">
+                  <input id="sync-md-sizes" type="checkbox" />
+                  <span>Usar los tamaños generados por FC</span>
+                </label>
+                <div class="method-note">
+                  Temperatura, termostato y schedules MD se mantienen desactivados hasta verificar los keywords SIESTA usados por este flujo.
+                </div>
+              </section>
+
+              <section class="method-card fc-panel">
+                <div class="method-card-header">
+                  <label class="method-toggle">
+                    <input class="method-checkbox" type="checkbox" value="siesta_fc_cartesian" checked />
+                    <span>SIESTA FC</span>
+                  </label>
+                  <span id="fc-limit" class="method-summary">Max per displacement: -</span>
+                </div>
+                <p class="field-help">Controla magnitudes y cuántas estructuras aporta cada desplazamiento.</p>
+                <label class="field fc-options-field">
+                  <span>Desplazamientos y conteos</span>
+                  <small>Una fila por magnitud: magnitud seguida de conteos por dataset.</small>
+                  <textarea id="fc-displacement-options" rows="6">0.02 Ang: 5, 7, 9
 0.03 Ang: 4, 6, 8
 0.05 Ang: 2, 10, 13</textarea>
-              </label>
-              <div class="fc-controls">
-                <label class="field">
-                  <span>Combination mode</span>
-                  <select id="fc-combination-mode" title="Aligned matches list positions. Cartesian expands every possible count combination.">
-                    <option value="aligned">Aligned combinations</option>
-                    <option value="cartesian">Cartesian product combinations</option>
-                  </select>
-                  <small>Aligned uses index 0 with index 0, index 1 with index 1. Cartesian generates every possible combination.</small>
                 </label>
-                <label class="field">
-                  <span>Generated datasets</span>
-                  <input id="atom-combination-count" type="text" value="3 aligned datasets" readonly />
-                </label>
-                <div class="grid three split-grid">
-                  <label class="field">
-                    <span>Train</span>
-                    <input id="split-train" type="number" step="0.01" min="0.01" max="0.98" value="0.8" />
-                  </label>
-                  <label class="field">
-                    <span>Validation</span>
-                    <input id="split-validation" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
-                  </label>
-                  <label class="field">
-                    <span>Test</span>
-                    <input id="split-test" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
-                  </label>
-                </div>
                 <div class="grid two split-grid">
+                  <label class="field">
+                    <span>Combination mode</span>
+                    <select id="fc-combination-mode" title="Aligned matches list positions. Cartesian expands every possible count combination.">
+                      <option value="aligned">Aligned combinations</option>
+                      <option value="cartesian">Cartesian product combinations</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Generated datasets</span>
+                    <input id="atom-combination-count" type="text" value="3 aligned datasets" readonly />
+                  </label>
                   <label class="field">
                     <span>Random seed</span>
                     <input id="fc-random-seed" type="number" step="1" value="42" />
@@ -250,18 +247,96 @@
                     <input id="fc-max-datasets" type="number" step="1" min="1" value="100" />
                   </label>
                 </div>
+                <label class="field">
+                  <span>Generated structures</span>
+                  <input id="atom-sizes" type="text" value="10, 20, 30" readonly />
+                </label>
+                <div class="fc-mode-note">
+                  <strong>Aligned</strong> empareja cada posición de las listas. <strong>Cartesian</strong> expande todas las combinaciones.
+                </div>
+                <div>
+                  <div class="preview-heading">
+                    <span>Dataset preview</span>
+                    <span class="muted-text">first entries shown before running</span>
+                  </div>
+                  <div id="fc-dataset-preview" class="dataset-preview"></div>
+                </div>
+              </section>
+
+              <section class="method-card method-random">
+                <div class="method-card-header">
+                  <label class="method-toggle">
+                    <input class="method-checkbox" type="checkbox" value="random_cartesian" checked />
+                    <span>Random Cartesian</span>
+                  </label>
+                  <span id="random-preview-summary" class="method-summary">1 dataset</span>
+                </div>
+                <p class="field-help">
+                  Genera geometrías aleatorias con amplitud y restricciones propias, sin depender del tamaño FC.
+                </p>
+                <label class="field">
+                  <span>Estructuras por dataset</span>
+                  <input id="random-cartesian-n-structures" type="text" value="100" />
+                  <small>Lista separada por comas. Ejemplo: 50, 100.</small>
+                </label>
+                <div class="grid two split-grid">
+                  <label class="field">
+                    <span>Distribución</span>
+                    <select id="random-cartesian-distribution">
+                      <option value="gaussian" selected>Gaussian</option>
+                      <option value="uniform">Uniform</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Seed</span>
+                    <input id="random-cartesian-seed" type="number" step="1" value="1234" />
+                  </label>
+                  <label class="field">
+                    <span>Sigma gaussian (Ang)</span>
+                    <input id="random-cartesian-sigma-ang" type="number" step="0.001" min="0" value="0.03" />
+                  </label>
+                  <label class="field">
+                    <span>Rango uniforme (Ang)</span>
+                    <input id="random-cartesian-uniform-range-ang" type="number" step="0.001" min="0" value="0.05" />
+                  </label>
+                  <label class="field">
+                    <span>Min distance (Ang)</span>
+                    <input id="random-cartesian-min-distance-ang" type="number" step="0.01" min="0" value="0.65" />
+                  </label>
+                  <label class="field">
+                    <span>Átomos movidos</span>
+                    <input id="random-cartesian-move-atoms" type="text" value="all" />
+                    <small>Usa all o índices 1-based separados por comas.</small>
+                  </label>
+                  <label class="field">
+                    <span>Filtro de especies</span>
+                    <input id="random-cartesian-species-filter" type="text" placeholder="H, O" />
+                  </label>
+                  <label class="toggle-field inline-toggle">
+                    <input id="random-cartesian-remove-com" type="checkbox" checked />
+                    <span>Eliminar traslación del centro de masa</span>
+                  </label>
+                </div>
+              </section>
+            </div>
+
+            <details class="advanced-recipes">
+              <summary>Import/export avanzado de recetas JSON</summary>
+              <div class="advanced-recipes-body">
+                <label class="toggle-field inline-toggle">
+                  <input id="use-dataset-recipes-json" type="checkbox" />
+                  <span>Usar este JSON al lanzar el experimento</span>
+                </label>
+                <label class="field">
+                  <span>Dataset recipes JSON</span>
+                  <textarea id="dataset-recipes-json" rows="8" placeholder='{"md":[{"recipe_id":"md_100","blocks":[{"n_snapshots":100}]}],"random_cartesian":[{"recipe_id":"rc_sigma_0p03","blocks":[{"n_structures":100,"distribution":"gaussian","sigma_ang":0.03,"seed":123}]}]}'></textarea>
+                  <small>
+                    Si activas esta opción, el JSON reemplaza el constructor visual para los métodos incluidos.
+                    Las recetas MD con temperatura siguen rechazándose hasta verificar keywords SIESTA.
+                  </small>
+                </label>
               </div>
-            </div>
-            <div class="fc-mode-note">
-              <strong>Aligned</strong> creates one dataset per list index. <strong>Cartesian</strong> creates one dataset for every product of the count lists.
-            </div>
-            <div>
-              <div class="preview-heading">
-                <span>Dataset preview</span>
-                <span class="muted-text">first entries shown before running</span>
-              </div>
-              <div id="fc-dataset-preview" class="dataset-preview"></div>
-            </div>
+            </details>
           </section>
 
           <section class="panel experiment-status">
@@ -300,9 +375,32 @@
             </div>
             <div class="grid four split-grid">
               <label class="field">
+                <span>Preset</span>
+                <select id="performance-preset">
+                  <option value="">Manual</option>
+                  <option value="aggressive_local">aggressive_local</option>
+                </select>
+              </label>
+              <label class="field">
                 <span>Max parallel SIESTA jobs</span>
                 <input id="performance-max-parallel-siesta-jobs" type="number" step="1" min="1" value="1" />
                 <small>Only independent AtomDisplacement / Random Cartesian samples. MD trajectories stay sequential.</small>
+              </label>
+              <label class="field">
+                <span>Max dataset jobs</span>
+                <input id="performance-max-parallel-dataset-jobs" type="number" step="1" min="1" value="1" />
+              </label>
+              <label class="field">
+                <span>Max prediction jobs</span>
+                <input id="performance-max-parallel-prediction-jobs" type="number" step="1" min="1" value="1" />
+              </label>
+              <label class="field">
+                <span>Max evaluation jobs</span>
+                <input id="performance-max-parallel-evaluation-jobs" type="number" step="1" min="1" value="1" />
+              </label>
+              <label class="field">
+                <span>Max metric jobs</span>
+                <input id="performance-max-parallel-metric-jobs" type="number" step="1" min="1" value="1" />
               </label>
               <label class="field">
                 <span>OMP threads</span>
@@ -315,6 +413,10 @@
               <label class="field">
                 <span>OpenBLAS threads</span>
                 <input id="performance-openblas-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
+              </label>
+              <label class="field">
+                <span>NumExpr threads</span>
+                <input id="performance-numexpr-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
               </label>
             </div>
           </section>
@@ -359,6 +461,27 @@
                 <span>Torch threads</span>
                 <input id="performance-torch-num-threads" type="number" step="1" min="1" placeholder="sin cambio" />
               </label>
+              <label class="field">
+                <span>Reuse validated SIESTA</span>
+                <select id="performance-reuse-validated-siesta-outputs">
+                  <option value="true" selected>true</option>
+                  <option value="false">false</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Experiment cache</span>
+                <select id="performance-enable-experiment-cache">
+                  <option value="false" selected>false</option>
+                  <option value="true">true</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Error policy</span>
+                <select id="performance-error-policy">
+                  <option value="fail_fast" selected>fail_fast</option>
+                  <option value="continue_on_error">continue_on_error</option>
+                </select>
+              </label>
             </div>
           </section>
         </section>
@@ -384,7 +507,17 @@
                 <p class="eyebrow">Post-processing metrics</p>
                 <h3>Visual comparison</h3>
               </div>
-              <span id="plots-status" class="muted-text">Plots disabled</span>
+              <div class="button-row">
+                <label class="field inline-field">
+                  <span>Cross experiments</span>
+                  <select id="plot-cross-selection">
+                    <option value="all_compatible" selected>All compatible latest group</option>
+                    <option value="latest">Latest only</option>
+                    <option value="all">All experiments</option>
+                  </select>
+                </label>
+                <span id="plots-status" class="muted-text">Plots disabled</span>
+              </div>
             </div>
             <div class="plot-grid">
               <div id="plot-fermi" class="plot-card"></div>

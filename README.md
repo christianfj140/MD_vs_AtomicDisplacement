@@ -317,6 +317,111 @@ revisa primero `experiment_manifest.yaml`, `validation_summary.json`,
 `cross_evaluation_metrics.csv`, `winner_summary.csv` y `recommendation.json`
 antes de confiar en las graficas.
 
+### Recetas de dataset y plots
+
+La UI de comparacion acepta ahora `dataset_recipes` opcional en el experimento.
+Los campos simples (`md_sizes`, opciones FC y `random_cartesian.n_structures`)
+siguen funcionando y se convierten internamente a recetas versionadas. En modo
+avanzado, el tamaño ya no es la identidad del dataset: cada run queda etiquetado
+por `recipe_id`, `block_id` y hash de receta, por ejemplo
+`md_md_plain_md_9_9` o `rc_rc_sigma_rc_sigma_0p03_100`.
+
+Ejemplo minimo:
+
+```json
+{
+  "md": [
+    {"recipe_id": "md_100", "blocks": [{"block_id": "md_plain", "n_snapshots": 100}]}
+  ],
+  "siesta_fc_cartesian": [
+    {
+      "recipe_id": "fc_mixed",
+      "blocks": [
+        {"block_id": "fc_0p02", "displacement": "0.02 Ang", "n_structures": 20},
+        {"block_id": "fc_0p05", "displacement": "0.05 Ang", "n_structures": 20}
+      ]
+    }
+  ],
+  "random_cartesian": [
+    {
+      "recipe_id": "rc_sigma_0p03",
+      "blocks": [
+        {"block_id": "rc_100", "n_structures": 100, "distribution": "gaussian", "sigma_ang": 0.03, "seed": 7}
+      ]
+    }
+  ]
+}
+```
+
+Las recetas MD aceptan por ahora bloques de `n_snapshots`. Los campos de
+temperatura/termostato se rechazan con un error claro hasta que se verifiquen y
+se rendericen keywords SIESTA 5.4 compatibles en el flujo local; no se generan
+controles fisicos falsos.
+
+Los manifiestos de muestras y runs propagan metadatos de receta (`recipe_id`,
+`block_id`, parametros de generacion y seed) para poder agrupar errores
+prediccion-vs-SIESTA por familia. `/api/plots` devuelve todos los runs y los
+experimentos cross agrupados por compatibilidad. La UI ya no oculta
+silenciosamente experimentos antiguos: el selector de plots permite ver el grupo
+compatible mas reciente, solo el ultimo experimento o todos los experimentos con
+warning.
+
+### Rendimiento
+
+La pestaña `Rendimiento` de la UI controla solo opciones cableadas al backend y
+registradas en `experiment_manifest.yaml` y `performance_report.json/csv`.
+Por defecto el flujo conserva el comportamiento cientifico actual: jobs de
+dataset, prediccion, evaluacion y metricas en serie, sin cache experimental, y
+reutilizando solo salidas SIESTA locales que pasen la validacion estricta.
+
+Controles que afectan a SIESTA:
+
+- `max_parallel_siesta_jobs`: paraleliza single-points independientes de
+  AtomDisplacement/Random Cartesian. Cada muestra se ejecuta en su propio
+  directorio y se valida despues. La trayectoria MD no se paraleliza porque es
+  un calculo acoplado.
+- `omp_num_threads`, `mkl_num_threads`, `openblas_num_threads`,
+  `numexpr_num_threads`: se aplican como variables de entorno a los
+  subprocesos. Evita sobre-suscripcion: si subes `max_parallel_siesta_jobs`,
+  baja los threads por job.
+- `reuse_validated_siesta_outputs`: permite saltar single-points locales solo si
+  `RUN.fdf`, `RUN.out` y la matriz pasan la validacion; no acepta matrices por
+  mera existencia.
+
+Controles que afectan a Graph2Mat/PyTorch:
+
+- `compute_accelerator`: `cpu`, `gpu` o `auto`. `gpu` falla si CUDA no esta
+  disponible; `auto` usa GPU si existe y si no cae a CPU con warning.
+- `batch_size` y `store_in_memory`: se escriben en el YAML temporal de cada
+  workspace antes de entrenar/evaluar.
+- `torch_num_threads` y `torch_float32_matmul_precision`: se aplican al entorno
+  de PyTorch mediante el wrapper de compatibilidad.
+
+Controles de orquestacion:
+
+- `max_parallel_dataset_jobs`: ejecuta jobs independientes metodo/tamaño en
+  paralelo solo mediante snapshots `PIPELINE_CONFIG_PATH` y workspaces aislados.
+  Con una sola GPU, el runner fuerza serializacion para evitar entrenamientos
+  simultaneos en el mismo dispositivo.
+- `max_parallel_prediction_jobs`, `max_parallel_evaluation_jobs` y
+  `max_parallel_metric_jobs` limitan predicciones cruzadas, evaluaciones
+  cruzadas y metricas Hamiltonianas por muestra cuando sus directorios de salida
+  son unicos. Las partes que escriben artefactos agregados siguen en el proceso
+  padre para conservar orden determinista.
+- `error_policy`: `fail_fast` aborta al primer fallo; `continue_on_error`
+  permite terminar tareas pendientes y marca el experimento como parcial, nunca
+  como exitoso.
+- `enable_experiment_cache`: reservado y desactivado por defecto. Si se activa,
+  el backend falla de forma explicita porque aun no existe una clave de hash
+  completa para reutilizar entrenamiento, predicciones o metricas con seguridad.
+
+Para una estacion local grande, empieza con valores conservadores: 2-4
+single-points SIESTA en paralelo, 1-4 threads por job, dataset jobs en serie si
+usas GPU, y predicciones/evaluaciones en serie hasta confirmar que los outputs
+son independientes. El preset `aggressive_local` rellena valores prudentes a
+partir de los nucleos disponibles, pero sigue evitando paralelismo de GPU no
+aislado.
+
 ### Limitaciones actuales
 
 - La validacion estricta puede invalidar datasets antiguos que solo guardaban
@@ -329,3 +434,6 @@ antes de confiar en las graficas.
   `check_geometry_leakage.py` y multiples seeds.
 - Algunas metricas cerca de Fermi son delicadas en moleculas y dependen de que
   SIESTA proporcione un Fermi level real.
+- No se implementa cache global de SIESTA, checkpoints, predicciones ni metricas
+  sin validacion por hash completo; hacerlo por existencia de archivos seria
+  rapido pero cientificamente inseguro.

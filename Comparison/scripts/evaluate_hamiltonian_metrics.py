@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import math
@@ -88,6 +89,167 @@ def find_prediction(sample_dir: Path) -> Path | None:
         return direct
     matches = sorted(sample_dir.glob("*ML_prediction*.HSX"), key=matrix_sort_key)
     return matches[0] if matches else None
+
+
+def evaluate_sample(
+    sample: str,
+    prediction_dir: Path | None,
+    reference_dir: Path | None,
+    result_dir: Path,
+    basis_counts: dict[str, int],
+    *,
+    low_energy_enabled: bool,
+    low_energy_n_states: int,
+    low_energy_alignment: str,
+) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = {
+        "sparse": [],
+        "spectral": [],
+        "dos": [],
+        "overlap": [],
+        "sparse_sweep": [],
+        "dos_sweep": [],
+        "block": [],
+        "species_pair": [],
+        "distance_bin": [],
+        "structural_unavailable": [],
+        "errors": [],
+    }
+    predicted_path = find_prediction(prediction_dir) if prediction_dir is not None else None
+    reference_path = find_reference(reference_dir) if reference_dir is not None else None
+    if predicted_path is None or reference_path is None:
+        rows["errors"].append(
+            {
+                "sample": sample,
+                "kind": "input",
+                "error": "Missing predicted or reference Hamiltonian.",
+            }
+        )
+        return rows
+
+    try:
+        reference = read_matrix(reference_path)
+        predicted = read_matrix(predicted_path)
+    except Exception as exc:
+        rows["errors"].append({"sample": sample, "kind": "read_matrix", "error": str(exc)})
+        return rows
+
+    for kind, data in (("siesta", reference), ("predicted", predicted)):
+        rows["overlap"].append(
+            {
+                "sample": sample,
+                "kind": kind,
+                "matrix_path": str(data.path),
+                "n_bands": int(data.hamiltonian.shape[0]),
+                "orthogonal": data.orthogonal,
+                "has_overlap": data.has_overlap,
+                "overlap_error": data.overlap_error,
+                "fermi_level_eV": data.fermi_level,
+            }
+        )
+
+    try:
+        rows["sparse"].append(sparse_metrics(sample, reference, predicted))
+        rows["sparse_sweep"].extend(sparse_threshold_sweep_metrics(sample, reference, predicted))
+    except Exception as exc:
+        rows["errors"].append({"sample": sample, "kind": "sparse_metrics", "error": str(exc)})
+
+    try:
+        structural = structural_sparse_metrics(
+            sample,
+            reference,
+            predicted,
+            result_dir / "structures" / sample / "RUN.fdf",
+            basis_counts,
+        )
+        if structural["available"]:
+            rows["block"].extend(structural["block_rows"])
+            rows["species_pair"].extend(structural["species_pair_rows"])
+            rows["distance_bin"].extend(structural["distance_bin_rows"])
+        else:
+            rows["structural_unavailable"].append({"sample": sample, "reason": structural["reason"]})
+    except Exception as exc:
+        rows["structural_unavailable"].append({"sample": sample, "reason": str(exc)})
+        rows["errors"].append({"sample": sample, "kind": "structural_metrics", "error": str(exc)})
+
+    eigen_root = result_dir / "eigenvalues"
+    dos_root = result_dir / "dos"
+    try:
+        ref_eig = generalized_eigenvalues(reference.hamiltonian, reference.overlap)
+        pred_eig = generalized_eigenvalues(predicted.hamiltonian, reference.overlap)
+        write_csv(eigen_root / "siesta" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(ref_eig))
+        write_csv(eigen_root / "predicted" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(pred_eig))
+        fermi_level = reference.fermi_level
+        fermi_source = reference.fermi_level_source or "unavailable"
+        same_band_count = ref_eig.size == pred_eig.size
+        spectral_comparable = bool(reference.has_overlap and same_band_count and fermi_level is not None)
+        if fermi_level is None or not math.isfinite(fermi_level):
+            rows["errors"].append(
+                {
+                    "sample": sample,
+                    "kind": "missing_fermi_level",
+                    "error": (
+                        "SIESTA reference does not provide a Fermi level; "
+                        "near-Fermi, occupied-band, and gap metrics were left unavailable."
+                    ),
+                }
+            )
+            fermi_level = None
+            fermi_source = "unavailable"
+            spectral_comparable = False
+        band_rows, spectral_metrics = eigen_error_metrics(
+            ref_eig,
+            pred_eig,
+            fermi_level,
+            fermi_source,
+        )
+        if low_energy_enabled:
+            low_metrics = low_energy_metrics(
+                reference,
+                predicted,
+                n_states=low_energy_n_states,
+                alignment=low_energy_alignment,
+            )
+            spectral_metrics.update(low_metrics)
+            if low_metrics.get("low_energy_warning"):
+                rows["errors"].append(
+                    {
+                        "sample": sample,
+                        "kind": "low_energy_metrics",
+                        "error": str(low_metrics["low_energy_warning"]),
+                    }
+                )
+        write_csv(
+            eigen_root / "band_errors" / f"{sample}.csv",
+            ["band", "siesta_eV", "predicted_eV", "error_eV", "abs_error_eV", "siesta_minus_fermi_eV"],
+            band_rows,
+        )
+        rows["spectral"].append(
+            {
+                "sample": sample,
+                "siesta_bands": int(ref_eig.size),
+                "predicted_bands": int(pred_eig.size),
+                "overlap_source": "siesta_reference",
+                "spectral_comparable": spectral_comparable,
+                "same_band_count": same_band_count,
+                "reference_has_overlap": reference.has_overlap,
+                "hamiltonian_symmetrized_for_spectrum": True,
+                **spectral_metrics,
+            }
+        )
+        dos_grid_rows, dos_metrics = dos_for_sample(ref_eig, pred_eig)
+        write_csv(
+            dos_root / f"{sample}.csv",
+            ["energy_eV", "siesta_dos", "predicted_dos", "siesta_dos_normalized", "predicted_dos_normalized"],
+            dos_grid_rows,
+        )
+        rows["dos"].append({"sample": sample, **dos_metrics})
+        for sigma in DOS_SIGMA_SWEEP_EV:
+            _grid_rows, sweep_metrics = dos_for_sample(ref_eig, pred_eig, sigma_ev=sigma)
+            rows["dos_sweep"].append({"sample": sample, **sweep_metrics})
+    except Exception as exc:
+        rows["errors"].append({"sample": sample, "kind": "spectral_or_dos_metrics", "error": str(exc)})
+    return rows
 
 
 def find_reference(sample_dir: Path) -> Path | None:
@@ -796,6 +958,38 @@ def summarize_numeric(rows: list[dict[str, Any]], skip: set[str]) -> dict[str, d
     }
 
 
+def metric_availability(rows: list[dict[str, Any]], metrics: list[str]) -> dict[str, dict[str, Any]]:
+    availability: dict[str, dict[str, Any]] = {}
+    total = len(rows)
+    for metric in metrics:
+        available = 0
+        for row in rows:
+            try:
+                value = float(row.get(metric))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                available += 1
+        missing = max(0, total - available)
+        if available == total and total:
+            reason = ""
+        elif total == 0:
+            reason = "no_samples"
+        elif metric.startswith("fermi_window"):
+            reason = "fermi_window_unavailable_or_empty"
+        elif metric.startswith("frontier_window"):
+            reason = "frontier_levels_unavailable"
+        else:
+            reason = "metric_unavailable_for_some_samples"
+        availability[metric] = {
+            "metric_available": available > 0,
+            "n_samples_with_metric": available,
+            "n_samples_without_metric": missing,
+            "metric_unavailable_reason": reason,
+        }
+    return availability
+
+
 def pearson_correlation(rows: list[dict[str, Any]], x_key: str, y_key: str) -> float:
     pairs: list[tuple[float, float]] = []
     for row in rows:
@@ -882,6 +1076,7 @@ def extract(
     low_energy_enabled: bool = True,
     low_energy_n_states: int = LOW_ENERGY_N_STATES,
     low_energy_alignment: str = LOW_ENERGY_ALIGNMENT,
+    workers: int = 1,
 ) -> dict[str, Any]:
     low_energy_n_states, low_energy_alignment = validate_low_energy_config(
         low_energy_n_states,
@@ -920,139 +1115,55 @@ def extract(
         structural_basis_error = str(exc)
         errors.append({"sample": "*", "kind": "structural_basis", "error": structural_basis_error})
 
-    for sample in sample_names:
-        predicted_path = find_prediction(prediction_dirs[sample]) if sample in prediction_dirs else None
-        reference_path = find_reference(reference_dirs[sample]) if sample in reference_dirs else None
-        if predicted_path is None or reference_path is None:
-            errors.append(
-                {
-                    "sample": sample,
-                    "kind": "input",
-                    "error": "Missing predicted or reference Hamiltonian.",
-                }
-            )
-            continue
+    def merge_sample_rows(sample_rows: dict[str, list[dict[str, Any]]]) -> None:
+        sparse_rows.extend(sample_rows["sparse"])
+        spectral_rows.extend(sample_rows["spectral"])
+        dos_rows.extend(sample_rows["dos"])
+        overlap_rows.extend(sample_rows["overlap"])
+        sparse_sweep_rows.extend(sample_rows["sparse_sweep"])
+        dos_sweep_rows.extend(sample_rows["dos_sweep"])
+        block_rows.extend(sample_rows["block"])
+        species_pair_rows.extend(sample_rows["species_pair"])
+        distance_bin_rows.extend(sample_rows["distance_bin"])
+        structural_unavailable.extend(sample_rows["structural_unavailable"])
+        errors.extend(sample_rows["errors"])
 
-        try:
-            reference = read_matrix(reference_path)
-            predicted = read_matrix(predicted_path)
-        except Exception as exc:
-            errors.append({"sample": sample, "kind": "read_matrix", "error": str(exc)})
-            continue
-
-        for kind, data in (("siesta", reference), ("predicted", predicted)):
-            overlap_rows.append(
-                {
-                    "sample": sample,
-                    "kind": kind,
-                    "matrix_path": str(data.path),
-                    "n_bands": int(data.hamiltonian.shape[0]),
-                    "orthogonal": data.orthogonal,
-                    "has_overlap": data.has_overlap,
-                    "overlap_error": data.overlap_error,
-                    "fermi_level_eV": data.fermi_level,
-                }
-            )
-
-        try:
-            sparse_rows.append(sparse_metrics(sample, reference, predicted))
-            sparse_sweep_rows.extend(sparse_threshold_sweep_metrics(sample, reference, predicted))
-        except Exception as exc:
-            errors.append({"sample": sample, "kind": "sparse_metrics", "error": str(exc)})
-
-        try:
-            structural = structural_sparse_metrics(
-                sample,
-                reference,
-                predicted,
-                result_dir / "structures" / sample / "RUN.fdf",
-                basis_counts,
-            )
-            if structural["available"]:
-                block_rows.extend(structural["block_rows"])
-                species_pair_rows.extend(structural["species_pair_rows"])
-                distance_bin_rows.extend(structural["distance_bin_rows"])
-            else:
-                structural_unavailable.append({"sample": sample, "reason": structural["reason"]})
-        except Exception as exc:
-            structural_unavailable.append({"sample": sample, "reason": str(exc)})
-            errors.append({"sample": sample, "kind": "structural_metrics", "error": str(exc)})
-
-        try:
-            ref_eig = generalized_eigenvalues(reference.hamiltonian, reference.overlap)
-            pred_eig = generalized_eigenvalues(predicted.hamiltonian, reference.overlap)
-            write_csv(eigen_root / "siesta" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(ref_eig))
-            write_csv(eigen_root / "predicted" / f"{sample}.csv", ["band", "eigenvalue_eV"], eigenvalue_rows(pred_eig))
-            fermi_level = reference.fermi_level
-            fermi_source = reference.fermi_level_source or "unavailable"
-            same_band_count = ref_eig.size == pred_eig.size
-            spectral_comparable = bool(reference.has_overlap and same_band_count and fermi_level is not None)
-            if fermi_level is None or not math.isfinite(fermi_level):
-                errors.append(
-                    {
-                        "sample": sample,
-                        "kind": "missing_fermi_level",
-                        "error": (
-                            "SIESTA reference does not provide a Fermi level; "
-                            "near-Fermi, occupied-band, and gap metrics were left unavailable."
-                        ),
-                    }
+    worker_count = max(1, int(workers))
+    if worker_count > 1 and len(sample_names) > 1:
+        results_by_index: dict[int, dict[str, list[dict[str, Any]]]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_to_index = {
+                executor.submit(
+                    evaluate_sample,
+                    sample,
+                    prediction_dirs.get(sample),
+                    reference_dirs.get(sample),
+                    result_dir,
+                    basis_counts,
+                    low_energy_enabled=low_energy_enabled,
+                    low_energy_n_states=low_energy_n_states,
+                    low_energy_alignment=low_energy_alignment,
+                ): index
+                for index, sample in enumerate(sample_names)
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                results_by_index[future_to_index[future]] = future.result()
+        for index in sorted(results_by_index):
+            merge_sample_rows(results_by_index[index])
+    else:
+        for sample in sample_names:
+            merge_sample_rows(
+                evaluate_sample(
+                    sample,
+                    prediction_dirs.get(sample),
+                    reference_dirs.get(sample),
+                    result_dir,
+                    basis_counts,
+                    low_energy_enabled=low_energy_enabled,
+                    low_energy_n_states=low_energy_n_states,
+                    low_energy_alignment=low_energy_alignment,
                 )
-                fermi_level = None
-                fermi_source = "unavailable"
-                spectral_comparable = False
-            band_rows, spectral_metrics = eigen_error_metrics(
-                ref_eig,
-                pred_eig,
-                fermi_level,
-                fermi_source,
             )
-            if low_energy_enabled:
-                low_metrics = low_energy_metrics(
-                    reference,
-                    predicted,
-                    n_states=low_energy_n_states,
-                    alignment=low_energy_alignment,
-                )
-                spectral_metrics.update(low_metrics)
-                if low_metrics.get("low_energy_warning"):
-                    errors.append(
-                        {
-                            "sample": sample,
-                            "kind": "low_energy_metrics",
-                            "error": str(low_metrics["low_energy_warning"]),
-                        }
-                    )
-            write_csv(
-                eigen_root / "band_errors" / f"{sample}.csv",
-                ["band", "siesta_eV", "predicted_eV", "error_eV", "abs_error_eV", "siesta_minus_fermi_eV"],
-                band_rows,
-            )
-            spectral_rows.append(
-                {
-                    "sample": sample,
-                    "siesta_bands": int(ref_eig.size),
-                    "predicted_bands": int(pred_eig.size),
-                    "overlap_source": "siesta_reference",
-                    "spectral_comparable": spectral_comparable,
-                    "same_band_count": same_band_count,
-                    "reference_has_overlap": reference.has_overlap,
-                    "hamiltonian_symmetrized_for_spectrum": True,
-                    **spectral_metrics,
-                }
-            )
-            dos_grid_rows, dos_metrics = dos_for_sample(ref_eig, pred_eig)
-            write_csv(
-                dos_root / f"{sample}.csv",
-                ["energy_eV", "siesta_dos", "predicted_dos", "siesta_dos_normalized", "predicted_dos_normalized"],
-                dos_grid_rows,
-            )
-            dos_rows.append({"sample": sample, **dos_metrics})
-            for sigma in DOS_SIGMA_SWEEP_EV:
-                _grid_rows, sweep_metrics = dos_for_sample(ref_eig, pred_eig, sigma_ev=sigma)
-                dos_sweep_rows.append({"sample": sample, **sweep_metrics})
-        except Exception as exc:
-            errors.append({"sample": sample, "kind": "spectral_or_dos_metrics", "error": str(exc)})
 
     sparse_fields = [
         "sample",
@@ -1224,6 +1335,27 @@ def extract(
         "spectral": summarize_numeric(spectral_rows, {"sample", "overlap_source", "hamiltonian_symmetrized_for_spectrum"}),
         "dos": summarize_numeric(dos_rows, {"sample"}),
         "matrix_spectrum": matrix_spectrum_summary(relationship_rows),
+        "metric_availability": {
+            **metric_availability(
+                spectral_rows,
+                [
+                    "global_rmse_eV",
+                    "occupied_rmse_eV",
+                    "fermi_window_rmse_eV",
+                    "frontier_window_rmse_eV",
+                    "low_energy_rmse_eV",
+                    "gap_abs_error_eV",
+                ],
+            ),
+            **metric_availability(
+                sparse_rows,
+                ["relative_frobenius_union", "mae_ref_eV", "support_f1"],
+            ),
+            **metric_availability(
+                dos_rows,
+                ["dos_wasserstein_eV"],
+            ),
+        },
     }
     manifest = {
         "result_dir": str(result_dir),
@@ -1257,6 +1389,7 @@ def extract(
         },
         "support_threshold_sweep": SUPPORT_THRESHOLDS_SWEEP,
         "dos_points": DOS_POINTS,
+        "metric_workers": max(1, int(workers)),
         "errors": errors,
         "summary": summary,
         "outputs": {
@@ -1292,12 +1425,14 @@ def main() -> int:
     parser.add_argument("--disable-low-energy", action="store_true")
     parser.add_argument("--low-energy-n-states", type=int, default=LOW_ENERGY_N_STATES)
     parser.add_argument("--low-energy-alignment", default=LOW_ENERGY_ALIGNMENT, choices=["none", "global_shift"])
+    parser.add_argument("--workers", type=int, default=1, help="Parallel sample workers for metric extraction.")
     args = parser.parse_args()
     manifest = extract(
         args.result_dir,
         low_energy_enabled=not args.disable_low_energy,
         low_energy_n_states=args.low_energy_n_states,
         low_energy_alignment=args.low_energy_alignment,
+        workers=args.workers,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=False, allow_nan=False))
     return 0 if not manifest["errors"] else 2

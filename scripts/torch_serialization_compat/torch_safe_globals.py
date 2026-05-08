@@ -12,6 +12,7 @@ THREAD_ENV_BY_SETTING = {
     "omp_num_threads": "OMP_NUM_THREADS",
     "mkl_num_threads": "MKL_NUM_THREADS",
     "openblas_num_threads": "OPENBLAS_NUM_THREADS",
+    "numexpr_num_threads": "NUMEXPR_NUM_THREADS",
     "torch_num_threads": "TORCH_NUM_THREADS",
 }
 

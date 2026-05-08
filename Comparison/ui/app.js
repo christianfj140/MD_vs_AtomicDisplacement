@@ -210,27 +210,54 @@ async function pollLogs() {
   updateVenvCommandPreview();
 }
 
-function parseSizesInput(id) {
-  return document
-    .getElementById(id)
-    .value.split(/[;,]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => Number(item));
+function inputValue(id) {
+  return String(document.getElementById(id)?.value || "").trim();
 }
 
-function parseTextListInput(id) {
-  return document
-    .getElementById(id)
-    .value.split(/[;,]/)
+function splitList(value) {
+  return String(value || "")
+    .split(/[;,]/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
-function parsePositiveIntegerListInput(id) {
-  return parseTextListInput(id)
-    .map((item) => Number(item))
-    .filter((value) => Number.isInteger(value) && value > 0);
+function parseNumberListInput(id, label, { integer = false, min = null, allowEmpty = false } = {}) {
+  const rawItems = splitList(inputValue(id));
+  if (!rawItems.length) {
+    if (allowEmpty) return [];
+    throw new Error(`${label} requiere al menos un valor.`);
+  }
+  return rawItems.map((item) => {
+    const value = Number(item);
+    const integerOk = !integer || Number.isInteger(value);
+    const minOk = min == null || value >= min;
+    if (!Number.isFinite(value) || !integerOk || !minOk) {
+      const type = integer ? "entero" : "numero";
+      const floor = min == null ? "" : ` >= ${min}`;
+      throw new Error(`${label}: "${item}" debe ser un ${type}${floor}.`);
+    }
+    return value;
+  });
+}
+
+function parseSizesInput(id) {
+  return parseNumberListInput(id, "Tamanos de dataset", {
+    integer: true,
+    min: 3,
+    allowEmpty: true,
+  });
+}
+
+function optionalNumberInput(id, label, { integer = false, min = null } = {}) {
+  const raw = inputValue(id);
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || (integer && !Number.isInteger(value)) || (min != null && value < min)) {
+    const type = integer ? "entero" : "numero";
+    const floor = min == null ? "" : ` >= ${min}`;
+    throw new Error(`${label} debe ser un ${type}${floor}.`);
+  }
+  return value;
 }
 
 function parseSplitRatios() {
@@ -242,7 +269,7 @@ function parseSplitRatios() {
 }
 
 function optionalPositiveInteger(id, label) {
-  const raw = String(document.getElementById(id)?.value || "").trim();
+  const raw = inputValue(id);
   if (!raw) return null;
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
@@ -252,7 +279,7 @@ function optionalPositiveInteger(id, label) {
 }
 
 function optionalBooleanSelect(id) {
-  const raw = String(document.getElementById(id)?.value || "").trim();
+  const raw = inputValue(id);
   if (raw === "") return null;
   return raw === "true";
 }
@@ -267,13 +294,26 @@ function performanceSettings() {
       "performance-max-parallel-siesta-jobs",
       "Max parallel SIESTA jobs",
     ) || 1,
+    max_parallel_dataset_jobs:
+      optionalPositiveInteger("performance-max-parallel-dataset-jobs", "Max dataset jobs") || 1,
+    max_parallel_prediction_jobs:
+      optionalPositiveInteger("performance-max-parallel-prediction-jobs", "Max prediction jobs") || 1,
+    max_parallel_evaluation_jobs:
+      optionalPositiveInteger("performance-max-parallel-evaluation-jobs", "Max evaluation jobs") || 1,
+    max_parallel_metric_jobs:
+      optionalPositiveInteger("performance-max-parallel-metric-jobs", "Max metric jobs") || 1,
     omp_num_threads: optionalPositiveInteger("performance-omp-num-threads", "OMP threads"),
     mkl_num_threads: optionalPositiveInteger("performance-mkl-num-threads", "MKL threads"),
     openblas_num_threads: optionalPositiveInteger("performance-openblas-num-threads", "OpenBLAS threads"),
+    numexpr_num_threads: optionalPositiveInteger("performance-numexpr-num-threads", "NumExpr threads"),
     torch_num_threads: optionalPositiveInteger("performance-torch-num-threads", "Torch threads"),
     compute_accelerator: accelerator,
     batch_size: optionalPositiveInteger("performance-batch-size", "Batch size override"),
     store_in_memory: optionalBooleanSelect("performance-store-in-memory"),
+    reuse_validated_siesta_outputs: optionalBooleanSelect("performance-reuse-validated-siesta-outputs"),
+    enable_experiment_cache: optionalBooleanSelect("performance-enable-experiment-cache"),
+    error_policy: document.getElementById("performance-error-policy")?.value || "fail_fast",
+    preset: document.getElementById("performance-preset")?.value || null,
     torch_float32_matmul_precision:
       document.getElementById("performance-torch-float32-matmul-precision")?.value || null,
   };
@@ -360,29 +400,164 @@ function pipelineLabel(key) {
   return resultPipelines.find((item) => item.key === key)?.label || key;
 }
 
-function parseRandomCartesianOptions(methods) {
-  const input = document.getElementById("random-cartesian-n-structures");
-  const rawItems = String(input?.value || "")
-    .split(/[;,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  const sizes = rawItems.map((item) => Number(item));
-  if (methods.includes("random_cartesian")) {
-    if (!sizes.length || sizes.some((size) => !Number.isInteger(size) || size < 3)) {
-      throw new Error("Random Cartesian requiere tamanos enteros >= 3, separados por comas.");
-    }
-  }
-  if (!sizes.length || sizes.some((size) => !Number.isInteger(size) || size <= 0)) return {};
-  return sizes.length === 1 ? { n_structures: sizes[0] } : { n_structures: sizes };
+function slugPart(value) {
+  return String(value || "x")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48) || "x";
 }
 
-function syncRandomCartesianSizeFromAtomPlan(sizes) {
-  const input = document.getElementById("random-cartesian-n-structures");
-  if (!input) return;
-  const validSizes = sizes.filter((size) => Number.isInteger(size) && size >= 3);
-  if (validSizes.length) {
-    input.value = validSizes.join(", ");
+function parseMoveAtomsInput() {
+  const raw = inputValue("random-cartesian-move-atoms");
+  if (!raw || raw.toLowerCase() === "all") return "all";
+  return splitList(raw).map((item) => {
+    const value = Number(item);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`Átomos movidos: "${item}" debe ser un indice 1-based positivo o usa all.`);
+    }
+    return value;
+  });
+}
+
+function parseRandomCartesianOptions(methods) {
+  const selected = methods.includes("random_cartesian");
+  if (!selected) return {};
+  const sizes = parseNumberListInput("random-cartesian-n-structures", "Random Cartesian structures", {
+    integer: true,
+    min: 3,
+  });
+  if (!sizes.length) return {};
+  const distribution = inputValue("random-cartesian-distribution") || "gaussian";
+  if (!["gaussian", "uniform"].includes(distribution)) {
+    throw new Error("Random Cartesian distribution debe ser gaussian o uniform.");
   }
+  const seed = optionalNumberInput("random-cartesian-seed", "Random Cartesian seed", {
+    integer: true,
+  });
+  const sigma = optionalNumberInput("random-cartesian-sigma-ang", "Sigma gaussian", { min: 0 });
+  const uniformRange = optionalNumberInput("random-cartesian-uniform-range-ang", "Rango uniforme", {
+    min: 0,
+  });
+  const minDistance = optionalNumberInput("random-cartesian-min-distance-ang", "Min distance", {
+    min: 0,
+  });
+  return {
+    n_structures: sizes.length === 1 ? sizes[0] : sizes,
+    distribution,
+    seed: seed ?? 1234,
+    sigma_ang: sigma ?? 0.03,
+    uniform_range_ang: uniformRange ?? 0.05,
+    min_distance_ang: minDistance ?? 0.65,
+    move_atoms: parseMoveAtomsInput(),
+    species_filter: splitList(inputValue("random-cartesian-species-filter")),
+    remove_center_of_mass_translation: Boolean(
+      document.getElementById("random-cartesian-remove-com")?.checked,
+    ),
+  };
+}
+
+function parseDatasetRecipes() {
+  const input = document.getElementById("dataset-recipes-json");
+  const useJson = Boolean(document.getElementById("use-dataset-recipes-json")?.checked);
+  const raw = String(input?.value || "").trim();
+  if (!useJson && raw) return null;
+  if (useJson && !raw) {
+    throw new Error("Activa recetas JSON sólo si el textarea contiene un objeto JSON.");
+  }
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Dataset recipes JSON no es valido: ${error.message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Dataset recipes debe ser un objeto con claves md, siesta_fc_cartesian o random_cartesian.");
+  }
+  return parsed;
+}
+
+function randomCartesianSizes(options) {
+  const raw = options?.n_structures;
+  return Array.isArray(raw) ? raw.map((value) => Number(value)) : raw == null ? [] : [Number(raw)];
+}
+
+function builderDatasetRecipes(methods, mdSizes, fcSpecs, randomCartesianOptions) {
+  const recipes = {};
+  if (methods.includes("md")) {
+    if (!mdSizes.length) {
+      throw new Error("MD requiere al menos un tamaño de dataset.");
+    }
+    recipes.md = mdSizes.map((size, index) => ({
+      recipe_id: `md_${size}`,
+      label: `MD ${size} snapshots`,
+      blocks: [
+        {
+          block_id: `md_snapshots_${index + 1}_${size}`,
+          label: `${size} snapshots`,
+          n_snapshots: size,
+        },
+      ],
+    }));
+  }
+  if (methods.includes("siesta_fc_cartesian")) {
+    recipes.siesta_fc_cartesian = fcSpecs.map((spec) => ({
+      recipe_id: `fc_${spec.index + 1}_${spec.size}`,
+      label: `FC ${spec.size} structures`,
+      seed: optionalNumberInput("fc-random-seed", "FC random seed", { integer: true }) ?? 42,
+      blocks: spec.displacements.map((entry) => ({
+        block_id: `fc_${slugPart(entry.value)}_${entry.n_structures}`,
+        label: `${entry.value}: ${entry.n_structures}`,
+        displacement: entry.value,
+        n_structures: entry.n_structures,
+      })),
+    }));
+  }
+  if (methods.includes("random_cartesian")) {
+    const sizes = randomCartesianSizes(randomCartesianOptions);
+    if (!sizes.length) {
+      throw new Error("Random Cartesian requiere al menos un tamaño de dataset.");
+    }
+    const base = { ...randomCartesianOptions };
+    delete base.n_structures;
+    const amplitude =
+      base.distribution === "uniform"
+        ? `u${slugPart(base.uniform_range_ang)}`
+        : `s${slugPart(base.sigma_ang)}`;
+    recipes.random_cartesian = sizes.map((size, index) => ({
+      recipe_id: `rc_${amplitude}_${size}`,
+      label: `Random Cartesian ${size}`,
+      blocks: [
+        {
+          ...base,
+          block_id: `rc_${amplitude}_${index + 1}_${size}`,
+          label: `${size} random structures`,
+          n_structures: size,
+        },
+      ],
+    }));
+  }
+  return recipes;
+}
+
+function datasetRecipesForRun(methods, mdSizes, fcSpecs, randomCartesianOptions) {
+  return parseDatasetRecipes() || builderDatasetRecipes(methods, mdSizes, fcSpecs, randomCartesianOptions);
+}
+
+function exportCurrentDatasetRecipes() {
+  const methods = selectedMethods();
+  const mdSizes = methods.includes("md") ? parseSizesInput("md-sizes") : [];
+  const fcSpecs = methods.includes("siesta_fc_cartesian") ? fcDatasetSpecs() : [];
+  if (methods.includes("siesta_fc_cartesian")) validateFcPreviewSpecs(fcSpecs);
+  const randomOptions = parseRandomCartesianOptions(methods);
+  const recipes = builderDatasetRecipes(methods, mdSizes, fcSpecs, randomOptions);
+  const target = document.getElementById("dataset-recipes-json");
+  target.value = JSON.stringify(recipes, null, 2);
+  const details = document.querySelector(".advanced-recipes");
+  if (details) details.open = true;
+  showToast("Recetas exportadas al JSON avanzado.");
 }
 
 function cartesianProduct(arrays) {
@@ -482,6 +657,54 @@ function renderFcPreview(specs) {
   }
 }
 
+function setPreviewText(id, text, isError = false) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  node.textContent = text;
+  node.classList.toggle("error-text", isError);
+}
+
+function updateMethodCardStates() {
+  document.querySelectorAll(".method-card").forEach((card) => {
+    const checkbox = card.querySelector(".method-checkbox");
+    card.classList.toggle("disabled-method", checkbox && !checkbox.checked);
+  });
+}
+
+function updateDatasetPreview() {
+  const methods = selectedMethods();
+  try {
+    if (!methods.includes("md")) {
+      setPreviewText("md-preview-summary", "desactivado", false);
+    } else {
+      const mdSizes = parseSizesInput("md-sizes");
+      setPreviewText(
+        "md-preview-summary",
+        mdSizes.length ? `${mdSizes.length} datasets · ${mdSizes.join(", ")}` : "sin datasets",
+        false,
+      );
+    }
+  } catch (error) {
+    setPreviewText("md-preview-summary", "MD invalido", true);
+  }
+  try {
+    if (!methods.includes("random_cartesian")) {
+      setPreviewText("random-preview-summary", "desactivado", false);
+      updateMethodCardStates();
+      return;
+    }
+    const randomOptions = parseRandomCartesianOptions(methods);
+    const sizes = randomCartesianSizes(randomOptions);
+    const label = sizes.length
+      ? `${sizes.length} datasets · ${sizes.join(", ")} · ${randomOptions.distribution}`
+      : "sin datasets";
+    setPreviewText("random-preview-summary", label, false);
+  } catch (error) {
+    setPreviewText("random-preview-summary", "Random invalido", true);
+  }
+  updateMethodCardStates();
+}
+
 function updateAtomSizesFromFcPlan() {
   try {
     const specs = fcDatasetSpecs();
@@ -489,8 +712,9 @@ function updateAtomSizesFromFcPlan() {
     const sizes = specs.map((spec) => spec.size);
     const sizesText = sizes.join(", ");
     document.getElementById("atom-sizes").value = sizesText;
-    document.getElementById("md-sizes").value = [...new Set(sizes)].join(", ");
-    syncRandomCartesianSizeFromAtomPlan(sizes);
+    if (document.getElementById("sync-md-sizes")?.checked) {
+      document.getElementById("md-sizes").value = [...new Set(sizes)].join(", ");
+    }
     renderFcPreview(specs);
     const modeLabel = currentCombinationMode() === "cartesian" ? "cartesian datasets" : "aligned datasets";
     document.getElementById("atom-combination-count").value = specs.length
@@ -498,10 +722,13 @@ function updateAtomSizesFromFcPlan() {
       : "invalid plan";
   } catch (error) {
     document.getElementById("atom-sizes").value = "";
-    document.getElementById("md-sizes").value = "";
+    if (document.getElementById("sync-md-sizes")?.checked) {
+      document.getElementById("md-sizes").value = "";
+    }
     document.getElementById("atom-combination-count").value = `invalid plan: ${error.message}`;
     renderFcPreview([]);
   }
+  updateDatasetPreview();
 }
 
 async function loadFcConfig() {
@@ -570,7 +797,7 @@ async function runExperiment() {
   if (!methods.length) {
     throw new Error("Selecciona al menos un metodo.");
   }
-  const mdSizes = parseSizesInput("md-sizes");
+  const mdSizes = methods.includes("md") ? parseSizesInput("md-sizes") : [];
   let fcDisplacementOptions = {};
   let specs = [];
   if (methods.includes("siesta_fc_cartesian")) {
@@ -591,6 +818,7 @@ async function runExperiment() {
   }
   const atomSizes = parseSizesInput("atom-sizes");
   const randomCartesianOptions = parseRandomCartesianOptions(methods);
+  const datasetRecipes = datasetRecipesForRun(methods, mdSizes, specs, randomCartesianOptions);
   const splitRatios = parseSplitRatios();
   const randomSeed = Number(document.getElementById("fc-random-seed").value);
   const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
@@ -608,8 +836,9 @@ async function runExperiment() {
       run_mode: document.getElementById("run-mode").value,
       fc_displacement_options: fcDisplacementOptions,
       random_cartesian_options: randomCartesianOptions,
+      dataset_recipes: datasetRecipes,
       combination_mode: currentCombinationMode(),
-      sync_md_sizes: true,
+      sync_md_sizes: Boolean(document.getElementById("sync-md-sizes")?.checked),
       splits: splitRatios,
       split_mode: document.getElementById("split-mode").value,
       test_sets: selectedTestSets(),
@@ -1020,24 +1249,52 @@ function renderSensitivitySweeps(id, runs) {
   Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
-function latestCrossExperiment(payload) {
+function selectedCrossExperimentSet(payload) {
   const experiments = payload?.cross_experiments || [];
   if (!experiments.length) return null;
-  const latest = experiments[experiments.length - 1];
-  const sourceExperiments = experiments.map((experiment) => ({
-    experiment_id: experiment.experiment_id,
-    rows: (experiment.metrics || []).length,
-    outputs: experiment.outputs,
-  }));
+  const selection = document.getElementById("plot-cross-selection")?.value || "all_compatible";
+  let selected = [];
+  let isolationWarning = "";
+  if (selection === "latest") {
+    selected = [experiments[experiments.length - 1]];
+    if (experiments.length > 1) {
+      isolationWarning = "Mostrando solo el experimento cross mas reciente por seleccion del usuario.";
+    }
+  } else if (selection === "all") {
+    selected = experiments;
+    isolationWarning =
+      experiments.length > 1
+        ? "Mostrando todos los experimentos; comprueba compatibilidad antes de interpretar rankings."
+        : "";
+  } else {
+    const defaultGroupId = payload?.default_plot_selection?.group_id;
+    const groupId = defaultGroupId || experiments[experiments.length - 1]?.compatibility_group_id;
+    selected = experiments.filter((experiment) => experiment.compatibility_group_id === groupId);
+    const hidden = experiments.length - selected.length;
+    isolationWarning =
+      hidden > 0
+        ? `${hidden} experimento(s) ocultos por incompatibilidad/filtro. Selecciona "All experiments" para inspeccionarlos.`
+        : "";
+  }
+  if (!selected.length) selected = [experiments[experiments.length - 1]];
+  const latest = selected[selected.length - 1];
+  const metrics = selected.flatMap((experiment) =>
+    (experiment.metrics || []).map((row) => ({
+      ...row,
+      experiment_id: row.experiment_id || experiment.experiment_id,
+      compatibility_group_id: experiment.compatibility_group_id,
+    })),
+  );
   return {
     ...latest,
-    metrics: latest.metrics || [],
-    source_experiments: sourceExperiments,
+    metrics,
+    source_experiments: selected.map((experiment) => ({
+      experiment_id: experiment.experiment_id,
+      rows: (experiment.metrics || []).length,
+      outputs: experiment.outputs,
+    })),
     multi_experiment_available: experiments.length > 1,
-    isolation_warning:
-      experiments.length > 1
-        ? "Mostrando solo el experimento cross mas reciente. La comparacion multi-experimento debe seleccionarse explicitamente."
-        : "",
+    isolation_warning: isolationWarning,
   };
 }
 
@@ -1089,13 +1346,33 @@ function groupedCrossMeans(rows, metric) {
     if (typeof value !== "number" || !Number.isFinite(value)) continue;
     const mdDatasetSize = Number(row.md_dataset_size ?? row.dataset_size);
     const atomDatasetSize = Number(row.atom_dataset_size ?? row.dataset_size);
+    const randomDatasetSize = Number(row.random_dataset_size ?? row.dataset_size);
     const trainDatasetSize = Number(row.train_dataset_size ?? row.dataset_size);
-    const key = [mdDatasetSize, atomDatasetSize, trainDatasetSize, row.train_method, row.test_set].join("||");
+    const key = [
+      row.experiment_id,
+      row.recipe_set_hash,
+      row.md_recipe_set_hash,
+      row.atom_recipe_set_hash,
+      row.random_recipe_set_hash,
+      mdDatasetSize,
+      atomDatasetSize,
+      randomDatasetSize,
+      trainDatasetSize,
+      row.train_method,
+      row.test_set,
+    ].join("||");
     if (!groups.has(key)) {
       groups.set(key, {
+        experiment_id: row.experiment_id,
+        recipe_set_hash: row.recipe_set_hash,
         dataset_size: trainDatasetSize,
         md_dataset_size: mdDatasetSize,
         atom_dataset_size: atomDatasetSize,
+        random_dataset_size: randomDatasetSize,
+        train_dataset_label: row.train_dataset_label || row.train_method,
+        md_dataset_label: row.md_dataset_label,
+        atom_dataset_label: row.atom_dataset_label,
+        random_dataset_label: row.random_dataset_label,
         train_method: row.train_method,
         test_set: row.test_set,
         values: [],
@@ -1111,6 +1388,13 @@ function groupedCrossMeans(rows, metric) {
     dataset_size: Number(group.dataset_size),
     md_dataset_size: Number(group.md_dataset_size),
     atom_dataset_size: Number(group.atom_dataset_size),
+    random_dataset_size: Number(group.random_dataset_size),
+    experiment_id: group.experiment_id,
+    recipe_set_hash: group.recipe_set_hash,
+    train_dataset_label: group.train_dataset_label,
+    md_dataset_label: group.md_dataset_label,
+    atom_dataset_label: group.atom_dataset_label,
+    random_dataset_label: group.random_dataset_label,
     train_method: group.train_method,
     test_set: group.test_set,
     mean: group.values.reduce((sum, value) => sum + value, 0) / group.values.length,
@@ -1210,59 +1494,42 @@ function renderWinnerMap(id, experiment) {
   const metric = primaryCrossMetric(experiment);
   const scientificStatus = experiment?.recommendation?.scientific_status;
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
-  const mdSizes = Array.from(new Set(means.map((row) => row.md_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
-  const atomSizes = Array.from(new Set(means.map((row) => row.atom_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
-  const testSets = ["test_md", "test_atomdisp", "test_mixed"];
-  const rows = testSets.flatMap((testSet) => atomSizes.map((atomSize) => ({ testSet, atomSize })));
-  const labels = new Map([
-    [-1, "MD"],
-    [0, "Tie"],
-    [1, "AtomDisplacement"],
-  ]);
-  const shortLabels = new Map([
-    [-1, "MD"],
-    [0, "="],
-    [1, "AD"],
-  ]);
-  const z = rows.map(({ testSet, atomSize }) => mdSizes.map((mdSize) => {
-    const md = means.find((row) =>
-      row.md_dataset_size === mdSize &&
-      row.atom_dataset_size === atomSize &&
-      row.test_set === testSet &&
-      row.train_method === "md"
-    );
-    const atom = means.find((row) =>
-      row.md_dataset_size === mdSize &&
-      row.atom_dataset_size === atomSize &&
-      row.test_set === testSet &&
-      ["atom_displacement", "siesta_fc_cartesian"].includes(row.train_method)
-    );
-    if (!md || !atom) return null;
-    if (Math.abs(md.mean - atom.mean) < 1e-12) return 0;
-    return atom.mean < md.mean ? 1 : -1;
+  const methods = crossTrainMethods(experiment);
+  const methodLabel = (method) => ({
+    md: "MD",
+    siesta_fc_cartesian: "FC",
+    atom_displacement: "FC",
+    random_cartesian: "RC",
+  }[method] || method);
+  const comboKey = (row) => [
+    Number.isFinite(row.md_dataset_size) ? `MD ${row.md_dataset_size}` : "",
+    Number.isFinite(row.atom_dataset_size) ? `FC ${row.atom_dataset_size}` : "",
+    Number.isFinite(row.random_dataset_size) ? `RC ${row.random_dataset_size}` : "",
+    row.recipe_set_hash || "",
+  ].filter(Boolean).join(" / ") || `dataset ${row.dataset_size}`;
+  const comboLabels = Array.from(new Set(means.map(comboKey))).sort();
+  const testSets = crossTestSets(experiment);
+  const tieIndex = methods.length;
+  const labels = new Map(methods.map((method, index) => [index, methodLabel(method)]));
+  labels.set(tieIndex, "Tie");
+  const z = testSets.map((testSet) => comboLabels.map((combo) => {
+    const candidates = means.filter((row) => row.test_set === testSet && comboKey(row) === combo);
+    if (!candidates.length) return null;
+    const best = Math.min(...candidates.map((row) => row.mean));
+    const winners = candidates.filter((row) => Math.abs(row.mean - best) < 1e-12);
+    if (winners.length !== 1) return tieIndex;
+    const index = methods.indexOf(winners[0].train_method);
+    return index >= 0 ? index : null;
   }));
-  const yLabels = rows.map(({ testSet, atomSize }) => `${testSet} · AD ${atomSize}`);
-  const text = z.map((row) => row.map((value) => (value == null ? "" : shortLabels.get(value))));
-  const customdata = rows.map(({ testSet, atomSize }, rowIndex) => mdSizes.map((mdSize, colIndex) => {
-    const md = means.find((row) =>
-      row.md_dataset_size === mdSize &&
-      row.atom_dataset_size === atomSize &&
-      row.test_set === testSet &&
-      row.train_method === "md"
-    );
-    const atom = means.find((row) =>
-      row.md_dataset_size === mdSize &&
-      row.atom_dataset_size === atomSize &&
-      row.test_set === testSet &&
-      ["atom_displacement", "siesta_fc_cartesian"].includes(row.train_method)
-    );
+  const yLabels = testSets;
+  const text = z.map((row) => row.map((value) => (value == null ? "" : labels.get(value))));
+  const customdata = testSets.map((testSet, rowIndex) => comboLabels.map((combo, colIndex) => {
+    const candidates = means.filter((row) => row.test_set === testSet && comboKey(row) === combo);
     return {
       winner: z[rowIndex][colIndex] == null ? "No data" : labels.get(z[rowIndex][colIndex]),
       testSet,
-      mdSize,
-      atomSize,
-      md: md?.mean,
-      atom: atom?.mean,
+      combo,
+      values: candidates.map((row) => `${methodLabel(row.train_method)}=${row.mean.toPrecision(4)}`).join("; "),
     };
   }));
   const annotations = [];
@@ -1280,13 +1547,13 @@ function renderWinnerMap(id, experiment) {
       font: { size: 12, color: "#9f5b00" },
     });
   }
-  rows.forEach((row, rowIndex) => {
-    mdSizes.forEach((mdSize, colIndex) => {
+  yLabels.forEach((rowLabel, rowIndex) => {
+    comboLabels.forEach((combo, colIndex) => {
       const label = text[rowIndex][colIndex];
       if (!label) return;
       annotations.push({
-        x: mdSize,
-        y: yLabels[rowIndex],
+        x: combo,
+        y: rowLabel,
         text: label,
         showarrow: false,
         font: { size: 11, color: "#17202a" },
@@ -1294,25 +1561,31 @@ function renderWinnerMap(id, experiment) {
     });
   });
   const layout = plotLayout(`Winner map (${metric})`, "Winner", {
-    xaxis: { title: "MD train size", tickmode: "array", tickvals: mdSizes, ticktext: mdSizes.map(String) },
-    yaxis: { title: "Frozen test set / AtomDisplacement train size", automargin: true },
+    xaxis: { title: "Dataset combination", automargin: true },
+    yaxis: { title: "Frozen test set", automargin: true },
     annotations,
   });
-  if (!mdSizes.length || !atomSizes.length) layout.annotations = [emptyPlotAnnotation("No hay pares MD/AtomDisplacement en el mismo test set.")];
+  if (!comboLabels.length || !methods.length) layout.annotations = [emptyPlotAnnotation("No hay celdas cross comparables.")];
+  const palette = ["#4b6f8f", "#2a7f62", "#9467bd", "#d7a021", "#d7dee5"];
+  const maxValue = Math.max(1, tieIndex);
+  const colorscale = Array.from({ length: tieIndex + 1 }, (_, index) => {
+    const position = maxValue === 0 ? 0 : index / maxValue;
+    return [position, palette[index % palette.length]];
+  });
   Plotly.react(
     id,
     [{
       type: "heatmap",
       z,
-      x: mdSizes,
+      x: comboLabels,
       y: yLabels,
       customdata,
-      zmin: -1,
-      zmax: 1,
-      colorscale: [[0, "#4b6f8f"], [0.5, "#d7dee5"], [1, "#2a7f62"]],
-      colorbar: { tickvals: [-1, 0, 1], ticktext: ["MD", "Tie", "AtomDisp"] },
+      zmin: 0,
+      zmax: maxValue,
+      colorscale,
+      colorbar: { tickvals: Array.from(labels.keys()), ticktext: Array.from(labels.values()) },
       hovertemplate:
-        "MD size %{customdata.mdSize}<br>AtomDisp size %{customdata.atomSize}<br>%{customdata.testSet}<br>winner: %{customdata.winner}<br>MD: %{customdata.md:.4g}<br>AtomDisp: %{customdata.atom:.4g}<extra></extra>",
+        "%{customdata.combo}<br>%{customdata.testSet}<br>winner: %{customdata.winner}<br>%{customdata.values}<extra></extra>",
     }],
     layout,
     { responsive: true, displaylogo: false },
@@ -1351,7 +1624,7 @@ function renderPlots(payload) {
     return;
   }
   const runs = payload?.runs || [];
-  const crossExperiment = latestCrossExperiment(payload);
+  const crossExperiment = selectedCrossExperimentSet(payload);
   const recommendation = crossExperiment?.recommendation;
   const crossRows = crossExperiment?.metrics?.length || 0;
   const crossSources = crossExperiment?.source_experiments?.length || 0;
@@ -1439,6 +1712,9 @@ function setupEvents() {
       renderPlots(state.plotData);
     }
   });
+  document.getElementById("plot-cross-selection")?.addEventListener("change", () => {
+    if (state.plotsEnabled) renderPlots(state.plotData);
+  });
   document.getElementById("run-experiment").addEventListener("click", () => {
     runExperiment().catch((error) => showToast(error.message));
   });
@@ -1448,12 +1724,39 @@ function setupEvents() {
   document.getElementById("copy-venv-command").addEventListener("click", () => {
     copyVenvActivationCommand().catch((error) => showToast(error.message));
   });
+  document.getElementById("export-dataset-recipes")?.addEventListener("click", () => {
+    try {
+      exportCurrentDatasetRecipes();
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
   document.getElementById("fc-displacement-options").addEventListener("input", updateAtomSizesFromFcPlan);
   document.getElementById("fc-combination-mode").addEventListener("change", updateAtomSizesFromFcPlan);
   document.getElementById("fc-max-datasets").addEventListener("input", updateAtomSizesFromFcPlan);
+  document.getElementById("sync-md-sizes").addEventListener("change", updateAtomSizesFromFcPlan);
   document.getElementById("split-train").addEventListener("input", updateAtomSizesFromFcPlan);
   document.getElementById("split-validation").addEventListener("input", updateAtomSizesFromFcPlan);
   document.getElementById("split-test").addEventListener("input", updateAtomSizesFromFcPlan);
+  document.getElementById("md-sizes").addEventListener("input", updateDatasetPreview);
+  [
+    "random-cartesian-n-structures",
+    "random-cartesian-distribution",
+    "random-cartesian-seed",
+    "random-cartesian-sigma-ang",
+    "random-cartesian-uniform-range-ang",
+    "random-cartesian-min-distance-ang",
+    "random-cartesian-move-atoms",
+    "random-cartesian-species-filter",
+    "random-cartesian-remove-com",
+  ].forEach((id) => {
+    const node = document.getElementById(id);
+    node?.addEventListener("input", updateDatasetPreview);
+    node?.addEventListener("change", updateDatasetPreview);
+  });
+  document.querySelectorAll(".method-checkbox").forEach((node) => {
+    node.addEventListener("change", updateDatasetPreview);
+  });
 }
 
 async function boot() {
@@ -1465,6 +1768,7 @@ async function boot() {
   }
   updateVenvCommandPreview();
   await loadFcConfig();
+  updateDatasetPreview();
   await pollLogs();
   await loadResults();
   state.polling = setInterval(() => {

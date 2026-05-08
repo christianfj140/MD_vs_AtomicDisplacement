@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import glob
 import hashlib
@@ -218,6 +219,12 @@ def parse_random_cartesian_options(value: Any) -> dict[str, Any]:
 
 
 def random_cartesian_sizes_from_options(options: dict[str, Any]) -> list[int]:
+    dataset_specs = options.get("_dataset_specs")
+    if isinstance(dataset_specs, list) and dataset_specs:
+        sizes = [int(spec.get("size", 0)) for spec in dataset_specs if isinstance(spec, dict)]
+        if not sizes or any(size < 3 for size in sizes):
+            raise RuntimeError("random_cartesian dataset_recipes debe contener tamanos enteros >= 3.")
+        return sizes
     raw_sizes = options.get("n_structures")
     if raw_sizes in (None, ""):
         config = load_config(PIPELINES["atom_displacement"].config_path)
@@ -237,6 +244,324 @@ def random_cartesian_sizes_from_options(options: dict[str, Any]) -> list[int]:
 
 def random_cartesian_size_from_options(options: dict[str, Any]) -> int:
     return random_cartesian_sizes_from_options(options)[0]
+
+
+def slugify_label(value: Any, default: str = "dataset") -> str:
+    text = str(value or "").strip().lower()
+    replacements = {
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+        "ü": "u",
+        "ñ": "n",
+        ".": "p",
+        "+": "plus",
+        "-": "m",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    slug = "".join(char if char.isalnum() else "_" for char in text)
+    slug = "_".join(part for part in slug.split("_") if part)
+    return slug or default
+
+
+def stable_payload_hash(payload: Any, *, length: int = 12) -> str:
+    text = json.dumps(json_safe(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
+
+
+def recipe_set_hash(recipes: dict[str, Any] | list[Any] | None) -> str:
+    return stable_payload_hash(recipes or {}, length=16)
+
+
+def _recipe_metadata(
+    *,
+    method: str,
+    recipe: dict[str, Any],
+    block: dict[str, Any],
+    size: int,
+    recipe_index: int,
+    block_index: int,
+) -> dict[str, Any]:
+    recipe_id = str(recipe.get("recipe_id") or f"{method}_recipe_{recipe_index + 1}")
+    recipe_label = str(recipe.get("label") or recipe_id)
+    block_id = str(block.get("block_id") or f"{recipe_id}_block_{block_index + 1}")
+    block_label = str(block.get("label") or block_id)
+    generation_parameters = {
+        key: value
+        for key, value in block.items()
+        if key not in {"block_id", "label"}
+    }
+    return {
+        "method": method,
+        "recipe_id": recipe_id,
+        "recipe_label": recipe_label,
+        "block_id": block_id,
+        "block_label": block_label,
+        "dataset_size": int(size),
+        "recipe_index": recipe_index,
+        "block_index": block_index,
+        "generation_parameters": generation_parameters,
+        "generation_parameters_json": json.dumps(
+            json_safe(generation_parameters),
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
+        "seed": block.get("seed", recipe.get("seed")),
+    }
+
+
+def _dataset_label_from_recipe(method: str, metadata: dict[str, Any], size: int) -> str:
+    parts = [
+        method,
+        slugify_label(metadata.get("recipe_id"), "recipe"),
+        slugify_label(metadata.get("block_id"), "block"),
+        str(int(size)),
+    ]
+    return "_".join(part for part in parts if part)
+
+
+def legacy_payload_to_dataset_recipes(
+    *,
+    md_sizes: list[int],
+    atom_dataset_specs: list[dict[str, Any]] | None,
+    atom_sizes: list[int],
+    fc_dataset_specs: dict[int, list[dict[str, Any]]] | None,
+    random_cartesian_options: dict[str, Any],
+    selected_methods: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    recipes: dict[str, list[dict[str, Any]]] = {"md": [], "siesta_fc_cartesian": [], "random_cartesian": []}
+    if "md" in selected_methods:
+        for size in md_sizes:
+            recipes["md"].append(
+                {
+                    "recipe_id": f"md_dataset_{size}",
+                    "label": f"MD dataset {size}",
+                    "blocks": [{"block_id": f"md_snapshots_{size}", "n_snapshots": int(size)}],
+                }
+            )
+    if "siesta_fc_cartesian" in selected_methods:
+        if atom_dataset_specs:
+            for spec in atom_dataset_specs:
+                blocks = []
+                for entry in spec.get("displacements") or []:
+                    displacement = str(entry.get("value", "disp"))
+                    count = int(entry.get("n_structures", 0))
+                    blocks.append(
+                        {
+                            "block_id": f"fc_{_displacement_slug(displacement)}_{count}",
+                            "displacement": displacement,
+                            "n_structures": count,
+                        }
+                    )
+                recipes["siesta_fc_cartesian"].append(
+                    {
+                        "recipe_id": str(spec.get("label") or f"fc_dataset_{spec.get('size')}"),
+                        "label": str(spec.get("label") or f"FC dataset {spec.get('size')}"),
+                        "blocks": blocks,
+                    }
+                )
+        else:
+            for size in atom_sizes:
+                entries = (fc_dataset_specs or {}).get(size) or []
+                blocks = [
+                    {
+                        "block_id": f"fc_{_displacement_slug(str(entry.get('value', 'disp')))}_{int(entry.get('n_structures', 0) or 0)}",
+                        "displacement": entry.get("value"),
+                        "n_structures": int(entry.get("n_structures", 0) or 0),
+                    }
+                    for entry in entries
+                ] or [{"block_id": f"fc_dataset_{size}", "n_structures": int(size)}]
+                recipes["siesta_fc_cartesian"].append(
+                    {
+                        "recipe_id": f"fc_dataset_{size}",
+                        "label": f"FC dataset {size}",
+                        "blocks": blocks,
+                    }
+                )
+    if "random_cartesian" in selected_methods:
+        for size in random_cartesian_sizes_from_options(random_cartesian_options):
+            block = {**random_cartesian_options, "n_structures": int(size)}
+            block.pop("_dataset_specs", None)
+            recipes["random_cartesian"].append(
+                {
+                    "recipe_id": f"rc_dataset_{size}",
+                    "label": f"Random Cartesian dataset {size}",
+                    "blocks": [{"block_id": f"rc_structures_{size}", **block}],
+                }
+            )
+    return {key: value for key, value in recipes.items() if value}
+
+
+def _recipe_list(raw: Any, method: str) -> list[dict[str, Any]]:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise RuntimeError(f"dataset_recipes.{method} debe ser una lista.")
+    recipes: list[dict[str, Any]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"dataset_recipes.{method}[{index}] debe ser un objeto.")
+        blocks = item.get("blocks")
+        if not isinstance(blocks, list) or not blocks:
+            raise RuntimeError(f"dataset_recipes.{method}[{index}].blocks debe ser una lista no vacia.")
+        recipes.append(dict(item))
+    return recipes
+
+
+def dataset_recipes_to_execution_specs(
+    raw_recipes: Any,
+    *,
+    selected_methods: list[str],
+    split_ratios: dict[str, float],
+    random_cartesian_defaults: dict[str, Any],
+) -> dict[str, Any] | None:
+    if raw_recipes in (None, "", {}):
+        return None
+    if not isinstance(raw_recipes, dict):
+        raise RuntimeError("dataset_recipes debe ser un objeto con claves md/siesta_fc_cartesian/random_cartesian.")
+
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    md_specs: list[dict[str, Any]] = []
+    atom_specs: list[dict[str, Any]] = []
+    random_specs: list[dict[str, Any]] = []
+
+    if "md" in selected_methods:
+        md_recipes = _recipe_list(raw_recipes.get("md"), "md")
+        normalized["md"] = md_recipes
+        for recipe_index, recipe in enumerate(md_recipes):
+            for block_index, block in enumerate(recipe["blocks"]):
+                if not isinstance(block, dict):
+                    raise RuntimeError("Cada bloque MD debe ser un objeto.")
+                unsupported = [
+                    key
+                    for key in ("temperature_K", "thermostat", "ensemble", "timestep_fs")
+                    if block.get(key) not in (None, "", {})
+                ]
+                if unsupported:
+                    raise RuntimeError(
+                        "Las recetas MD con temperatura/termostato aun no estan habilitadas: "
+                        "no hay renderer verificado de keywords SIESTA 5.4 en este repo. "
+                        f"Campos rechazados: {unsupported}."
+                    )
+                size = int(block.get("n_snapshots") or block.get("n_structures") or 0)
+                validate_split_sizes(size, split_ratios, label=f"MD recipe {recipe.get('recipe_id', recipe_index + 1)}")
+                metadata = _recipe_metadata(
+                    method="md",
+                    recipe=recipe,
+                    block=block,
+                    size=size,
+                    recipe_index=recipe_index,
+                    block_index=block_index,
+                )
+                md_specs.append(
+                    {
+                        "label": _dataset_label_from_recipe("md", metadata, size),
+                        "size": size,
+                        "recipe_metadata": metadata,
+                    }
+                )
+
+    if "siesta_fc_cartesian" in selected_methods:
+        fc_recipes = _recipe_list(raw_recipes.get("siesta_fc_cartesian"), "siesta_fc_cartesian")
+        normalized["siesta_fc_cartesian"] = fc_recipes
+        atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+        limit = atom_fc_sample_limit(atom_config)
+        if limit is None:
+            raise RuntimeError("AtomDisplacement: FC no esta habilitado en la configuracion.")
+        for recipe_index, recipe in enumerate(fc_recipes):
+            entries: list[dict[str, Any]] = []
+            block_metadata: list[dict[str, Any]] = []
+            for block_index, block in enumerate(recipe["blocks"]):
+                if not isinstance(block, dict):
+                    raise RuntimeError("Cada bloque FC debe ser un objeto.")
+                displacement = str(block.get("displacement") or block.get("value") or "").strip()
+                if not displacement:
+                    raise RuntimeError("Cada bloque FC necesita displacement.")
+                count = int(block.get("n_structures") or 0)
+                if count <= 0:
+                    raise RuntimeError("Cada bloque FC necesita n_structures positivo.")
+                if count > limit:
+                    raise RuntimeError(
+                        f"FC {displacement}: pide {count} estructuras, maximo {limit}."
+                    )
+                entries.append({"value": displacement, "n_structures": count})
+                block_metadata.append(
+                    _recipe_metadata(
+                        method="siesta_fc_cartesian",
+                        recipe=recipe,
+                        block=block,
+                        size=count,
+                        recipe_index=recipe_index,
+                        block_index=block_index,
+                    )
+                )
+            size = sum(int(entry["n_structures"]) for entry in entries)
+            validate_split_sizes(size, split_ratios, label=f"FC recipe {recipe.get('recipe_id', recipe_index + 1)}")
+            recipe_metadata = {
+                "method": "siesta_fc_cartesian",
+                "recipe_id": str(recipe.get("recipe_id") or f"fc_recipe_{recipe_index + 1}"),
+                "recipe_label": str(recipe.get("label") or recipe.get("recipe_id") or f"FC recipe {recipe_index + 1}"),
+                "block_id": "__".join(meta["block_id"] for meta in block_metadata),
+                "block_label": "__".join(meta["block_label"] for meta in block_metadata),
+                "dataset_size": size,
+                "blocks": block_metadata,
+                "generation_parameters": {"displacements": entries},
+                "generation_parameters_json": json.dumps(
+                    {"displacements": entries},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                "seed": recipe.get("seed"),
+            }
+            atom_specs.append(
+                {
+                    "label": _dataset_label_from_recipe("fc", recipe_metadata, size),
+                    "size": size,
+                    "displacements": entries,
+                    "recipe_metadata": recipe_metadata,
+                }
+            )
+
+    if "random_cartesian" in selected_methods:
+        rc_recipes = _recipe_list(raw_recipes.get("random_cartesian"), "random_cartesian")
+        normalized["random_cartesian"] = rc_recipes
+        for recipe_index, recipe in enumerate(rc_recipes):
+            for block_index, block in enumerate(recipe["blocks"]):
+                if not isinstance(block, dict):
+                    raise RuntimeError("Cada bloque Random Cartesian debe ser un objeto.")
+                size = int(block.get("n_structures") or 0)
+                validate_split_sizes(size, split_ratios, label=f"Random Cartesian recipe {recipe.get('recipe_id', recipe_index + 1)}")
+                metadata = _recipe_metadata(
+                    method="random_cartesian",
+                    recipe=recipe,
+                    block=block,
+                    size=size,
+                    recipe_index=recipe_index,
+                    block_index=block_index,
+                )
+                options = {**random_cartesian_defaults, **block, "n_structures": size}
+                options.pop("block_id", None)
+                options.pop("label", None)
+                random_specs.append(
+                    {
+                        "label": _dataset_label_from_recipe("rc", metadata, size),
+                        "size": size,
+                        "options": options,
+                        "recipe_metadata": metadata,
+                    }
+                )
+
+    normalized = {key: value for key, value in normalized.items() if value}
+    return {
+        "recipes": normalized,
+        "recipe_set_hash": recipe_set_hash(normalized),
+        "md_dataset_specs": md_specs,
+        "atom_dataset_specs": atom_specs,
+        "random_cartesian_dataset_specs": random_specs,
+    }
 
 
 def pipeline_keys_for_methods(method_ids: list[str]) -> list[str]:
@@ -1085,13 +1410,22 @@ def apply_training_accelerator(config: dict[str, Any], accelerator: str) -> None
 
 DEFAULT_PERFORMANCE_SETTINGS: dict[str, Any] = {
     "max_parallel_siesta_jobs": 1,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 1,
+    "max_parallel_metric_jobs": 1,
     "omp_num_threads": None,
     "mkl_num_threads": None,
     "openblas_num_threads": None,
+    "numexpr_num_threads": None,
     "torch_num_threads": None,
     "compute_accelerator": "cpu",
     "batch_size": None,
     "store_in_memory": None,
+    "reuse_validated_siesta_outputs": True,
+    "enable_experiment_cache": False,
+    "error_policy": "fail_fast",
+    "preset": None,
     "torch_float32_matmul_precision": None,
 }
 
@@ -1108,6 +1442,32 @@ def parse_optional_positive_int(value: Any, name: str) -> int | None:
     return number
 
 
+def parse_optional_bool(value: Any, name: str, default: bool | None = None) -> bool | None:
+    if value in (None, "", "null"):
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "si", "sí"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} debe ser booleano o null.")
+
+
+def aggressive_local_performance_defaults() -> dict[str, Any]:
+    cores = max(1, os.cpu_count() or 1)
+    siesta_jobs = max(1, min(cores // 2, 4))
+    return {
+        "max_parallel_siesta_jobs": siesta_jobs,
+        "max_parallel_dataset_jobs": 1,
+        "max_parallel_prediction_jobs": 1,
+        "max_parallel_evaluation_jobs": min(cores, 4),
+        "max_parallel_metric_jobs": cores,
+        "omp_num_threads": max(1, cores // siesta_jobs),
+    }
+
+
 def parse_performance_settings(value: Any, *, compute_accelerator: str | None = None) -> dict[str, Any]:
     if value in (None, ""):
         raw: dict[str, Any] = {}
@@ -1116,24 +1476,62 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
     else:
         raise RuntimeError("performance debe ser un objeto.")
     settings = dict(DEFAULT_PERFORMANCE_SETTINGS)
+    preset = raw.get("preset")
+    if preset in (None, "", "null"):
+        settings["preset"] = None
+    else:
+        preset = str(preset).strip().lower()
+        if preset != "aggressive_local":
+            raise RuntimeError("performance.preset debe ser null o aggressive_local.")
+        settings.update(aggressive_local_performance_defaults())
+        settings["preset"] = preset
     settings["compute_accelerator"] = parse_compute_accelerator(
         raw.get("compute_accelerator", compute_accelerator)
     )
-    settings["max_parallel_siesta_jobs"] = parse_optional_positive_int(
-        raw.get("max_parallel_siesta_jobs", settings["max_parallel_siesta_jobs"]),
-        "performance.max_parallel_siesta_jobs",
-    ) or 1
-    for key in ("omp_num_threads", "mkl_num_threads", "openblas_num_threads", "torch_num_threads", "batch_size"):
-        settings[key] = parse_optional_positive_int(raw.get(key), f"performance.{key}")
-    if "store_in_memory" in raw and raw.get("store_in_memory") not in (None, ""):
-        store_raw = raw.get("store_in_memory")
-        if isinstance(store_raw, bool):
-            settings["store_in_memory"] = store_raw
-        else:
-            store_text = str(store_raw).strip().lower()
-            if store_text not in {"1", "0", "true", "false", "yes", "no", "on", "off", "si", "sí"}:
-                raise RuntimeError("performance.store_in_memory debe ser booleano o null.")
-            settings["store_in_memory"] = store_text in {"1", "true", "yes", "on", "si", "sí"}
+    for key in (
+        "max_parallel_siesta_jobs",
+        "max_parallel_dataset_jobs",
+        "max_parallel_prediction_jobs",
+        "max_parallel_evaluation_jobs",
+        "max_parallel_metric_jobs",
+    ):
+        settings[key] = parse_optional_positive_int(
+            raw.get(key, settings[key]),
+            f"performance.{key}",
+        ) or int(settings[key] or 1)
+    for key in (
+        "omp_num_threads",
+        "mkl_num_threads",
+        "openblas_num_threads",
+        "numexpr_num_threads",
+        "torch_num_threads",
+        "batch_size",
+    ):
+        settings[key] = parse_optional_positive_int(raw.get(key, settings.get(key)), f"performance.{key}")
+    settings["store_in_memory"] = parse_optional_bool(
+        raw.get("store_in_memory"),
+        "performance.store_in_memory",
+        settings.get("store_in_memory"),
+    )
+    settings["reuse_validated_siesta_outputs"] = bool(parse_optional_bool(
+        raw.get("reuse_validated_siesta_outputs"),
+        "performance.reuse_validated_siesta_outputs",
+        settings.get("reuse_validated_siesta_outputs"),
+    ))
+    settings["enable_experiment_cache"] = bool(parse_optional_bool(
+        raw.get("enable_experiment_cache"),
+        "performance.enable_experiment_cache",
+        settings.get("enable_experiment_cache"),
+    ))
+    if settings["enable_experiment_cache"]:
+        raise RuntimeError(
+            "performance.enable_experiment_cache todavia no esta implementado con "
+            "validacion completa por hashes; dejalo en false para evitar cache insegura."
+        )
+    error_policy = str(raw.get("error_policy", settings["error_policy"]) or "fail_fast").strip().lower()
+    if error_policy not in {"fail_fast", "continue_on_error"}:
+        raise RuntimeError("performance.error_policy debe ser fail_fast o continue_on_error.")
+    settings["error_policy"] = error_policy
     precision = raw.get("torch_float32_matmul_precision")
     if precision in (None, "", "null"):
         settings["torch_float32_matmul_precision"] = None
@@ -1151,6 +1549,7 @@ def performance_env(settings: dict[str, Any]) -> dict[str, str]:
         ("omp_num_threads", "OMP_NUM_THREADS"),
         ("mkl_num_threads", "MKL_NUM_THREADS"),
         ("openblas_num_threads", "OPENBLAS_NUM_THREADS"),
+        ("numexpr_num_threads", "NUMEXPR_NUM_THREADS"),
         ("torch_num_threads", "TORCH_NUM_THREADS"),
     ):
         value = settings.get(key)
@@ -1171,7 +1570,9 @@ def apply_performance_to_config(config: dict[str, Any], settings: dict[str, Any]
         training_data["store_in_memory"] = bool(settings["store_in_memory"])
         config.setdefault("testing", {}).setdefault("data", {})["store_in_memory"] = bool(settings["store_in_memory"])
         config.setdefault("prediction", {}).setdefault("data", {})["store_in_memory"] = bool(settings["store_in_memory"])
-    config.setdefault("single_points", {})["workers"] = int(settings["max_parallel_siesta_jobs"])
+    single_points = config.setdefault("single_points", {})
+    single_points["workers"] = int(settings["max_parallel_siesta_jobs"])
+    single_points["rerun"] = not bool(settings.get("reuse_validated_siesta_outputs", True))
     config.setdefault("training", {})["torch_float32_matmul_precision"] = settings.get(
         "torch_float32_matmul_precision"
     )
@@ -2340,6 +2741,13 @@ def plot_data_summary() -> dict[str, Any]:
                     ),
                     "run_id": str(manifest.get("run_id", manifest_path.parent.name.removeprefix("run_"))),
                     "result_dir": str(result_dir),
+                    "dataset_label": manifest.get("dataset_label"),
+                    "recipe_id": manifest.get("recipe_id"),
+                    "recipe_label": manifest.get("recipe_label"),
+                    "block_id": manifest.get("block_id"),
+                    "block_label": manifest.get("block_label"),
+                    "recipe_set_hash": manifest.get("recipe_set_hash"),
+                    "dataset_recipe": manifest.get("dataset_recipe", {}),
                     "pipeline_elapsed_seconds": manifest.get("pipeline_elapsed_seconds"),
                     "means": {
                         "run": {
@@ -2390,12 +2798,23 @@ def plot_data_summary() -> dict[str, Any]:
                 manifest = load_config(manifest_path)
             except Exception as exc:
                 manifest = {"error": str(exc)}
+        compatibility = {
+            "metric_version": manifest.get("metric_version"),
+            "molecule_system_name": manifest.get("molecule_system_name"),
+            "siesta_settings_hash": manifest.get("siesta_settings_hash"),
+            "model_config_hash": manifest.get("model_config_hash"),
+            "test_sets": manifest.get("test_sets"),
+            "selected_methods": manifest.get("selected_methods"),
+        }
+        compatibility_group_id = stable_payload_hash(compatibility, length=16)
         cross_experiments.append(
             {
                 "experiment_id": experiment_dir.name,
                 "metrics": rows,
                 "recommendation": recommendation,
                 "manifest": manifest,
+                "compatibility": compatibility,
+                "compatibility_group_id": compatibility_group_id,
                 "outputs": {
                     "cross_evaluation_metrics": str(metrics_path),
                     "winner_summary": str(experiment_dir / "summary" / "winner_summary.csv"),
@@ -2404,7 +2823,35 @@ def plot_data_summary() -> dict[str, Any]:
                 },
             }
         )
-    return {"runs": runs, "cross_experiments": cross_experiments}
+    groups_by_id: dict[str, dict[str, Any]] = {}
+    for experiment in cross_experiments:
+        group_id = str(experiment.get("compatibility_group_id") or "unknown")
+        group = groups_by_id.setdefault(
+            group_id,
+            {
+                "group_id": group_id,
+                "compatibility": experiment.get("compatibility", {}),
+                "experiment_ids": [],
+                "rows": 0,
+            },
+        )
+        group["experiment_ids"].append(experiment["experiment_id"])
+        group["rows"] += len(experiment.get("metrics") or [])
+    compatible_groups = sorted(
+        groups_by_id.values(),
+        key=lambda group: (str(group["experiment_ids"][-1]) if group["experiment_ids"] else "", group["group_id"]),
+    )
+    latest_group = compatible_groups[-1] if compatible_groups else None
+    return {
+        "runs": runs,
+        "cross_experiments": cross_experiments,
+        "compatible_experiment_groups": compatible_groups,
+        "default_plot_selection": {
+            "mode": "all_compatible",
+            "group_id": latest_group.get("group_id") if latest_group else None,
+            "experiment_ids": latest_group.get("experiment_ids") if latest_group else [],
+        },
+    }
 
 
 def atom_fc_ui_config() -> dict[str, Any]:
@@ -2460,12 +2907,14 @@ class ExperimentRunner:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen[str] | None = None
+        self._processes: set[subprocess.Popen[str]] = set()
         self._logs: list[str] = []
         self._started_at: float | None = None
         self._finished_at: float | None = None
         self._returncode: int | None = None
         self._current: dict[str, Any] | None = None
         self._results: list[dict[str, Any]] = []
+        self._progress: dict[str, Any] = {}
         self._stop_requested = False
         self._run_id: str | None = None
         self._rate_seconds_per_structure: dict[str, float] = {}
@@ -2487,6 +2936,8 @@ class ExperimentRunner:
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
         performance: dict[str, Any] | None = None,
+        venv_activate_path: str | None = None,
+        dataset_recipes_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -2517,12 +2968,30 @@ class ExperimentRunner:
                 atom_sizes = []
                 fc_dataset_specs = None
                 atom_dataset_specs = None
+            if dataset_recipes_info is None:
+                legacy_recipes = legacy_payload_to_dataset_recipes(
+                    md_sizes=md_sizes,
+                    atom_dataset_specs=atom_dataset_specs,
+                    atom_sizes=atom_sizes,
+                    fc_dataset_specs=fc_dataset_specs,
+                    random_cartesian_options=random_cartesian_options,
+                    selected_methods=selected_methods,
+                )
+                dataset_recipes_info = {
+                    "recipes": legacy_recipes,
+                    "recipe_set_hash": recipe_set_hash(legacy_recipes),
+                    "md_dataset_specs": [],
+                    "atom_dataset_specs": atom_dataset_specs or [],
+                    "random_cartesian_dataset_specs": random_cartesian_options.get("_dataset_specs") or [],
+                }
             self._logs = []
             self._started_at = time.time()
             self._finished_at = None
             self._returncode = None
             self._current = None
             self._results = []
+            self._progress = {}
+            self._processes = set()
             self._stop_requested = False
             self._run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
             self._rate_seconds_per_structure = {}
@@ -2545,6 +3014,8 @@ class ExperimentRunner:
                     run_mode,
                     random_cartesian_options,
                     performance_settings,
+                    venv_activate_path,
+                    dataset_recipes_info,
                 ),
                 daemon=True,
             )
@@ -2554,10 +3025,13 @@ class ExperimentRunner:
     def stop(self) -> dict[str, Any]:
         with self._lock:
             self._stop_requested = True
-            process = self._process
+            processes = list(self._processes)
+            if self._process is not None and self._process not in processes:
+                processes.append(self._process)
             self._logs.append("\n[UI] Solicitud de parada enviada al experimento.\n")
-        if process is not None and process.poll() is None:
-            process.terminate()
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
         return self.status()
 
     def status(self) -> dict[str, Any]:
@@ -2581,9 +3055,11 @@ class ExperimentRunner:
                 "finished_at": self._finished_at,
                 "current": current,
                 "results": self._results,
+                "progress": dict(self._progress),
                 "log_size": len(self._logs),
                 "run_id": self._run_id,
                 "results_root": str(RESULTS_ROOT),
+                "active_processes": len([process for process in self._processes if process.poll() is None]),
             }
 
     def logs(self, since: int = 0) -> dict[str, Any]:
@@ -2616,6 +3092,7 @@ class ExperimentRunner:
         run_mode: str,
         random_cartesian_options: dict[str, Any] | None = None,
         performance: dict[str, Any] | None = None,
+        dataset_recipes_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         md_config = load_config(PIPELINES["md"].config_path)
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
@@ -2684,6 +3161,9 @@ class ExperimentRunner:
                 PIPELINES["atom_displacement"].root / "base" / "RUN.fdf",
             ]),
         }
+        dataset_recipes_info = dataset_recipes_info or {}
+        normalized_recipes = dataset_recipes_info.get("recipes") or {}
+        normalized_recipe_hash = dataset_recipes_info.get("recipe_set_hash") or recipe_set_hash(normalized_recipes)
         return {
             "experiment_id": run_id,
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -2725,6 +3205,15 @@ class ExperimentRunner:
                 "random_cartesian": random_cartesian_sizes_from_options(random_cartesian_options or {})
                 if "random_cartesian" in selected_methods
                 else [],
+            },
+            "dataset_recipes": normalized_recipes,
+            "dataset_recipe_set_hash": normalized_recipe_hash,
+            "dataset_recipe_specs": {
+                "md": dataset_recipes_info.get("md_dataset_specs") or [],
+                "siesta_fc_cartesian": dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [],
+                "random_cartesian": dataset_recipes_info.get("random_cartesian_dataset_specs") or (
+                    (random_cartesian_options or {}).get("_dataset_specs") or []
+                ),
             },
             "random_cartesian_options": random_cartesian_options or {},
             "atom_displacement_dataset_specs": atom_dataset_specs or [],
@@ -2791,6 +3280,170 @@ class ExperimentRunner:
         path = experiment_manifest_path(str(manifest["experiment_id"]))
         path.parent.mkdir(parents=True, exist_ok=True)
         write_yaml(path, json_safe(manifest))
+
+    def _write_performance_report(self, manifest: dict[str, Any]) -> None:
+        root = experiment_root(str(manifest["experiment_id"]))
+        report = {
+            "experiment_id": manifest.get("experiment_id"),
+            "performance": manifest.get("performance", {}),
+            "timing": manifest.get("timing", {}),
+            "scientific_status": manifest.get("scientific_status"),
+            "warnings": manifest.get("warnings", []),
+        }
+        (root / "performance_report.json").write_text(
+            json.dumps(json_safe(report), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        rows = []
+        for stage in (manifest.get("timing", {}) or {}).get("stages", []) or []:
+            if isinstance(stage, dict):
+                rows.append(stage)
+        write_csv_dicts(root / "performance_report.csv", rows or [{"stage": "none", "wall_time_seconds": ""}])
+
+    def _record_run_result(self, manifest: dict[str, Any], result: dict[str, Any]) -> None:
+        with self._lock:
+            self._results.append(result)
+        manifest["runs"].append(result)
+        self._merge_run_timing(manifest, result)
+        self._write_experiment_manifest(manifest)
+
+    def _run_dataset_tasks(
+        self,
+        tasks: list[tuple[str, Any]],
+        *,
+        manifest: dict[str, Any],
+        workers: int,
+        error_policy: str,
+    ) -> list[dict[str, Any]]:
+        results_by_index: dict[int, dict[str, Any]] = {}
+        failures: list[str] = []
+        with self._lock:
+            self._progress.update(
+                {
+                    "active_stage": "dataset_jobs",
+                    "total_tasks": len(tasks),
+                    "completed_tasks": 0,
+                    "failed_tasks": 0,
+                    "active_tasks": [],
+                }
+            )
+        if workers <= 1 or len(tasks) <= 1:
+            for index, (_label, fn) in enumerate(tasks):
+                try:
+                    with self._lock:
+                        self._progress["active_tasks"] = [tasks[index][0]]
+                    results_by_index[index] = fn()
+                    with self._lock:
+                        self._progress["completed_tasks"] = int(self._progress.get("completed_tasks", 0)) + 1
+                except Exception as exc:
+                    failures.append(f"{tasks[index][0]}: {exc}")
+                    with self._lock:
+                        self._progress["failed_tasks"] = int(self._progress.get("failed_tasks", 0)) + 1
+                    if error_policy == "fail_fast":
+                        raise
+            if failures:
+                manifest.setdefault("warnings", []).extend(failures)
+                manifest.setdefault("partial_failures", []).extend(failures)
+                manifest["scientific_status"] = "partial_failed"
+                self._write_experiment_manifest(manifest)
+            return [results_by_index[index] for index in sorted(results_by_index)]
+
+        self._append(f"[PERF] Ejecutando {len(tasks)} dataset jobs con max_parallel_dataset_jobs={workers}.\n")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_index = {
+                executor.submit(fn): index
+                for index, (_label, fn) in enumerate(tasks)
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                index = future_to_index[future]
+                label = tasks[index][0]
+                try:
+                    results_by_index[index] = future.result()
+                    with self._lock:
+                        self._progress["completed_tasks"] = int(self._progress.get("completed_tasks", 0)) + 1
+                    self._append(f"[PROGRESS] Dataset job completado: {label}\n")
+                except Exception as exc:
+                    message = f"{label}: {exc}"
+                    failures.append(message)
+                    with self._lock:
+                        self._progress["failed_tasks"] = int(self._progress.get("failed_tasks", 0)) + 1
+                    self._append(f"[ERROR] Dataset job fallo: {message}\n")
+                    if error_policy == "fail_fast":
+                        for pending in future_to_index:
+                            if pending is not future:
+                                pending.cancel()
+                        raise
+        if failures:
+            manifest.setdefault("warnings", []).extend(failures)
+            manifest.setdefault("partial_failures", []).extend(failures)
+            manifest["scientific_status"] = "partial_failed"
+            self._write_experiment_manifest(manifest)
+        return [results_by_index[index] for index in sorted(results_by_index)]
+
+    def _run_callable_tasks(
+        self,
+        tasks: list[tuple[str, Any]],
+        *,
+        workers: int,
+        error_policy: str,
+        stage: str,
+    ) -> tuple[list[Any], list[str]]:
+        results_by_index: dict[int, Any] = {}
+        failures: list[str] = []
+        with self._lock:
+            self._progress.update(
+                {
+                    "active_stage": stage,
+                    "total_tasks": len(tasks),
+                    "completed_tasks": 0,
+                    "failed_tasks": 0,
+                    "active_tasks": [],
+                }
+            )
+        if workers <= 1 or len(tasks) <= 1:
+            for index, (label, fn) in enumerate(tasks):
+                try:
+                    with self._lock:
+                        self._progress["active_tasks"] = [label]
+                    results_by_index[index] = fn()
+                    with self._lock:
+                        self._progress["completed_tasks"] = int(self._progress.get("completed_tasks", 0)) + 1
+                except Exception as exc:
+                    message = f"{label}: {exc}"
+                    failures.append(message)
+                    with self._lock:
+                        self._progress["failed_tasks"] = int(self._progress.get("failed_tasks", 0)) + 1
+                    self._append(f"[ERROR] {stage} fallo: {message}\n")
+                    if error_policy == "fail_fast":
+                        raise
+            return [results_by_index[index] for index in sorted(results_by_index)], failures
+
+        self._append(f"[PERF] Ejecutando {len(tasks)} tareas {stage} con workers={workers}.\n")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_index = {
+                executor.submit(fn): index
+                for index, (_label, fn) in enumerate(tasks)
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                index = future_to_index[future]
+                label = tasks[index][0]
+                try:
+                    results_by_index[index] = future.result()
+                    with self._lock:
+                        self._progress["completed_tasks"] = int(self._progress.get("completed_tasks", 0)) + 1
+                    self._append(f"[PROGRESS] {stage} completado: {label}\n")
+                except Exception as exc:
+                    message = f"{label}: {exc}"
+                    failures.append(message)
+                    with self._lock:
+                        self._progress["failed_tasks"] = int(self._progress.get("failed_tasks", 0)) + 1
+                    self._append(f"[ERROR] {stage} fallo: {message}\n")
+                    if error_policy == "fail_fast":
+                        for pending in future_to_index:
+                            if pending is not future:
+                                pending.cancel()
+                        raise
+        return [results_by_index[index] for index in sorted(results_by_index)], failures
 
     def _merge_run_timing(self, manifest: dict[str, Any], result: dict[str, Any]) -> None:
         timing = manifest.setdefault("timing", {})
@@ -2875,11 +3528,9 @@ class ExperimentRunner:
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
         performance: dict[str, Any] | None = None,
+        venv_activate_path: str | None = None,
+        dataset_recipes_info: dict[str, Any] | None = None,
     ) -> None:
-        original_configs = {
-            key: spec.config_path.read_text(encoding="utf-8")
-            for key, spec in PIPELINES.items()
-        }
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
         run_mode = parse_run_mode(run_mode)
@@ -2887,8 +3538,11 @@ class ExperimentRunner:
             performance,
             compute_accelerator=compute_accelerator,
         )
+        if venv_activate_path in (None, ""):
+            venv_activate_path = resolve_venv_activate_from_command(DEFAULT_VENV_ACTIVATE_COMMAND)
         compute_accelerator = str(performance_settings["compute_accelerator"])
         random_cartesian_options = random_cartesian_options or {}
+        dataset_recipes_info = dataset_recipes_info or {}
         pipeline_keys = pipeline_keys_for_methods(selected_methods)
         manifest = self._initial_experiment_manifest(
             run_id,
@@ -2906,6 +3560,7 @@ class ExperimentRunner:
             run_mode,
             random_cartesian_options,
             performance_settings,
+            dataset_recipes_info,
         )
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
         if manifest.get("siesta_settings_warning"):
@@ -2982,27 +3637,36 @@ class ExperimentRunner:
                 "[UI] ETA: el primer dataset de cada pipeline no tiene historico; "
                 "los siguientes usan segundos/estructura de runs ya completados.\n"
             )
-            previous_by_method: dict[str, dict[str, Any]] = {}
-            for size in (md_sizes if "md" in pipeline_keys else []):
-                self._ensure_not_stopped()
-                self._restore_original_config("md", original_configs)
-                result = self._run_one(
-                    "md",
-                    size,
-                    run_id,
-                    split_ratios=split_ratios,
-                    split_mode=split_mode,
-                    run_mode=run_mode,
-                    compute_accelerator=compute_accelerator,
-                    performance=performance_settings,
-                )
-                self._annotate_nested_subset(result, previous_by_method.get("md"))
-                previous_by_method["md"] = result
-                with self._lock:
-                    self._results.append(result)
-                manifest["runs"].append(result)
-                self._merge_run_timing(manifest, result)
-                self._write_experiment_manifest(manifest)
+            dataset_workers = int(performance_settings.get("max_parallel_dataset_jobs") or 1)
+            if compute_accelerator == "gpu" and dataset_workers > 1:
+                self._append("[WARN] GPU training requested; max_parallel_dataset_jobs forced to 1 to avoid single-GPU contention.\n")
+                dataset_workers = 1
+            manifest["timing"]["counters"]["dataset_jobs"] = 0
+            manifest["timing"]["counters"]["dataset_workers_used"] = dataset_workers
+
+            dataset_tasks: list[tuple[str, Any]] = []
+            md_task_specs = dataset_recipes_info.get("md_dataset_specs") or [
+                {"label": f"dataset_{size}", "size": size, "recipe_metadata": None}
+                for size in md_sizes
+            ]
+            for md_spec in (md_task_specs if "md" in pipeline_keys else []):
+                size = int(md_spec["size"])
+                dataset_tasks.append((
+                    f"md {md_spec.get('label', f'dataset_{size}')}",
+                    lambda size=size, md_spec=md_spec: self._run_one(
+                        "md",
+                        size,
+                        run_id,
+                        dataset_label=str(md_spec.get("label") or f"dataset_{size}"),
+                        recipe_metadata=md_spec.get("recipe_metadata"),
+                        split_ratios=split_ratios,
+                        split_mode=split_mode,
+                        run_mode=run_mode,
+                        compute_accelerator=compute_accelerator,
+                        performance=performance_settings,
+                        venv_activate_path=venv_activate_path,
+                    ),
+                ))
             atom_runs = atom_dataset_specs or [
                 {
                     "label": f"dataset_{size}",
@@ -3012,49 +3676,73 @@ class ExperimentRunner:
                 for size in atom_sizes
             ]
             for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
-                self._ensure_not_stopped()
-                self._restore_original_config("atom_displacement", original_configs)
-                size = int(atom_spec["size"])
-                result = self._run_one(
-                    "atom_displacement",
-                    size,
-                    run_id,
-                    dataset_label=str(atom_spec["label"]),
-                    fc_displacements=atom_spec.get("displacements"),
-                    split_ratios=split_ratios,
-                    random_seed=random_seed,
-                    split_mode=split_mode,
-                    run_mode=run_mode,
-                    compute_accelerator=compute_accelerator,
-                    performance=performance_settings,
-                )
-                self._annotate_nested_subset(result, previous_by_method.get("atom_displacement"))
-                previous_by_method["atom_displacement"] = result
-                with self._lock:
-                    self._results.append(result)
-                manifest["runs"].append(result)
-                self._merge_run_timing(manifest, result)
-                self._write_experiment_manifest(manifest)
-            if "random_cartesian" in selected_methods:
-                self._ensure_not_stopped()
-                self._restore_original_config("atom_displacement", original_configs)
-                for random_size in random_cartesian_sizes_from_options(random_cartesian_options):
-                    self._ensure_not_stopped()
-                    size_options = {**random_cartesian_options, "n_structures": random_size}
-                    result = self._run_random_cartesian(
-                        random_size,
+                dataset_tasks.append((
+                    f"atom_displacement {atom_spec['label']}",
+                    lambda atom_spec=atom_spec: self._run_one(
+                        "atom_displacement",
+                        int(atom_spec["size"]),
                         run_id,
+                        dataset_label=str(atom_spec["label"]),
+                        fc_displacements=atom_spec.get("displacements"),
+                        recipe_metadata=atom_spec.get("recipe_metadata"),
                         split_ratios=split_ratios,
-                        random_cartesian_options=size_options,
+                        random_seed=random_seed,
+                        split_mode=split_mode,
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
-                    )
-                    with self._lock:
-                        self._results.append(result)
-                    manifest["runs"].append(result)
-                    self._merge_run_timing(manifest, result)
-                    self._write_experiment_manifest(manifest)
+                        venv_activate_path=venv_activate_path,
+                    ),
+                ))
+            if "random_cartesian" in selected_methods:
+                random_specs = random_cartesian_options.get("_dataset_specs") or [
+                    {
+                        "label": f"dataset_{random_size}",
+                        "size": random_size,
+                        "options": {**random_cartesian_options, "n_structures": random_size},
+                        "recipe_metadata": None,
+                    }
+                    for random_size in random_cartesian_sizes_from_options(random_cartesian_options)
+                ]
+                for random_spec in random_specs:
+                    random_size = int(random_spec["size"])
+                    size_options = {
+                        **random_cartesian_options,
+                        **dict(random_spec.get("options") or {}),
+                        "n_structures": random_size,
+                    }
+                    size_options.pop("_dataset_specs", None)
+                    dataset_tasks.append((
+                        f"random_cartesian {random_spec.get('label', f'dataset_{random_size}')}",
+                        lambda random_size=random_size, size_options=size_options, random_spec=random_spec: self._run_random_cartesian(
+                            random_size,
+                            run_id,
+                            dataset_label=str(random_spec.get("label") or f"dataset_{random_size}"),
+                            recipe_metadata=random_spec.get("recipe_metadata"),
+                            split_ratios=split_ratios,
+                            random_cartesian_options=size_options,
+                            run_mode=run_mode,
+                            compute_accelerator=compute_accelerator,
+                            performance=performance_settings,
+                            venv_activate_path=venv_activate_path,
+                        ),
+                    ))
+            dataset_results = self._run_dataset_tasks(
+                dataset_tasks,
+                manifest=manifest,
+                workers=dataset_workers,
+                error_policy=str(performance_settings.get("error_policy", "fail_fast")),
+            )
+            manifest["timing"]["counters"]["dataset_jobs"] = len(dataset_tasks)
+            previous_by_method: dict[str, dict[str, Any]] = {}
+            for result in sorted(dataset_results, key=lambda item: (str(item.get("method_id") or item.get("pipeline")), int(item.get("dataset_size") or 0), str(item.get("dataset_label") or ""))):
+                method = str(result.get("method_id") or result.get("pipeline"))
+                if method in {"md", "siesta_fc_cartesian", "atom_displacement"}:
+                    nested_key = "atom_displacement" if method in {"siesta_fc_cartesian", "atom_displacement"} else "md"
+                    self._annotate_nested_subset(result, previous_by_method.get(nested_key))
+                    previous_by_method[nested_key] = result
+                self._record_run_result(manifest, result)
+                self._write_experiment_manifest(manifest)
             if run_mode == "dataset_only":
                 manifest["cross_evaluation"] = {
                     "ok": False,
@@ -3101,8 +3789,6 @@ class ExperimentRunner:
             manifest.setdefault("warnings", []).append(str(exc))
             self._write_experiment_manifest(manifest)
         finally:
-            for key, raw in original_configs.items():
-                PIPELINES[key].config_path.write_text(raw, encoding="utf-8")
             with self._lock:
                 self._process = None
                 self._current = None
@@ -3115,7 +3801,8 @@ class ExperimentRunner:
             )
             manifest["timing"]["total_experiment_seconds"] = manifest["timing"]["total_seconds"]
             self._write_experiment_manifest(manifest)
-            self._append("[UI] Configuraciones originales restauradas.\n")
+            self._write_performance_report(manifest)
+            self._append("[UI] Configuraciones globales no modificadas por el experimento.\n")
 
     def _restore_original_config(self, key: str, original_configs: dict[str, str]) -> None:
         PIPELINES[key].config_path.write_text(original_configs[key], encoding="utf-8")
@@ -3154,12 +3841,14 @@ class ExperimentRunner:
         run_id: str,
         dataset_label: str | None = None,
         fc_displacements: list[dict[str, Any]] | None = None,
+        recipe_metadata: dict[str, Any] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
         split_mode: str = "block",
         run_mode: str = "full_strict_pipeline",
         compute_accelerator: str = "cpu",
         performance: dict[str, Any] | None = None,
+        venv_activate_path: str | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -3184,11 +3873,16 @@ class ExperimentRunner:
             result_group = "results_atomdisp"
         result_dir = RESULTS_ROOT / result_group / dataset_label / f"run_{run_id}"
         workspace.mkdir(parents=True, exist_ok=True)
+        config_snapshot_path = workspace / "pipeline_config.yaml"
         self._append(f"[UI] Workspace: {workspace}\n")
         self._append(f"[UI] Result dir previsto: {result_dir}\n")
-        self._append(f"[UI] Config temporal: {spec.config_path}\n")
+        self._append(f"[UI] Config snapshot: {config_snapshot_path}\n")
         performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
         apply_performance_to_config(config, performance)
+        if recipe_metadata:
+            config["dataset_recipe"] = dict(recipe_metadata)
+        if venv_activate_path:
+            config.setdefault("paths", {})["venv_activate"] = venv_activate_path
         compute_accelerator = str(performance["compute_accelerator"])
         self._append(f"[UI] Accelerator: {compute_accelerator}\n")
         self._append(f"[PERF] {key} {dataset_label}: {json.dumps(json_safe(performance), sort_keys=True)}\n")
@@ -3199,7 +3893,7 @@ class ExperimentRunner:
             self._prepare_md_config(config, workspace, size, split_ratios, split_mode=split_mode)
             original_steps = list(config.get("pipeline", {}).get("steps", []))
             config.setdefault("pipeline", {})["steps"] = ["generate_md_dataset"]
-            write_yaml(spec.config_path, config)
+            write_yaml(config_snapshot_path, config)
             self._append("[UI] Config temporal MD escrita para generar dataset y manifests.\n")
             generation_started = time.time()
             generation_returncode = self._run_pipeline_process(
@@ -3207,8 +3901,10 @@ class ExperimentRunner:
                 key=key,
                 size=size,
                 started_at=started_at,
+                config_path=config_snapshot_path,
             )
-            prepare_metadata["generation_seconds"] = time.time() - generation_started
+            generation_seconds = time.time() - generation_started
+            prepare_metadata["generation_seconds"] = generation_seconds
             if generation_returncode != 0:
                 raise RuntimeError(
                     f"{spec.label} dataset_{size} fallo generando dataset con codigo "
@@ -3217,7 +3913,7 @@ class ExperimentRunner:
             self._validate_split_manifests(key, config, size)
             if run_mode == "dataset_only":
                 config["pipeline"]["steps"] = []
-                write_yaml(spec.config_path, config)
+                write_yaml(config_snapshot_path, config)
                 self._append("[UI] dataset_only: MD validado; no se entrena ni predice.\n")
                 returncode = 0
             else:
@@ -3226,10 +3922,10 @@ class ExperimentRunner:
                     for step in original_steps
                     if step in {"run_md_training", "run_md_testing", "run_md_prediction"}
                 ] or ["run_md_training", "run_md_testing", "run_md_prediction"]
-                write_yaml(spec.config_path, config)
+                write_yaml(config_snapshot_path, config)
                 self._append("[UI] Config temporal MD escrita para entrenar/evaluar tras validacion.\n")
                 training_started = time.time()
-                returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+                returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at, config_path=config_snapshot_path)
                 prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         else:
             self._prepare_atom_generation_config(
@@ -3239,7 +3935,7 @@ class ExperimentRunner:
                 fc_displacements,
                 random_seed=random_seed,
             )
-            write_yaml(spec.config_path, config)
+            write_yaml(config_snapshot_path, config)
             self._append(
                 "[UI] Config temporal FC escrita; SIESTA generara AtDis_steps en el workspace.\n"
             )
@@ -3249,32 +3945,34 @@ class ExperimentRunner:
                 key=key,
                 size=size,
                 started_at=started_at,
+                config_path=config_snapshot_path,
             )
-            prepare_metadata["generation_seconds"] = time.time() - generation_started
+            generation_seconds = time.time() - generation_started
             if generation_returncode != 0:
                 raise RuntimeError(
                     f"{spec.label} dataset_{size} fallo generando FC con codigo "
                     f"{generation_returncode}."
                 )
             prepare_metadata = self._prepare_atom_config(config, workspace, size, split_ratios)
-            write_yaml(spec.config_path, config)
+            prepare_metadata["generation_seconds"] = generation_seconds
+            write_yaml(config_snapshot_path, config)
             self._append("[UI] Config temporal de entrenamiento escrita tras FC.\n")
             if prepare_metadata.get("test_needs_siesta"):
                 test_siesta_started = time.time()
-                self._run_atom_test_single_points(spec, config, Path(prepare_metadata["test_samples_dir"]))
+                self._run_atom_test_single_points(spec, config, Path(prepare_metadata["test_samples_dir"]), config_snapshot_path)
                 prepare_metadata["test_single_points_seconds"] = time.time() - test_siesta_started
                 self._refresh_atom_split_manifests(config)
-                write_yaml(spec.config_path, config)
+                write_yaml(config_snapshot_path, config)
                 self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
             self._validate_split_manifests(key, config, size)
             if run_mode == "dataset_only":
                 config["pipeline"]["steps"] = []
-                write_yaml(spec.config_path, config)
+                write_yaml(config_snapshot_path, config)
                 self._append("[UI] dataset_only: SIESTA FC y splits validados; no se entrena ni predice.\n")
                 returncode = 0
             else:
                 training_started = time.time()
-                returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at)
+                returncode = self._run_pipeline_process(spec, key=key, size=size, started_at=started_at, config_path=config_snapshot_path)
                 prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         with self._lock:
             run_log = "".join(self._logs[log_start:])
@@ -3291,6 +3989,7 @@ class ExperimentRunner:
             dataset_label=dataset_label,
             pipeline_elapsed_seconds=pipeline_elapsed,
             run_mode=run_mode,
+            recipe_metadata=recipe_metadata,
         )
         elapsed = time.time() - started_at
         self._update_rate(key, size, elapsed, returncode)
@@ -3303,14 +4002,17 @@ class ExperimentRunner:
         size: int,
         run_id: str,
         *,
+        dataset_label: str | None = None,
+        recipe_metadata: dict[str, Any] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_cartesian_options: dict[str, Any] | None = None,
         run_mode: str = "dataset_only",
         compute_accelerator: str = "cpu",
         performance: dict[str, Any] | None = None,
+        venv_activate_path: str | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
-        dataset_label = f"dataset_{size}"
+        dataset_label = dataset_label or f"dataset_{size}"
         started_at = time.time()
         self._set_current(
             "random_cartesian",
@@ -3323,6 +4025,10 @@ class ExperimentRunner:
         config = load_config(spec.config_path)
         performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
         apply_performance_to_config(config, performance)
+        if recipe_metadata:
+            config["dataset_recipe"] = dict(recipe_metadata)
+        if venv_activate_path:
+            config.setdefault("paths", {})["venv_activate"] = venv_activate_path
         compute_accelerator = str(performance["compute_accelerator"])
         self._append(f"[UI] Accelerator: {compute_accelerator}\n")
         self._append(f"[PERF] random_cartesian {dataset_label}: {json.dumps(json_safe(performance), sort_keys=True)}\n")
@@ -3332,6 +4038,7 @@ class ExperimentRunner:
         base_dir = workspace / "base"
         relaxed_dir = workspace / "relaxed"
         workspace.mkdir(parents=True, exist_ok=True)
+        config_snapshot_path = workspace / "pipeline_config.yaml"
         pseudo_count = copy_pseudopotentials(PIPELINES["atom_displacement"].root / "base", base_dir)
         relaxed_counts = copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
         random_config = config.setdefault("structure", {}).setdefault("random_cartesian", {})
@@ -3354,7 +4061,7 @@ class ExperimentRunner:
             "run_single_points",
             "collect_atom_displacement_dataset",
         ]
-        write_yaml(spec.config_path, config)
+        write_yaml(config_snapshot_path, config)
         self._append(f"[UI] Random Cartesian dataset_dir: {dataset_dir}\n")
         self._append(f"[UI] Random Cartesian samples_dir: {config['paths']['samples_dir']}\n")
         self._append(f"[UI] Random Cartesian pseudopotenciales copiados: {pseudo_count}\n")
@@ -3370,6 +4077,7 @@ class ExperimentRunner:
             key="random_cartesian",
             size=size,
             started_at=started_at,
+            config_path=config_snapshot_path,
         )
         generation_seconds = time.time() - started_at
         if generation_returncode != 0:
@@ -3384,6 +4092,7 @@ class ExperimentRunner:
         }
         returncode = 0
         if run_mode != "dataset_only":
+            generation_metadata = dict(prepare_metadata)
             prepare_metadata = self._prepare_atom_config(
                 config,
                 workspace,
@@ -3392,7 +4101,14 @@ class ExperimentRunner:
                 source_samples_dir=dataset_dir / "RandomCartesian_steps",
                 method_id="random_cartesian",
             )
-            write_yaml(spec.config_path, config)
+            prepare_metadata.update(
+                {
+                    "generation_seconds": generation_metadata.get("generation_seconds"),
+                    "generated_samples": generation_metadata.get("generated_samples"),
+                    "seed": generation_metadata.get("seed"),
+                }
+            )
+            write_yaml(config_snapshot_path, config)
             self._append("[UI] Config temporal Random Cartesian escrita para entrenar/evaluar.\n")
             self._validate_split_manifests("atom_displacement", config, size)
             training_started = time.time()
@@ -3401,6 +4117,7 @@ class ExperimentRunner:
                 key="random_cartesian",
                 size=size,
                 started_at=started_at,
+                config_path=config_snapshot_path,
             )
             prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         with self._lock:
@@ -3418,6 +4135,7 @@ class ExperimentRunner:
             dataset_label=dataset_label,
             pipeline_elapsed_seconds=pipeline_elapsed,
             run_mode=run_mode,
+            recipe_metadata=recipe_metadata,
         )
         elapsed = time.time() - started_at
         self._update_rate("random_cartesian", size, elapsed, returncode)
@@ -3740,8 +4458,10 @@ class ExperimentRunner:
         key: str,
         size: int,
         started_at: float,
+        config_path: Path | None = None,
     ) -> int:
-        config = load_config(spec.config_path)
+        config_path = config_path or spec.config_path
+        config = load_config(config_path)
         shell = str(config.get("commands", {}).get("shell", "bash"))
         python = str(config.get("commands", {}).get("python", "python"))
         venv_activate = resolve_pipeline_path(spec, config["paths"]["venv_activate"])
@@ -3759,7 +4479,7 @@ class ExperimentRunner:
                 resolved = "gpu" if has_cuda else "cpu"
                 config.setdefault("training", {}).setdefault("trainer", {})["accelerator"] = resolved
                 config.setdefault("performance", {})["compute_accelerator"] = resolved
-                write_yaml(spec.config_path, config)
+                write_yaml(config_path, config)
                 message = "GPU disponible; usando accelerator=gpu." if has_cuda else "CUDA no disponible; auto usa accelerator=cpu."
                 self._append(f"[PERF] {spec.label}: {message}\n")
         shell_command = (
@@ -3770,6 +4490,7 @@ class ExperimentRunner:
         env = {
             **os.environ,
             "PYTHONUNBUFFERED": "1",
+            "PIPELINE_CONFIG_PATH": str(config_path),
             **performance_env(config.get("performance", {})),
         }
         self._append(f"[RUN] {' '.join(command)}\n")
@@ -3797,6 +4518,7 @@ class ExperimentRunner:
             )
         with self._lock:
             self._process = process
+            self._processes.add(process)
         self._append(f"[UI] PID: {process.pid}\n")
         self._append(f"[UI] CWD: {spec.root}\n")
         self._append(f"[UI] ETA al arrancar proceso: {format_duration(self._estimated_seconds(key, size))}\n")
@@ -3814,6 +4536,7 @@ class ExperimentRunner:
         with self._lock:
             if self._process is process:
                 self._process = None
+            self._processes.discard(process)
         elapsed = time.time() - started_at
         self._append(
             f"[UI] {spec.label} finalizo con codigo {returncode} "
@@ -3826,6 +4549,7 @@ class ExperimentRunner:
         spec: PipelineSpec,
         config: dict[str, Any],
         test_samples_dir: Path,
+        config_path: Path,
     ) -> None:
         self._append(f"[UI] Preparando SIESTA solo para test: {test_samples_dir}\n")
         original_samples_dir = config["paths"]["samples_dir"]
@@ -3834,7 +4558,7 @@ class ExperimentRunner:
         config["paths"]["samples_dir"] = str(test_samples_dir)
         config["single_points"]["limit"] = None
         config["pipeline"]["steps"] = ["run_single_points"]
-        write_yaml(spec.config_path, config)
+        write_yaml(config_path, config)
         returncode = self._run_pipeline_process(
             spec,
             key=spec.key,
@@ -3849,6 +4573,7 @@ class ExperimentRunner:
                 ),
             ),
             started_at=time.time(),
+            config_path=config_path,
         )
         config["paths"]["samples_dir"] = original_samples_dir
         config["single_points"]["limit"] = original_limit
@@ -4069,9 +4794,11 @@ class ExperimentRunner:
         dataset_label: str | None = None,
         pipeline_elapsed_seconds: float | None = None,
         run_mode: str = "full_strict_pipeline",
+        recipe_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         prepare_metadata = prepare_metadata or {}
         dataset_label = dataset_label or f"dataset_{size}"
+        recipe_metadata = recipe_metadata or config.get("dataset_recipe") or {}
         if key == "md":
             result_group = "results_md"
         elif key == "random_cartesian":
@@ -4257,6 +4984,13 @@ class ExperimentRunner:
             "dataset_sample_ids": sorted(set(dataset_sample_ids)),
             "dataset_sample_hash": sample_set_hash(dataset_sample_ids),
             "seed": prepare_metadata.get("seed"),
+            "dataset_recipe": recipe_metadata,
+            "recipe_id": recipe_metadata.get("recipe_id"),
+            "recipe_label": recipe_metadata.get("recipe_label"),
+            "block_id": recipe_metadata.get("block_id"),
+            "block_label": recipe_metadata.get("block_label"),
+            "recipe_set_hash": recipe_set_hash(recipe_metadata) if recipe_metadata else "",
+            "generation_parameters_json": recipe_metadata.get("generation_parameters_json"),
             "predicted_hamiltonians": prediction_count,
             "siesta_hamiltonians": reference_count,
             "timing_breakdown": timing_breakdown,
@@ -4295,6 +5029,9 @@ class ExperimentRunner:
             python = Path(sys.executable)
         script = COMPARISON_ROOT / "scripts" / "evaluate_hamiltonian_metrics.py"
         command = [str(python), str(script), str(result_dir)]
+        metric_workers = int((config.get("performance", {}) or {}).get("max_parallel_metric_jobs") or 1)
+        if metric_workers > 1:
+            command.extend(["--workers", str(metric_workers)])
         self._append(f"[UI] Calculando metricas sparse/espectro/DOS: {' '.join(command)}\n")
         started_at = time.time()
         result = subprocess.run(
@@ -4303,6 +5040,7 @@ class ExperimentRunner:
             capture_output=True,
             text=True,
             check=False,
+            env={**os.environ, **performance_env(config.get("performance", {}))},
         )
         elapsed = time.time() - started_at
         if result.stdout.strip():
@@ -4799,6 +5537,27 @@ class ExperimentRunner:
                 method: int(combo_by_method[method].get("dataset_size", 0))
                 for method in selected_methods
             }
+            dataset_label_by_method = {
+                method: str(
+                    combo_by_method[method].get(
+                        "dataset_label",
+                        f"dataset_{dataset_size_by_method.get(method, 0)}",
+                    )
+                )
+                for method in selected_methods
+            }
+            recipe_id_by_method = {
+                method: combo_by_method[method].get("recipe_id")
+                for method in selected_methods
+            }
+            recipe_label_by_method = {
+                method: combo_by_method[method].get("recipe_label")
+                for method in selected_methods
+            }
+            recipe_set_hash_by_method = {
+                method: combo_by_method[method].get("recipe_set_hash")
+                for method in selected_methods
+            }
             pair_id = "__".join(
                 f"{method}_{combo_by_method[method].get('dataset_label', combo_by_method[method].get('dataset_size'))}"
                 for method in selected_methods
@@ -4861,6 +5620,20 @@ class ExperimentRunner:
                     if STRICT_COMPARISON_MODE:
                         raise RuntimeError(warning)
 
+            performance = parse_performance_settings(
+                manifest.get("performance", {}),
+                compute_accelerator=str(manifest.get("compute_accelerator", "cpu")),
+            )
+            error_policy = str(performance.get("error_policy", "fail_fast"))
+            prediction_workers = int(performance.get("max_parallel_prediction_jobs", 1) or 1)
+            evaluation_workers = int(performance.get("max_parallel_evaluation_jobs", 1) or 1)
+            if str(manifest.get("compute_accelerator", "")).lower() == "gpu" and prediction_workers > 1:
+                self._append(
+                    "[WARN] compute_accelerator=gpu: cross predictions se serializan "
+                    "para no sobresuscribir una unica GPU.\n"
+                )
+                prediction_workers = 1
+            prediction_tasks: list[tuple[str, Any]] = []
             for train_method in selected_methods:
                 train_result = combo_by_method[train_method]
                 checkpoint = train_result.get("model_checkpoint")
@@ -4926,19 +5699,84 @@ class ExperimentRunner:
                     if matmul_precision in {"high", "medium"}:
                         predict_command.extend(["--torch-float32-matmul-precision", str(matmul_precision)])
                     predict_command.append("--patch-graph2mat-basis-loading")
-                    predict_start = time.time()
-                    predict_result = self._run_local_script(
-                        predict_command,
-                        label=f"Prediccion cruzada {cross_name}",
-                        env={**os.environ, **performance_env(train_config.get("performance", {}))},
-                    )
-                    prediction_time = time.time() - predict_start
-                    if predict_result.returncode != 0:
-                        summary["missing_cells"].append(required_cell)
-                        raise RuntimeError(f"Cross prediction failed for {cross_name}.")
 
+                    def run_prediction(
+                        *,
+                        command: list[str] = list(predict_command),
+                        cross_name: str = cross_name,
+                        required_cell: str = required_cell,
+                        train_config: dict[str, Any] = train_config,
+                        train_method: str = train_method,
+                        test_set: str = test_set,
+                        test_method: str = test_method,
+                        test_manifest: Path = test_manifest,
+                        basis_files: str = basis_files,
+                        prediction_dir: Path = prediction_dir,
+                        train_result: dict[str, Any] = train_result,
+                        checkpoint: Any = checkpoint,
+                        frozen_manifest_path: Path = frozen_manifest_path,
+                        frozen_test_hash: Any = frozen_test_hash,
+                        frozen_test_warning: str = frozen_test_warning,
+                    ) -> dict[str, Any]:
+                        predict_start = time.time()
+                        predict_result = self._run_local_script(
+                            command,
+                            label=f"Prediccion cruzada {cross_name}",
+                            env={**os.environ, **performance_env(train_config.get("performance", {}))},
+                        )
+                        prediction_time = time.time() - predict_start
+                        if predict_result.returncode != 0:
+                            raise RuntimeError(f"{required_cell}: Cross prediction failed for {cross_name}.")
+                        return {
+                            "cross_name": cross_name,
+                            "required_cell": required_cell,
+                            "train_config": train_config,
+                            "train_method": train_method,
+                            "test_set": test_set,
+                            "test_method": test_method,
+                            "test_manifest": test_manifest,
+                            "basis_files": basis_files,
+                            "prediction_dir": prediction_dir,
+                            "prediction_time": prediction_time,
+                            "train_result": train_result,
+                            "checkpoint": checkpoint,
+                            "frozen_manifest_path": frozen_manifest_path,
+                            "frozen_test_hash": frozen_test_hash,
+                            "frozen_test_warning": frozen_test_warning,
+                        }
+
+                    prediction_tasks.append((cross_name, run_prediction))
+
+            prediction_results, prediction_failures = self._run_callable_tasks(
+                prediction_tasks,
+                workers=prediction_workers,
+                error_policy=error_policy,
+                stage="cross_prediction",
+            )
+            if prediction_failures:
+                summary["warnings"].extend(prediction_failures)
+                summary["missing_cells"].extend(prediction_failures)
+
+            evaluation_tasks: list[tuple[str, Any]] = []
+            for prediction_payload in prediction_results:
+                cross_name = str(prediction_payload["cross_name"])
+
+                def run_evaluation(
+                    *,
+                    payload: dict[str, Any] = prediction_payload,
+                    cross_name: str = cross_name,
+                ) -> dict[str, Any]:
+                    train_result = payload["train_result"]
+                    train_method = str(payload["train_method"])
+                    train_config = payload["train_config"]
+                    test_set = str(payload["test_set"])
                     cross_result_dir = cross_root / cross_name
-                    copy_counts = self._prepare_cross_result_dir(cross_result_dir, prediction_dir, test_manifest, basis_files)
+                    copy_counts = self._prepare_cross_result_dir(
+                        cross_result_dir,
+                        Path(payload["prediction_dir"]),
+                        Path(payload["test_manifest"]),
+                        str(payload["basis_files"]),
+                    )
                     evaluation_start = time.time()
                     evaluation_summary = self._evaluate_hamiltonian_metrics(train_method, train_config, cross_result_dir)
                     evaluation_time = time.time() - evaluation_start
@@ -4947,18 +5785,36 @@ class ExperimentRunner:
                         "pair_id": pair_id,
                         "train_method": train_method,
                         "test_set": test_set,
-                        "test_method": test_method,
+                        "test_method": payload["test_method"],
                         "dataset_size": int(train_result.get("dataset_size", 0)),
                         "train_dataset_size": int(train_result.get("dataset_size", 0)),
                         "dataset_size_by_method": dataset_size_by_method,
+                        "dataset_label_by_method": dataset_label_by_method,
+                        "recipe_id_by_method": recipe_id_by_method,
+                        "recipe_label_by_method": recipe_label_by_method,
+                        "recipe_set_hash_by_method": recipe_set_hash_by_method,
+                        "recipe_set_hash": train_result.get("recipe_set_hash", ""),
+                        "train_dataset_label": train_result.get("dataset_label", ""),
+                        "train_recipe_id": train_result.get("recipe_id"),
+                        "train_recipe_label": train_result.get("recipe_label"),
+                        "train_block_id": train_result.get("block_id"),
+                        "train_block_label": train_result.get("block_label"),
+                        "train_generation_parameters_json": train_result.get("generation_parameters_json"),
                         "md_dataset_size": dataset_size_by_method.get("md"),
                         "atom_dataset_size": dataset_size_by_method.get("siesta_fc_cartesian"),
+                        "random_dataset_size": dataset_size_by_method.get("random_cartesian"),
+                        "md_dataset_label": dataset_label_by_method.get("md"),
+                        "atom_dataset_label": dataset_label_by_method.get("siesta_fc_cartesian"),
+                        "random_dataset_label": dataset_label_by_method.get("random_cartesian"),
+                        "md_recipe_set_hash": recipe_set_hash_by_method.get("md"),
+                        "atom_recipe_set_hash": recipe_set_hash_by_method.get("siesta_fc_cartesian"),
+                        "random_recipe_set_hash": recipe_set_hash_by_method.get("random_cartesian"),
                         "compute_budget_mode": manifest.get("compute_budget_mode", "both"),
                         "leakage_warning": leakage_warnings_by_test_set.get(test_set, ""),
                         "leakage_summary": leakage_summary_by_test_set.get(test_set, ""),
-                        "frozen_test_warning": frozen_test_warning,
-                        "frozen_test_hash": frozen_test_hash,
-                        "frozen_test_manifest": str(frozen_manifest_path) if frozen_manifest_path.exists() else "",
+                        "frozen_test_warning": payload["frozen_test_warning"],
+                        "frozen_test_hash": payload["frozen_test_hash"],
+                        "frozen_test_manifest": str(payload["frozen_manifest_path"]) if Path(payload["frozen_manifest_path"]).exists() else "",
                         "siesta_settings_hash": manifest.get("siesta_settings_hash"),
                         "siesta_settings_warning": manifest.get("siesta_settings_warning", ""),
                         "model_config_hash": manifest.get("model_config_hash"),
@@ -4967,17 +5823,19 @@ class ExperimentRunner:
                         "strict_comparison_mode": manifest.get("strict_comparison_mode", STRICT_COMPARISON_MODE),
                         "seed": train_result.get("seed"),
                         "epoch": None,
-                        "model_checkpoint": str(checkpoint),
+                        "model_checkpoint": str(payload["checkpoint"]),
                         "model_checkpoint_sha256": train_result.get("model_checkpoint_sha256"),
                         "checkpoint_manifest": train_result.get("checkpoint_manifest", ""),
                         "checkpoint_selection_warning": train_result.get("checkpoint_selection_warning", ""),
                         "reproducibility_warning": manifest.get("reproducibility_warning", ""),
                         "nested_subset_warning": train_result.get("nested_subset_warning", ""),
-                        "prediction_dir": str(prediction_dir),
+                        "prediction_dir": str(payload["prediction_dir"]),
                         "siesta_reference_dir": str(cross_result_dir / "siesta_hamiltonians"),
-                        "prediction_time_seconds": prediction_time,
+                        "prediction_time_seconds": payload["prediction_time"],
                         "evaluation_time_seconds": evaluation_time,
-                        "total_time_seconds": float(train_result.get("pipeline_elapsed_seconds") or 0.0) + prediction_time + evaluation_time,
+                        "total_time_seconds": float(train_result.get("pipeline_elapsed_seconds") or 0.0)
+                        + float(payload["prediction_time"])
+                        + evaluation_time,
                         "references": copy_counts["references"],
                         "structures": copy_counts["structures"],
                         "evaluation": evaluation_summary,
@@ -4986,7 +5844,20 @@ class ExperimentRunner:
                         json.dumps(json_safe(cross_manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
                         encoding="utf-8",
                     )
-                    summary["cross_evaluations"].append(cross_manifest)
+                    return cross_manifest
+
+                evaluation_tasks.append((cross_name, run_evaluation))
+
+            evaluation_results, evaluation_failures = self._run_callable_tasks(
+                evaluation_tasks,
+                workers=evaluation_workers,
+                error_policy=error_policy,
+                stage="cross_evaluation",
+            )
+            if evaluation_failures:
+                summary["warnings"].extend(evaluation_failures)
+                summary["missing_cells"].extend(evaluation_failures)
+            summary["cross_evaluations"].extend(evaluation_results)
 
         aggregate_command = [
             sys.executable,
@@ -5276,7 +6147,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 )
                 if not venv_activate_command:
                     venv_activate_command = DEFAULT_VENV_ACTIVATE_COMMAND
-                apply_venv_activate_to_pipeline_configs(venv_activate_command)
+                venv_activate_path = resolve_venv_activate_from_command(venv_activate_command)
                 raw_atom_sizes = payload.get("atom_sizes")
                 atom_dataset_specs = None
                 fc_dataset_specs = None
@@ -5312,7 +6183,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                             split_ratios=split_ratios,
                         )
                 if "md" in selected_pipeline_keys:
-                    if atom_sizes and parse_bool(payload.get("sync_md_sizes"), True):
+                    if atom_sizes and parse_bool(payload.get("sync_md_sizes"), False):
                         md_sizes = unique_ints_preserve_order(atom_sizes)
                     else:
                         md_sizes = parse_sizes(raw_md_sizes, atom_sizes or [10, 20])
@@ -5321,6 +6192,55 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 if "atom_displacement" not in selected_pipeline_keys:
                     fc_dataset_specs = None
                     atom_dataset_specs = None
+                dataset_recipes_info = dataset_recipes_to_execution_specs(
+                    payload.get("dataset_recipes"),
+                    selected_methods=selected_methods,
+                    split_ratios=split_ratios,
+                    random_cartesian_defaults=random_cartesian_options,
+                )
+                if dataset_recipes_info:
+                    md_recipe_specs = dataset_recipes_info.get("md_dataset_specs") or []
+                    atom_recipe_specs = dataset_recipes_info.get("atom_dataset_specs") or []
+                    random_recipe_specs = dataset_recipes_info.get("random_cartesian_dataset_specs") or []
+                    if md_recipe_specs:
+                        md_sizes = [int(spec["size"]) for spec in md_recipe_specs]
+                    if atom_recipe_specs:
+                        atom_dataset_specs = atom_recipe_specs
+                        atom_sizes = [int(spec["size"]) for spec in atom_recipe_specs]
+                        fc_dataset_specs = None
+                    if random_recipe_specs:
+                        random_cartesian_options = {
+                            **random_cartesian_options,
+                            "_dataset_specs": random_recipe_specs,
+                        }
+                    legacy_recipes = legacy_payload_to_dataset_recipes(
+                        md_sizes=md_sizes,
+                        atom_dataset_specs=atom_dataset_specs,
+                        atom_sizes=atom_sizes,
+                        fc_dataset_specs=fc_dataset_specs,
+                        random_cartesian_options=random_cartesian_options,
+                        selected_methods=selected_methods,
+                    )
+                    merged_recipes = dict(legacy_recipes)
+                    merged_recipes.update(dataset_recipes_info.get("recipes") or {})
+                    dataset_recipes_info["recipes"] = merged_recipes
+                    dataset_recipes_info["recipe_set_hash"] = recipe_set_hash(merged_recipes)
+                else:
+                    legacy_recipes = legacy_payload_to_dataset_recipes(
+                        md_sizes=md_sizes,
+                        atom_dataset_specs=atom_dataset_specs,
+                        atom_sizes=atom_sizes,
+                        fc_dataset_specs=fc_dataset_specs,
+                        random_cartesian_options=random_cartesian_options,
+                        selected_methods=selected_methods,
+                    )
+                    dataset_recipes_info = {
+                        "recipes": legacy_recipes,
+                        "recipe_set_hash": recipe_set_hash(legacy_recipes),
+                        "md_dataset_specs": [],
+                        "atom_dataset_specs": atom_dataset_specs or [],
+                        "random_cartesian_dataset_specs": random_cartesian_options.get("_dataset_specs") or [],
+                    }
                 json_response(
                     self,
                     EXPERIMENT_RUNNER.start(
@@ -5339,6 +6259,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         run_mode,
                         random_cartesian_options,
                         performance_settings,
+                        venv_activate_path,
+                        dataset_recipes_info,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )
