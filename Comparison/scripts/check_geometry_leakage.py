@@ -205,14 +205,6 @@ def family_key(row: dict[str, Any]) -> tuple[str, ...]:
 
 
 def random_family_key(row: dict[str, Any]) -> tuple[str, ...]:
-    keys = [
-        "base_geometry_hash",
-        "distribution",
-        "sigma_ang",
-        "uniform_range_ang",
-        "seed",
-        "split_group_id",
-    ]
     metadata_path = row.get("metadata_path")
     metadata: dict[str, Any] = {}
     if metadata_path:
@@ -222,7 +214,24 @@ def random_family_key(row: dict[str, Any]) -> tuple[str, ...]:
                 metadata = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             metadata = {}
-    return tuple(str(row.get(key, metadata.get(key, ""))) for key in keys)
+    sample_token = (
+        row.get("sample_index")
+        or metadata.get("sample_index")
+        or metadata.get("id")
+        or row.get("sample_id")
+    )
+    if sample_token in (None, ""):
+        return ()
+    keys = [
+        "base_geometry_hash",
+        "distribution",
+        "sigma_ang",
+        "uniform_range_ang",
+        "seed",
+    ]
+    return tuple(str(row.get(key, metadata.get(key, ""))) for key in keys) + (
+        str(sample_token),
+    )
 
 
 def analyze(

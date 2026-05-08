@@ -43,7 +43,7 @@ COMPARISON_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = COMPARISON_ROOT / "results"
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
 LOG_HEARTBEAT_SECONDS = 30.0
-METRIC_VERSION = "2026-05-04.strict-validation-v1"
+METRIC_VERSION = "2026-05-08.frontier-window-v1"
 DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
 
 
@@ -686,14 +686,48 @@ def environment_versions(configs: list[dict[str, Any]] | None = None) -> dict[st
     }
 
 
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
 def absolute_path_warning(paths_to_check: list[Path]) -> str:
     home = str(Path.home())
+    portable_roots = [REPO_ROOT]
     matches = [
         str(path)
         for path in paths_to_check
-        if path.is_absolute() and (str(path).startswith(home) or str(path).startswith("/mnt/"))
+        if path.is_absolute()
+        and (str(path).startswith(home) or str(path).startswith("/mnt/"))
+        and not any(_path_is_relative_to(path, root) for root in portable_roots)
     ]
+    matches = sorted(dict.fromkeys(matches))
     return "User-local absolute paths detected: " + ", ".join(matches) if matches else ""
+
+
+def sanitize_reproducibility_warning(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    prefix = "User-local absolute paths detected:"
+    if not value.startswith(prefix):
+        return value
+    paths = [Path(part.strip()) for part in value.removeprefix(prefix).split(",") if part.strip()]
+    return absolute_path_warning(paths)
+
+
+def sanitize_recommendation_warnings(recommendation: dict[str, Any]) -> dict[str, Any]:
+    warnings = recommendation.get("severe_warnings")
+    if isinstance(warnings, list):
+        sanitized = [
+            warning
+            for warning in (sanitize_reproducibility_warning(item) for item in warnings)
+            if warning
+        ]
+        recommendation = {**recommendation, "severe_warnings": sanitized}
+    return recommendation
 
 
 def sample_set_hash(sample_ids: list[str]) -> str:
@@ -734,7 +768,7 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
 
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
-DEFAULT_PRIMARY_METRIC = "fermi_window_rmse_eV"
+DEFAULT_PRIMARY_METRIC = "frontier_window_rmse_eV"
 MINIMUM_ROBUST_SEEDS = 3
 STRICT_COMPARISON_MODE = True
 SPLIT_MANIFEST_FIELDS = [
@@ -2056,8 +2090,34 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
                     parsed[key] = float(value)
                 except ValueError:
                     parsed[key] = value
+            parsed["reproducibility_warning"] = sanitize_reproducibility_warning(
+                parsed.get("reproducibility_warning")
+            )
             rows.append(parsed)
+    derive_frontier_metrics(rows)
     return rows
+
+
+def finite_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return None
+
+
+def derive_frontier_metrics(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        if finite_number(row.get("frontier_window_rmse_eV")) is not None:
+            continue
+        homo_error = finite_number(row.get("homo_error_eV"))
+        lumo_error = finite_number(row.get("lumo_error_eV"))
+        errors = [value for value in (homo_error, lumo_error) if value is not None]
+        if not errors:
+            continue
+        row["frontier_window_bands"] = len(errors)
+        row["frontier_window_mae_eV"] = sum(abs(value) for value in errors) / len(errors)
+        row["frontier_window_rmse_eV"] = math.sqrt(
+            sum(value * value for value in errors) / len(errors)
+        )
 
 
 def numeric_means(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -2214,6 +2274,7 @@ def plot_data_summary() -> dict[str, Any]:
                 recommendation = json.loads(recommendation_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 recommendation = {"error": str(exc)}
+        recommendation = sanitize_recommendation_warnings(recommendation)
         manifest: dict[str, Any] = {}
         if manifest_path.exists():
             try:

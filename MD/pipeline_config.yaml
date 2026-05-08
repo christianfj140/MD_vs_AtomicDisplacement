@@ -1,6 +1,6 @@
 paths:
-  dataset_dir: ${REPO_ROOT}/MD/dataset
-  training_dir: ${REPO_ROOT}/MD/training
+  dataset_dir: /home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260508_120125/md/dataset_60/dataset
+  training_dir: /home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/workspaces/20260508_120125/md/dataset_60/training
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
@@ -11,7 +11,7 @@ commands:
   shell: bash
 md:
   type_of_run: verlet
-  steps: 10
+  steps: 60
   basis_size: DZP
   basis_type: split
   energy_shift: 0.03 eV
@@ -91,7 +91,7 @@ training:
     loss: graph2mat.metrics.block_type_mae
     optim_lr: 0.005
   trainer:
-    accelerator: cpu
+    accelerator: gpu
     logger:
       class_path: TensorBoardLogger
       init_args:
@@ -117,12 +117,9 @@ prediction:
 pipeline:
   steps:
   - generate_md_dataset
-  - run_md_training
-  - run_md_testing
-  - run_md_prediction
 splits:
   enabled: true
-  strategy: spread
-  train: 8
-  validation: 1
-  test: 1
+  strategy: block
+  train: 48
+  validation: 6
+  test: 6

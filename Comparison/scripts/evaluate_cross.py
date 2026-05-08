@@ -41,13 +41,16 @@ def format_cell(manifest: dict[str, Any] | None) -> str:
         return ""
     sparse_mae = mean_metric(manifest, "sparse", "mae_ref_eV")
     sparse_rmse = mean_metric(manifest, "sparse", "rmse_ref_eV")
+    frontier_rmse = mean_metric(manifest, "spectral", "frontier_window_rmse_eV")
     fermi_rmse = mean_metric(manifest, "spectral", "fermi_window_rmse_eV")
     parts = []
     if sparse_mae is not None:
         parts.append(f"MAE={sparse_mae:.6g}")
     if sparse_rmse is not None:
         parts.append(f"RMSE={sparse_rmse:.6g}")
-    if fermi_rmse is not None:
+    if frontier_rmse is not None:
+        parts.append(f"FrontierRMSE={frontier_rmse:.6g}")
+    elif fermi_rmse is not None:
         parts.append(f"FermiRMSE={fermi_rmse:.6g}")
     return "; ".join(parts)
 

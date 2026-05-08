@@ -617,6 +617,7 @@ def eigen_error_metrics(
 
     occupied_mask = np.zeros(n_bands, dtype=bool)
     fermi_mask = np.zeros(n_bands, dtype=bool)
+    frontier_mask = np.zeros(n_bands, dtype=bool)
     homo_index = None
     lumo_index = None
     if fermi_level is not None:
@@ -633,6 +634,10 @@ def eigen_error_metrics(
             homo_index = max(0, (n_bands // 2) - 1)
             lumo_index = min(n_bands - 1, homo_index + 1)
             fermi_mask[homo_index:lumo_index + 1] = True
+    if homo_index is not None:
+        frontier_mask[homo_index] = True
+    if lumo_index is not None:
+        frontier_mask[lumo_index] = True
 
     def masked_mae(mask: np.ndarray) -> float:
         return float(np.mean(np.abs(errors[mask]))) if np.any(mask) else math.nan
@@ -683,7 +688,9 @@ def eigen_error_metrics(
         "lumo_index": lumo_index,
         "homo_error_eV": float(errors[homo_index]) if homo_index is not None else math.nan,
         "lumo_error_eV": float(errors[lumo_index]) if lumo_index is not None else math.nan,
-        "frontier_window_rmse_eV": masked_rmse(fermi_mask),
+        "frontier_window_bands": int(np.count_nonzero(frontier_mask)),
+        "frontier_window_mae_eV": masked_mae(frontier_mask),
+        "frontier_window_rmse_eV": masked_rmse(frontier_mask),
         "align_global_shift_eV": global_shift,
         "align_global_mae_eV": global_aligned_mae,
         "align_global_rmse_eV": global_aligned_rmse,
@@ -828,6 +835,7 @@ def matrix_spectrum_rows(
                 "support_f1": sparse_row.get("support_f1"),
                 "global_rmse_eV": spectral_row.get("global_rmse_eV"),
                 "fermi_window_rmse_eV": spectral_row.get("fermi_window_rmse_eV"),
+                "frontier_window_rmse_eV": spectral_row.get("frontier_window_rmse_eV"),
                 "gap_abs_error_eV": spectral_row.get("gap_abs_error_eV"),
                 "fermi_level_source": spectral_row.get("fermi_level_source"),
                 "fermi_metric_available": spectral_row.get("fermi_level_source") == "siesta_file",
@@ -852,10 +860,18 @@ def matrix_spectrum_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "relative_frobenius_union",
             "fermi_window_rmse_eV",
         ),
+        "corr_frobenius_vs_frontier_rmse": pearson_correlation(
+            rows,
+            "relative_frobenius_union",
+            "frontier_window_rmse_eV",
+        ),
         "corr_support_f1_vs_fermi_rmse": pearson_correlation(fermi_rows, "support_f1", "fermi_window_rmse_eV"),
         "spearman_corr_mae_ref_vs_global_rmse": spearman_correlation(rows, "mae_ref_eV", "global_rmse_eV"),
         "spearman_corr_frobenius_vs_fermi_rmse": spearman_correlation(
             fermi_rows, "relative_frobenius_union", "fermi_window_rmse_eV"
+        ),
+        "spearman_corr_frobenius_vs_frontier_rmse": spearman_correlation(
+            rows, "relative_frobenius_union", "frontier_window_rmse_eV"
         ),
     }
 
@@ -1099,6 +1115,8 @@ def extract(
         "lumo_index",
         "homo_error_eV",
         "lumo_error_eV",
+        "frontier_window_bands",
+        "frontier_window_mae_eV",
         "frontier_window_rmse_eV",
         "align_global_shift_eV",
         "align_global_mae_eV",
@@ -1132,6 +1150,7 @@ def extract(
         "global_rmse_eV",
         "low_energy_rmse_eV",
         "fermi_window_rmse_eV",
+        "frontier_window_rmse_eV",
         "gap_abs_error_eV",
         "fermi_level_source",
         "fermi_metric_available",

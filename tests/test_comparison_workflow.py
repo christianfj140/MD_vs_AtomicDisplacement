@@ -361,6 +361,24 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
             )
 
+    def test_repo_local_paths_do_not_raise_reproducibility_warning(self) -> None:
+        module = self.load_pipeline_ui_module()
+        warning = module.absolute_path_warning(
+            [
+                REPO_ROOT / "MD" / "dataset",
+                REPO_ROOT / ".venv" / "bin" / "activate",
+            ]
+        )
+        self.assertEqual(warning, "")
+        warning = module.absolute_path_warning([Path.home() / "external_data" / "RUN.fdf"])
+        self.assertIn("User-local absolute paths detected", warning)
+        old_warning = (
+            "User-local absolute paths detected: "
+            f"{REPO_ROOT / 'MD' / 'dataset'}, "
+            f"{REPO_ROOT / '.venv' / 'bin' / 'activate'}"
+        )
+        self.assertEqual(module.sanitize_reproducibility_warning(old_warning), "")
+
     def load_random_cartesian_module(self):
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
         spec = importlib.util.spec_from_file_location(
@@ -1762,6 +1780,48 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertIn("random_cartesian on test_mixed", recommendation["missing_required_cells"])
             self.assertIn("test_random_cartesian", recommendation["rankings_by_test_set"])
 
+    def test_winner_analysis_nway_complete_reports_consensus_leader(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+            values = {"md": "0.4", "siesta_fc_cartesian": "0.8", "random_cartesian": "1.2"}
+            for method in methods:
+                for test_set in test_sets:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_nway_complete",
+                            "train_method": method,
+                            "test_set": test_set,
+                            "test_method": test_set.removeprefix("test_"),
+                            "dataset_size_by_method": json.dumps(
+                                {"md": 3, "siesta_fc_cartesian": 4, "random_cartesian": 5}
+                            ),
+                            "seed": "1",
+                            "model_checkpoint": f"{method}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "nway_consensus_win")
+            self.assertEqual(recommendation["scientific_status"], "exploratory")
+            self.assertEqual(recommendation["nway_consensus_leader"], "md")
+            self.assertEqual(set(recommendation["nway_leaders_by_test_set"].values()), {"md"})
+            self.assertNotIn("legacy global-winner", recommendation["reason"])
+
     def test_geometry_leakage_detects_duplicates_near_duplicates_and_md_neighbors(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
@@ -1915,6 +1975,104 @@ class ComparisonWorkflowTests(unittest.TestCase):
             summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
             self.assertGreaterEqual(summary["atom_displacement_family_warnings"], 1)
 
+    def test_geometry_leakage_allows_distinct_random_cartesian_samples_from_same_group(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            train = make_sample(root / "samples", "train")
+            test = make_sample(root / "samples", "test")
+            text = (test / "RUN.fdf").read_text(encoding="utf-8").replace("0.0 0.7 0.0 2", "0.0 0.76 0.0 2")
+            (test / "RUN.fdf").write_text(text, encoding="utf-8")
+            train_metadata = train / "metadata.json"
+            test_metadata = test / "metadata.json"
+            common = {
+                "base_geometry_hash": "base",
+                "distribution": "gaussian",
+                "sigma_ang": 0.03,
+                "seed": 1234,
+                "split_group_id": "same-generation-group",
+            }
+            train_metadata.write_text(json.dumps({**common, "id": "sample_000001", "sample_index": 0}), encoding="utf-8")
+            test_metadata.write_text(json.dumps({**common, "id": "sample_000002", "sample_index": 1}), encoding="utf-8")
+            train_manifest = root / "train.csv"
+            test_manifest = root / "test.csv"
+            write_csv(
+                train_manifest,
+                [
+                    {
+                        "sample_id": "random_sample_000001",
+                        "method": "random_cartesian",
+                        "structure_path": str(train / "RUN.fdf"),
+                        "metadata_path": str(train_metadata),
+                        "split_group_id": "same-generation-group",
+                    }
+                ],
+            )
+            write_csv(
+                test_manifest,
+                [
+                    {
+                        "sample_id": "random_sample_000002",
+                        "method": "random_cartesian",
+                        "structure_path": str(test / "RUN.fdf"),
+                        "metadata_path": str(test_metadata),
+                        "split_group_id": "same-generation-group",
+                    }
+                ],
+            )
+            result = run_script(
+                "Comparison/scripts/check_geometry_leakage.py",
+                "--train-manifest",
+                str(train_manifest),
+                "--test-manifest",
+                str(test_manifest),
+                "--output-dir",
+                str(root / "leakage"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["random_cartesian_family_warnings"], 0)
+
+    def test_geometry_leakage_detects_same_random_cartesian_sample_index(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            train = make_sample(root / "samples", "train")
+            test = make_sample(root / "samples", "test")
+            text = (test / "RUN.fdf").read_text(encoding="utf-8").replace("0.0 0.7 0.0 2", "0.0 0.76 0.0 2")
+            (test / "RUN.fdf").write_text(text, encoding="utf-8")
+            train_metadata = train / "metadata.json"
+            test_metadata = test / "metadata.json"
+            common = {
+                "base_geometry_hash": "base",
+                "distribution": "gaussian",
+                "sigma_ang": 0.03,
+                "seed": 1234,
+                "sample_index": 7,
+            }
+            train_metadata.write_text(json.dumps({**common, "id": "sample_000008"}), encoding="utf-8")
+            test_metadata.write_text(json.dumps({**common, "id": "sample_000008"}), encoding="utf-8")
+            train_manifest = root / "train.csv"
+            test_manifest = root / "test.csv"
+            write_csv(
+                train_manifest,
+                [{"sample_id": "train", "method": "random_cartesian", "structure_path": str(train / "RUN.fdf"), "metadata_path": str(train_metadata)}],
+            )
+            write_csv(
+                test_manifest,
+                [{"sample_id": "test", "method": "random_cartesian", "structure_path": str(test / "RUN.fdf"), "metadata_path": str(test_metadata)}],
+            )
+            result = run_script(
+                "Comparison/scripts/check_geometry_leakage.py",
+                "--train-manifest",
+                str(train_manifest),
+                "--test-manifest",
+                str(test_manifest),
+                "--output-dir",
+                str(root / "leakage"),
+            )
+            self.assertEqual(result.returncode, 2)
+            summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
+            self.assertGreaterEqual(summary["random_cartesian_family_warnings"], 1)
+
     def test_predict_inputs_do_not_copy_reference_hamiltonians(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "predict_model_on_dataset",
@@ -1934,6 +2092,35 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertFalse(any(copied_dir.glob("*.TSHS")))
             self.assertFalse(any(copied_dir.glob("*.HSX")))
             self.assertFalse(copied[0]["reference_hamiltonian_copied_to_input"])
+
+    def test_cross_predict_parser_accepts_all_method_labels(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "predict_model_on_dataset",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        parser = module.build_parser()
+        for method in ("md", "atom_displacement", "siesta_fc_cartesian", "random_cartesian"):
+            args = parser.parse_args(
+                [
+                    "--checkpoint",
+                    "model.ckpt",
+                    "--train-method",
+                    method,
+                    "--test-set",
+                    "test_md",
+                    "--test-manifest",
+                    "test.csv",
+                    "--output-dir",
+                    "out",
+                    "--basis-files",
+                    "basis/*.ion.xml",
+                ]
+            )
+            self.assertEqual(args.train_method, method)
 
     def test_siesta_settings_hash_and_mismatch_warning(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
@@ -2249,6 +2436,34 @@ class ComparisonWorkflowTests(unittest.TestCase):
 
         fewer = module.low_energy_metrics(reference, predicted, n_states=10)
         self.assertEqual(fewer["low_energy_n_states"], 4)
+
+    def test_frontier_metrics_use_homo_lumo_when_fermi_window_is_empty(self) -> None:
+        try:
+            import numpy as np
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "evaluate_hamiltonian_metrics_frontier",
+            REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        _, metrics = module.eigen_error_metrics(
+            np.asarray([-10.0, -8.0, 8.0, 10.0], dtype=float),
+            np.asarray([-11.0, -6.0, 11.0, 9.0], dtype=float),
+            0.0,
+            "siesta_file",
+        )
+        self.assertEqual(metrics["fermi_window_bands"], 0)
+        self.assertTrue(np.isnan(metrics["fermi_window_rmse_eV"]))
+        self.assertEqual(metrics["frontier_window_bands"], 2)
+        self.assertAlmostEqual(metrics["frontier_window_mae_eV"], 2.5)
+        self.assertAlmostEqual(metrics["frontier_window_rmse_eV"], ((2.0**2 + 3.0**2) / 2.0) ** 0.5)
 
     def test_low_energy_metrics_warn_when_required_overlap_is_missing(self) -> None:
         import math

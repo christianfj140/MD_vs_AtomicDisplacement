@@ -17,6 +17,10 @@ from md_pipeline_config import (
     write_checkpoint_manifest,
 )
 
+TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
+sys.path.insert(0, str(TORCH_COMPAT_DIR))
+from torch_safe_globals import env_with_torch_compat
+
 
 def require_command(command_name: str) -> None:
     if shutil.which(command_name) is None:
@@ -28,7 +32,7 @@ def require_command(command_name: str) -> None:
 
 def run_command(cmd: list[str], cwd: Path) -> None:
     print(f"\n[RUN] {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, check=False)
+    result = subprocess.run(cmd, cwd=cwd, check=False, env=env_with_torch_compat())
     if result.returncode != 0:
         raise RuntimeError(
             f"El comando falló con código {result.returncode}: {' '.join(cmd)}"

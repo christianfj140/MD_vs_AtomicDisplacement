@@ -30,4 +30,4 @@ torch
 torch-geometric
 e3nn
 mace-torch
-graph2mat @ git+https://github.com/christianfj140/graph2mat.git
+graph2mat @ git+ssh://git@github.com/christianfj140/graph2mat.git@hamiltonian-spin-colineal-support

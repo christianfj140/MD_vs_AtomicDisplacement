@@ -7,6 +7,13 @@ import os
 import inspect
 import shutil
 import sys
+from pathlib import Path
+
+TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
+sys.path.insert(0, str(TORCH_COMPAT_DIR))
+from torch_safe_globals import allow_graph2mat_checkpoint_globals
+
+allow_graph2mat_checkpoint_globals()
 
 import pytorch_lightning as pl
 from graph2mat.tools.lightning import (
@@ -54,6 +61,7 @@ def main() -> int:
 
     training_data = config["training"]["data"]
     callbacks_config = config["testing"]["callbacks"]
+    allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(
         str(pipeline_paths["training_dir"] / ckpt_path)
     )

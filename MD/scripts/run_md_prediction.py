@@ -7,12 +7,43 @@ import os
 import inspect
 import shutil
 import sys
+import glob
+from pathlib import Path
+
+TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
+sys.path.insert(0, str(TORCH_COMPAT_DIR))
+from torch_safe_globals import allow_graph2mat_checkpoint_globals
+
+allow_graph2mat_checkpoint_globals()
 
 import pytorch_lightning as pl
 from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
 from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
 from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint
+
+EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
+
+
+class SafeMatrixWriter(MatrixWriter):
+    """MatrixWriter variant that keeps valid single-sample predictions."""
+
+    def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
+        try:
+            return super()._on_batch_end(split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx)
+        except ValueError as exc:
+            if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
+                raise
+            outputs = [
+                self._get_out_file(batch.get_example(index), trainer)
+                for index in range(getattr(batch, "num_graphs", 0))
+            ]
+            if not outputs or any(not output.exists() for output in outputs):
+                raise
+            print(
+                "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
+                "escribir las predicciones del batch; se continua."
+            )
 
 
 def require_command(command_name: str) -> None:
@@ -21,6 +52,17 @@ def require_command(command_name: str) -> None:
             f"No se encontro '{command_name}' en PATH. "
             "Activa tu entorno antes de ejecutar este script."
         )
+
+
+def expected_prediction_outputs(predict_structs: str, output_file: str) -> list[Path]:
+    outputs: list[Path] = []
+    for structure in sorted(glob.glob(predict_structs)):
+        structure_path = Path(structure)
+        destination = Path(output_file)
+        if not destination.is_absolute():
+            destination = structure_path.parent / destination
+        outputs.append(destination)
+    return outputs
 
 
 def main() -> int:
@@ -42,6 +84,7 @@ def main() -> int:
 
     training_data = config["training"]["data"]
     prediction = config["prediction"]
+    allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(
         str(pipeline_paths["training_dir"] / ckpt_path)
     )
@@ -53,6 +96,8 @@ def main() -> int:
         "predict_structs": str(prediction["predict_structs"]),
         "store_in_memory": bool(training_data.get("store_in_memory", True)),
     }
+    if "batch_size" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["batch_size"] = 1
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["n_matrix_components"] = int(training_data.get("n_matrix_components", 2))
     datamodule = MatrixDataModule(**datamodule_kwargs)
@@ -60,7 +105,7 @@ def main() -> int:
     callbacks = []
     if prediction["callbacks"].get("matrix_writer", True):
         callbacks.append(
-            MatrixWriter(
+            SafeMatrixWriter(
                 output_file=str(prediction["output_file"]),
                 splits=["predict"],
             )
@@ -71,11 +116,25 @@ def main() -> int:
         logger=False,
         callbacks=callbacks,
     )
-    trainer.predict(
-        model,
-        datamodule=datamodule,
-        ckpt_path=str(pipeline_paths["training_dir"] / ckpt_path),
-    )
+    try:
+        trainer.predict(
+            model,
+            datamodule=datamodule,
+            ckpt_path=str(pipeline_paths["training_dir"] / ckpt_path),
+        )
+    except ValueError as exc:
+        if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
+            raise
+        outputs = expected_prediction_outputs(
+            str(prediction["predict_structs"]),
+            str(prediction["output_file"]),
+        )
+        if not outputs or any(not output.exists() for output in outputs):
+            raise
+        print(
+            "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
+            "escribir todas las predicciones esperadas; se continua."
+        )
     print("\n=== Prediccion completada correctamente ===")
     return 0
 

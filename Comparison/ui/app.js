@@ -656,6 +656,14 @@ function sampleMetricValues(run, group, metric) {
     .filter((value) => typeof value === "number" && Number.isFinite(value));
 }
 
+function sampleMetricValuesAny(run, group, metrics) {
+  for (const metric of metrics) {
+    const values = sampleMetricValues(run, group, metric);
+    if (values.length) return values;
+  }
+  return [];
+}
+
 function missingFermiSummary(runs) {
   const pieces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
@@ -755,7 +763,11 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
 function renderBoxPlot(id, runs) {
   const traces = [];
   for (const run of runs) {
-    const spectral = sampleMetricValues(run, "spectral", "fermi_window_rmse_eV");
+    const spectral = sampleMetricValuesAny(run, "spectral", [
+      "fermi_window_rmse_eV",
+      "frontier_window_rmse_eV",
+      "low_energy_rmse_eV",
+    ]);
     if (!spectral.length) continue;
     traces.push({
       type: "box",
@@ -773,7 +785,7 @@ function renderBoxPlot(id, runs) {
   });
   if (!traces.length) {
     layout.annotations = [
-      emptyPlotAnnotation("No hay RMSE cerca de Fermi con Fermi real de SIESTA."),
+      emptyPlotAnnotation("No hay RMSE Fermi/frontier con valores finitos."),
     ];
   }
   Plotly.react(
@@ -804,6 +816,7 @@ function renderScatterPlot(id, runs) {
             relative_frobenius_union: row.relative_frobenius_union,
             global_rmse_eV: spectral.global_rmse_eV,
             fermi_window_rmse_eV: spectral.fermi_window_rmse_eV,
+            frontier_window_rmse_eV: spectral.frontier_window_rmse_eV,
             fermi_level_source: spectral.fermi_level_source,
           };
         });
@@ -818,10 +831,15 @@ function renderScatterPlot(id, runs) {
           typeof row.fermi_window_rmse_eV === "number" && Number.isFinite(row.fermi_window_rmse_eV)
             ? `${row.fermi_window_rmse_eV.toPrecision(4)} eV`
             : "no disponible";
+        const frontierValue =
+          typeof row.frontier_window_rmse_eV === "number" && Number.isFinite(row.frontier_window_rmse_eV)
+            ? `${row.frontier_window_rmse_eV.toPrecision(4)} eV`
+            : "no disponible";
         text.push(
           `dataset_${run.dataset_size} - sample ${row.sample}<br>` +
             `Fermi source: ${row.fermi_level_source || "unknown"}<br>` +
-            `Fermi RMSE: ${fermiValue}`,
+            `Fermi RMSE: ${fermiValue}<br>` +
+            `Frontier RMSE: ${frontierValue}`,
         );
       }
     }
@@ -861,6 +879,7 @@ function renderHeatmap(id, runs) {
     ["sparse", "support_f1", "Support F1"],
     ["spectral", "low_energy_rmse_eV", "Low-energy RMSE"],
     ["spectral", "fermi_window_rmse_eV", "Fermi RMSE"],
+    ["spectral", "frontier_window_rmse_eV", "Frontier RMSE"],
     ["spectral", "gap_abs_error_eV", "Gap error"],
     ["dos", "dos_wasserstein_eV", "DOS W1"],
     ["run", "pipeline_elapsed_seconds", "Time s"],
@@ -982,8 +1001,33 @@ function latestCrossExperiment(payload) {
   };
 }
 
+const CROSS_METRIC_FALLBACKS = [
+  "frontier_window_rmse_eV",
+  "low_energy_rmse_eV",
+  "gap_abs_error_eV",
+  "fermi_window_rmse_eV",
+  "global_rmse_eV",
+  "relative_frobenius_union",
+  "mae_ref_eV",
+];
+
+function hasFiniteCrossMetric(experiment, metric) {
+  return (experiment?.metrics || []).some((row) => {
+    const value = row[metric];
+    return typeof value === "number" && Number.isFinite(value);
+  });
+}
+
 function primaryCrossMetric(experiment) {
-  return experiment?.recommendation?.primary_metric || experiment?.manifest?.selected_metrics?.primary_metric || "fermi_window_rmse_eV";
+  const requested =
+    experiment?.recommendation?.primary_metric ||
+    experiment?.manifest?.selected_metrics?.primary_metric ||
+    "frontier_window_rmse_eV";
+  const candidates = [requested, ...CROSS_METRIC_FALLBACKS].filter(Boolean);
+  for (const metric of Array.from(new Set(candidates))) {
+    if (hasFiniteCrossMetric(experiment, metric)) return metric;
+  }
+  return requested;
 }
 
 function crossTrainMethods(experiment) {
@@ -1125,15 +1169,6 @@ function renderCrossCompute(id, experiment) {
 function renderWinnerMap(id, experiment) {
   const metric = primaryCrossMetric(experiment);
   const scientificStatus = experiment?.recommendation?.scientific_status;
-  if (scientificStatus && scientificStatus !== "robust_comparison") {
-    const layout = plotLayout(`Winner map (${metric})`, "Winner");
-    const blockers = recommendationBlockers(experiment?.recommendation).slice(0, 4).join(" | ");
-    layout.annotations = [
-      emptyPlotAnnotation(`Winner no robusto: ${scientificStatus}${blockers ? ` · ${blockers}` : ""}`),
-    ];
-    Plotly.react(id, [], layout, { responsive: true, displaylogo: false });
-    return;
-  }
   const means = groupedCrossMeans(experiment?.metrics || [], metric);
   const mdSizes = Array.from(new Set(means.map((row) => row.md_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
   const atomSizes = Array.from(new Set(means.map((row) => row.atom_dataset_size).filter(Number.isFinite))).sort((a, b) => a - b);
@@ -1160,7 +1195,7 @@ function renderWinnerMap(id, experiment) {
       row.md_dataset_size === mdSize &&
       row.atom_dataset_size === atomSize &&
       row.test_set === testSet &&
-      row.train_method === "atom_displacement"
+      ["atom_displacement", "siesta_fc_cartesian"].includes(row.train_method)
     );
     if (!md || !atom) return null;
     if (Math.abs(md.mean - atom.mean) < 1e-12) return 0;
@@ -1179,7 +1214,7 @@ function renderWinnerMap(id, experiment) {
       row.md_dataset_size === mdSize &&
       row.atom_dataset_size === atomSize &&
       row.test_set === testSet &&
-      row.train_method === "atom_displacement"
+      ["atom_displacement", "siesta_fc_cartesian"].includes(row.train_method)
     );
     return {
       winner: z[rowIndex][colIndex] == null ? "No data" : labels.get(z[rowIndex][colIndex]),
@@ -1191,6 +1226,20 @@ function renderWinnerMap(id, experiment) {
     };
   }));
   const annotations = [];
+  if (scientificStatus && scientificStatus !== "robust_comparison") {
+    const blockers = recommendationBlockers(experiment?.recommendation).slice(0, 3).join(" | ");
+    annotations.push({
+      xref: "paper",
+      yref: "paper",
+      x: 0,
+      y: 1.12,
+      xanchor: "left",
+      yanchor: "bottom",
+      text: `Mapa exploratorio: ${scientificStatus}${blockers ? ` · ${blockers}` : ""}`,
+      showarrow: false,
+      font: { size: 12, color: "#9f5b00" },
+    });
+  }
   rows.forEach((row, rowIndex) => {
     mdSizes.forEach((mdSize, colIndex) => {
       const label = text[rowIndex][colIndex];
@@ -1275,7 +1324,17 @@ function renderPlots(payload) {
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
     : "No hay metricas archivadas";
   status.textContent += crossText;
-  renderLinePlot("plot-fermi", runs, "spectral", [{ key: "fermi_window_rmse_eV", label: "Fermi RMSE" }], "Error cerca del Fermi", "RMSE eV");
+  renderLinePlot(
+    "plot-fermi",
+    runs,
+    "spectral",
+    [
+      { key: "fermi_window_rmse_eV", label: "Fermi-window RMSE" },
+      { key: "frontier_window_rmse_eV", label: "Frontier RMSE" },
+    ],
+    "Error cerca de Fermi/frontier",
+    "RMSE eV",
+  );
   renderLinePlot("plot-low-energy", runs, "spectral", [{ key: "low_energy_rmse_eV", label: "Low-energy RMSE" }], "Low-energy eigenvalues", "RMSE eV");
   renderLinePlot("plot-sparse", runs, "sparse", [{ key: "relative_frobenius_union", label: "Frobenius rel." }], "Error sparse matricial", "Relative Frobenius");
   renderLinePlot("plot-dos", runs, "dos", [{ key: "dos_wasserstein_eV", label: "Wasserstein" }], "Distancia DOS total", "Wasserstein eV");

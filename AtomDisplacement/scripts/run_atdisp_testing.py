@@ -6,7 +6,14 @@ from __future__ import annotations
 import os
 import inspect
 import csv
+import sys
 from pathlib import Path
+
+TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
+sys.path.insert(0, str(TORCH_COMPAT_DIR))
+from torch_safe_globals import allow_graph2mat_checkpoint_globals
+
+allow_graph2mat_checkpoint_globals()
 
 import pytorch_lightning as pl
 from graph2mat.core.data.processing import MatrixDataProcessor
@@ -110,6 +117,7 @@ def main() -> int:
     testing = PIPELINE_CONFIG["testing"]
     data = testing["data"]
     callbacks_config = testing["callbacks"]
+    allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(str(TRAINING_DIR / ckpt_path))
     datamodule_kwargs = {
         "out_matrix": data["out_matrix"],

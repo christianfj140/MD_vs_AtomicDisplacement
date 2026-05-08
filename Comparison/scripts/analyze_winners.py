@@ -26,6 +26,7 @@ METHOD_ALIASES = {
     "siesta_fc_cartesian": METHOD_ATOM,
     "atomdisp": METHOD_ATOM,
 }
+REPO_ROOT = Path(__file__).resolve().parents[2]
 METADATA_COLUMNS = {
     "experiment_id",
     "train_method",
@@ -92,6 +93,8 @@ ERROR_METRICS = {
     "occupied_rmse_eV",
     "fermi_window_mae_eV",
     "fermi_window_rmse_eV",
+    "frontier_window_mae_eV",
+    "frontier_window_rmse_eV",
     "gap_abs_error_eV",
     "mae_pred_eV",
     "mae_ref_eV",
@@ -121,6 +124,70 @@ def parse_value(value: str | None) -> Any:
     return number if math.isfinite(number) else None
 
 
+def finite_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return None
+
+
+def path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def sanitize_reproducibility_warning(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    prefix = "User-local absolute paths detected:"
+    if not value.startswith(prefix):
+        return value
+    paths = [Path(part.strip()) for part in value.removeprefix(prefix).split(",") if part.strip()]
+    external = [
+        str(path)
+        for path in paths
+        if path.is_absolute() and not path_is_relative_to(path, REPO_ROOT)
+    ]
+    return f"{prefix} {', '.join(sorted(dict.fromkeys(external)))}" if external else None
+
+
+def sanitize_warning_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    parts = [
+        sanitized
+        for sanitized in (
+            sanitize_reproducibility_warning(part.strip())
+            for part in value.split(" | ")
+            if part.strip()
+        )
+        if sanitized
+    ]
+    return " | ".join(parts) if parts else None
+
+
+def derive_frontier_metrics(row: dict[str, Any]) -> None:
+    if finite_number(row.get("frontier_window_rmse_eV")) is not None:
+        return
+    errors = [
+        value
+        for value in (
+            finite_number(row.get("homo_error_eV")),
+            finite_number(row.get("lumo_error_eV")),
+        )
+        if value is not None
+    ]
+    if not errors:
+        return
+    row["frontier_window_bands"] = len(errors)
+    row["frontier_window_mae_eV"] = sum(abs(value) for value in errors) / len(errors)
+    row["frontier_window_rmse_eV"] = math.sqrt(
+        sum(value * value for value in errors) / len(errors)
+    )
+
+
 def canonical_method(value: Any) -> str:
     text = str(value or "")
     return METHOD_ALIASES.get(text, text)
@@ -140,6 +207,11 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
             for row in csv.DictReader(handle)
         ]
     for row in rows:
+        row["reproducibility_warning"] = sanitize_reproducibility_warning(
+            row.get("reproducibility_warning")
+        )
+        row["severe_warnings"] = sanitize_warning_text(row.get("severe_warnings"))
+        derive_frontier_metrics(row)
         if row.get("train_method") not in (None, ""):
             row["train_method"] = canonical_method(row.get("train_method"))
         if row.get("test_set") not in (None, ""):
@@ -511,6 +583,32 @@ def first_compute_method_win(
     return candidates[0] if candidates else None
 
 
+def ranking_rows_by_test_set(
+    rows: list[dict[str, Any]],
+    methods: list[str],
+    test_sets: list[str],
+    primary_metric: str,
+) -> dict[str, list[dict[str, Any]]]:
+    rankings_by_test_set: dict[str, list[dict[str, Any]]] = {}
+    for test_set in test_sets:
+        ranking_rows = []
+        for method in methods:
+            values = [
+                float(row[primary_metric])
+                for row in rows
+                if str(row.get("train_method")) == method
+                and str(row.get("test_set")) == test_set
+                and finite(row.get(primary_metric))
+            ]
+            if values:
+                ranking_rows.append({"method": method, "mean": mean(values), "n": len(values)})
+        rankings_by_test_set[test_set] = sorted(
+            ranking_rows,
+            key=lambda item: float(item["mean"]) if item["mean"] is not None else math.inf,
+        )
+    return rankings_by_test_set
+
+
 def build_recommendation(
     rows: list[dict[str, Any]],
     summary_rows: list[dict[str, Any]],
@@ -667,6 +765,18 @@ def build_recommendation(
     ]
     available_md_wins = [row for row in available_primary_wins if row.get("winner") == METHOD_MD]
     available_atom_wins = [row for row in available_primary_wins if row.get("winner") == METHOD_ATOM]
+    rankings_by_test_set = ranking_rows_by_test_set(rows, methods, test_sets, primary_metric)
+    nway_leaders_by_test_set = {
+        test_set: ranking[0]["method"]
+        for test_set, ranking in rankings_by_test_set.items()
+        if ranking
+    }
+    nway_consensus_leaders = sorted(set(nway_leaders_by_test_set.values()))
+    nway_consensus_leader = (
+        nway_consensus_leaders[0]
+        if len(nway_consensus_leaders) == 1 and len(nway_leaders_by_test_set) == len(test_sets)
+        else None
+    )
     status = "no_conservative_winner"
     reason = "No method wins stably on MD or mixed test distributions for the primary metric."
     if first_md_size and not first_atom_size:
@@ -702,6 +812,20 @@ def build_recommendation(
     elif severe_warnings:
         status = "inconclusive"
         reason = "Validation warnings invalidate a robust winner: " + " | ".join(severe_warnings)
+    elif nway_methods and not missing_cells and not missing_primary_metric_cells and not severe_warnings:
+        if nway_consensus_leader:
+            status = "nway_consensus_win"
+            reason = (
+                f"{nway_consensus_leader} has the best mean {primary_metric} "
+                "in every frozen test set. Treat this as exploratory until the "
+                "minimum seed count is reached."
+            )
+        else:
+            status = "nway_complete_mixed_ranking"
+            reason = (
+                "N-way comparison cells are complete, but different methods lead "
+                "on different frozen test sets; inspect rankings_by_test_set."
+            )
     elif single_seed_only and available_primary_wins:
         if available_md_wins and not available_atom_wins:
             status = "md_available_single_seed_win"
@@ -718,14 +842,13 @@ def build_recommendation(
         else:
             status = "mixed_available_single_seed_result"
             reason = "Single-seed winners disagree across allowed test distributions; no robust winner."
-    elif nway_methods and not missing_cells and not missing_primary_metric_cells and not severe_warnings:
-        status = "nway_complete_no_global_winner"
-        reason = (
-            "N-way comparison cells are complete, but the conservative legacy "
-            "global-winner rule is not yet reduced to one robust winner."
-        )
 
-    robust_statuses = {"md_conservative_win", "atom_displacement_conservative_win", "mixed_conservative_result"}
+    robust_statuses = {
+        "md_conservative_win",
+        "atom_displacement_conservative_win",
+        "mixed_conservative_result",
+        "nway_consensus_win",
+    }
     if status in robust_statuses and not insufficient_robust_seeds and not underpowered_stable_wins:
         scientific_status = "robust_comparison"
     elif not missing_cells and not missing_primary_metric_cells and not severe_warnings and insufficient_robust_seeds:
@@ -740,24 +863,6 @@ def build_recommendation(
         scientific_status = "exploratory"
     else:
         scientific_status = "scientifically_inconclusive"
-
-    rankings_by_test_set: dict[str, list[dict[str, Any]]] = {}
-    for test_set in test_sets:
-        ranking_rows = []
-        for method in methods:
-            values = [
-                float(row[primary_metric])
-                for row in rows
-                if str(row.get("train_method")) == method
-                and str(row.get("test_set")) == test_set
-                and finite(row.get(primary_metric))
-            ]
-            if values:
-                ranking_rows.append({"method": method, "mean": mean(values), "n": len(values)})
-        rankings_by_test_set[test_set] = sorted(
-            ranking_rows,
-            key=lambda item: float(item["mean"]) if item["mean"] is not None else math.inf,
-        )
 
     return {
         "status": status,
@@ -777,6 +882,8 @@ def build_recommendation(
         "missing_primary_metric_cells": missing_primary_metric_cells,
         "severe_warnings": severe_warnings,
         "rankings_by_test_set": rankings_by_test_set,
+        "nway_leaders_by_test_set": nway_leaders_by_test_set,
+        "nway_consensus_leader": nway_consensus_leader,
         "first_dataset_size_where_md_beats_atom_displacement": first_md_size,
         "first_dataset_size_where_atom_displacement_beats_md": first_atom_size,
         "first_compute_budget_where_md_beats_atom_displacement": first_md_compute,
@@ -792,7 +899,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metrics-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--primary-metric", default="fermi_window_rmse_eV")
+    parser.add_argument("--primary-metric", default="frontier_window_rmse_eV")
     parser.add_argument("--minimum-robust-seeds", type=int, default=3)
     parser.add_argument("--higher-is-better", action="store_true")
     parser.add_argument(

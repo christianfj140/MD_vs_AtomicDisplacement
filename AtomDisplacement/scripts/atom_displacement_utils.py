@@ -31,6 +31,7 @@ ATOM_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_CONFIG = load_pipeline_config()
 PIPELINE_PATHS = paths(PIPELINE_CONFIG)
 DEFAULT_VENV_ACTIVATE = PIPELINE_PATHS["venv_activate"]
+TORCH_COMPAT_DIR = ATOM_ROOT.parent / "scripts" / "torch_serialization_compat"
 
 BASE_DIR = PIPELINE_PATHS["base_dir"]
 RELAXED_DIR = PIPELINE_PATHS["relaxed_dir"]
@@ -133,7 +134,11 @@ def run_command_in_venv(
 
     quoted_cmd = " ".join(shlex_quote(token) for token in cmd)
     shell = command(PIPELINE_CONFIG, "shell")
-    bash_cmd = f"source {shlex.quote(str(activate_path))} && {quoted_cmd}"
+    bash_cmd = (
+        f"source {shlex.quote(str(activate_path))} && "
+        f"export PYTHONPATH={shlex.quote(str(TORCH_COMPAT_DIR))}:$PYTHONPATH && "
+        f"{quoted_cmd}"
+    )
     print(f"\n[RUN] {shell} -lc \"{bash_cmd}\"")
     result = subprocess.run([shell, "-lc", bash_cmd], cwd=cwd, check=False)
     if result.returncode != 0:

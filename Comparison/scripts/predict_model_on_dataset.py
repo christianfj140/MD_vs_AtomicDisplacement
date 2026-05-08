@@ -18,12 +18,44 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
+sys.path.insert(0, str(TORCH_COMPAT_DIR))
+from torch_safe_globals import allow_graph2mat_checkpoint_globals
+
+allow_graph2mat_checkpoint_globals()
+
+EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
+
+
+def safe_matrix_writer_class(matrix_writer_cls: type) -> type:
+    class SafeMatrixWriter(matrix_writer_cls):
+        def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
+            try:
+                return super()._on_batch_end(split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx)
+            except ValueError as exc:
+                if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
+                    raise
+                outputs = [
+                    self._get_out_file(batch.get_example(index), trainer)
+                    for index in range(getattr(batch, "num_graphs", 0))
+                ]
+                if not outputs or any(not output.exists() for output in outputs):
+                    raise
+                print(
+                    "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
+                    "escribir las predicciones del batch; se continua."
+                )
+
+    return SafeMatrixWriter
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -95,6 +127,7 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
 
         MatrixDataProcessor.get_config_kwargs = patched
 
+    allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(str(args.checkpoint))
     datamodule_kwargs: dict[str, Any] = {
         "out_matrix": args.out_matrix,
@@ -106,10 +139,27 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
     }
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters and args.n_matrix_components:
         datamodule_kwargs["n_matrix_components"] = int(args.n_matrix_components)
+    if "batch_size" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["batch_size"] = 1
     datamodule = MatrixDataModule(**datamodule_kwargs)
-    callbacks = [MatrixWriter(output_file="ML_prediction.HSX", splits=["predict"])]
+    SafeMatrixWriter = safe_matrix_writer_class(MatrixWriter)
+    callbacks = [SafeMatrixWriter(output_file="ML_prediction.HSX", splits=["predict"])]
     trainer = pl.Trainer(accelerator=args.accelerator, logger=False, callbacks=callbacks)
-    trainer.predict(model, datamodule=datamodule, ckpt_path=str(args.checkpoint))
+    try:
+        trainer.predict(model, datamodule=datamodule, ckpt_path=str(args.checkpoint))
+    except ValueError as exc:
+        if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
+            raise
+        outputs = [
+            Path(structure).parent / "ML_prediction.HSX"
+            for structure in sorted(glob.glob(predict_glob))
+        ]
+        if not outputs or any(not output.exists() for output in outputs):
+            raise
+        print(
+            "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
+            "escribir todas las predicciones esperadas; se continua."
+        )
 
 
 def checkpoint_training_dir(checkpoint: Path) -> Path:
@@ -154,7 +204,11 @@ def collect_predictions(rows: list[dict[str, Any]], workspace: Path, output_dir:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--train-method", required=True, choices=["md", "atom_displacement"])
+    parser.add_argument(
+        "--train-method",
+        required=True,
+        choices=["md", "atom_displacement", "siesta_fc_cartesian", "random_cartesian"],
+    )
     parser.add_argument("--test-set", required=True)
     parser.add_argument("--test-manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
