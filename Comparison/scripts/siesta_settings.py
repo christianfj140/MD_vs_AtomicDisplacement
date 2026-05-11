@@ -45,6 +45,8 @@ COMMON_KEYS = [
     "ForceAuxCell",
     "Save.HS",
     "TS.HS.Save",
+    "TS.DE.Save",
+    "XML.Write",
 ]
 
 
@@ -98,6 +100,8 @@ def md_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
         "ForceAuxCell": "T" if bool(md.get("force_aux_cell", False)) else "F",
         "Save.HS": "T" if bool(md.get("save_hs_file", False)) else "F",
         "TS.HS.Save": "T" if bool(md.get("save_hs", False)) else "F",
+        "TS.DE.Save": "T" if bool(md.get("save_de", False)) else "F",
+        "XML.Write": "T" if bool(md.get("xml_write", False)) else "F",
     }
 
 
@@ -109,6 +113,7 @@ def atom_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
         "lattice_constant": structure.get("lattice_constant"),
         "lattice_vectors": structure.get("lattice_vectors"),
         "TS.HS.Save": "T" if bool(force_constants.get("save_tshs", siesta.get("TS.HS.Save", True))) else "F",
+        "TS.DE.Save": "T" if bool(force_constants.get("save_tsde", siesta.get("TS.DE.Save", True))) else "F",
         **siesta,
     }
 

@@ -14,6 +14,9 @@ from typing import Any
 import numpy as np
 import sisl
 
+from reference_selection import REFERENCE_SELECTION_POLICY
+from reference_selection import choose_reference_matrix
+
 
 def json_safe(value: Any) -> Any:
     if isinstance(value, float):
@@ -62,15 +65,8 @@ def find_prediction(sample_dir: Path) -> Path | None:
 
 
 def find_reference(sample_dir: Path) -> Path | None:
-    matrices = [
-        path
-        for path in sorted(
-            list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX")),
-            key=matrix_sort_key,
-        )
-        if path.name != "ML_prediction.HSX"
-    ]
-    return matrices[0] if matrices else None
+    selection = choose_reference_matrix(sample_dir)
+    return selection.path if selection.ok else None
 
 
 def read_matrix_eigenvalues(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
@@ -140,7 +136,16 @@ def extract(result_dir: Path) -> dict[str, Any]:
 
     for sample in sample_names:
         predicted_path = find_prediction(prediction_dirs[sample]) if sample in prediction_dirs else None
-        reference_path = find_reference(reference_dirs[sample]) if sample in reference_dirs else None
+        reference_selection = choose_reference_matrix(reference_dirs[sample]) if sample in reference_dirs else None
+        reference_path = reference_selection.path if reference_selection and reference_selection.ok else None
+        if reference_selection is not None and not reference_selection.ok:
+            errors.append(
+                {
+                    "sample": sample,
+                    "kind": "reference_selection",
+                    "error": reference_selection.reason,
+                }
+            )
         sample_values: dict[str, np.ndarray] = {}
 
         for kind, matrix_path in (("siesta", reference_path), ("predicted", predicted_path)):
@@ -210,6 +215,7 @@ def extract(result_dir: Path) -> dict[str, Any]:
         "samples_seen": len(sample_names),
         "samples_compared": len(metrics_rows),
         "overlap_entries": len(overlap_rows),
+        "reference_selection_policy": REFERENCE_SELECTION_POLICY,
         "errors": errors,
         "outputs": {
             "siesta": str(output_root / "siesta"),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,11 @@ except ImportError as exc:  # pragma: no cover - depends on runtime environment.
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "pipeline_config.yaml"
+SHARED_DIR = PROJECT_ROOT.parent / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from siesta_run_fdf import md_common_settings, render_common_run_fdf, render_md_layer
 
 
 def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -56,7 +62,9 @@ def validate_config(config: dict[str, Any]) -> None:
             raise RuntimeError(f"Falta la sección '{section}' en pipeline_config.yaml.")
 
     md = config["md"]
-    if int(md["steps"]) <= 0:
+    if md_temperature_blocks(config):
+        pass
+    elif int(md["steps"]) <= 0:
         raise RuntimeError("md.steps debe ser mayor que cero.")
     if len(md["lattice_vectors"]) != 3:
         raise RuntimeError("md.lattice_vectors debe contener exactamente 3 vectores.")
@@ -116,90 +124,79 @@ def _format_float(value: float) -> str:
     return f"{float(value):.8f}"
 
 
-def render_run_fdf(config: dict[str, Any]) -> str:
+def md_temperature_blocks(config: dict[str, Any]) -> list[dict[str, Any]]:
+    md = config.get("md", {}) or {}
+    raw_blocks = md.get("temperature_blocks") or md.get("blocks") or []
+    if raw_blocks in (None, "", []):
+        return []
+    if not isinstance(raw_blocks, list):
+        raise RuntimeError("md.temperature_blocks debe ser una lista.")
+    blocks: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_blocks, start=1):
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"md.temperature_blocks[{index}] debe ser un objeto.")
+        n_snapshots = int(raw.get("n_snapshots") or raw.get("steps") or 0)
+        if n_snapshots <= 0:
+            raise RuntimeError(f"md.temperature_blocks[{index}].n_snapshots debe ser > 0.")
+        block = dict(raw)
+        block["n_snapshots"] = n_snapshots
+        if block.get("temperature_K") not in (None, ""):
+            temperature = float(block["temperature_K"])
+            if temperature < 0:
+                raise RuntimeError(f"md.temperature_blocks[{index}].temperature_K no puede ser negativa.")
+            block["temperature_K"] = temperature
+        if block.get("timestep_fs") not in (None, ""):
+            timestep = float(block["timestep_fs"])
+            if timestep <= 0:
+                raise RuntimeError(f"md.temperature_blocks[{index}].timestep_fs debe ser > 0.")
+            block["timestep_fs"] = timestep
+        block.setdefault("block_id", f"md_block_{index}")
+        block.setdefault("label", f"{n_snapshots} snapshots")
+        blocks.append(block)
+    return blocks
+
+
+def md_total_steps(config: dict[str, Any]) -> int:
+    blocks = md_temperature_blocks(config)
+    if blocks:
+        return sum(int(block["n_snapshots"]) for block in blocks)
+    return int(config["md"]["steps"])
+
+
+def render_run_fdf(config: dict[str, Any], block: dict[str, Any] | None = None) -> str:
     md = config["md"]
-    lines = [
-        f"# Run {md['steps']} steps of a {md['type_of_run']} MD",
-        f"MD.TypeOfRun {md['type_of_run']}",
-        f"MD.Steps {md['steps']}",
-        "",
-        "# Basis set.",
-        f"PAO.BasisType {md.get('basis_type', 'split')}",
-        f"PAO.BasisSize {md['basis_size']}",
-        f"PAO.EnergyShift {md.get('energy_shift', '0.03 eV')}",
-        "",
-        "# Electronic structure settings shared with AtomDisplacement.",
-        f"MeshCutoff {md.get('mesh_cutoff', '200 Ry')}",
-        f"XC.functional {md.get('xc_functional', 'GGA')}",
-        f"XC.authors {md.get('xc_authors', 'PBE')}",
-        f"MaxSCFIterations {md.get('max_scf_iterations', 200)}",
-        f"SolutionMethod {md.get('solution_method', 'diagon')}",
-        f"DM.MixingWeight {md.get('dm_mixing_weight', 0.02)}",
-        f"DM.NumberPulay {md.get('dm_number_pulay', 3)}",
-        f"DM.Tolerance {md.get('dm_tolerance', '1.d-5')}",
-        f"DM.Require.Energy.Convergence {md.get('dm_require_energy_convergence', 'T')}",
-        f"DM.Energy.Tolerance {md.get('dm_energy_tolerance', '1.e-5 eV')}",
-        f"SpinPolarized {md.get('spin_polarized', 'F')}",
-        f"FixSpin {md.get('fix_spin', 'F')}",
-        f"NonCollinearSpin {md.get('non_collinear_spin', 'F')}",
-        "",
-        "# Matrix outputs.",
-        f"Save.HS {_fdf_bool(bool(md.get('save_hs_file', True)))}",
-        f"TS.HS.Save {_fdf_bool(bool(md['save_hs']))}",
-        f"TS.DE.Save {_fdf_bool(bool(md['save_de']))}",
-        "",
-        "# Lua store script.",
-        f"Lua.Script {md['lua_script']}",
-        "",
-        "# Auxiliary cell handling.",
-        f"ForceAuxCell {_fdf_bool(bool(md['force_aux_cell']))}",
-        "",
-        "# Structure.",
-        f"LatticeConstant {md['lattice_constant']['value']} {md['lattice_constant']['unit']}",
-        "%block LatticeVectors",
-    ]
-
-    for vector in md["lattice_vectors"]:
-        lines.append(" ".join(_format_float(component) for component in vector))
-
-    lines.extend(
-        [
-            "%endblock LatticeVectors",
-            "",
-            f"NumberOfSpecies {len(md['species'])}",
-            "%block ChemicalSpeciesLabel",
-        ]
+    base = render_common_run_fdf(
+        system_name=str(md.get("system_name", "MD dataset")),
+        system_label=str((block or {}).get("system_label", md.get("system_label", "siesta"))),
+        lattice_constant=md["lattice_constant"],
+        lattice_vectors=md["lattice_vectors"],
+        species=md["species"],
+        coordinates_format=md["coordinates_format"],
+        atoms=md["atoms"],
+        kgrid_monkhorst_pack=md.get("kgrid_monkhorst_pack"),
+        siesta_settings=md_common_settings(md),
+        header="common MD/FC/Random Cartesian electronic and structural base",
     )
-
-    for species in md["species"]:
-        lines.append(
-            f"{species['index']} {species['atomic_number']} {species['symbol']}"
-        )
-
-    lines.extend(
-        [
-            "%endblock ChemicalSpeciesLabel",
-            "",
-            f"NumberOfAtoms {len(md['atoms'])}",
-            f"AtomicCoordinatesFormat {md['coordinates_format']}",
-            "%block AtomicCoordinatesAndAtomicSpecies",
-        ]
-    )
-
-    for index, atom in enumerate(md["atoms"], start=1):
-        x, y, z = atom["position"]
-        lines.append(
-            f"{_format_float(x)}  {_format_float(y)} {_format_float(z)} "
-            f"{atom['species_index']} # {index}: {atom['label']}"
-        )
-
-    lines.append("%endblock AtomicCoordinatesAndAtomicSpecies")
-    return "\n".join(lines) + "\n"
+    return base + render_md_layer(md, block)
 
 
 def render_training_config(config: dict[str, Any]) -> str:
-    training_config = dict(config["training"])
-    training_config.pop("torch_float32_matmul_precision", None)
+    graph2mat_keys = (
+        "data",
+        "model",
+        "trainer",
+        "optimizer",
+        "lr_scheduler",
+        "seed_everything",
+        "multiprocessing_sharing_strategy",
+        "ckpt_path",
+        "weights_only",
+    )
+    training_config = {
+        key: config["training"][key]
+        for key in graph2mat_keys
+        if key in config["training"]
+    }
     return "# Generated from ../pipeline_config.yaml\n" + yaml.safe_dump(
         training_config,
         sort_keys=False,

@@ -16,6 +16,7 @@ const resultPipelines = [
 ];
 
 const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
+const CROSS_PLOT_METRIC_DEFAULT = "low_energy_rmse_eV";
 
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
@@ -25,6 +26,7 @@ const state = {
   plotData: null,
   fcMaxPerDisplacement: null,
   experimentWasRunning: false,
+  performancePresetCatalog: null,
 };
 
 function showToast(message) {
@@ -285,10 +287,7 @@ function optionalBooleanSelect(id) {
 }
 
 function performanceSettings() {
-  const accelerator =
-    document.getElementById("performance-compute-accelerator")?.value ||
-    document.getElementById("compute-accelerator")?.value ||
-    "cpu";
+  const accelerator = document.getElementById("performance-compute-accelerator")?.value || "cpu";
   return {
     max_parallel_siesta_jobs: optionalPositiveInteger(
       "performance-max-parallel-siesta-jobs",
@@ -319,10 +318,213 @@ function performanceSettings() {
   };
 }
 
+function optionalTextInput(id) {
+  const value = inputValue(id);
+  return value ? value : null;
+}
+
+function trainingSettings() {
+  const settings = {
+    max_epochs: optionalPositiveInteger("training-max-epochs", "Training epochs"),
+    optim_lr: optionalNumberInput("training-optim-lr", "Learning rate", { min: 0.000001 }),
+    batch_size: optionalPositiveInteger("training-batch-size", "Training batch size"),
+    loss: optionalTextInput("training-loss"),
+    num_interactions: optionalPositiveInteger("training-num-interactions", "Model interactions"),
+    correlation: optionalPositiveInteger("training-correlation", "Model correlation"),
+    max_ell: optionalNumberInput("training-max-ell", "Model max ell", { integer: true, min: 0 }),
+    hidden_irreps: optionalTextInput("training-hidden-irreps"),
+  };
+  return Object.fromEntries(
+    Object.entries(settings).filter(([, value]) => value !== null && value !== undefined && value !== ""),
+  );
+}
+
+const performanceFieldMap = {
+  max_parallel_siesta_jobs: "performance-max-parallel-siesta-jobs",
+  max_parallel_dataset_jobs: "performance-max-parallel-dataset-jobs",
+  max_parallel_prediction_jobs: "performance-max-parallel-prediction-jobs",
+  max_parallel_evaluation_jobs: "performance-max-parallel-evaluation-jobs",
+  max_parallel_metric_jobs: "performance-max-parallel-metric-jobs",
+  omp_num_threads: "performance-omp-num-threads",
+  mkl_num_threads: "performance-mkl-num-threads",
+  openblas_num_threads: "performance-openblas-num-threads",
+  numexpr_num_threads: "performance-numexpr-num-threads",
+  torch_num_threads: "performance-torch-num-threads",
+  compute_accelerator: "performance-compute-accelerator",
+  batch_size: "performance-batch-size",
+  store_in_memory: "performance-store-in-memory",
+  reuse_validated_siesta_outputs: "performance-reuse-validated-siesta-outputs",
+  enable_experiment_cache: "performance-enable-experiment-cache",
+  error_policy: "performance-error-policy",
+  torch_float32_matmul_precision: "performance-torch-float32-matmul-precision",
+};
+
+function allPerformancePresetItems() {
+  const catalog = state.performancePresetCatalog;
+  if (!catalog) return [];
+  return [...(catalog.presets || []), ...(catalog.dynamic_profiles || [])];
+}
+
+function presetItemById(id) {
+  return allPerformancePresetItems().find((item) => item.id === id) || null;
+}
+
+function settingsForPresetId(id) {
+  if (id === "auto_detect") {
+    const choice = state.performancePresetCatalog?.auto_detect_choice;
+    return presetItemById(choice)?.settings || {};
+  }
+  return presetItemById(id)?.settings || {};
+}
+
+function setPerformanceInputValue(id, value) {
+  const node = document.getElementById(id);
+  if (!node) return;
+  if (value === null || value === undefined) {
+    node.value = "";
+    return;
+  }
+  if (node.tagName === "SELECT") {
+    node.value = String(value);
+  } else {
+    node.value = String(value);
+  }
+}
+
+function applyPerformancePreset(id) {
+  const settings = settingsForPresetId(id);
+  for (const [key, inputId] of Object.entries(performanceFieldMap)) {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) {
+      setPerformanceInputValue(inputId, settings[key]);
+    }
+  }
+  renderPerformancePresetInfo(id);
+}
+
+function renderPerformancePresetInfo(id) {
+  const item = presetItemById(id);
+  const resolved = id === "auto_detect" ? presetItemById(state.performancePresetCatalog?.auto_detect_choice) : item;
+  const description = document.getElementById("performance-preset-description");
+  if (description) {
+    const base = item?.description || "Manual settings.";
+    const suffix = id === "auto_detect" && resolved ? ` Resolved profile: ${resolved.label}.` : "";
+    description.textContent = `${base}${suffix}`;
+  }
+  const warningNode = document.getElementById("performance-preset-warnings");
+  const warnings = [
+    ...((item && item.warnings) || []),
+    ...((id === "auto_detect" && resolved && resolved.warnings) || []),
+  ].filter(Boolean);
+  if (warningNode) {
+    warningNode.classList.toggle("hidden", !warnings.length);
+    warningNode.textContent = warnings.join(" ");
+  }
+}
+
+function renderHardwareSummary(hardware) {
+  const node = document.getElementById("performance-hardware-summary");
+  if (!node || !hardware) return;
+  const cpu = `${hardware.cpu_physical_cores || "?"} physical / ${hardware.cpu_logical_cores || "?"} logical CPU cores`;
+  const ram = hardware.ram_total_gb ? `${hardware.ram_total_gb} GB RAM` : "RAM unknown";
+  const gpu = hardware.gpu_name
+    ? `${hardware.gpu_name}${hardware.gpu_vram_total_gb ? ` (${hardware.gpu_vram_total_gb} GB VRAM)` : ""}`
+    : "No GPU detected";
+  const torch = hardware.torch_cuda_available ? "PyTorch CUDA available" : "PyTorch CUDA not confirmed";
+  node.textContent = `${cpu} · ${ram} · ${gpu} · ${torch}`;
+}
+
+function populatePerformancePresetSelector(catalog) {
+  const select = document.getElementById("performance-preset");
+  if (!select || !catalog) return;
+  const options = [];
+  for (const item of catalog.presets || []) {
+    options.push({ value: item.id, label: item.label, description: item.description });
+  }
+  if ((catalog.dynamic_profiles || []).length) {
+    for (const item of catalog.dynamic_profiles) {
+      options.push({ value: item.id, label: item.label, description: item.description });
+    }
+  }
+  options.push({ value: "", label: "Manual", description: "Keep the current editable values." });
+  select.innerHTML = "";
+  for (const option of options) {
+    const node = document.createElement("option");
+    node.value = option.value;
+    node.textContent = option.label;
+    node.title = option.description || "";
+    if (option.value === (catalog.default_preset || "balanced")) node.selected = true;
+    select.appendChild(node);
+  }
+}
+
+async function loadPerformancePresets() {
+  try {
+    const catalog = await request("/api/performance-presets");
+    state.performancePresetCatalog = catalog;
+    populatePerformancePresetSelector(catalog);
+    renderHardwareSummary(catalog.hardware);
+    const selected = document.getElementById("performance-preset")?.value || catalog.default_preset || "balanced";
+    applyPerformancePreset(selected);
+  } catch (error) {
+    renderPerformancePresetInfo(document.getElementById("performance-preset")?.value || "balanced");
+    showToast(`No se pudieron cargar presets de rendimiento: ${error.message}`);
+  }
+}
+
+function splitDatasetTableGroups(rawText) {
+  const groups = [];
+  let current = [];
+  for (const rawLine of String(rawText || "").split(/\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (current.length) {
+        groups.push(current);
+        current = [];
+      }
+      continue;
+    }
+    if (line.startsWith("#")) continue;
+    const lower = line.toLowerCase();
+    if (
+      lower.includes("snapshot") ||
+      lower.includes("temperatura") ||
+      lower.includes("temperature") ||
+      lower.includes("desplazamiento") ||
+      lower.includes("estructura") ||
+      lower.includes("structure") ||
+      lower.includes("amplitud") ||
+      lower.includes("amplitude")
+    ) {
+      continue;
+    }
+    current.push(line);
+  }
+  if (current.length) groups.push(current);
+  return groups;
+}
+
+function splitDatasetTableRow(row) {
+  const parts = String(row)
+    .split(/\s*\|\s*|[,;]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length >= 2) return [parts[0], parts.slice(1).join(" ")];
+  const whitespaceParts = String(row).trim().split(/\s+/).filter(Boolean);
+  if (whitespaceParts.length >= 2) return [whitespaceParts[0], whitespaceParts.slice(1).join(" ")];
+  return [];
+}
+
+function normalizeDisplacement(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return /[a-zA-Z]/.test(text) ? text : `${text} Ang`;
+}
+
 function parseFcDisplacementOptionsText() {
-  const rows = document
-    .getElementById("fc-displacement-options")
-    .value.split(/\n+/)
+  const text = document.getElementById("fc-displacement-options").value;
+  if (!text.includes(":")) return {};
+  const rows = text
+    .split(/\n+/)
     .map((item) => item.trim())
     .filter(Boolean);
   const options = {};
@@ -367,9 +569,19 @@ function parseFcDisplacementOptionsText() {
 }
 
 function formatFcDisplacementOptions(options) {
-  return Object.entries(options || {})
-    .map(([displacement, counts]) => `${displacement}: ${(counts || []).join(", ")}`)
-    .join("\n");
+  const entries = sortedFcEntries(options || {});
+  const maxLength = Math.max(0, ...entries.map(([, counts]) => (counts || []).length));
+  if (!maxLength) return "";
+  const groups = [];
+  for (let index = 0; index < maxLength; index += 1) {
+    const rows = [];
+    for (const [displacement, counts] of entries) {
+      const count = Number((counts || [])[index]);
+      if (Number.isInteger(count) && count > 0) rows.push(`${count} | ${displacement}`);
+    }
+    if (rows.length) groups.push(rows.join("\n"));
+  }
+  return groups.join("\n\n");
 }
 
 function displacementSortValue(value) {
@@ -382,6 +594,257 @@ function sortedFcEntries(options) {
     ([left], [right]) =>
       displacementSortValue(left) - displacementSortValue(right) || String(left).localeCompare(String(right)),
   );
+}
+
+function numericPrefix(value, label) {
+  const match = String(value ?? "").match(/[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
+  if (!match) throw new Error(`${label}: valor numerico requerido.`);
+  return Number(match[0]);
+}
+
+const datasetEditorConfigs = {
+  md: {
+    containerId: "md-dataset-editor",
+    sourceId: "md-dataset-table",
+    addDatasetId: "md-add-dataset",
+    countLabel: "Snapshots",
+    valueLabel: "Temperatura (K)",
+    defaultCount: "1000",
+    defaultValue: "300",
+  },
+  fc: {
+    containerId: "fc-dataset-editor",
+    sourceId: "fc-displacement-options",
+    addDatasetId: "fc-add-dataset",
+    countLabel: "Snapshots",
+    valueLabel: "Ang",
+    defaultCount: "200",
+    defaultValue: "0.02",
+  },
+  random_cartesian: {
+    containerId: "random-dataset-editor",
+    sourceId: "random-cartesian-dataset-table",
+    addDatasetId: "random-add-dataset",
+    countLabel: "Estructuras",
+    valueLabel: "Amplitud (Ang)",
+    defaultCount: "200",
+    defaultValue: "0.03",
+  },
+};
+
+function datasetEditorConfig(kind) {
+  return datasetEditorConfigs[kind];
+}
+
+function datasetEditorContainer(kind) {
+  const config = datasetEditorConfig(kind);
+  return config ? document.getElementById(config.containerId) : null;
+}
+
+function sourceTextForKind(kind) {
+  const config = datasetEditorConfig(kind);
+  return String(document.getElementById(config?.sourceId)?.value || "");
+}
+
+function blocksForEditorSpec(kind, spec) {
+  if (kind === "md") {
+    return (spec.blocks || []).map((block) => ({
+      count: block.n_snapshots,
+      value: block.temperature_K,
+    }));
+  }
+  if (kind === "fc") {
+    return (spec.displacements || []).map((entry) => ({
+      count: entry.n_structures,
+      value: String(entry.value || "").replace(/\s*Ang\s*$/i, ""),
+    }));
+  }
+  return (spec.blocks || []).map((block) => ({
+    count: block.n_structures,
+    value: block.amplitude_ang ?? block.max_displacement ?? block.sigma_ang ?? block.uniform_range_ang,
+  }));
+}
+
+function defaultEditorBlocks(kind) {
+  const config = datasetEditorConfig(kind);
+  return [{ count: config.defaultCount, value: config.defaultValue }];
+}
+
+function specsForEditor(kind) {
+  try {
+    if (kind === "md") return parseMdDatasetTableSpecsFromText(sourceTextForKind(kind));
+    if (kind === "fc") return parseFcDatasetTableSpecsFromText(sourceTextForKind(kind)) || [];
+    if (kind === "random_cartesian") return parseRandomCartesianDatasetTableSpecsFromText(sourceTextForKind(kind));
+  } catch (error) {
+    return [];
+  }
+  return [];
+}
+
+function createDatasetComponentRow(kind, count = "", value = "") {
+  const config = datasetEditorConfig(kind);
+  const row = document.createElement("div");
+  row.className = "dataset-component-row";
+  row.innerHTML = `
+    <label>
+      <span>${config.countLabel}</span>
+      <input type="number" min="1" step="1" data-field="count" value="${String(count ?? "")}" />
+    </label>
+    <label>
+      <span>${config.valueLabel}</span>
+      <input type="number" min="0" step="0.001" data-field="value" value="${String(value ?? "")}" />
+    </label>
+    <button class="mini-button danger" type="button" data-action="remove-component">Remove</button>
+  `;
+  return row;
+}
+
+function updateDatasetEditorTotals(kind) {
+  const container = datasetEditorContainer(kind);
+  if (!container) return;
+  for (const [index, card] of Array.from(container.querySelectorAll(".dataset-card")).entries()) {
+    card.querySelector(".dataset-card-name").textContent = `Dataset ${index + 1}`;
+    const rows = Array.from(card.querySelectorAll(".dataset-component-row"));
+    let total = 0;
+    for (const row of rows) {
+      const count = Number(row.querySelector('[data-field="count"]')?.value);
+      if (Number.isInteger(count) && count > 0) total += count;
+    }
+    const totalNode = card.querySelector(".dataset-card-total");
+    if (totalNode) {
+      totalNode.textContent = `${total || 0} estructuras · ${rows.length} bloques`;
+    }
+    rows.forEach((row) => {
+      const remove = row.querySelector('[data-action="remove-component"]');
+      if (remove) remove.disabled = rows.length <= 1;
+    });
+    const removeDataset = card.querySelector('[data-action="remove-dataset"]');
+    if (removeDataset) removeDataset.disabled = container.querySelectorAll(".dataset-card").length <= 1;
+  }
+}
+
+function createDatasetCard(kind, blocks) {
+  const card = document.createElement("div");
+  card.className = "dataset-card";
+  card.innerHTML = `
+    <div class="dataset-card-header">
+      <div class="dataset-card-title">
+        <span class="dataset-card-name">Dataset</span>
+        <span class="dataset-card-total">0 estructuras · 0 bloques</span>
+      </div>
+      <button class="mini-button danger" type="button" data-action="remove-dataset">Remove dataset</button>
+    </div>
+    <div class="dataset-components"></div>
+    <div class="button-row">
+      <button class="mini-button" type="button" data-action="add-component">+ Component</button>
+    </div>
+  `;
+  const list = card.querySelector(".dataset-components");
+  for (const block of blocks.length ? blocks : defaultEditorBlocks(kind)) {
+    list.appendChild(createDatasetComponentRow(kind, block.count, block.value));
+  }
+  return card;
+}
+
+function renderDatasetEditor(kind) {
+  const container = datasetEditorContainer(kind);
+  if (!container) return;
+  const specs = specsForEditor(kind);
+  const blockGroups = specs.length
+    ? specs.map((spec) => blocksForEditorSpec(kind, spec))
+    : [defaultEditorBlocks(kind)];
+  container.innerHTML = "";
+  for (const blocks of blockGroups) {
+    container.appendChild(createDatasetCard(kind, blocks));
+  }
+  bindDatasetEditor(kind);
+  syncDatasetEditorText(kind);
+}
+
+function syncDatasetEditorText(kind) {
+  const config = datasetEditorConfig(kind);
+  const container = datasetEditorContainer(kind);
+  const source = document.getElementById(config?.sourceId);
+  if (!config || !container || !source || !container.querySelector(".dataset-card")) return;
+  const groups = Array.from(container.querySelectorAll(".dataset-card")).map((card) =>
+    Array.from(card.querySelectorAll(".dataset-component-row"))
+      .map((row) => {
+        const count = String(row.querySelector('[data-field="count"]')?.value || "").trim();
+        const value = String(row.querySelector('[data-field="value"]')?.value || "").trim();
+        return `${count} | ${value}`;
+      })
+      .join("\n"),
+  );
+  source.value = groups.join("\n\n");
+  if (kind === "md") {
+    const sizes = groups
+      .map((group) =>
+        group
+          .split(/\n/)
+          .map((row) => Number(splitDatasetTableRow(row)[0]))
+          .filter((value) => Number.isInteger(value) && value > 0)
+          .reduce((sum, value) => sum + value, 0),
+      )
+      .filter((value) => value > 0);
+    const hidden = document.getElementById("md-sizes");
+    if (hidden) hidden.value = sizes.join(", ");
+  }
+  if (kind === "random_cartesian") {
+    const sizes = groups
+      .map((group) =>
+        group
+          .split(/\n/)
+          .map((row) => Number(splitDatasetTableRow(row)[0]))
+          .filter((value) => Number.isInteger(value) && value > 0)
+          .reduce((sum, value) => sum + value, 0),
+      )
+      .filter((value) => value > 0);
+    const hidden = document.getElementById("random-cartesian-n-structures");
+    if (hidden) hidden.value = sizes.join(", ");
+  }
+  updateDatasetEditorTotals(kind);
+}
+
+function handleDatasetEditorChanged(kind) {
+  syncDatasetEditorText(kind);
+  if (kind === "fc") updateAtomSizesFromFcPlan();
+  else updateDatasetPreview();
+}
+
+function bindDatasetEditor(kind) {
+  const container = datasetEditorContainer(kind);
+  if (!container || container.dataset.bound === "true") return;
+  container.dataset.bound = "true";
+  container.addEventListener("input", () => handleDatasetEditorChanged(kind));
+  container.addEventListener("click", (event) => {
+    const action = event.target?.dataset?.action;
+    if (!action) return;
+    const card = event.target.closest(".dataset-card");
+    if (!card) return;
+    if (action === "add-component") {
+      card.querySelector(".dataset-components").appendChild(createDatasetComponentRow(kind, "", ""));
+    } else if (action === "remove-component") {
+      const rows = card.querySelectorAll(".dataset-component-row");
+      if (rows.length > 1) event.target.closest(".dataset-component-row")?.remove();
+    } else if (action === "remove-dataset") {
+      const cards = container.querySelectorAll(".dataset-card");
+      if (cards.length > 1) card.remove();
+    }
+    handleDatasetEditorChanged(kind);
+  });
+}
+
+function setupDatasetEditors() {
+  for (const kind of Object.keys(datasetEditorConfigs)) {
+    renderDatasetEditor(kind);
+    const addDataset = document.getElementById(datasetEditorConfigs[kind].addDatasetId);
+    addDataset?.addEventListener("click", () => {
+      const container = datasetEditorContainer(kind);
+      if (!container) return;
+      container.appendChild(createDatasetCard(kind, defaultEditorBlocks(kind)));
+      handleDatasetEditorChanged(kind);
+    });
+  }
 }
 
 function currentCombinationMode() {
@@ -424,6 +887,7 @@ function parseMoveAtomsInput() {
 function parseRandomCartesianOptions(methods) {
   const selected = methods.includes("random_cartesian");
   if (!selected) return {};
+  syncDatasetEditorText("random_cartesian");
   const sizes = parseNumberListInput("random-cartesian-n-structures", "Random Cartesian structures", {
     integer: true,
     min: 3,
@@ -458,6 +922,137 @@ function parseRandomCartesianOptions(methods) {
   };
 }
 
+function parseMdDatasetTableSpecsFromText(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw) return [];
+  return splitDatasetTableGroups(raw).map((group, datasetIndex) => {
+    const blocks = group.map((row, blockIndex) => {
+      const parts = splitDatasetTableRow(row);
+      if (parts.length < 2) {
+        throw new Error(`MD dataset ${datasetIndex + 1}, fila ${blockIndex + 1}: usa "snapshots | temperatura".`);
+      }
+      const nSnapshots = Number(parts[0]);
+      const temperature = Number(parts[1]);
+      if (!Number.isInteger(nSnapshots) || nSnapshots <= 0) {
+        throw new Error(`MD dataset ${datasetIndex + 1}, fila ${blockIndex + 1}: snapshots debe ser entero positivo.`);
+      }
+      if (!Number.isFinite(temperature) || temperature < 0) {
+        throw new Error(`MD dataset ${datasetIndex + 1}, fila ${blockIndex + 1}: temperatura debe ser >= 0 K.`);
+      }
+      return {
+        block_id: `md_d${datasetIndex + 1}_T${slugPart(temperature)}_${blockIndex + 1}_${nSnapshots}`,
+        label: `${nSnapshots} snapshots @ ${temperature} K`,
+        temperature_K: temperature,
+        n_snapshots: nSnapshots,
+      };
+    });
+    return {
+      index: datasetIndex,
+      size: blocks.reduce((sum, block) => sum + Number(block.n_snapshots), 0),
+      blocks,
+    };
+  });
+}
+
+function parseMdDatasetTableSpecs() {
+  syncDatasetEditorText("md");
+  return parseMdDatasetTableSpecsFromText(document.getElementById("md-dataset-table")?.value || "");
+}
+
+function parseMdTemperatureBlocks() {
+  const specs = parseMdDatasetTableSpecs();
+  if (specs.length === 1) return specs[0].blocks;
+  return [];
+}
+
+function parseFcDatasetTableSpecsFromText(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw || raw.includes(":")) return null;
+  return splitDatasetTableGroups(raw).map((group, datasetIndex) => {
+    const displacements = group.map((row, rowIndex) => {
+      const parts = splitDatasetTableRow(row);
+      if (parts.length < 2) {
+        throw new Error(`FC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "snapshots | desplazamiento".`);
+      }
+      const count = Number(parts[0]);
+      const displacement = normalizeDisplacement(parts[1]);
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error(`FC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: snapshots debe ser entero positivo.`);
+      }
+      if (!displacement) {
+        throw new Error(`FC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: desplazamiento vacio.`);
+      }
+      return { value: displacement, n_structures: count };
+    });
+    return {
+      mode: "explicit_table",
+      index: datasetIndex,
+      size: displacements.reduce((sum, item) => sum + Number(item.n_structures), 0),
+      displacements,
+    };
+  });
+}
+
+function parseFcDatasetTableSpecs() {
+  syncDatasetEditorText("fc");
+  return parseFcDatasetTableSpecsFromText(document.getElementById("fc-displacement-options")?.value || "");
+}
+
+function parseRandomCartesianDatasetTableSpecsFromText(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw) return [];
+  return splitDatasetTableGroups(raw).map((group, datasetIndex) => {
+    const blocks = group.map((row, rowIndex) => {
+      const parts = splitDatasetTableRow(row);
+      if (parts.length < 2) {
+        throw new Error(`RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "estructuras | amplitud".`);
+      }
+      const count = Number(parts[0]);
+      const amplitude = numericPrefix(parts[1], `RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}`);
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error(`RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: estructuras debe ser entero positivo.`);
+      }
+      if (!Number.isFinite(amplitude) || amplitude < 0) {
+        throw new Error(`RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: amplitud debe ser >= 0 Ang.`);
+      }
+      return {
+        block_id: `rc_d${datasetIndex + 1}_a${slugPart(amplitude)}_${rowIndex + 1}_${count}`,
+        label: `${count} estructuras @ ${amplitude} Ang`,
+        n_structures: count,
+        amplitude_ang: amplitude,
+        max_displacement: `${amplitude} Ang`,
+      };
+    });
+    return {
+      index: datasetIndex,
+      size: blocks.reduce((sum, block) => sum + Number(block.n_structures), 0),
+      blocks,
+    };
+  });
+}
+
+function parseRandomCartesianDatasetTableSpecs() {
+  syncDatasetEditorText("random_cartesian");
+  return parseRandomCartesianDatasetTableSpecsFromText(
+    document.getElementById("random-cartesian-dataset-table")?.value || "",
+  );
+}
+
+function syncMdTableFromSizes(sizes) {
+  const target = document.getElementById("md-dataset-table");
+  if (!target) return;
+  target.value = sizes.map((size) => `${size} | 300`).join("\n\n");
+  renderDatasetEditor("md");
+}
+
+function mdSizesFromSpecs(specs) {
+  return specs.map((spec) => Number(spec.size)).filter((size) => Number.isInteger(size) && size > 0);
+}
+
+function legacyMdSizesFromHidden() {
+  return parseSizesInput("md-sizes");
+}
+
 function parseDatasetRecipes() {
   const input = document.getElementById("dataset-recipes-json");
   const useJson = Boolean(document.getElementById("use-dataset-recipes-json")?.checked);
@@ -484,23 +1079,38 @@ function randomCartesianSizes(options) {
   return Array.isArray(raw) ? raw.map((value) => Number(value)) : raw == null ? [] : [Number(raw)];
 }
 
-function builderDatasetRecipes(methods, mdSizes, fcSpecs, randomCartesianOptions) {
+function builderDatasetRecipes(
+  methods,
+  mdSizes,
+  fcSpecs,
+  randomCartesianOptions,
+  mdDatasetSpecs = [],
+  randomCartesianDatasetSpecs = [],
+) {
   const recipes = {};
   if (methods.includes("md")) {
-    if (!mdSizes.length) {
-      throw new Error("MD requiere al menos un tamaño de dataset.");
+    if (mdDatasetSpecs.length) {
+      recipes.md = mdDatasetSpecs.map((spec, index) => ({
+        recipe_id: `md_table_${index + 1}_${spec.size}`,
+        label: `MD dataset ${index + 1}: ${spec.size} snapshots`,
+        blocks: spec.blocks,
+      }));
+    } else {
+      if (!mdSizes.length) {
+        throw new Error("MD requiere al menos un tamaño de dataset.");
+      }
+      recipes.md = mdSizes.map((size, index) => ({
+        recipe_id: `md_${size}`,
+        label: `MD ${size} snapshots`,
+        blocks: [
+          {
+            block_id: `md_snapshots_${index + 1}_${size}`,
+            label: `${size} snapshots`,
+            n_snapshots: size,
+          },
+        ],
+      }));
     }
-    recipes.md = mdSizes.map((size, index) => ({
-      recipe_id: `md_${size}`,
-      label: `MD ${size} snapshots`,
-      blocks: [
-        {
-          block_id: `md_snapshots_${index + 1}_${size}`,
-          label: `${size} snapshots`,
-          n_snapshots: size,
-        },
-      ],
-    }));
   }
   if (methods.includes("siesta_fc_cartesian")) {
     recipes.siesta_fc_cartesian = fcSpecs.map((spec) => ({
@@ -516,12 +1126,20 @@ function builderDatasetRecipes(methods, mdSizes, fcSpecs, randomCartesianOptions
     }));
   }
   if (methods.includes("random_cartesian")) {
+    const base = { ...randomCartesianOptions };
+    delete base.n_structures;
+    if (randomCartesianDatasetSpecs.length) {
+      recipes.random_cartesian = randomCartesianDatasetSpecs.map((spec, index) => ({
+        recipe_id: `rc_table_${index + 1}_${spec.size}`,
+        label: `Random Cartesian dataset ${index + 1}: ${spec.size} structures`,
+        blocks: spec.blocks.map((block) => ({ ...base, ...block })),
+      }));
+      return recipes;
+    }
     const sizes = randomCartesianSizes(randomCartesianOptions);
     if (!sizes.length) {
       throw new Error("Random Cartesian requiere al menos un tamaño de dataset.");
     }
-    const base = { ...randomCartesianOptions };
-    delete base.n_structures;
     const amplitude =
       base.distribution === "uniform"
         ? `u${slugPart(base.uniform_range_ang)}`
@@ -542,17 +1160,43 @@ function builderDatasetRecipes(methods, mdSizes, fcSpecs, randomCartesianOptions
   return recipes;
 }
 
-function datasetRecipesForRun(methods, mdSizes, fcSpecs, randomCartesianOptions) {
-  return parseDatasetRecipes() || builderDatasetRecipes(methods, mdSizes, fcSpecs, randomCartesianOptions);
+function datasetRecipesForRun(
+  methods,
+  mdSizes,
+  fcSpecs,
+  randomCartesianOptions,
+  mdDatasetSpecs = [],
+  randomCartesianDatasetSpecs = [],
+) {
+  return (
+    parseDatasetRecipes() ||
+    builderDatasetRecipes(
+      methods,
+      mdSizes,
+      fcSpecs,
+      randomCartesianOptions,
+      mdDatasetSpecs,
+      randomCartesianDatasetSpecs,
+    )
+  );
 }
 
 function exportCurrentDatasetRecipes() {
   const methods = selectedMethods();
-  const mdSizes = methods.includes("md") ? parseSizesInput("md-sizes") : [];
+  const mdDatasetSpecs = methods.includes("md") ? parseMdDatasetTableSpecs() : [];
+  const mdSizes = methods.includes("md") ? (mdDatasetSpecs.length ? mdSizesFromSpecs(mdDatasetSpecs) : legacyMdSizesFromHidden()) : [];
   const fcSpecs = methods.includes("siesta_fc_cartesian") ? fcDatasetSpecs() : [];
   if (methods.includes("siesta_fc_cartesian")) validateFcPreviewSpecs(fcSpecs);
   const randomOptions = parseRandomCartesianOptions(methods);
-  const recipes = builderDatasetRecipes(methods, mdSizes, fcSpecs, randomOptions);
+  const randomDatasetSpecs = methods.includes("random_cartesian") ? parseRandomCartesianDatasetTableSpecs() : [];
+  const recipes = builderDatasetRecipes(
+    methods,
+    mdSizes,
+    fcSpecs,
+    randomOptions,
+    mdDatasetSpecs,
+    randomDatasetSpecs,
+  );
   const target = document.getElementById("dataset-recipes-json");
   target.value = JSON.stringify(recipes, null, 2);
   const details = document.querySelector(".advanced-recipes");
@@ -568,6 +1212,8 @@ function cartesianProduct(arrays) {
 }
 
 function fcDatasetSpecs() {
+  const explicitSpecs = parseFcDatasetTableSpecs();
+  if (explicitSpecs !== null) return explicitSpecs;
   const options = parseFcDisplacementOptionsText();
   const entries = sortedFcEntries(options);
   if (!entries.length) return [];
@@ -677,12 +1323,19 @@ function updateDatasetPreview() {
     if (!methods.includes("md")) {
       setPreviewText("md-preview-summary", "desactivado", false);
     } else {
-      const mdSizes = parseSizesInput("md-sizes");
-      setPreviewText(
-        "md-preview-summary",
-        mdSizes.length ? `${mdSizes.length} datasets · ${mdSizes.join(", ")}` : "sin datasets",
-        false,
-      );
+      const mdSpecs = parseMdDatasetTableSpecs();
+      if (mdSpecs.length) {
+        const sizes = mdSizesFromSpecs(mdSpecs);
+        const blockCount = mdSpecs.reduce((sum, spec) => sum + spec.blocks.length, 0);
+        setPreviewText("md-preview-summary", `${mdSpecs.length} datasets · ${sizes.join(", ")} · ${blockCount} T rows`, false);
+      } else {
+        const mdSizes = legacyMdSizesFromHidden();
+        setPreviewText(
+          "md-preview-summary",
+          mdSizes.length ? `${mdSizes.length} datasets · ${mdSizes.join(", ")}` : "sin datasets",
+          false,
+        );
+      }
     }
   } catch (error) {
     setPreviewText("md-preview-summary", "MD invalido", true);
@@ -694,9 +1347,11 @@ function updateDatasetPreview() {
       return;
     }
     const randomOptions = parseRandomCartesianOptions(methods);
-    const sizes = randomCartesianSizes(randomOptions);
+    const randomSpecs = parseRandomCartesianDatasetTableSpecs();
+    const sizes = randomSpecs.length ? randomSpecs.map((spec) => spec.size) : randomCartesianSizes(randomOptions);
+    const blockCount = randomSpecs.reduce((sum, spec) => sum + spec.blocks.length, 0);
     const label = sizes.length
-      ? `${sizes.length} datasets · ${sizes.join(", ")} · ${randomOptions.distribution}`
+      ? `${sizes.length} datasets · ${sizes.join(", ")} · ${blockCount || sizes.length} bloques · ${randomOptions.distribution}`
       : "sin datasets";
     setPreviewText("random-preview-summary", label, false);
   } catch (error) {
@@ -714,6 +1369,7 @@ function updateAtomSizesFromFcPlan() {
     document.getElementById("atom-sizes").value = sizesText;
     if (document.getElementById("sync-md-sizes")?.checked) {
       document.getElementById("md-sizes").value = [...new Set(sizes)].join(", ");
+      syncMdTableFromSizes([...new Set(sizes)]);
     }
     renderFcPreview(specs);
     const modeLabel = currentCombinationMode() === "cartesian" ? "cartesian datasets" : "aligned datasets";
@@ -748,6 +1404,7 @@ async function loadFcConfig() {
   document.getElementById("split-train").value = config.splits?.train ?? 0.8;
   document.getElementById("split-validation").value = config.splits?.validation ?? 0.1;
   document.getElementById("split-test").value = config.splits?.test ?? 0.1;
+  renderDatasetEditor("fc");
   updateAtomSizesFromFcPlan();
 }
 
@@ -797,15 +1454,18 @@ async function runExperiment() {
   if (!methods.length) {
     throw new Error("Selecciona al menos un metodo.");
   }
-  const mdSizes = methods.includes("md") ? parseSizesInput("md-sizes") : [];
+  const mdDatasetSpecs = methods.includes("md") ? parseMdDatasetTableSpecs() : [];
+  const mdSizes = methods.includes("md")
+    ? (mdDatasetSpecs.length ? mdSizesFromSpecs(mdDatasetSpecs) : legacyMdSizesFromHidden())
+    : [];
   let fcDisplacementOptions = {};
   let specs = [];
   if (methods.includes("siesta_fc_cartesian")) {
-    fcDisplacementOptions = parseFcDisplacementOptionsText();
-    if (!Object.keys(fcDisplacementOptions).length) {
-      throw new Error("Define al menos una magnitud FC con opciones.");
-    }
     specs = fcDatasetSpecs();
+    fcDisplacementOptions = parseFcDisplacementOptionsText();
+    if (!specs.length) {
+      throw new Error("Define al menos una tabla FC con desplazamientos.");
+    }
     validateFcPreviewSpecs(specs);
     const badDatasets = specs
       .map((spec) => spec.size)
@@ -818,11 +1478,33 @@ async function runExperiment() {
   }
   const atomSizes = parseSizesInput("atom-sizes");
   const randomCartesianOptions = parseRandomCartesianOptions(methods);
-  const datasetRecipes = datasetRecipesForRun(methods, mdSizes, specs, randomCartesianOptions);
+  const randomDatasetSpecs = methods.includes("random_cartesian") ? parseRandomCartesianDatasetTableSpecs() : [];
+  if (methods.includes("random_cartesian")) {
+    if (!randomDatasetSpecs.length) {
+      throw new Error("Define al menos un dataset Random Cartesian.");
+    }
+    const badRandomDatasets = randomDatasetSpecs
+      .map((spec) => spec.size)
+      .filter((size) => !Number.isInteger(size) || size < 3);
+    if (badRandomDatasets.length) {
+      throw new Error(
+        `Con train/validation/test se requieren datasets RC >= 3. Tamaños invalidos: ${badRandomDatasets.join(", ")}.`,
+      );
+    }
+  }
+  const datasetRecipes = datasetRecipesForRun(
+    methods,
+    mdSizes,
+    specs,
+    randomCartesianOptions,
+    mdDatasetSpecs,
+    randomDatasetSpecs,
+  );
   const splitRatios = parseSplitRatios();
   const randomSeed = Number(document.getElementById("fc-random-seed").value);
   const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
   const performance = performanceSettings();
+  const training = trainingSettings();
   const venvActivateCommandInput = document.getElementById("venv-activate-command");
   const venvActivateCommand = String(venvActivateCommandInput?.value || "").trim();
   state.experimentOffset = 0;
@@ -846,6 +1528,7 @@ async function runExperiment() {
       compute_budget_mode: document.getElementById("compute-budget-mode").value,
       compute_accelerator: performance.compute_accelerator,
       performance,
+      training_settings: training,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
       venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
@@ -919,6 +1602,11 @@ function metricValue(run, group, metric) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function sampleMetricValues(run, group, metric) {
   return (run?.samples?.[group] || [])
     .map((row) => row[metric])
@@ -982,11 +1670,12 @@ function lineTraces(runs, group, metrics) {
       if (!points.length) continue;
       traces.push({
         type: "scatter",
-        mode: "lines+markers",
+        mode: "markers",
         name: metrics.length > 1 ? `${label} · ${metric.label}` : label,
         x: points.map((point) => point.x),
         y: points.map((point) => point.y),
         text: points.map((point) => point.text),
+        marker: { size: 9, opacity: 0.82 },
         hovertemplate: "dataset %{x}<br>%{y:.4g}<br>run %{text}<extra>%{fullData.name}</extra>",
       });
     }
@@ -1031,12 +1720,19 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
 
 function renderBoxPlot(id, runs) {
   const traces = [];
+  const availability = [];
   for (const run of runs) {
-    const spectral = sampleMetricValuesAny(run, "spectral", [
-      "fermi_window_rmse_eV",
-      "frontier_window_rmse_eV",
-      "low_energy_rmse_eV",
-    ]);
+    const spectral = sampleMetricValues(run, "spectral", "fermi_window_rmse_eV");
+    const fermiAvailability = run.metric_availability?.spectral?.fermi_window_rmse_eV ||
+      run.diagnostics?.metric_availability?.spectral?.fermi_window_rmse_eV ||
+      {};
+    const total = finiteNumber(fermiAvailability.n_total) ?? (run.samples?.spectral || []).length;
+    const finite = finiteNumber(fermiAvailability.n_finite) ?? spectral.length;
+    availability.push({
+      label: `${run.label} ${run.dataset_size}`,
+      finite,
+      total,
+    });
     if (!spectral.length) continue;
     traces.push({
       type: "box",
@@ -1048,15 +1744,52 @@ function renderBoxPlot(id, runs) {
       hovertemplate: "%{y:.4g} eV<extra>%{fullData.name}</extra>",
     });
   }
-  const layout = plotLayout("Distribucion por muestra: RMSE cerca de Fermi", "RMSE eV", {
+  const layout = plotLayout("Distribucion por muestra: Fermi-window RMSE", "RMSE eV", {
     xaxis: { title: "", tickangle: -25 },
     showlegend: false,
+    margin: { l: 56, r: 18, t: 82, b: 64 },
   });
-  if (!traces.length) {
-    layout.annotations = [
-      emptyPlotAnnotation("No hay RMSE Fermi/frontier con valores finitos."),
-    ];
+  const summaries = availability
+    .filter((item) => item.total > 0 || item.finite > 0)
+    .map((item) => `${item.label}: ${item.finite}/${item.total}`)
+    .slice(0, 10);
+  const zeroFinite = availability
+    .filter((item) => item.total > 0 && item.finite === 0)
+    .map((item) => `${item.label}: sin bandas dentro de ±2 eV de Fermi`)
+    .slice(0, 4);
+  const annotations = [];
+  if (summaries.length) {
+    annotations.push({
+      text: `Disponibilidad Fermi-window: ${summaries.join(" · ")}`,
+      xref: "paper",
+      yref: "paper",
+      x: 0,
+      y: 1.22,
+      xanchor: "left",
+      yanchor: "bottom",
+      showarrow: false,
+      font: { size: 11, color: "#56616f" },
+    });
   }
+  if (zeroFinite.length) {
+    annotations.push({
+      text: zeroFinite.join(" · "),
+      xref: "paper",
+      yref: "paper",
+      x: 0,
+      y: 1.12,
+      xanchor: "left",
+      yanchor: "bottom",
+      showarrow: false,
+      font: { size: 11, color: "#9f5b00" },
+    });
+  }
+  if (!traces.length) {
+    annotations.push(
+      emptyPlotAnnotation("No hay Fermi-window RMSE finito; la metrica primaria no se sustituye."),
+    );
+  }
+  if (annotations.length) layout.annotations = annotations;
   Plotly.react(
     id,
     traces,
@@ -1212,10 +1945,11 @@ function renderSensitivitySweeps(id, runs) {
     if (ts.length) {
       traces.push({
         type: "scatter",
-        mode: "lines+markers",
+        mode: "markers",
         name: `${label} sparse-threshold RMSE`,
         x: ts,
         y: ts.map((t) => sparseByThreshold.get(t).reduce((s, v) => s + v, 0) / sparseByThreshold.get(t).length),
+        marker: { size: 9, opacity: 0.82 },
         xaxis: "x1",
         yaxis: "y1",
       });
@@ -1224,10 +1958,11 @@ function renderSensitivitySweeps(id, runs) {
     if (ss.length) {
       traces.push({
         type: "scatter",
-        mode: "lines+markers",
+        mode: "markers",
         name: `${label} DOS sigma W1`,
         x: ss,
         y: ss.map((s) => dosBySigma.get(s).reduce((sum, v) => sum + v, 0) / dosBySigma.get(s).length),
+        marker: { size: 9, opacity: 0.82 },
         xaxis: "x2",
         yaxis: "y2",
       });
@@ -1252,7 +1987,8 @@ function renderSensitivitySweeps(id, runs) {
 function selectedCrossExperimentSet(payload) {
   const experiments = payload?.cross_experiments || [];
   if (!experiments.length) return null;
-  const selection = document.getElementById("plot-cross-selection")?.value || "all_compatible";
+  const defaultSelection = payload?.default_plot_selection?.mode || "all";
+  const selection = document.getElementById("plot-cross-selection")?.value || defaultSelection;
   let selected = [];
   let isolationWarning = "";
   if (selection === "latest") {
@@ -1262,10 +1998,13 @@ function selectedCrossExperimentSet(payload) {
     }
   } else if (selection === "all") {
     selected = experiments;
+    const compatibilityGroups = new Set(experiments.map((experiment) => experiment.compatibility_group_id || "unknown"));
     isolationWarning =
-      experiments.length > 1
-        ? "Mostrando todos los experimentos; comprueba compatibilidad antes de interpretar rankings."
-        : "";
+      compatibilityGroups.size > 1
+        ? `Mostrando todos los experimentos; hay ${compatibilityGroups.size} grupos metric_version/compatibilidad distintos. Interpreta rankings como visuales.`
+        : experiments.length > 1
+          ? "Mostrando todos los experimentos compatibles para visualizacion."
+          : "";
   } else {
     const defaultGroupId = payload?.default_plot_selection?.group_id;
     const groupId = defaultGroupId || experiments[experiments.length - 1]?.compatibility_group_id;
@@ -1292,39 +2031,32 @@ function selectedCrossExperimentSet(payload) {
       experiment_id: experiment.experiment_id,
       rows: (experiment.metrics || []).length,
       outputs: experiment.outputs,
+      compatibility_group_id: experiment.compatibility_group_id,
+      compatibility: experiment.compatibility,
     })),
     multi_experiment_available: experiments.length > 1,
     isolation_warning: isolationWarning,
   };
 }
 
-const CROSS_METRIC_FALLBACKS = [
-  "frontier_window_rmse_eV",
-  "low_energy_rmse_eV",
-  "gap_abs_error_eV",
-  "fermi_window_rmse_eV",
-  "global_rmse_eV",
-  "relative_frobenius_union",
-  "mae_ref_eV",
-];
-
-function hasFiniteCrossMetric(experiment, metric) {
-  return (experiment?.metrics || []).some((row) => {
-    const value = row[metric];
-    return typeof value === "number" && Number.isFinite(value);
-  });
-}
-
 function primaryCrossMetric(experiment) {
-  const requested =
+  return (
     experiment?.recommendation?.primary_metric ||
     experiment?.manifest?.selected_metrics?.primary_metric ||
-    "frontier_window_rmse_eV";
-  const candidates = [requested, ...CROSS_METRIC_FALLBACKS].filter(Boolean);
-  for (const metric of Array.from(new Set(candidates))) {
-    if (hasFiniteCrossMetric(experiment, metric)) return metric;
-  }
-  return requested;
+    "fermi_window_rmse_eV"
+  );
+}
+
+function selectedCrossMetric() {
+  return document.getElementById("plot-cross-metric")?.value || CROSS_PLOT_METRIC_DEFAULT;
+}
+
+function missingPrimaryMetricAnnotation(metric) {
+  return emptyPlotAnnotation(`La metrica primaria ${metric} no tiene valores finitos; no se sustituye por otra metrica.`);
+}
+
+function missingPlotMetricAnnotation(metric) {
+  return emptyPlotAnnotation(`La metrica ${metric} no tiene valores finitos en las filas seleccionadas; se muestra como No metric.`);
 }
 
 function crossTrainMethods(experiment) {
@@ -1336,18 +2068,17 @@ function crossTrainMethods(experiment) {
 function crossTestSets(experiment) {
   const rows = experiment?.metrics || [];
   const sets = Array.from(new Set(rows.map((row) => row.test_set).filter(Boolean))).sort();
-  return sets.length ? sets : ["test_md", "test_atomdisp", "test_mixed"];
+  return sets.length ? sets : ["test_md", "test_siesta_fc_cartesian", "test_mixed"];
 }
 
-function groupedCrossMeans(rows, metric) {
+function groupedCrossMetrics(rows, metric) {
   const groups = new Map();
   for (const row of rows || []) {
-    const value = row[metric];
-    if (typeof value !== "number" || !Number.isFinite(value)) continue;
-    const mdDatasetSize = Number(row.md_dataset_size ?? row.dataset_size);
-    const atomDatasetSize = Number(row.atom_dataset_size ?? row.dataset_size);
-    const randomDatasetSize = Number(row.random_dataset_size ?? row.dataset_size);
-    const trainDatasetSize = Number(row.train_dataset_size ?? row.dataset_size);
+    const value = finiteNumber(row[metric]);
+    const mdDatasetSize = finiteNumber(row.md_dataset_size ?? row.dataset_size);
+    const atomDatasetSize = finiteNumber(row.atom_dataset_size ?? row.dataset_size);
+    const randomDatasetSize = finiteNumber(row.random_dataset_size);
+    const trainDatasetSize = finiteNumber(row.train_dataset_size ?? row.dataset_size);
     const key = [
       row.experiment_id,
       row.recipe_set_hash,
@@ -1377,18 +2108,22 @@ function groupedCrossMeans(rows, metric) {
         test_set: row.test_set,
         values: [],
         times: [],
+        n_total: 0,
       });
     }
-    groups.get(key).values.push(value);
-    if (typeof row.total_time_seconds === "number" && Number.isFinite(row.total_time_seconds)) {
-      groups.get(key).times.push(row.total_time_seconds);
+    const group = groups.get(key);
+    group.n_total += 1;
+    if (value != null) group.values.push(value);
+    const totalTime = finiteNumber(row.total_time_seconds);
+    if (totalTime != null) {
+      group.times.push(totalTime);
     }
   }
   return Array.from(groups.values()).map((group) => ({
-    dataset_size: Number(group.dataset_size),
-    md_dataset_size: Number(group.md_dataset_size),
-    atom_dataset_size: Number(group.atom_dataset_size),
-    random_dataset_size: Number(group.random_dataset_size),
+    dataset_size: group.dataset_size,
+    md_dataset_size: group.md_dataset_size,
+    atom_dataset_size: group.atom_dataset_size,
+    random_dataset_size: group.random_dataset_size,
     experiment_id: group.experiment_id,
     recipe_set_hash: group.recipe_set_hash,
     train_dataset_label: group.train_dataset_label,
@@ -1397,7 +2132,13 @@ function groupedCrossMeans(rows, metric) {
     random_dataset_label: group.random_dataset_label,
     train_method: group.train_method,
     test_set: group.test_set,
-    mean: group.values.reduce((sum, value) => sum + value, 0) / group.values.length,
+    mean: group.values.length
+      ? group.values.reduce((sum, value) => sum + value, 0) / group.values.length
+      : null,
+    n_total: group.n_total,
+    n_finite: group.values.length,
+    missing_count: Math.max(0, group.n_total - group.values.length),
+    metric_available: group.values.length > 0,
     time:
       group.times.length > 0
         ? group.times.reduce((sum, value) => sum + value, 0) / group.times.length
@@ -1405,73 +2146,166 @@ function groupedCrossMeans(rows, metric) {
   }));
 }
 
+function crossDatasetComboLabel(row) {
+  return [
+    row.md_dataset_size != null ? `MD ${row.md_dataset_size}` : "",
+    row.atom_dataset_size != null ? `AD ${row.atom_dataset_size}` : "",
+    row.random_dataset_size != null ? `RC ${row.random_dataset_size}` : "",
+    row.recipe_set_hash || "",
+  ].filter(Boolean).join(" / ") || `dataset ${row.dataset_size ?? "unknown"}`;
+}
+
+function crossSizeLabel(row) {
+  return `${row.test_set || "test"} · ${crossDatasetComboLabel(row)}`;
+}
+
+function metricAvailabilityLabel(row) {
+  return `${row.n_finite}/${row.n_total}`;
+}
+
+function crossMissingGroupsAnnotation(groups, metric) {
+  const missingGroups = groups.filter((row) => !row.metric_available).length;
+  if (!missingGroups) return null;
+  return {
+    xref: "paper",
+    yref: "paper",
+    x: 0,
+    y: 1.12,
+    xanchor: "left",
+    yanchor: "bottom",
+    text: `${missingGroups} grupo(s) sin ${metric}; permanecen marcados como No metric en mapas.`,
+    showarrow: false,
+    font: { size: 12, color: "#9f5b00" },
+  };
+}
+
 function renderCrossHeatmap(id, experiment) {
-  const metric = primaryCrossMetric(experiment);
-  const means = groupedCrossMeans(experiment?.metrics || [], metric);
+  const metric = selectedCrossMetric(experiment);
+  const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const trainMethods = crossTrainMethods(experiment);
-  const testSets = crossTestSets(experiment);
   const sizeLabels = Array.from(
     new Set(
       means
-        .map((row) => `${row.test_set} · MD ${row.md_dataset_size} / AD ${row.atom_dataset_size}`)
+        .map(crossSizeLabel)
         .filter(Boolean),
     ),
   );
   const z = sizeLabels.map((label) =>
     trainMethods.map((method) => {
       const row = means.find((item) =>
-        `${item.test_set} · MD ${item.md_dataset_size} / AD ${item.atom_dataset_size}` === label &&
+        crossSizeLabel(item) === label &&
         item.train_method === method
       );
-      return row ? row.mean : null;
+      return row?.metric_available ? row.mean : null;
+    }),
+  );
+  const text = sizeLabels.map((label) =>
+    trainMethods.map((method) => {
+      const row = means.find((item) => crossSizeLabel(item) === label && item.train_method === method);
+      if (!row) return "";
+      return row.metric_available ? "" : "No metric";
+    }),
+  );
+  const customdata = sizeLabels.map((label) =>
+    trainMethods.map((method) => {
+      const row = means.find((item) => crossSizeLabel(item) === label && item.train_method === method);
+      if (!row) {
+        return { label, method, valueText: "No row", availability: "0/0" };
+      }
+      return {
+        label,
+        method,
+        valueText: row.metric_available ? row.mean.toPrecision(4) : "No metric",
+        availability: metricAvailabilityLabel(row),
+      };
     }),
   );
   const layout = plotLayout(`Cross-evaluation heatmap (${metric})`, metric, {
     xaxis: { title: "Training method", gridcolor: "#edf1f4", zeroline: false },
     yaxis: { title: "Frozen test set / pair size", automargin: true },
   });
+  const annotations = [];
+  text.forEach((row, rowIndex) => {
+    row.forEach((label, colIndex) => {
+      if (!label) return;
+      annotations.push({
+        x: trainMethods[colIndex],
+        y: sizeLabels[rowIndex],
+        text: label,
+        showarrow: false,
+        font: { size: 11, color: "#6b7280" },
+      });
+    });
+  });
+  const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
+  if (missingAnnotation) annotations.push(missingAnnotation);
   if (!means.length) {
-    layout.annotations = [emptyPlotAnnotation("No hay tabla cross_evaluation_metrics.csv completa.")];
+    layout.annotations = [(experiment?.metrics || []).length ? missingPlotMetricAnnotation(metric) : emptyPlotAnnotation("No hay tabla cross_evaluation_metrics.csv completa.")];
+  } else if (annotations.length) {
+    layout.annotations = annotations;
   }
   Plotly.react(
     id,
-    [{ type: "heatmap", z, x: trainMethods, y: sizeLabels, colorscale: "Viridis", hoverongaps: false }],
+    [{
+      type: "heatmap",
+      z,
+      text,
+      customdata,
+      x: trainMethods,
+      y: sizeLabels,
+      colorscale: "Viridis",
+      hoverongaps: false,
+      hovertemplate:
+        "%{customdata.label}<br>%{customdata.method}<br>" +
+        `${metric}: %{customdata.valueText}<br>` +
+        "finite rows: %{customdata.availability}<extra></extra>",
+    }],
     layout,
     { responsive: true, displaylogo: false },
   );
 }
 
 function renderCrossLearning(id, experiment) {
-  const metric = primaryCrossMetric(experiment);
-  const means = groupedCrossMeans(experiment?.metrics || [], metric);
+  const metric = selectedCrossMetric(experiment);
+  const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const traces = [];
   for (const method of crossTrainMethods(experiment)) {
     for (const testSet of crossTestSets(experiment)) {
       const points = means
         .filter((row) => row.train_method === method && row.test_set === testSet)
-        .sort((a, b) => a.dataset_size - b.dataset_size);
+        .filter((row) => row.metric_available)
+        .sort((a, b) => (a.dataset_size ?? 0) - (b.dataset_size ?? 0));
       if (!points.length) continue;
       traces.push({
         type: "scatter",
-        mode: "lines+markers",
+        mode: "markers",
         name: `${method} on ${testSet}`,
         x: points.map((row) => row.dataset_size),
         y: points.map((row) => row.mean),
-        hovertemplate: "dataset %{x}<br>%{y:.4g}<extra>%{fullData.name}</extra>",
+        text: points.map((row) => `${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
+        marker: { size: 9, opacity: 0.82 },
+        hovertemplate: "dataset %{x}<br>%{y:.4g}<br>%{text}<extra>%{fullData.name}</extra>",
       });
     }
   }
   const layout = plotLayout(`Learning curves (${metric})`, metric);
-  if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay curvas cruzadas disponibles.")];
+  const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
+  if (!traces.length) {
+    layout.annotations = [(experiment?.metrics || []).length ? missingPlotMetricAnnotation(metric) : emptyPlotAnnotation("No hay curvas cruzadas disponibles.")];
+  } else if (missingAnnotation) {
+    layout.annotations = [missingAnnotation];
+  }
   Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function renderCrossCompute(id, experiment) {
-  const metric = primaryCrossMetric(experiment);
-  const means = groupedCrossMeans(experiment?.metrics || [], metric).filter((row) => row.time != null);
+  const metric = selectedCrossMetric(experiment);
+  const means = groupedCrossMetrics(experiment?.metrics || [], metric).filter((row) => row.time != null);
   const traces = [];
   for (const method of crossTrainMethods(experiment)) {
-    const points = means.filter((row) => row.train_method === method).sort((a, b) => a.time - b.time);
+    const points = means
+      .filter((row) => row.train_method === method && row.metric_available)
+      .sort((a, b) => a.time - b.time);
     if (!points.length) continue;
     traces.push({
       type: "scatter",
@@ -1479,21 +2313,26 @@ function renderCrossCompute(id, experiment) {
       name: method,
       x: points.map((row) => row.time),
       y: points.map((row) => row.mean),
-      text: points.map((row) => `${row.test_set}, dataset_${row.dataset_size}`),
+      text: points.map((row) => `${row.test_set}, ${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
       hovertemplate: "%{text}<br>%{x:.2f}s<br>%{y:.4g}<extra>%{fullData.name}</extra>",
     });
   }
   const layout = plotLayout(`Metric vs total compute time (${metric})`, metric, {
     xaxis: { title: "Total compute seconds", gridcolor: "#edf1f4", zeroline: false },
   });
-  if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay timing cruzado disponible.")];
+  const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
+  if (!traces.length) {
+    layout.annotations = [(experiment?.metrics || []).length ? missingPlotMetricAnnotation(metric) : emptyPlotAnnotation("No hay timing cruzado disponible.")];
+  } else if (missingAnnotation) {
+    layout.annotations = [missingAnnotation];
+  }
   Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function renderWinnerMap(id, experiment) {
-  const metric = primaryCrossMetric(experiment);
+  const metric = selectedCrossMetric(experiment);
   const scientificStatus = experiment?.recommendation?.scientific_status;
-  const means = groupedCrossMeans(experiment?.metrics || [], metric);
+  const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const methods = crossTrainMethods(experiment);
   const methodLabel = (method) => ({
     md: "MD",
@@ -1501,35 +2340,36 @@ function renderWinnerMap(id, experiment) {
     atom_displacement: "FC",
     random_cartesian: "RC",
   }[method] || method);
-  const comboKey = (row) => [
-    Number.isFinite(row.md_dataset_size) ? `MD ${row.md_dataset_size}` : "",
-    Number.isFinite(row.atom_dataset_size) ? `FC ${row.atom_dataset_size}` : "",
-    Number.isFinite(row.random_dataset_size) ? `RC ${row.random_dataset_size}` : "",
-    row.recipe_set_hash || "",
-  ].filter(Boolean).join(" / ") || `dataset ${row.dataset_size}`;
-  const comboLabels = Array.from(new Set(means.map(comboKey))).sort();
+  const comboLabels = Array.from(new Set(means.map(crossDatasetComboLabel))).sort();
   const testSets = crossTestSets(experiment);
   const tieIndex = methods.length;
   const labels = new Map(methods.map((method, index) => [index, methodLabel(method)]));
   labels.set(tieIndex, "Tie");
   const z = testSets.map((testSet) => comboLabels.map((combo) => {
-    const candidates = means.filter((row) => row.test_set === testSet && comboKey(row) === combo);
+    const candidates = means.filter((row) => row.test_set === testSet && crossDatasetComboLabel(row) === combo);
     if (!candidates.length) return null;
-    const best = Math.min(...candidates.map((row) => row.mean));
-    const winners = candidates.filter((row) => Math.abs(row.mean - best) < 1e-12);
+    const available = candidates.filter((row) => row.metric_available);
+    if (!available.length) return null;
+    const best = Math.min(...available.map((row) => row.mean));
+    const winners = available.filter((row) => Math.abs(row.mean - best) < 1e-12);
     if (winners.length !== 1) return tieIndex;
     const index = methods.indexOf(winners[0].train_method);
     return index >= 0 ? index : null;
   }));
   const yLabels = testSets;
-  const text = z.map((row) => row.map((value) => (value == null ? "" : labels.get(value))));
+  const text = z.map((row) => row.map((value) => (value == null ? "No metric" : labels.get(value))));
   const customdata = testSets.map((testSet, rowIndex) => comboLabels.map((combo, colIndex) => {
-    const candidates = means.filter((row) => row.test_set === testSet && comboKey(row) === combo);
+    const candidates = means.filter((row) => row.test_set === testSet && crossDatasetComboLabel(row) === combo);
+    const values = candidates.map((row) =>
+      row.metric_available
+        ? `${methodLabel(row.train_method)}=${row.mean.toPrecision(4)} (${metricAvailabilityLabel(row)})`
+        : `${methodLabel(row.train_method)}=No metric (${metricAvailabilityLabel(row)})`
+    );
     return {
-      winner: z[rowIndex][colIndex] == null ? "No data" : labels.get(z[rowIndex][colIndex]),
+      winner: z[rowIndex][colIndex] == null ? "No metric" : labels.get(z[rowIndex][colIndex]),
       testSet,
       combo,
-      values: candidates.map((row) => `${methodLabel(row.train_method)}=${row.mean.toPrecision(4)}`).join("; "),
+      values: values.join("; "),
     };
   }));
   const annotations = [];
@@ -1551,21 +2391,26 @@ function renderWinnerMap(id, experiment) {
     comboLabels.forEach((combo, colIndex) => {
       const label = text[rowIndex][colIndex];
       if (!label) return;
+      const isMissing = label === "No metric";
       annotations.push({
         x: combo,
         y: rowLabel,
         text: label,
         showarrow: false,
-        font: { size: 11, color: "#17202a" },
+        font: { size: 11, color: isMissing ? "#6b7280" : "#17202a" },
       });
     });
   });
+  const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
+  if (missingAnnotation) annotations.push(missingAnnotation);
   const layout = plotLayout(`Winner map (${metric})`, "Winner", {
     xaxis: { title: "Dataset combination", automargin: true },
     yaxis: { title: "Frozen test set", automargin: true },
     annotations,
   });
-  if (!comboLabels.length || !methods.length) layout.annotations = [emptyPlotAnnotation("No hay celdas cross comparables.")];
+  if (!comboLabels.length || !methods.length) {
+    layout.annotations = [(experiment?.metrics || []).length ? missingPlotMetricAnnotation(metric) : emptyPlotAnnotation("No hay celdas cross comparables.")];
+  }
   const palette = ["#4b6f8f", "#2a7f62", "#9467bd", "#d7a021", "#d7dee5"];
   const maxValue = Math.max(1, tieIndex);
   const colorscale = Array.from({ length: tieIndex + 1 }, (_, index) => {
@@ -1625,13 +2470,15 @@ function renderPlots(payload) {
   }
   const runs = payload?.runs || [];
   const crossExperiment = selectedCrossExperimentSet(payload);
+  const crossMetric = selectedCrossMetric(crossExperiment);
+  const primaryMetric = primaryCrossMetric(crossExperiment);
   const recommendation = crossExperiment?.recommendation;
   const crossRows = crossExperiment?.metrics?.length || 0;
   const crossSources = crossExperiment?.source_experiments?.length || 0;
   const isolationText = crossExperiment?.isolation_warning ? ` | ${crossExperiment.isolation_warning}` : "";
   const blockerText = recommendation ? recommendationBlockers(recommendation).slice(0, 6).join(" | ") : "";
   const crossText = recommendation?.status
-    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | scientific: ${recommendation.scientific_status || "unknown"} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${recommendation.reason || ""}${isolationText}`
+    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${recommendation.scientific_status || "unknown"} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${recommendation.reason || ""}${isolationText}`
     : "";
   status.textContent = runs.length
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
@@ -1643,9 +2490,8 @@ function renderPlots(payload) {
     "spectral",
     [
       { key: "fermi_window_rmse_eV", label: "Fermi-window RMSE" },
-      { key: "frontier_window_rmse_eV", label: "Frontier RMSE" },
     ],
-    "Error cerca de Fermi/frontier",
+    "Error Fermi-window",
     "RMSE eV",
   );
   renderLinePlot("plot-low-energy", runs, "spectral", [{ key: "low_energy_rmse_eV", label: "Low-energy RMSE" }], "Low-energy eigenvalues", "RMSE eV");
@@ -1685,16 +2531,7 @@ function setupTabs() {
 }
 
 function setupEvents() {
-  const experimentAccelerator = document.getElementById("compute-accelerator");
-  const performanceAccelerator = document.getElementById("performance-compute-accelerator");
-  if (experimentAccelerator && performanceAccelerator) {
-    experimentAccelerator.addEventListener("change", () => {
-      performanceAccelerator.value = experimentAccelerator.value;
-    });
-    performanceAccelerator.addEventListener("change", () => {
-      experimentAccelerator.value = performanceAccelerator.value;
-    });
-  }
+  setupDatasetEditors();
   document.getElementById("run-all").addEventListener("click", () => {
     runAll().catch((error) => showToast(error.message));
   });
@@ -1715,6 +2552,9 @@ function setupEvents() {
   document.getElementById("plot-cross-selection")?.addEventListener("change", () => {
     if (state.plotsEnabled) renderPlots(state.plotData);
   });
+  document.getElementById("plot-cross-metric")?.addEventListener("change", () => {
+    if (state.plotsEnabled) renderPlots(state.plotData);
+  });
   document.getElementById("run-experiment").addEventListener("click", () => {
     runExperiment().catch((error) => showToast(error.message));
   });
@@ -1723,6 +2563,9 @@ function setupEvents() {
   });
   document.getElementById("copy-venv-command").addEventListener("click", () => {
     copyVenvActivationCommand().catch((error) => showToast(error.message));
+  });
+  document.getElementById("performance-preset")?.addEventListener("change", (event) => {
+    applyPerformancePreset(event.target.value);
   });
   document.getElementById("export-dataset-recipes")?.addEventListener("click", () => {
     try {
@@ -1739,6 +2582,8 @@ function setupEvents() {
   document.getElementById("split-validation").addEventListener("input", updateAtomSizesFromFcPlan);
   document.getElementById("split-test").addEventListener("input", updateAtomSizesFromFcPlan);
   document.getElementById("md-sizes").addEventListener("input", updateDatasetPreview);
+  document.getElementById("md-dataset-table")?.addEventListener("input", updateDatasetPreview);
+  document.getElementById("random-cartesian-dataset-table")?.addEventListener("input", updateDatasetPreview);
   [
     "random-cartesian-n-structures",
     "random-cartesian-distribution",
@@ -1767,6 +2612,7 @@ async function boot() {
     venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;
   }
   updateVenvCommandPreview();
+  await loadPerformancePresets();
   await loadFcConfig();
   updateDatasetPreview();
   await pollLogs();

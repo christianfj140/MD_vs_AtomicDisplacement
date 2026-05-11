@@ -39,6 +39,35 @@ allow_graph2mat_checkpoint_globals()
 EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
 
 
+def remove_tree_with_retries(path: Path, *, attempts: int = 5) -> bool:
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(0.05 * (attempt + 1))
+    return False
+
+
+def reset_output_directory(path: Path) -> None:
+    if path.exists():
+        stale_root = path.parent / ".stale"
+        stale_root.mkdir(parents=True, exist_ok=True)
+        stale_path = stale_root / f"{path.name}.{os.getpid()}.{time.time_ns()}"
+        try:
+            path.rename(stale_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not remove_tree_with_retries(path):
+                raise
+        else:
+            remove_tree_with_retries(stale_path)
+    path.mkdir(parents=True, exist_ok=False)
+
+
 def safe_matrix_writer_class(matrix_writer_cls: type) -> type:
     class SafeMatrixWriter(matrix_writer_cls):
         def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
@@ -80,9 +109,7 @@ def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 def copy_sample_inputs(rows: list[dict[str, str]], workspace: Path) -> list[dict[str, Any]]:
     copied = []
     structs_dir = workspace / "predict_structures"
-    if structs_dir.exists():
-        shutil.rmtree(structs_dir)
-    structs_dir.mkdir(parents=True, exist_ok=True)
+    reset_output_directory(structs_dir)
     for row in rows:
         sample_id = row["sample_id"]
         sample_dir = structs_dir / sample_id
@@ -181,9 +208,7 @@ def relative_pattern(pattern: str, base: Path) -> str:
 def collect_predictions(rows: list[dict[str, Any]], workspace: Path, output_dir: Path) -> list[dict[str, Any]]:
     prediction_rows = []
     prediction_root = output_dir / "predicted_hamiltonians"
-    if prediction_root.exists():
-        shutil.rmtree(prediction_root)
-    prediction_root.mkdir(parents=True, exist_ok=True)
+    reset_output_directory(prediction_root)
     for row in rows:
         sample_id = row["sample_id"]
         source_sample_dir = workspace / "predict_structures" / sample_id

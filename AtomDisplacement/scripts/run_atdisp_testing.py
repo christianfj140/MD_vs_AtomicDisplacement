@@ -137,7 +137,7 @@ def main() -> int:
         "store_in_memory": bool(data["store_in_memory"]),
     }
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
-        datamodule_kwargs["n_matrix_components"] = int(data["n_matrix_components"])
+        datamodule_kwargs["n_matrix_components"] = int(data.get("n_matrix_components", 2))
     datamodule = MatrixDataModule(**datamodule_kwargs)
     callbacks = []
     if bool(callbacks_config["plot_matrix_error"]):

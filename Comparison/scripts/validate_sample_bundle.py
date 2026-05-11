@@ -27,6 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reference_selection import (
+    choose_reference_matrix as strict_choose_reference_matrix,
+    reference_candidates,
+)
 
 MATRIX_SUFFIXES = (".TSHS", ".HSX")
 STRUCTURE_NAMES = ("RUN.fdf",)
@@ -74,51 +78,19 @@ def find_first(path: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def matrix_sort_key(path: Path) -> tuple[int, str]:
-    numbers: list[int] = []
-    for chunk in path.stem.replace("-", ".").replace("_", ".").split("."):
-        if chunk.isdigit():
-            numbers.append(int(chunk))
-    return (numbers[-1] if numbers else 10**9, path.name)
-
-
 def find_matrix(sample_dir: Path) -> Path | None:
     matrix, _ambiguous, _count = choose_reference_matrix(sample_dir)
     return matrix
 
 
 def find_matrices(sample_dir: Path) -> list[Path]:
-    return sorted(
-        [
-            path
-            for suffix in MATRIX_SUFFIXES
-            for path in sample_dir.glob(f"*{suffix}")
-            if path.name != "ML_prediction.HSX"
-        ],
-        key=matrix_sort_key,
-    )
+    return reference_candidates(sample_dir)
 
 
 def choose_reference_matrix(sample_dir: Path) -> tuple[Path | None, bool, int]:
     """Choose TSHS over HSX; reject only multiple competing preferred files."""
-
-    tshs = sorted(
-        [path for path in sample_dir.glob("*.TSHS") if path.name != "ML_prediction.HSX"],
-        key=matrix_sort_key,
-    )
-    hsx = sorted(
-        [path for path in sample_dir.glob("*.HSX") if path.name != "ML_prediction.HSX"],
-        key=matrix_sort_key,
-    )
-    if len(tshs) == 1:
-        return tshs[0], False, len(tshs) + len(hsx)
-    if len(tshs) > 1:
-        return None, True, len(tshs) + len(hsx)
-    if len(hsx) == 1:
-        return hsx[0], False, len(hsx)
-    if len(hsx) > 1:
-        return None, True, len(hsx)
-    return None, False, 0
+    selection = strict_choose_reference_matrix(sample_dir)
+    return selection.path, selection.ambiguous, selection.candidate_count
 
 
 def system_label_from_fdf(path: Path) -> str | None:

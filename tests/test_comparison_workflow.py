@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import contextlib
+import copy
 import importlib.util
 import json
 import os
@@ -103,6 +104,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def load_metrics_module(self, name: str = "evaluate_hamiltonian_metrics_test"):
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        return self.load_module_from_path(
+            name,
+            REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py",
+        )
+
     def test_method_selection_normalization_and_validation(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
@@ -167,6 +175,39 @@ class ComparisonWorkflowTests(unittest.TestCase):
 
     def test_performance_settings_validation_env_and_config_application(self) -> None:
         module = self.load_pipeline_ui_module()
+        default_settings = module.parse_performance_settings(None)
+        self.assertEqual(default_settings["preset"], "balanced")
+        self.assertIn(default_settings["compute_accelerator"], {"cpu", "gpu"})
+        self.assertGreaterEqual(default_settings["batch_size"], 32)
+        self.assertEqual(default_settings["torch_float32_matmul_precision"], "high")
+        self.assertGreaterEqual(default_settings["max_parallel_siesta_jobs"], 1)
+        self.assertEqual(default_settings["max_parallel_dataset_jobs"], 1)
+        fake_hardware = {
+            "cpu_physical_cores": 16,
+            "cpu_logical_cores": 32,
+            "ram_total_gb": 128,
+            "cuda_available": True,
+            "gpu_name": "NVIDIA GeForce RTX 5090",
+            "gpu_vram_total_gb": 32,
+            "torch_available": True,
+            "torch_cuda_available": True,
+        }
+        catalog = module.performance_preset_catalog(fake_hardware)
+        self.assertEqual(catalog["default_preset"], "balanced")
+        self.assertIn("dynamic_gpu_focused", [item["id"] for item in catalog["dynamic_profiles"]])
+        self.assertEqual(
+            next(item for item in catalog["presets"] if item["id"] == "balanced")["settings"]["batch_size"],
+            128,
+        )
+        self.assertEqual(
+            next(item for item in catalog["presets"] if item["id"] == "gpu_focused")["settings"]["compute_accelerator"],
+            "gpu",
+        )
+        resolved, auto_settings = module.preset_settings_by_id("auto_detect", fake_hardware)
+        self.assertEqual(resolved, "balanced")
+        self.assertEqual(auto_settings["compute_accelerator"], "gpu")
+        cpu_settings = module.parse_performance_settings({"preset": "cpu_only"})
+        self.assertEqual(cpu_settings["compute_accelerator"], "cpu")
         settings = module.parse_performance_settings(
             {
                 "max_parallel_siesta_jobs": "2",
@@ -226,6 +267,68 @@ class ComparisonWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "store_in_memory"):
             module.parse_performance_settings({"store_in_memory": "maybe"})
 
+    def test_training_settings_parse_and_apply_to_pipeline_config(self) -> None:
+        module = self.load_pipeline_ui_module()
+        settings = module.parse_training_settings(
+            {
+                "max_epochs": "50",
+                "optim_lr": "0.001",
+                "batch_size": "32",
+                "num_interactions": "2",
+                "correlation": "3",
+                "max_ell": "4",
+                "hidden_irreps": "32x0e + 32x1o",
+                "loss": "graph2mat.metrics.block_type_mae",
+            }
+        )
+        config = {"training": {"data": {}, "model": {}, "trainer": {}}}
+        module.apply_training_settings_to_config(config, settings)
+        self.assertEqual(config["training"]["trainer"]["max_epochs"], 50)
+        self.assertEqual(config["training"]["data"]["batch_size"], 32)
+        self.assertEqual(config["training"]["model"]["num_interactions"], 2)
+        self.assertEqual(config["training"]["model"]["correlation"], 3)
+        self.assertEqual(config["training"]["model"]["max_ell"], 4)
+        self.assertEqual(config["training"]["model"]["hidden_irreps"], "32x0e + 32x1o")
+        self.assertEqual(config["training"]["model"]["optim_lr"], 0.001)
+        self.assertEqual(config["training"]["ui_training_settings"], settings)
+        with self.assertRaisesRegex(RuntimeError, "training_settings.max_epochs"):
+            module.parse_training_settings({"max_epochs": 0})
+        with self.assertRaisesRegex(RuntimeError, "training_settings.optim_lr"):
+            module.parse_training_settings({"optim_lr": -0.1})
+        with self.assertRaisesRegex(RuntimeError, "training_settings.max_ell"):
+            module.parse_training_settings({"max_ell": -1})
+
+    def test_md_graph2mat_training_config_excludes_ui_metadata(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
+        module = self.load_module_from_path(
+            "md_pipeline_config_render_test",
+            REPO_ROOT / "MD" / "scripts" / "md_pipeline_config.py",
+        )
+        rendered = module.render_training_config(
+            {
+                "training": {
+                    "torch_float32_matmul_precision": "high",
+                    "data": {
+                        "out_matrix": "hamiltonian",
+                        "batch_size": 4,
+                        "n_matrix_components": 2,
+                    },
+                    "model": {"optim_lr": 0.001},
+                    "trainer": {"max_epochs": 12},
+                    "optimizer": {"class_path": "Adam"},
+                    "ui_training_settings": {"max_epochs": 12, "batch_size": 4},
+                }
+            }
+        )
+        self.assertIn("data:", rendered)
+        self.assertIn("model:", rendered)
+        self.assertIn("trainer:", rendered)
+        self.assertIn("optimizer:", rendered)
+        self.assertIn("n_matrix_components: 2", rendered)
+        self.assertIn("max_epochs: 12", rendered)
+        self.assertNotIn("ui_training_settings", rendered)
+        self.assertNotIn("torch_float32_matmul_precision", rendered)
+
     def test_default_venv_command_is_repo_portable(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
@@ -247,14 +350,17 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": [11, 23, 30]}), [11, 23, 30])
         self.assertEqual(module.random_cartesian_sizes_from_options({"n_structures": "11, 23, 30"}), [11, 23, 30])
 
-    def test_dataset_recipes_parse_specs_and_reject_unverified_md_temperature(self) -> None:
+    def test_dataset_recipes_parse_specs_and_accept_md_temperature_blocks(self) -> None:
         module = self.load_pipeline_ui_module()
         recipes = {
             "md": [
                 {
                     "recipe_id": "md_plain",
                     "label": "MD plain",
-                    "blocks": [{"block_id": "md_9", "n_snapshots": 9, "seed": 1}],
+                    "blocks": [
+                        {"block_id": "md_300", "n_snapshots": 3, "temperature_K": 300, "seed": 1},
+                        {"block_id": "md_700", "n_snapshots": 6, "temperature_K": 700, "seed": 2},
+                    ],
                 }
             ],
             "random_cartesian": [
@@ -280,16 +386,267 @@ class ComparisonWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(info)
         self.assertEqual(info["md_dataset_specs"][0]["size"], 9)
-        self.assertIn("md_plain", info["md_dataset_specs"][0]["label"])
+        self.assertEqual(
+            [block["temperature_K"] for block in info["md_dataset_specs"][0]["temperature_blocks"]],
+            [300.0, 700.0],
+        )
+        self.assertEqual(
+            [block["n_snapshots"] for block in info["md_dataset_specs"][0]["temperature_blocks"]],
+            [3, 6],
+        )
+        self.assertRegex(info["md_dataset_specs"][0]["label"], r"^MD_dataset1_[A-Za-z0-9]{6}$")
         self.assertEqual(info["random_cartesian_dataset_specs"][0]["size"], 6)
         self.assertEqual(info["random_cartesian_dataset_specs"][0]["options"]["sigma_ang"], 0.03)
-        with self.assertRaisesRegex(RuntimeError, "temperatura/termostato"):
-            module.dataset_recipes_to_execution_specs(
-                {"md": [{"recipe_id": "md_300K", "blocks": [{"n_snapshots": 9, "temperature_K": 300}]}]},
-                selected_methods=["md"],
-                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
-                random_cartesian_defaults={},
+        self.assertRegex(info["random_cartesian_dataset_specs"][0]["label"], r"^RC_dataset1_[A-Za-z0-9]{6}$")
+
+    def test_composite_dataset_recipes_create_one_run_per_recipe(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.atom_fc_sample_limit = lambda _config: 100
+        recipes = {
+            "md": [
+                {
+                    "recipe_id": "md_dataset_1",
+                    "blocks": [
+                        {"n_snapshots": 3, "temperature_K": 300},
+                        {"n_snapshots": 3, "temperature_K": 500},
+                    ],
+                },
+                {
+                    "recipe_id": "md_dataset_2",
+                    "blocks": [
+                        {"n_snapshots": 6, "temperature_K": 300},
+                        {"n_snapshots": 3, "temperature_K": 700},
+                    ],
+                },
+            ],
+            "siesta_fc_cartesian": [
+                {
+                    "recipe_id": "fc_dataset_1",
+                    "blocks": [
+                        {"n_structures": 3, "displacement": "0.02 Ang"},
+                        {"n_structures": 3, "displacement": "0.04 Ang"},
+                    ],
+                }
+            ],
+            "random_cartesian": [
+                {
+                    "recipe_id": "rc_dataset_1",
+                    "blocks": [
+                        {"n_structures": 3, "max_displacement": "0.02 Ang", "seed": 11},
+                        {"n_structures": 6, "max_displacement": "0.05 Ang", "seed": 12},
+                    ],
+                }
+            ],
+        }
+        info = module.dataset_recipes_to_execution_specs(
+            recipes,
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+            split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            random_cartesian_defaults={"distribution": "gaussian", "sigma_ang": 0.03, "seed": 7},
+        )
+        self.assertEqual(len(info["md_dataset_specs"]), 2)
+        self.assertEqual([spec["size"] for spec in info["md_dataset_specs"]], [6, 9])
+        self.assertEqual(len(info["atom_dataset_specs"]), 1)
+        self.assertEqual(info["atom_dataset_specs"][0]["size"], 6)
+        self.assertEqual(len(info["atom_dataset_specs"][0]["recipe_metadata"]["blocks"]), 2)
+        self.assertEqual(len(info["random_cartesian_dataset_specs"]), 1)
+        rc_spec = info["random_cartesian_dataset_specs"][0]
+        self.assertEqual(rc_spec["size"], 9)
+        self.assertEqual(len(rc_spec["options"]["blocks"]), 2)
+        self.assertEqual(rc_spec["options"]["blocks"][0]["n_structures"], 3)
+        self.assertEqual(rc_spec["options"]["blocks"][1]["max_displacement"], "0.05 Ang")
+        self.assertEqual(len(rc_spec["recipe_metadata"]["blocks"]), 2)
+        labels = (
+            [spec["label"] for spec in info["md_dataset_specs"]]
+            + [spec["label"] for spec in info["atom_dataset_specs"]]
+            + [spec["label"] for spec in info["random_cartesian_dataset_specs"]]
+        )
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertEqual(len({label.rsplit("_", 1)[-1] for label in labels}), len(labels))
+        self.assertRegex(labels[0], r"^MD_dataset1_[A-Za-z0-9]{6}$")
+        self.assertRegex(labels[1], r"^MD_dataset2_[A-Za-z0-9]{6}$")
+        self.assertRegex(labels[2], r"^FC_dataset1_[A-Za-z0-9]{6}$")
+        self.assertRegex(labels[3], r"^RC_dataset1_[A-Za-z0-9]{6}$")
+
+    def test_fc_dataset_labels_are_compact_for_many_displacements(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.atom_fc_sample_limit = lambda _config: 100
+        blocks = [
+            {"n_structures": 3, "displacement": f"{0.01 + index * 0.005:.3f} Ang"}
+            for index in range(24)
+        ]
+        recipes = {"siesta_fc_cartesian": [{"recipe_id": "fc_many_distances", "blocks": blocks}]}
+        info = module.dataset_recipes_to_execution_specs(
+            recipes,
+            selected_methods=["siesta_fc_cartesian"],
+            split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            random_cartesian_defaults={},
+        )
+        label = info["atom_dataset_specs"][0]["label"]
+        self.assertLessEqual(len(label), module.MAX_DATASET_LABEL_LENGTH)
+        self.assertRegex(label, r"^FC_dataset1_[A-Za-z0-9]{6}$")
+        self.assertEqual(info["atom_dataset_specs"][0]["size"], 72)
+
+        displacement_options = {
+            f"{0.01 + index * 0.005:.3f} Ang": [3]
+            for index in range(24)
+        }
+        legacy_specs = module.build_fc_aligned_dataset_specs(
+            displacement_options,
+            per_displacement_limit=100,
+            split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            max_datasets=10,
+        )
+        self.assertLessEqual(len(legacy_specs[0]["label"]), module.MAX_DATASET_LABEL_LENGTH)
+        self.assertRegex(legacy_specs[0]["label"], r"^FC_dataset1_[A-Za-z0-9]{6}$")
+
+    def test_cross_evaluation_names_are_compact(self) -> None:
+        module = self.load_pipeline_ui_module()
+        long_label = "fc_" + "_".join(f"disp_{index}_0_0{index}" for index in range(30))
+        combo = {
+            "md": {
+                "dataset_label": "MD_dataset1_ABC123",
+                "dataset_short_id": "ABC123",
+                "dataset_size": 10,
+                "result_dir": "/tmp/md",
+            },
+            "siesta_fc_cartesian": {
+                "dataset_label": long_label,
+                "dataset_short_id": "DEF456",
+                "dataset_size": 72,
+                "result_dir": "/tmp/fc",
+            },
+            "random_cartesian": {
+                "dataset_label": "RC_dataset1_GHI789",
+                "dataset_short_id": "GHI789",
+                "dataset_size": 10,
+                "result_dir": "/tmp/rc",
+            },
+        }
+        pair_id = module.cross_pair_id(
+            combo,
+            ["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        cross_name = module.cross_result_name(pair_id, "random_cartesian", "test_random_cartesian")
+        self.assertRegex(pair_id, r"^cross_[0-9a-f]{12}$")
+        self.assertEqual(cross_name, f"{pair_id}__rc__on__test_rc")
+        self.assertLessEqual(len(cross_name), 48)
+        self.assertNotIn(long_label, cross_name)
+        test_set_names = {
+            module.cross_result_name(pair_id, "md", test_set)
+            for test_set in (
+                "test_md",
+                "test_siesta_fc_cartesian",
+                "test_atomdisp",
+                "test_random_cartesian",
+                "test_mixed",
             )
+        }
+        self.assertEqual(len(test_set_names), 5)
+        self.assertIn(f"{pair_id}__md__on__test_fc", test_set_names)
+        self.assertIn(f"{pair_id}__md__on__test_ad", test_set_names)
+
+    def test_common_test_set_aliases_are_deduplicated(self) -> None:
+        module = self.load_pipeline_ui_module()
+        self.assertEqual(
+            module.deduplicate_common_test_sets(
+                ["test_md", "test_siesta_fc_cartesian", "test_atomdisp", "test_mixed"]
+            ),
+            ["test_md", "test_siesta_fc_cartesian", "test_mixed"],
+        )
+        self.assertEqual(
+            module.deduplicate_common_test_sets(["test_md", "test_atomdisp", "test_mixed"]),
+            ["test_md", "test_atomdisp", "test_mixed"],
+        )
+
+    def test_prepare_cross_result_dir_resets_existing_nonempty_output(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            prediction_dir = root / "prediction"
+            prediction_sample = prediction_dir / "predicted_hamiltonians" / "sample_1"
+            prediction_sample.mkdir(parents=True)
+            (prediction_sample / "ML_prediction.HSX").write_bytes(b"prediction")
+            structure = root / "RUN.fdf"
+            hamiltonian = root / "siesta.TSHS"
+            metadata = root / "metadata.json"
+            structure.write_text("structure", encoding="utf-8")
+            hamiltonian.write_bytes(b"reference")
+            metadata.write_text("{}", encoding="utf-8")
+            manifest = root / "test_manifest.csv"
+            write_csv(
+                manifest,
+                [
+                    {
+                        "sample_id": "sample_1",
+                        "structure_path": str(structure),
+                        "hamiltonian_path": str(hamiltonian),
+                        "metadata_path": str(metadata),
+                        "status": "valid",
+                    }
+                ],
+            )
+            cross_dir = root / "cross" / "cell"
+            stale_prediction = cross_dir / "predicted_hamiltonians" / "old_sample"
+            stale_prediction.mkdir(parents=True)
+            (stale_prediction / "old.HSX").write_bytes(b"old")
+
+            counts = module.ExperimentRunner()._prepare_cross_result_dir(cross_dir, prediction_dir, manifest)
+
+            self.assertEqual(counts, {"references": 1, "structures": 1})
+            self.assertTrue((cross_dir / "predicted_hamiltonians" / "sample_1" / "ML_prediction.HSX").exists())
+            self.assertFalse(stale_prediction.exists())
+            self.assertTrue((cross_dir / "siesta_hamiltonians" / "sample_1" / "siesta.TSHS").exists())
+            self.assertTrue((cross_dir / "structures" / "sample_1" / "RUN.fdf").exists())
+
+    def test_md_fc_random_render_shared_base_and_specific_layers(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        md_module = self.load_module_from_path(
+            "md_pipeline_config_layer_test",
+            REPO_ROOT / "MD" / "scripts" / "md_pipeline_config.py",
+        )
+        atom_module = self.load_module_from_path(
+            "atom_pipeline_config_layer_test",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "pipeline_config_utils.py",
+        )
+        md_config = md_module.load_pipeline_config(REPO_ROOT / "MD" / "pipeline_config.yaml")
+        md_config["md"]["temperature_blocks"] = [
+            {"block_id": "md_300", "temperature_K": 300, "n_snapshots": 3},
+            {"block_id": "md_500", "temperature_K": 500, "n_snapshots": 2},
+        ]
+        self.assertEqual(md_module.md_total_steps(md_config), 5)
+        md_fdf = md_module.render_run_fdf(md_config, block=md_config["md"]["temperature_blocks"][0])
+        atom_config = atom_module.load_pipeline_config(REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml")
+        fc_fdf = atom_module.render_single_point_fdf(
+            atom_config,
+            positions_ang=[atom["position"] for atom in atom_config["structure"]["atoms"]],
+            atom_species=[atom["species_index"] for atom in atom_config["structure"]["atoms"]],
+            sample_id="fc_sample",
+        )
+        random_config = copy.deepcopy(atom_config)
+        random_config["structure"]["force_constants"]["enabled"] = False
+        random_fdf = atom_module.render_single_point_fdf(
+            random_config,
+            positions_ang=[atom["position"] for atom in random_config["structure"]["atoms"]],
+            atom_species=[atom["species_index"] for atom in random_config["structure"]["atoms"]],
+            sample_id="rc_sample",
+        )
+        for text in (md_fdf, fc_fdf, random_fdf):
+            self.assertIn("Generated from pipeline_config.yaml using shared RUN.fdf layers", text)
+            self.assertIn("PAO.BasisSize", text)
+            self.assertIn("MeshCutoff", text)
+            self.assertIn("XML.Write", text)
+        self.assertIn("MD.TypeOfRun", md_fdf)
+        self.assertIn("Verlet", md_fdf)
+        self.assertIn("MD.InitialTemperature", md_fdf)
+        self.assertIn("300 K", md_fdf)
+        self.assertIn("MD.TypeOfRun", fc_fdf)
+        self.assertIn("FC", fc_fdf)
+        self.assertIn("FC.Displacement", fc_fdf)
+        self.assertNotIn("FC.Displacement", md_fdf)
+        self.assertNotIn("MD.TypeOfRun", random_fdf)
+        self.assertNotIn("FC.Displacement", random_fdf)
 
     def test_legacy_payload_converts_to_dataset_recipes_without_sync(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -311,6 +668,36 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(recipes["siesta_fc_cartesian"][0]["blocks"][0]["n_structures"], 3)
         self.assertEqual([item["blocks"][0]["n_structures"] for item in recipes["random_cartesian"]], [6, 8])
 
+    def test_cleanup_generated_datasets_preserves_code_and_configs(self) -> None:
+        cleanup = self.load_module_from_path(
+            "cleanup_generated_datasets_test",
+            REPO_ROOT / "Comparison" / "scripts" / "cleanup_generated_datasets.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            (root / "MD" / "scripts").mkdir(parents=True)
+            (root / "MD" / "scripts" / "keep.py").write_text("print('keep')\n", encoding="utf-8")
+            (root / "MD" / "pipeline_config.yaml").write_text("config: keep\n", encoding="utf-8")
+            (root / "MD" / "dataset").mkdir(parents=True)
+            (root / "MD" / "dataset" / "H.psf").write_text("pseudo\n", encoding="utf-8")
+            (root / "MD" / "dataset" / "MD_steps").mkdir()
+            (root / "AtomDisplacement" / "dataset" / "FC_steps").mkdir(parents=True)
+            (root / "AtomDisplacement" / "pipeline_config.yaml").parent.mkdir(parents=True, exist_ok=True)
+            (root / "AtomDisplacement" / "pipeline_config.yaml").write_text("config: keep\n", encoding="utf-8")
+            (root / "Comparison" / "workspaces" / "run" / "md" / "dataset_3").mkdir(parents=True)
+            (root / "Comparison" / "results" / "results_md" / "dataset_3").mkdir(parents=True)
+            manifest = cleanup.cleanup_generated_datasets(root)
+            self.assertIn(str(root / "MD" / "dataset" / "MD_steps"), manifest["removed"])
+            self.assertFalse((root / "MD" / "dataset" / "MD_steps").exists())
+            self.assertFalse((root / "AtomDisplacement" / "dataset" / "FC_steps").exists())
+            self.assertFalse((root / "Comparison" / "workspaces").exists())
+            self.assertFalse((root / "Comparison" / "results" / "results_md" / "dataset_3").exists())
+            self.assertTrue((root / "MD" / "scripts" / "keep.py").exists())
+            self.assertTrue((root / "MD" / "pipeline_config.yaml").exists())
+            self.assertTrue((root / "AtomDisplacement" / "pipeline_config.yaml").exists())
+            self.assertTrue((root / "MD" / "dataset" / "H.psf").exists())
+            self.assertTrue((root / "Comparison" / "generated_dataset_cleanup_manifest.json").exists())
+
     def test_dataset_only_records_status_and_skips_cross_evaluation(self) -> None:
         module = self.load_pipeline_ui_module()
         module.STRICT_COMPARISON_MODE = False
@@ -319,12 +706,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
             module.RESULTS_ROOT = root / "results"
             module.WORKSPACES_ROOT = root / "workspaces"
             runner = module.ExperimentRunner()
-            calls = {"run_one": [], "cross": 0}
+            calls = {"run_one": [], "cross": 0, "labels": []}
             md_yaml_before = (REPO_ROOT / "MD" / "pipeline_config.yaml").read_text(encoding="utf-8")
             atom_yaml_before = (REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml").read_text(encoding="utf-8")
 
             def fake_run_one(key, size, run_id, **kwargs):
                 calls["run_one"].append((key, kwargs.get("run_mode"), kwargs.get("compute_accelerator")))
+                calls["labels"].append(kwargs.get("dataset_label"))
                 return {
                     "pipeline": key,
                     "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
@@ -369,6 +757,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 calls["run_one"],
                 [("md", "dataset_only", "gpu"), ("atom_displacement", "dataset_only", "gpu")],
             )
+            self.assertRegex(calls["labels"][0], r"^MD_dataset1_[A-Za-z0-9]{6}$")
+            self.assertRegex(calls["labels"][1], r"^FC_dataset1_[A-Za-z0-9]{6}$")
+            self.assertNotEqual(calls["labels"][0].rsplit("_", 1)[-1], calls["labels"][1].rsplit("_", 1)[-1])
             self.assertTrue(manifest["cross_evaluation"]["skipped"])
             self.assertEqual((REPO_ROOT / "MD" / "pipeline_config.yaml").read_text(encoding="utf-8"), md_yaml_before)
             self.assertEqual(
@@ -479,11 +870,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
             finally:
                 module.threading.Thread = original_thread
             self.assertEqual(status["run_id"], runner._run_id)
-            self.assertEqual(started["args"][-7], "gpu")
-            self.assertEqual(started["args"][-6], ["random_cartesian"])
-            self.assertEqual(started["args"][-5], "full_strict_pipeline")
-            self.assertEqual(started["args"][-4], {"n_structures": 3})
-            self.assertEqual(started["args"][-3]["compute_accelerator"], "gpu")
+            self.assertEqual(started["args"][-8], "gpu")
+            self.assertEqual(started["args"][-7], ["random_cartesian"])
+            self.assertEqual(started["args"][-6], "full_strict_pipeline")
+            self.assertEqual(started["args"][-5], {"n_structures": 3})
+            self.assertEqual(started["args"][-4]["compute_accelerator"], "gpu")
+            self.assertEqual(started["args"][-3], {})
             self.assertIsNone(started["args"][-2])
             self.assertIn("recipes", started["args"][-1])
 
@@ -494,6 +886,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('value="siesta_fc_cartesian"', index_html)
         self.assertIn('value="random_cartesian"', index_html)
         self.assertIn('value="random_cartesian" checked', index_html)
+        self.assertIn('class="tab hidden" data-view="run"', index_html)
+        self.assertIn('class="tab active" data-view="experiment"', index_html)
+        self.assertIn('id="view-run" class="view"', index_html)
+        self.assertIn('id="view-experiment" class="view active"', index_html)
         self.assertIn('id="random-cartesian-n-structures"', index_html)
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
@@ -502,10 +898,20 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"', app_js)
         self.assertNotIn("graph2mat-env", index_html)
         self.assertNotIn("graph2mat-env", app_js)
-        self.assertIn('id="compute-accelerator"', index_html)
+        self.assertNotIn('id="compute-accelerator"', index_html)
         self.assertIn('value="cpu"', index_html)
-        self.assertIn('value="gpu"', index_html)
+        self.assertIn('value="gpu" selected', index_html)
         self.assertIn('value="auto"', index_html)
+        self.assertIn('<option value="balanced" selected>Balanced</option>', index_html)
+        self.assertIn('<option value="auto_detect">Auto detect</option>', index_html)
+        self.assertIn('<option value="max_aggressive">Max aggressive / stress</option>', index_html)
+        self.assertIn('id="performance-batch-size" type="number" step="1" min="1" value="128"', index_html)
+        self.assertIn('id="performance-torch-num-threads" type="number" step="1" min="1" value="8"', index_html)
+        self.assertIn('<option value="high" selected>high</option>', index_html)
+        self.assertIn('<option value="true" selected>true</option>', index_html)
+        self.assertIn('id="performance-preset-description"', index_html)
+        self.assertIn('id="performance-hardware-summary"', index_html)
+        self.assertIn('id="performance-preset-warnings"', index_html)
         self.assertIn('id="performance-compute-accelerator"', index_html)
         self.assertIn('id="performance-max-parallel-siesta-jobs"', index_html)
         self.assertIn('id="performance-max-parallel-dataset-jobs"', index_html)
@@ -516,8 +922,31 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="performance-reuse-validated-siesta-outputs"', index_html)
         self.assertIn('id="performance-enable-experiment-cache"', index_html)
         self.assertIn('id="performance-error-policy"', index_html)
+        self.assertIn('id="training-max-epochs"', index_html)
+        self.assertIn('id="training-optim-lr"', index_html)
+        self.assertIn('id="training-batch-size"', index_html)
+        self.assertIn('id="training-num-interactions"', index_html)
+        self.assertIn('id="training-correlation"', index_html)
+        self.assertIn('id="training-max-ell"', index_html)
+        self.assertIn('id="training-hidden-irreps"', index_html)
+        self.assertIn('id="training-loss"', index_html)
         self.assertIn("performanceSettings()", app_js)
+        self.assertIn("trainingSettings()", app_js)
+        self.assertIn("loadPerformancePresets()", app_js)
+        self.assertIn("/api/performance-presets", app_js)
+        self.assertIn("applyPerformancePreset", app_js)
+        self.assertNotIn("experimentAccelerator", app_js)
         self.assertIn('id="sync-md-sizes"', index_html)
+        self.assertIn('id="md-dataset-editor"', index_html)
+        self.assertIn('id="md-add-dataset"', index_html)
+        self.assertIn('id="md-dataset-table"', index_html)
+        self.assertIn('id="fc-dataset-editor"', index_html)
+        self.assertIn('id="fc-add-dataset"', index_html)
+        self.assertIn('id="random-dataset-editor"', index_html)
+        self.assertIn('id="random-add-dataset"', index_html)
+        self.assertIn('id="random-cartesian-dataset-table"', index_html)
+        self.assertIn("Datasets MD: snapshots | temperatura", index_html)
+        self.assertIn("Datasets FC: snapshots | desplazamiento", index_html)
         self.assertIn('id="dataset-recipes-json"', index_html)
         self.assertIn('id="use-dataset-recipes-json"', index_html)
         self.assertIn('id="export-dataset-recipes"', index_html)
@@ -525,7 +954,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="random-cartesian-sigma-ang"', index_html)
         self.assertIn('id="random-cartesian-min-distance-ang"', index_html)
         self.assertIn("Dataset builder", index_html)
+        self.assertIn("setupDatasetEditors()", app_js)
         self.assertIn("parseDatasetRecipes()", app_js)
+        self.assertIn("parseMdDatasetTableSpecs()", app_js)
+        self.assertIn("parseMdTemperatureBlocks()", app_js)
+        self.assertIn("parseFcDatasetTableSpecs()", app_js)
+        self.assertIn("parseRandomCartesianDatasetTableSpecs()", app_js)
+        self.assertIn("syncMdTableFromSizes", app_js)
         self.assertIn("builderDatasetRecipes", app_js)
         self.assertIn("exportCurrentDatasetRecipes", app_js)
         self.assertIn("dataset_recipes: datasetRecipes", app_js)
@@ -534,6 +969,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("reuse_validated_siesta_outputs", app_js)
         self.assertIn("error_policy", app_js)
         self.assertIn("performance,", app_js)
+        self.assertIn("training_settings: training", app_js)
         self.assertIn("compute_accelerator: performance.compute_accelerator", app_js)
         self.assertIn("parseRandomCartesianOptions(methods)", app_js)
         self.assertIn("random_cartesian_options: randomCartesianOptions", app_js)
@@ -544,13 +980,43 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("results_random_cartesian", app_js)
         self.assertIn("wasRunning && !status.running && state.plotsEnabled", app_js)
         self.assertIn('id="plot-cross-selection"', index_html)
+        self.assertIn('id="plot-cross-metric"', index_html)
+        self.assertIn('<option value="all" selected>All experiments</option>', index_html)
+        self.assertIn('<option value="low_energy_rmse_eV" selected>', index_html)
         self.assertIn("selectedCrossExperimentSet(payload)", app_js)
+        self.assertIn("selectedCrossMetric", app_js)
+        self.assertIn("groupedCrossMetrics", app_js)
+        self.assertIn("No metric", app_js)
+        self.assertIn("n_finite", app_js)
+        self.assertIn("sin bandas dentro de ±2 eV de Fermi", app_js)
+        self.assertNotIn("function groupedCrossMeans", app_js)
         self.assertNotIn("function latestCrossExperiment", app_js)
         self.assertNotIn("sync_md_sizes: true", app_js)
         self.assertIn('<option value="test_random_cartesian" selected>', index_html)
         self.assertIn("crossTrainMethods(experiment)", app_js)
         self.assertIn("crossTestSets(experiment)", app_js)
         self.assertNotIn('const trainMethods = ["md", "atom_displacement"]', app_js)
+
+    def test_ui_sidebar_visible_navigation_order(self) -> None:
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        expected = [
+            'data-view="experiment"',
+            'data-view="results"',
+            'data-view="performance"',
+            'data-view="api"',
+        ]
+        positions = [index_html.index(item) for item in expected]
+        self.assertEqual(positions, sorted(positions))
+        self.assertLess(index_html.index('data-view="run"'), positions[0])
+        self.assertIn('class="tab hidden" data-view="run"', index_html)
+
+    def test_ui_plotly_traces_use_scatter_points_without_line_connections(self) -> None:
+        app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('mode: "markers"', app_js)
+        self.assertNotIn('mode: "lines+markers"', app_js)
+        self.assertNotIn("mode: 'lines+markers'", app_js)
+        self.assertNotIn('mode: "lines"', app_js)
+        self.assertNotIn("mode: 'lines'", app_js)
 
     def test_cross_prediction_command_uses_training_accelerator(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
@@ -590,6 +1056,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(runs[0]["pipeline"], "random_cartesian")
             self.assertEqual(runs[0]["label"], "Random Cartesian")
             self.assertEqual(runs[0]["means"]["sparse"]["relative_frobenius_union"], 0.25)
+            availability = runs[0]["metric_availability"]["spectral"]
+            self.assertEqual(availability["fermi_window_rmse_eV"]["n_total"], 1)
+            self.assertEqual(availability["fermi_window_rmse_eV"]["n_finite"], 0)
+            self.assertEqual(availability["low_energy_rmse_eV"]["n_total"], 1)
             archived = module.archived_results_summary()
             self.assertIn("random_cartesian", archived)
             self.assertEqual(len(archived["random_cartesian"]), 1)
@@ -599,6 +1069,48 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 results["random_cartesian"]["prediction_glob"],
                 "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
             )
+
+    def test_plot_summary_discovers_recipe_named_archived_runs(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            result_dir = (
+                module.RESULTS_ROOT
+                / "results_md"
+                / "md_md_table_1_30_md_d1_t300_1_30_30"
+                / "run_20260511_131313"
+            )
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "sparse_metrics.csv",
+                [{"sample": "27", "relative_frobenius_union": "0.12"}],
+            )
+            write_csv(
+                metrics_dir / "spectral_metrics.csv",
+                [{"sample": "27", "low_energy_rmse_eV": "0.34"}],
+            )
+            (result_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "20260511_131313",
+                        "result_dir": str(result_dir),
+                        "dataset_size": 30,
+                        "requested_dataset_size": 30,
+                        "dataset_label": "md_md_table_1_30_md_d1_t300_1_30_30",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plots = module.plot_data_summary()
+            self.assertEqual(len(plots["runs"]), 1)
+            self.assertEqual(plots["runs"][0]["pipeline"], "md")
+            self.assertEqual(plots["runs"][0]["dataset_label"], "md_md_table_1_30_md_d1_t300_1_30_30")
+            self.assertEqual(plots["runs"][0]["means"]["spectral"]["low_energy_rmse_eV"], 0.34)
+            archived = module.archived_results_summary()
+            self.assertEqual(len(archived["md"]), 1)
 
     def test_plot_summary_keeps_all_compatible_cross_experiments(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -620,6 +1132,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                             "atom_dataset_size": str(size),
                             "train_dataset_size": str(size),
                             "frontier_window_rmse_eV": "1.0",
+                            "low_energy_rmse_eV": "0.8",
                         }
                     ],
                 )
@@ -646,6 +1159,85 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 plots["default_plot_selection"]["experiment_ids"],
                 ["20260101_000001", "20260101_000002"],
             )
+            self.assertEqual(plots["default_plot_selection"]["mode"], "all")
+            availability = plots["cross_experiments"][0]["metric_availability"][0]["metrics"]
+            self.assertEqual(availability["low_energy_rmse_eV"]["n_finite"], 1)
+            self.assertEqual(availability["fermi_window_rmse_eV"]["n_finite"], 0)
+
+    def test_plot_summary_keeps_different_metric_versions_visible(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            for experiment_id, size, metric_version in (
+                ("20260101_000001", 25, "v1"),
+                ("20260101_000002", 30, "v2"),
+            ):
+                summary_dir = module.RESULTS_ROOT / experiment_id / "summary"
+                summary_dir.mkdir(parents=True)
+                write_csv(
+                    summary_dir / "cross_evaluation_metrics.csv",
+                    [
+                        {
+                            "experiment_id": experiment_id,
+                            "sample_id": "s1",
+                            "train_method": "md",
+                            "test_set": "test_mixed",
+                            "md_dataset_size": str(size),
+                            "atom_dataset_size": str(size),
+                            "train_dataset_size": str(size),
+                            "low_energy_rmse_eV": "0.5",
+                        },
+                        {
+                            "experiment_id": experiment_id,
+                            "sample_id": "s1",
+                            "train_method": "atom_displacement",
+                            "test_set": "test_mixed",
+                            "md_dataset_size": str(size),
+                            "atom_dataset_size": str(size),
+                            "train_dataset_size": str(size),
+                            "low_energy_rmse_eV": "",
+                        },
+                    ],
+                )
+                (summary_dir / "recommendation.json").write_text(
+                    json.dumps({"status": "ok", "scientific_status": "exploratory"}),
+                    encoding="utf-8",
+                )
+                module.write_yaml(
+                    module.RESULTS_ROOT / experiment_id / "experiment_manifest.yaml",
+                    {
+                        "metric_version": metric_version,
+                        "molecule_system_name": "water",
+                        "siesta_settings_hash": "same",
+                        "model_config_hash": "same",
+                        "test_sets": ["test_mixed"],
+                        "selected_methods": ["md", "siesta_fc_cartesian"],
+                    },
+                )
+
+            plots = module.plot_data_summary()
+            self.assertEqual(len(plots["cross_experiments"]), 2)
+            self.assertEqual(len(plots["compatible_experiment_groups"]), 2)
+            self.assertEqual(plots["default_plot_selection"]["mode"], "all")
+            self.assertEqual(
+                plots["default_plot_selection"]["experiment_ids"],
+                ["20260101_000001", "20260101_000002"],
+            )
+            self.assertTrue(plots["visualization_warnings"])
+            experiment_30 = next(
+                experiment
+                for experiment in plots["cross_experiments"]
+                if experiment["experiment_id"] == "20260101_000002"
+            )
+            atom_availability = next(
+                item
+                for item in experiment_30["metric_availability"]
+                if item["train_method"] == "atom_displacement"
+            )
+            self.assertEqual(atom_availability["train_dataset_size"], 30)
+            self.assertEqual(atom_availability["metrics"]["low_energy_rmse_eV"]["n_total"], 1)
+            self.assertEqual(atom_availability["metrics"]["low_energy_rmse_eV"]["n_finite"], 0)
 
     def test_repo_local_paths_do_not_raise_reproducibility_warning(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -761,6 +1353,48 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertTrue((dataset_root / "dataset_manifest.json").exists())
             self.assertTrue((dataset_root / "artifact_hashes.json").exists())
             self.assertFalse((root / "dataset" / "FC_steps").exists())
+
+    def test_random_cartesian_composite_blocks_preserve_manifest_metadata(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=5, seed=13)
+            module.PIPELINE_CONFIG["dataset_recipe"] = {
+                "recipe_id": "rc_dataset_1",
+                "recipe_label": "RC composite",
+                "generation_parameters_json": json.dumps({"blocks": ["rc_small", "rc_large"]}),
+            }
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"]["blocks"] = [
+                {
+                    "block_id": "rc_small",
+                    "label": "2 structures @ 0.02 Ang",
+                    "n_structures": 2,
+                    "max_displacement": "0.02 Ang",
+                    "seed": 21,
+                },
+                {
+                    "block_id": "rc_large",
+                    "label": "3 structures @ 0.05 Ang",
+                    "n_structures": 3,
+                    "distribution": "uniform",
+                    "max_displacement": "0.05 Ang",
+                    "seed": 22,
+                },
+            ]
+            manifest = module.generate_dataset(module.PIPELINE_CONFIG)
+            dataset_root = root / "dataset" / "RandomCartesian_steps"
+            self.assertEqual(manifest["requested_structures"], 5)
+            self.assertEqual(manifest["generated_structures"], 5)
+            self.assertEqual(len(manifest["blocks"]), 2)
+            self.assertEqual([sample["block_id"] for sample in manifest["samples"]], ["rc_small", "rc_small", "rc_large", "rc_large", "rc_large"])
+            metadata = json.loads((dataset_root / "sample_000003" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["block_id"], "rc_large")
+            self.assertEqual(metadata["sample_index_within_block"], 0)
+            self.assertEqual(metadata["block_n_structures"], 3)
+            self.assertEqual(metadata["uniform_range_ang"], 0.05)
+            run_fdf = (dataset_root / "sample_000003" / "RUN.fdf").read_text(encoding="utf-8")
+            self.assertNotIn("MD.TypeOfRun", run_fdf)
+            self.assertNotIn("FC.Displacement", run_fdf)
 
     def test_random_cartesian_different_seed_changes_geometries(self) -> None:
         module = self.load_random_cartesian_module()
@@ -980,6 +1614,41 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertTrue(rows[0]["hamiltonian_path"].endswith(".TSHS"))
+
+    def test_strict_reference_selection_rejects_ambiguous_references_and_predictions(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        module = self.load_module_from_path(
+            "reference_selection_test",
+            REPO_ROOT / "Comparison" / "scripts" / "reference_selection.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            one = root / "one"
+            one.mkdir()
+            (one / "siesta.TSHS").write_bytes(b"tshs")
+            (one / "siesta.HSX").write_bytes(b"hsx")
+            selection = module.choose_reference_matrix(one)
+            self.assertTrue(selection.ok)
+            self.assertEqual(selection.path.name, "siesta.TSHS")
+
+            many_tshs = root / "many_tshs"
+            many_tshs.mkdir()
+            (many_tshs / "a.TSHS").write_bytes(b"a")
+            (many_tshs / "b.TSHS").write_bytes(b"b")
+            self.assertFalse(module.choose_reference_matrix(many_tshs).ok)
+            self.assertTrue(module.choose_reference_matrix(many_tshs).ambiguous)
+
+            many_hsx = root / "many_hsx"
+            many_hsx.mkdir()
+            (many_hsx / "a.HSX").write_bytes(b"a")
+            (many_hsx / "b.HSX").write_bytes(b"b")
+            self.assertFalse(module.choose_reference_matrix(many_hsx).ok)
+            self.assertTrue(module.choose_reference_matrix(many_hsx).ambiguous)
+
+            prediction_only = root / "prediction_only"
+            prediction_only.mkdir()
+            (prediction_only / "ML_prediction.HSX").write_bytes(b"prediction")
+            self.assertFalse(module.choose_reference_matrix(prediction_only).ok)
 
     def test_atomdisp_training_requires_split_manifest_in_strict_mode(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
@@ -1406,6 +2075,75 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 },
             )
 
+    def test_cross_aggregation_rejects_duplicate_sample_ids_and_propagates_evaluator_errors(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            cross_root = root / "cross"
+            result_dir = cross_root / "md__on__test_md"
+            (result_dir / "metrics").mkdir(parents=True)
+            write_csv(
+                result_dir / "metrics" / "sparse_metrics.csv",
+                [
+                    {"sample": "sample_1", "relative_frobenius_union": "1.0"},
+                    {"sample": "sample_1", "relative_frobenius_union": "2.0"},
+                ],
+            )
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps({"train_method": "md", "test_set": "test_md"}),
+                encoding="utf-8",
+            )
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_dup",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary_dup"),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("duplicate sample", result.stderr + result.stdout)
+
+            shutil.rmtree(root / "cross")
+            result_dir = cross_root / "md__on__test_md"
+            (result_dir / "metrics").mkdir(parents=True)
+            write_csv(
+                result_dir / "metrics" / "sparse_metrics.csv",
+                [{"sample": "sample_1", "relative_frobenius_union": "1.0"}],
+            )
+            write_csv(
+                result_dir / "metrics" / "spectral_metrics.csv",
+                [{"sample": "sample_1", "fermi_window_rmse_eV": "0.3"}],
+            )
+            (result_dir / "metrics" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "fatal_errors": [{"sample": "sample_1", "kind": "matrix_shape_mismatch", "error": "bad shape"}],
+                        "warnings": [{"sample": "sample_1", "kind": "missing_fermi_level", "error": "no fermi"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps({"train_method": "md", "test_set": "test_md"}),
+                encoding="utf-8",
+            )
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_warn",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary_warn"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary_warn" / "cross_evaluation_metrics.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["severe_warning_status"], "severe")
+            self.assertIn("matrix_shape_mismatch", rows[0]["severe_warnings"])
+            self.assertIn("missing_fermi_level", rows[0]["severe_warnings"])
+
     def test_cross_aggregation_contains_nway_method_fields(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
@@ -1556,6 +2294,61 @@ class ComparisonWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "sin partir familias"):
                 module.split_grouped_exact(same_group, {"train": 1, "validation": 1, "test": 0})
 
+    def test_fc_zero_reference_duplicates_are_excluded_from_splits(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            samples = []
+            for index, run_id in enumerate(("fc_000_0_02_ang", "fc_001_0_03_ang", "fc_002_0_05_ang")):
+                sample = make_sample(root / "samples", f"{index:03d}")
+                (sample / "metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "generation_mode": "siesta_fc_multi_normalized_step",
+                            "raw_displacement_run_id": run_id,
+                            "raw_fc_run_dir": f"/tmp/{run_id}",
+                            "matrix_label": f"{run_id}.00000",
+                            "displacement_ang": 0.0,
+                            "displacement_input": "0 Ang",
+                            "positions_ang": [[0.0, 0.0, 0.0], [0.0, 0.7, 0.0], [0.0, -0.7, 0.0]],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                samples.append(sample)
+            for offset, axis in enumerate((1, 2, 3), start=3):
+                sample = make_sample(root / "samples", f"{offset:03d}")
+                (sample / "metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "generation_mode": "siesta_fc_multi_normalized_step",
+                            "raw_displacement_run_id": "fc_000_0_02_ang",
+                            "raw_fc_run_dir": "/tmp/fc_000_0_02_ang",
+                            "matrix_label": f"fc_000_0_02_ang.00001-{axis}",
+                            "displacement_ang": 0.02,
+                            "displacement_input": "0.02 Ang",
+                            "atom": 1,
+                            "direction": axis,
+                            "sign": 1,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                samples.append(sample)
+
+            zero_groups = {module.atom_split_group_id(sample) for sample in samples[:3]}
+            self.assertEqual(len(zero_groups), 1)
+            self.assertEqual([sample.name for sample in module.atom_visible_split_samples(samples)], ["003", "004", "005"])
+            splits = module.split_grouped_exact(samples, {"train": 1, "validation": 1, "test": 1})
+            split_names = {
+                split: {sample.name for sample in split_samples}
+                for split, split_samples in splits.items()
+            }
+            self.assertEqual(split_names["train"] | split_names["validation"] | split_names["test"], {"003", "004", "005"})
+            self.assertTrue({"000", "001", "002"}.isdisjoint(split_names["train"]))
+            self.assertTrue({"000", "001", "002"}.isdisjoint(split_names["validation"]))
+            self.assertTrue({"000", "001", "002"}.isdisjoint(split_names["test"]))
+
     def test_checkpoint_manifest_is_preferred_over_latest_checkpoint(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
         spec = importlib.util.spec_from_file_location(
@@ -1635,6 +2428,40 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
             self.assertNotEqual(recommendation["status"], "atom_displacement_conservative_win")
+
+    def test_winner_analysis_does_not_treat_atomdisp_only_win_as_generalization(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in (("md", "1.0"), ("atom_displacement", "0.1")):
+                    rows.append(
+                        {
+                            "experiment_id": "exp_atom_only",
+                            "train_method": method,
+                            "test_set": "test_atomdisp",
+                            "md_dataset_size": "3",
+                            "atom_dataset_size": "3",
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": value,
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(recommendation["status"], "atom_displacement_conservative_win")
+            self.assertIn("missing_required_cells", recommendation)
 
     def test_winner_analysis_preserves_seeds_and_marks_stability(self) -> None:
         with workspace_tempdir() as tmp:
@@ -2518,13 +3345,15 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "force_aux_cell": False,
                 "save_hs_file": True,
                 "save_hs": True,
+                "save_de": True,
+                "xml_write": True,
             }
         }
         atom = {
             "structure": {
                 "lattice_constant": 15,
                 "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
-                "force_constants": {"save_tshs": True},
+                "force_constants": {"save_tshs": True, "save_tsde": True},
                 "siesta": {
                     "ForceAuxCell": "F",
                     "Save.HS": "T",
@@ -2544,6 +3373,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     "SpinPolarized": "F",
                     "FixSpin": "F",
                     "NonCollinearSpin": "F",
+                    "XML.Write": "T",
                 },
             }
         }
@@ -2758,6 +3588,240 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("Basis files are required", script)
         self.assertIn("2 * angular_momentum + 1", script)
 
+    def test_sparse_metrics_exact_perturbation_and_support_failures(self) -> None:
+        import math
+        try:
+            import numpy as np
+            from scipy import sparse
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_sparse_test")
+
+        def matrix_data(matrix):
+            return module.MatrixData(
+                path=Path("synthetic.HSX"),
+                hamiltonian=sparse.csr_matrix(matrix),
+                overlap=None,
+                own_eigenvalues=np.asarray([], dtype=float),
+                fermi_level=0.0,
+                fermi_level_source="siesta_file",
+                orthogonal=True,
+                has_overlap=False,
+                overlap_error=None,
+            )
+
+        reference = matrix_data([[1.0, 2.0], [0.0, 4.0]])
+        exact = module.sparse_metrics("exact", reference, matrix_data([[1.0, 2.0], [0.0, 4.0]]))
+        self.assertEqual(exact["mae_union_eV"], 0.0)
+        self.assertEqual(exact["rmse_union_eV"], 0.0)
+        self.assertEqual(exact["support_f1"], 1.0)
+
+        perturbed = module.sparse_metrics("perturbed", reference, matrix_data([[1.5, 0.0], [3.0, 4.0]]))
+        self.assertEqual(perturbed["false_zeros"], 1)
+        self.assertEqual(perturbed["false_nonzeros"], 1)
+        self.assertAlmostEqual(perturbed["weighted_false_zeros_eV"], 2.0)
+        self.assertAlmostEqual(perturbed["weighted_false_nonzeros_eV"], 3.0)
+        self.assertAlmostEqual(perturbed["mae_union_eV"], (0.5 + 2.0 + 3.0) / 4.0)
+        self.assertAlmostEqual(perturbed["rmse_union_eV"], math.sqrt((0.5**2 + 2.0**2 + 3.0**2) / 4.0))
+
+        non_hermitian = module.sparse_metrics("nonhermitian", reference, matrix_data([[1.0, 5.0], [0.0, 4.0]]))
+        self.assertGreater(non_hermitian["hermiticity_pred"], 0.0)
+
+    def test_metric_compatibility_blocks_shape_overlap_and_components(self) -> None:
+        try:
+            import numpy as np
+            from scipy import sparse
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_compat_test")
+
+        def matrix_data(values, *, orthogonal=True, overlap=None, component_count=1, spin_kind=None):
+            return module.MatrixData(
+                path=Path("synthetic.HSX"),
+                hamiltonian=sparse.diags(values, format="csr"),
+                overlap=overlap,
+                own_eigenvalues=np.asarray(values, dtype=float),
+                fermi_level=0.0,
+                fermi_level_source="siesta_file",
+                orthogonal=orthogonal,
+                has_overlap=overlap is not None,
+                overlap_error="missing overlap" if overlap is None else None,
+                component_count=component_count,
+                spin_kind=spin_kind,
+            )
+
+        shape_errors = module.matrix_compatibility_errors("shape", matrix_data([0.0, 1.0]), matrix_data([0.0, 1.0, 2.0]))
+        self.assertIn("matrix_shape_mismatch", {error["kind"] for error in shape_errors})
+
+        overlap_errors = module.matrix_compatibility_errors("overlap", matrix_data([0.0, 1.0], orthogonal=False), matrix_data([0.0, 1.0]))
+        self.assertIn("missing_required_overlap", {error["kind"] for error in overlap_errors})
+
+        component_errors = module.matrix_compatibility_errors("components", matrix_data([0.0, 1.0], component_count=2), matrix_data([0.0, 1.0]))
+        self.assertIn("unsupported_matrix_components", {error["kind"] for error in component_errors})
+
+        graph2mat_reference = matrix_data(
+            [0.0, 1.0],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            component_count=1,
+            spin_kind="Spin{unpolarized}",
+        )
+        graph2mat_prediction = matrix_data(
+            [0.1, 1.2],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            component_count=2,
+            spin_kind="Spin{polarized}",
+        )
+        auxiliary_errors = module.matrix_compatibility_errors(
+            "graph2mat_auxiliary",
+            graph2mat_reference,
+            graph2mat_prediction,
+        )
+        self.assertNotIn("unsupported_matrix_components", {error["kind"] for error in auxiliary_errors})
+        self.assertNotIn("spin_state_mismatch", {error["kind"] for error in auxiliary_errors})
+        auxiliary_warnings = module.matrix_compatibility_warnings(
+            "graph2mat_auxiliary",
+            graph2mat_reference,
+            graph2mat_prediction,
+        )
+        self.assertIn("graph2mat_auxiliary_component_ignored", {warning["kind"] for warning in auxiliary_warnings})
+
+    def test_missing_fermi_does_not_infer_frontier_or_gap(self) -> None:
+        try:
+            import numpy as np
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_no_fermi_test")
+        _rows, metrics = module.eigen_error_metrics(
+            np.asarray([-2.0, -1.0, 1.0, 2.0], dtype=float),
+            np.asarray([-2.1, -0.5, 2.0, 3.0], dtype=float),
+            None,
+            "unavailable",
+        )
+        self.assertEqual(metrics["occupied_bands"], 0)
+        self.assertEqual(metrics["frontier_window_bands"], 0)
+        self.assertTrue(np.isnan(metrics["frontier_window_rmse_eV"]))
+        self.assertTrue(np.isnan(metrics["gap_abs_error_eV"]))
+
+    def test_evaluate_sample_status_records_reference_hash(self) -> None:
+        try:
+            import numpy as np
+            from scipy import sparse
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_status_test")
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            pred_dir = root / "predicted" / "sample_1"
+            ref_dir = root / "siesta" / "sample_1"
+            pred_dir.mkdir(parents=True)
+            ref_dir.mkdir(parents=True)
+            pred_path = pred_dir / "ML_prediction.HSX"
+            ref_path = ref_dir / "siesta.TSHS"
+            pred_path.write_bytes(b"prediction")
+            ref_path.write_bytes(b"reference")
+
+            def fake_read_matrix(path: Path):
+                values = [0.0, 1.0]
+                return module.MatrixData(
+                    path=path,
+                    hamiltonian=sparse.diags(values, format="csr"),
+                    overlap=None,
+                    own_eigenvalues=np.asarray(values, dtype=float),
+                    fermi_level=0.5,
+                    fermi_level_source="siesta_file",
+                    orthogonal=True,
+                    has_overlap=False,
+                    overlap_error=None,
+                    sha256=module.file_sha256(path),
+                )
+
+            original = module.read_matrix
+            module.read_matrix = fake_read_matrix
+            try:
+                rows = module.evaluate_sample(
+                    "sample_1",
+                    pred_dir,
+                    ref_dir,
+                    root,
+                    {},
+                    low_energy_enabled=False,
+                    low_energy_n_states=2,
+                    low_energy_alignment="none",
+                )
+            finally:
+                module.read_matrix = original
+            status = rows["sample_status"][0]
+            self.assertEqual(status["status"], "warning")
+            self.assertEqual(status["reference_kind"], ".TSHS")
+            self.assertEqual(status["reference_sha256"], module.file_sha256(ref_path))
+            self.assertEqual(rows["fatal_errors"], [])
+
+    def test_md_post_siesta_run_fdf_timestamp_is_warning_only(self) -> None:
+        try:
+            import numpy  # noqa: F401
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_md_mtime_test")
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample_dir = root / "structures" / "1"
+            sample_dir.mkdir(parents=True)
+            reference_path = root / "siesta.TSHS"
+            structure_path = sample_dir / "RUN.fdf"
+            reference_path.write_bytes(b"reference")
+            minimal_run_fdf(structure_path)
+            os.utime(reference_path, (100.0, 100.0))
+            os.utime(structure_path, (200.0, 200.0))
+
+            non_md_issue = module.stale_reference_issue(
+                "1",
+                reference_path,
+                structure_path,
+                method_id="siesta_fc_cartesian",
+            )
+            self.assertIsNotNone(non_md_issue)
+            self.assertEqual(non_md_issue["kind"], "stale_reference_matrix")
+            self.assertEqual(non_md_issue["severity"], "fatal")
+
+            md_issue = module.stale_reference_issue(
+                "1",
+                reference_path,
+                structure_path,
+                method_id="md",
+            )
+            self.assertIsNotNone(md_issue)
+            self.assertEqual(md_issue["kind"], "md_post_siesta_run_fdf_mtime")
+            self.assertEqual(md_issue["severity"], "warning")
+
+            (sample_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "method": "md",
+                        "run_fdf_rewritten_from_xv": True,
+                        "run_fdf_geometry_source": "siesta.XV",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cross_md_issue = module.stale_reference_issue(
+                "md_1",
+                reference_path,
+                structure_path,
+                method_id="",
+            )
+            self.assertIsNotNone(cross_md_issue)
+            self.assertEqual(cross_md_issue["kind"], "md_post_siesta_run_fdf_mtime")
+            self.assertEqual(cross_md_issue["severity"], "warning")
+            self.assertEqual(cross_md_issue["method_id"], "md")
+
     def test_low_energy_metrics_from_synthetic_diagonal_hamiltonians(self) -> None:
         try:
             import numpy as np
@@ -2879,6 +3943,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("low_energy_rmse_eV", app_js)
         self.assertIn("low_energy_mae_eV", metrics_doc)
         self.assertIn("A lower matrix MAE/RMSE does not necessarily imply a better", metrics_doc)
+        self.assertNotIn("CROSS_METRIC_FALLBACKS", app_js)
+        self.assertIn("no se sustituye", app_js)
+        self.assertIn('"fermi_window_rmse_eV"', app_js)
 
     def test_strict_ui_does_not_allow_missing_atomdisp_matrices(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
@@ -2895,6 +3962,23 @@ class ComparisonWorkflowTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("write_checkpoint_manifest", text, str(path))
             self.assertIn("selection_metric", text, str(path))
+
+    def test_hamiltonian_prediction_uses_graph2mat_nonorthogonal_component_defaults(self) -> None:
+        for path in (
+            REPO_ROOT / "MD" / "pipeline_config.yaml",
+            REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml",
+        ):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("n_matrix_components: 2", text, str(path))
+
+        for path in (
+            REPO_ROOT / "MD" / "scripts" / "run_md_testing.py",
+            REPO_ROOT / "MD" / "scripts" / "run_md_prediction.py",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "run_atdisp_testing.py",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "run_atdisp_prediction.py",
+        ):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn('get("n_matrix_components", 2)', text, str(path))
 
     def test_ui_records_nested_subset_metadata_and_warnings(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
@@ -2940,6 +4024,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 module.rewrite_run_fdf_from_xv(sample_dir / "RUN.fdf", sample_dir / "siesta.XV")
+                self.assertIn(
+                    module.MD_RUN_FDF_XV_MARKER,
+                    sample_dir.joinpath("RUN.fdf").read_text(encoding="utf-8"),
+                )
                 signatures.append(module.effective_fdf_geometry_signature(sample_dir / "RUN.fdf"))
             self.assertNotEqual(signatures[0], signatures[1])
 

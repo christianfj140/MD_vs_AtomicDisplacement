@@ -22,6 +22,7 @@ from typing import Any
 
 METHOD_MD = "md"
 METHOD_ATOM = "atom_displacement"
+DEFAULT_BINARY_TEST_SETS = {"test_md", "test_atomdisp", "test_mixed"}
 METHOD_ALIASES = {
     "siesta_fc_cartesian": METHOD_ATOM,
     "atomdisp": METHOD_ATOM,
@@ -648,6 +649,8 @@ def build_recommendation(
         }
     )
     required_test_sets = set(test_sets)
+    if {METHOD_MD, METHOD_ATOM}.issubset(set(methods)) and required_test_sets.issubset(DEFAULT_BINARY_TEST_SETS):
+        required_test_sets = set(DEFAULT_BINARY_TEST_SETS)
     required_cells = {
         (method, test_set)
         for method in methods
@@ -692,6 +695,9 @@ def build_recommendation(
         }
     )
     allowed_test_sets = set(test_sets)
+    conservative_win_test_sets = {test_set for test_set in allowed_test_sets if test_set in {"test_md", "test_mixed"}}
+    if not conservative_win_test_sets:
+        conservative_win_test_sets = set()
     primary_summary = [
         row
         for row in summary_rows
@@ -707,14 +713,14 @@ def build_recommendation(
         summary_rows,
         primary_metric,
         METHOD_ATOM,
-        allowed_test_sets=allowed_test_sets,
+        allowed_test_sets=conservative_win_test_sets,
         minimum_robust_seeds=minimum_robust_seeds,
     )
     first_md_size = first_method_win(
         summary_rows,
         primary_metric,
         METHOD_MD,
-        allowed_test_sets=allowed_test_sets,
+        allowed_test_sets=conservative_win_test_sets,
         minimum_robust_seeds=minimum_robust_seeds,
     )
     first_atom_compute = first_compute_method_win(
@@ -726,7 +732,7 @@ def build_recommendation(
         summary_rows,
         primary_metric,
         METHOD_ATOM,
-        allowed_test_sets=allowed_test_sets,
+        allowed_test_sets=conservative_win_test_sets,
         minimum_robust_seeds=minimum_robust_seeds,
     )
     first_md_compute = first_compute_method_win(
@@ -738,7 +744,7 @@ def build_recommendation(
         summary_rows,
         primary_metric,
         METHOD_MD,
-        allowed_test_sets=allowed_test_sets,
+        allowed_test_sets=conservative_win_test_sets,
         minimum_robust_seeds=minimum_robust_seeds,
     )
     atom_only_wins = [
@@ -899,7 +905,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metrics-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--primary-metric", default="frontier_window_rmse_eV")
+    parser.add_argument("--primary-metric", default="fermi_window_rmse_eV")
     parser.add_argument("--minimum-robust-seeds", type=int, default=3)
     parser.add_argument("--higher-is-better", action="store_true")
     parser.add_argument(

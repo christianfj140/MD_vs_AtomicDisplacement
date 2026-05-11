@@ -27,3 +27,5 @@ NonCollinearSpin: F
 ForceAuxCell: T
 Save.HS: T
 TS.HS.Save: T
+TS.DE.Save: T
+XML.Write: T

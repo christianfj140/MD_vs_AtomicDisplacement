@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,11 @@ except ImportError as exc:  # pragma: no cover - depends on runtime environment.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "pipeline_config.yaml"
 GENERATED_HEADER = "# Generated from ../pipeline_config.yaml\n"
+SHARED_DIR = PROJECT_ROOT.parent / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from siesta_run_fdf import render_common_run_fdf, render_fc_layer
 
 
 def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -157,77 +163,29 @@ def render_fdf(
     system_label = system_label or structure["relaxation"]["system_label"]
     system_name = system_name or structure["relaxation"]["system_name"]
 
-    lines = [
-        GENERATED_HEADER.rstrip(),
-        f"# {header}",
-        "",
-        f"SystemName   {system_name}",
-        f"SystemLabel  {system_label}",
-        "",
-        f"NumberOfSpecies  {len(species)}",
-        f"NumberOfAtoms    {len(atom_species)}",
-        "",
-        "%block ChemicalSpeciesLabel",
-    ]
-    for index, (atomic_number, symbol) in sorted(species.items()):
-        lines.append(f" {index:>1}  {atomic_number:>2}  {symbol}")
-    lines.extend(
-        [
-            "%endblock ChemicalSpeciesLabel",
-            "",
-            f"LatticeConstant  {structure['lattice_constant']['value']} {structure['lattice_constant']['unit']}",
-            "%block LatticeVectors",
-        ]
-    )
-    for vector in structure["lattice_vectors"]:
-        lines.append(f" {_format_float(vector[0])}   {_format_float(vector[1])}   {_format_float(vector[2])}")
-    lines.extend(
-        [
-            "%endblock LatticeVectors",
-            "",
-            f"AtomicCoordinatesFormat {structure['coordinates_format']}",
-            "%block AtomicCoordinatesAndAtomicSpecies",
-        ]
-    )
-    for position, species_index in zip(positions, atom_species):
-        lines.append(
-            f" {_format_float(position[0])}  {_format_float(position[1])}  "
-            f"{_format_float(position[2])}  {species_index}  # {species[species_index][1]}"
-        )
-    lines.extend(["%endblock AtomicCoordinatesAndAtomicSpecies", "", "%block kgrid_Monkhorst_Pack"])
-    for row in structure["kgrid_monkhorst_pack"]:
-        lines.append(f" {row[0]}  {row[1]}  {row[2]}  {row[3]}")
-    lines.extend(["%endblock kgrid_Monkhorst_Pack", ""])
-
     siesta = dict(structure["siesta"])
     if not include_relaxation:
         siesta.update(structure.get("single_point_overrides", {}))
-    for key, value in siesta.items():
-        lines.append(f"{key:<32} {_format_value(value)}")
+    text = render_common_run_fdf(
+        system_name=system_name,
+        system_label=system_label,
+        lattice_constant=structure["lattice_constant"],
+        lattice_vectors=structure["lattice_vectors"],
+        species=structure["species"],
+        coordinates_format=structure["coordinates_format"],
+        positions=positions,
+        atom_species=atom_species,
+        kgrid_monkhorst_pack=structure.get("kgrid_monkhorst_pack"),
+        siesta_settings=siesta,
+        header=header,
+    )
+    lines = text.rstrip().splitlines()
     if include_relaxation:
         lines.append("")
         for key, value in structure["relaxation_md"].items():
             lines.append(f"{key:<32} {_format_value(value)}")
     elif bool(structure.get("force_constants", {}).get("enabled", False)):
-        force_constants = dict(structure["force_constants"])
-        first_atom = int(force_constants.get("first_atom", 1))
-        last_atom = force_constants.get("last_atom")
-        if last_atom is None:
-            last_atom = len(atom_species)
-        lines.append("")
-        if "lua_script" in force_constants:
-            lines.append(f"{'Lua.Script':<32} {force_constants['lua_script']}")
-        lines.append(f"{'TS.HS.Save':<32} {_format_value(force_constants.get('save_tshs', True))}")
-        lines.append(f"{'TS.DE.Save':<32} {_format_value(force_constants.get('save_tsde', True))}")
-        lines.append(f"{'MD.TypeOfRun':<32} FC")
-        lines.append(f"{'FC.Displacement':<32} {force_constants['displacement']}")
-        lines.append(f"{'FC.First':<32} {first_atom}")
-        lines.append(f"{'FC.Last':<32} {int(last_atom)}")
-        lines.append(f"{'FC.Save.dHS':<32} {_format_value(force_constants.get('save_dhs', True))}")
-        if "dHdR_tolerance" in force_constants:
-            lines.append(f"{'FC.dHdR.Tolerance':<32} {force_constants['dHdR_tolerance']}")
-        if "dSdR_tolerance" in force_constants:
-            lines.append(f"{'FC.dSdR.Tolerance':<32} {force_constants['dSdR_tolerance']}")
+        lines.extend(render_fc_layer(dict(structure["force_constants"]), len(atom_species)).splitlines())
     return "\n".join(lines) + "\n"
 
 

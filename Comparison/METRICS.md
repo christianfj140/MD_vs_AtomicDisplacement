@@ -15,6 +15,18 @@ The evaluator loads both matrices with `sisl`, compares the predicted
 Hamiltonian against the SIESTA reference, writes per-sample CSV files under
 `metrics/`, and writes a JSON manifest with summaries and explicit errors.
 
+Reference selection is fail-closed and shared by validation, archiving, legacy
+eigenvalue extraction, and the metrics evaluator:
+
+- exactly one non-predicted `.TSHS` is preferred;
+- if no `.TSHS` exists, exactly one non-predicted `.HSX` is allowed;
+- multiple `.TSHS` files, multiple fallback `.HSX` files, and any
+  `ML_prediction.HSX` reference candidate are rejected.
+
+`metrics/manifest.json` records `reference_selection_policy`, `fatal_errors`,
+`warnings`, `samples_failed`, and per-sample `sample_status` rows containing the
+selected reference/prediction paths and SHA256 hashes.
+
 The UI endpoint `/api/plots` reads those archived CSV files for both
 `results_md` and `results_atomdisp`. If a manifest contains an absolute path
 from another OS, the UI falls back to the archive directory beside the manifest.
@@ -83,8 +95,7 @@ Reported metrics include:
 - `gap_ref_eV`, `gap_pred_eV`, `gap_abs_error_eV`: gap metrics around the SIESTA
   Fermi level.
 - `homo_error_eV`, `lumo_error_eV`, `frontier_window_rmse_eV`: frontier orbital
-  diagnostics. If the Fermi level is unavailable, a molecule fallback uses the
-  central occupied/unoccupied index split as an explicit approximation.
+  diagnostics when a real SIESTA Fermi level identifies HOMO/LUMO levels.
 - Alignment diagnostics are additionally reported and never overwrite raw errors:
   `align_global_shift_eV`, `align_global_mae_eV`, `align_global_rmse_eV`,
   `align_fermi_*`, and `align_homo_*`.
@@ -96,7 +107,9 @@ solved with the SIESTA reference overlap when overlap is available, so both
 spectra use the same generalized eigenproblem `H c = E S c`. If the reference
 Hamiltonian is non-orthogonal and no supported overlap can be read, the
 low-energy metrics are left unavailable and `low_energy_warning` records the
-reason. The evaluator does not invent an identity overlap.
+reason. Metric-time validation treats an invalid or missing required overlap as
+a fatal evaluator error for strict comparisons; the evaluator does not invent an
+identity overlap.
 
 Configuration defaults are equivalent to:
 
@@ -122,7 +135,14 @@ Important: near-Fermi, occupied-band, and gap metrics require a real Fermi level
 read from the SIESTA reference file. The evaluator does not estimate or infer a
 Fermi level. If SIESTA does not provide one, those metrics are left unavailable,
 `fermi_level_source` is set to `unavailable`, and the manifest records a
-`missing_fermi_level` error for that sample.
+nonfatal `missing_fermi_level` warning for that sample. This warning still
+blocks winner claims whenever the unavailable Fermi-dependent metric is the
+selected primary metric.
+
+Metric-time compatibility gates require identical Hamiltonian shapes and a
+single supported matrix component. Complex Hamiltonian values are preserved
+rather than cast to real values. Obvious unsupported multi-component matrices
+are rejected until spin/k/component-aware metrics are implemented.
 
 ## DOS Metrics
 
@@ -149,6 +169,7 @@ Per sample it records:
 - `mae_ref_eV`, `rmse_ref_eV`, `rmse_union_eV`
 - `support_f1`
 - `global_rmse_eV`
+- `low_energy_rmse_eV`
 - `fermi_window_rmse_eV` when a real SIESTA Fermi level exists
 - `gap_abs_error_eV` when a real SIESTA Fermi level exists
 
@@ -172,8 +193,9 @@ MAE can still fail to improve frontier eigenvalues, gap, or DOS, so the report
 keeps matrix, spectral, near-Fermi, DOS, and matrix-spectrum relationship
 metrics separate.
 
-For physical conclusions the UI/winner analysis should prefer, in order of
-availability:
+For physical conclusions the UI/winner analysis uses the selected primary metric
+authoritatively and does not silently substitute another metric when the primary
+metric is missing. The recommended primary order is:
 
 1. `fermi_window_rmse_eV`
 2. `occupied_rmse_eV`
@@ -188,6 +210,12 @@ aggregation is only produced when explicitly requested with
 `scientific_status: exploratory`; `robust_comparison` requires at least three
 seeds, complete 2x3 cross evaluation, a complete primary metric, and no severe
 warnings.
+
+AtomDisplacement wins only on `test_atomdisp` are treated as
+distribution-specific diagnostics, not cross-generalization winners. A
+conservative MD-vs-AtomDisplacement winner must win on `test_md` and/or
+`test_mixed` with the same frozen references, enough seeds, a complete primary
+metric, and no severe warnings.
 
 Winner recommendations are marked `inconclusive` when machine-readable
 validation warnings are present in the aggregated cross metrics, including
@@ -205,8 +233,8 @@ invented numbers.
 Before a sample is considered scientifically valid, strict validation requires:
 
 - `RUN.fdf`
-- a non-predicted Hamiltonian reference; `.TSHS` is preferred over `.HSX`
-  when both are present from the same SIESTA run
+- a non-predicted Hamiltonian reference following the shared strict reference
+  policy above
 - `RUN.out`
 - SIESTA `Job completed`
 - `SCF cycle converged`

@@ -63,14 +63,36 @@ def finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(float(value))
 
 
-def join_by_sample(*groups: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def join_by_sample(*groups: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
     joined: dict[str, dict[str, Any]] = {}
+    duplicate_errors: list[str] = []
     for rows in groups:
+        seen_in_group: set[str] = set()
         for row in rows:
             sample = str(row.get("sample"))
+            if sample in seen_in_group:
+                duplicate_errors.append(f"duplicate sample row {sample!r}")
+            seen_in_group.add(sample)
             joined.setdefault(sample, {})
             joined[sample].update(row)
-    return joined
+    return joined, sorted(set(duplicate_errors))
+
+
+def issue_messages(items: Any) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    messages = []
+    for item in items:
+        if isinstance(item, dict):
+            sample = item.get("sample")
+            kind = item.get("kind")
+            error = item.get("error")
+            parts = [str(part) for part in (sample, kind, error) if part not in (None, "", False)]
+            if parts:
+                messages.append(":".join(parts))
+        elif item not in (None, "", False):
+            messages.append(str(item))
+    return messages
 
 
 def infer_metadata(path: Path) -> tuple[str, str]:
@@ -95,20 +117,18 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
         manifest = {"train_method": train_method, "test_set": test_set}
     prediction_summary = read_json(result_dir / "prediction_summary.json")
     evaluation_manifest = read_json(metrics_root / "manifest.json")
-    joined = join_by_sample(sparse, spectral, dos)
+    joined, duplicate_errors = join_by_sample(sparse, spectral, dos)
+    if duplicate_errors:
+        raise RuntimeError(f"{result_dir}: duplicate sample ids in metric CSVs: {' | '.join(duplicate_errors)}")
     evaluation_warning = manifest.get("evaluation_warning")
-    low_energy_warnings = sorted(
-        {
-            str(item.get("error"))
-            for item in evaluation_manifest.get("errors", [])
-            if isinstance(item, dict)
-            and item.get("kind") == "low_energy_metrics"
-            and item.get("error")
-        }
+    evaluation_messages = (
+        duplicate_errors
+        + issue_messages(evaluation_manifest.get("fatal_errors"))
+        + issue_messages(evaluation_manifest.get("warnings"))
     )
-    if low_energy_warnings:
+    if evaluation_messages:
         warning_parts = [str(evaluation_warning)] if evaluation_warning else []
-        warning_parts.extend(low_energy_warnings)
+        warning_parts.extend(evaluation_messages)
         evaluation_warning = " | ".join(warning_parts)
     rows = []
     for sample, row in sorted(joined.items()):

@@ -19,6 +19,10 @@ import scipy.stats
 from scipy import sparse
 import sisl
 
+from reference_selection import REFERENCE_SELECTION_POLICY
+from reference_selection import choose_reference_matrix
+from reference_selection import file_sha256
+
 
 SUPPORT_THRESHOLD = 1e-12
 SUPPORT_THRESHOLDS_SWEEP = [1e-12, 1e-10, 1e-8, 1e-6]
@@ -41,6 +45,9 @@ class MatrixData:
     orthogonal: bool
     has_overlap: bool
     overlap_error: str | None
+    sha256: str | None = None
+    component_count: int = 1
+    spin_kind: str | None = None
 
 
 def json_safe(value: Any) -> Any:
@@ -91,6 +98,157 @@ def find_prediction(sample_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def sample_status_row(
+    sample: str,
+    *,
+    prediction_path: Path | None,
+    reference_path: Path | None,
+    errors: list[dict[str, Any]],
+    warnings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    status = "failed" if errors else "warning" if warnings else "ok"
+    return {
+        "sample": sample,
+        "status": status,
+        "prediction_path": str(prediction_path) if prediction_path else None,
+        "prediction_sha256": file_sha256(prediction_path),
+        "reference_path": str(reference_path) if reference_path else None,
+        "reference_sha256": file_sha256(reference_path),
+        "reference_kind": reference_path.suffix if reference_path else None,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def append_issue(
+    rows: dict[str, list[dict[str, Any]]],
+    target: str,
+    *,
+    sample: str,
+    kind: str,
+    message: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    issue = {"sample": sample, "kind": kind, "error": message, **extra}
+    rows[target].append(issue)
+    return issue
+
+
+def result_method_id(result_dir: Path) -> str:
+    fallback = result_method_id_from_path(result_dir)
+    manifest_path = result_dir / "manifest.json"
+    if not manifest_path.exists():
+        return fallback
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    method_id = str(payload.get("method_id") or payload.get("pipeline") or "").strip().lower()
+    return method_id or fallback
+
+
+def result_method_id_from_path(result_dir: Path) -> str:
+    parts = {part.lower() for part in result_dir.parts}
+    if "results_md" in parts:
+        return "md"
+    if "results_random_cartesian" in parts:
+        return "random_cartesian"
+    if "results_atomdisp" in parts:
+        return "siesta_fc_cartesian"
+    return ""
+
+
+def sample_structure_metadata(structure_path: Path) -> dict[str, Any]:
+    metadata_path = structure_path.parent / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def sample_method_id(structure_path: Path, fallback: str = "") -> str:
+    metadata = sample_structure_metadata(structure_path)
+    method_id = str(
+        metadata.get("method")
+        or metadata.get("method_id")
+        or metadata.get("source_method")
+        or metadata.get("pipeline")
+        or ""
+    ).strip().lower()
+    if method_id == "atom_displacement":
+        method_id = "siesta_fc_cartesian"
+    return method_id or fallback.strip().lower()
+
+
+def md_run_fdf_geometry_materialized(structure_path: Path) -> bool:
+    metadata = sample_structure_metadata(structure_path)
+    if metadata and (
+        metadata.get("run_fdf_rewritten_from_xv") is True
+        or str(metadata.get("run_fdf_geometry_source") or "").lower() == "siesta.xv"
+    ):
+        return True
+    try:
+        text = structure_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+    return "Graph2Mat MD geometry materialized from siesta.XV" in text
+
+
+def stale_reference_issue(
+    sample: str,
+    reference_path: Path | None,
+    structure_path: Path,
+    *,
+    method_id: str = "",
+) -> dict[str, Any] | None:
+    if reference_path is None or not structure_path.exists():
+        return None
+    try:
+        if reference_path.stat().st_mtime < structure_path.stat().st_mtime:
+            normalized_method = sample_method_id(structure_path, method_id)
+            materialized_from_xv = md_run_fdf_geometry_materialized(structure_path)
+            if normalized_method == "md" or materialized_from_xv:
+                return {
+                    "sample": sample,
+                    "kind": "md_post_siesta_run_fdf_mtime",
+                    "severity": "warning",
+                    "error": (
+                        "SIESTA reference matrix is older than RUN.fdf, but this MD "
+                        "workflow materializes per-frame RUN.fdf geometries from siesta.XV "
+                        "after SIESTA. Timestamp ordering is treated as nonfatal for MD."
+                    ),
+                    "reference_path": str(reference_path),
+                    "structure_path": str(structure_path),
+                    "method_id": normalized_method or method_id,
+                    "run_fdf_geometry_source": "siesta.XV" if materialized_from_xv else "md_pipeline_assumed",
+                }
+            return {
+                "sample": sample,
+                "kind": "stale_reference_matrix",
+                "severity": "fatal",
+                "error": "SIESTA reference matrix is older than the archived RUN.fdf structure.",
+                "reference_path": str(reference_path),
+                "structure_path": str(structure_path),
+                "method_id": normalized_method or method_id,
+            }
+    except OSError as exc:
+        return {
+            "sample": sample,
+            "kind": "reference_staleness_check",
+            "severity": "fatal",
+            "error": str(exc),
+            "reference_path": str(reference_path) if reference_path else None,
+            "structure_path": str(structure_path),
+            "method_id": method_id,
+        }
+    return None
+
+
 def evaluate_sample(
     sample: str,
     prediction_dir: Path | None,
@@ -98,6 +256,7 @@ def evaluate_sample(
     result_dir: Path,
     basis_counts: dict[str, int],
     *,
+    method_id: str = "",
     low_energy_enabled: bool,
     low_energy_n_states: int,
     low_energy_alignment: str,
@@ -114,24 +273,91 @@ def evaluate_sample(
         "distance_bin": [],
         "structural_unavailable": [],
         "errors": [],
+        "fatal_errors": [],
+        "warnings": [],
+        "sample_status": [],
     }
+    sample_errors: list[dict[str, Any]] = []
+    sample_warnings: list[dict[str, Any]] = []
     predicted_path = find_prediction(prediction_dir) if prediction_dir is not None else None
-    reference_path = find_reference(reference_dir) if reference_dir is not None else None
-    if predicted_path is None or reference_path is None:
-        rows["errors"].append(
-            {
-                "sample": sample,
-                "kind": "input",
-                "error": "Missing predicted or reference Hamiltonian.",
-            }
+    reference_selection = choose_reference_matrix(reference_dir) if reference_dir is not None else None
+    reference_path = reference_selection.path if reference_selection and reference_selection.ok else None
+    if predicted_path is None:
+        sample_errors.append(
+            append_issue(
+                rows,
+                "fatal_errors",
+                sample=sample,
+                kind="missing_prediction",
+                message="Missing predicted Hamiltonian.",
+            )
+        )
+    if reference_selection is None:
+        sample_errors.append(
+            append_issue(
+                rows,
+                "fatal_errors",
+                sample=sample,
+                kind="missing_reference_dir",
+                message="Missing SIESTA reference directory.",
+            )
+        )
+    elif not reference_selection.ok:
+        sample_errors.append(
+            append_issue(
+                rows,
+                "fatal_errors",
+                sample=sample,
+                kind="reference_selection",
+                message=reference_selection.reason,
+                candidate_count=reference_selection.candidate_count,
+                candidates=list(reference_selection.candidates),
+            )
+        )
+    stale_issue = stale_reference_issue(
+        sample,
+        reference_path,
+        result_dir / "structures" / sample / "RUN.fdf",
+        method_id=method_id,
+    )
+    if stale_issue is not None:
+        if stale_issue.get("severity") == "warning":
+            rows["warnings"].append(stale_issue)
+            sample_warnings.append(stale_issue)
+        else:
+            rows["fatal_errors"].append(stale_issue)
+            sample_errors.append(stale_issue)
+    if sample_errors:
+        rows["errors"].extend(sample_errors)
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=sample_errors,
+                warnings=sample_warnings,
+            )
         )
         return rows
 
     try:
+        assert reference_path is not None and predicted_path is not None
         reference = read_matrix(reference_path)
         predicted = read_matrix(predicted_path)
     except Exception as exc:
-        rows["errors"].append({"sample": sample, "kind": "read_matrix", "error": str(exc)})
+        sample_errors.append(
+            append_issue(rows, "fatal_errors", sample=sample, kind="read_matrix", message=str(exc))
+        )
+        rows["errors"].extend(sample_errors)
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=sample_errors,
+                warnings=sample_warnings,
+            )
+        )
         return rows
 
     for kind, data in (("siesta", reference), ("predicted", predicted)):
@@ -141,6 +367,8 @@ def evaluate_sample(
                 "kind": kind,
                 "matrix_path": str(data.path),
                 "n_bands": int(data.hamiltonian.shape[0]),
+                "hamiltonian_components": int(data.component_count),
+                "spin_kind": data.spin_kind,
                 "orthogonal": data.orthogonal,
                 "has_overlap": data.has_overlap,
                 "overlap_error": data.overlap_error,
@@ -148,11 +376,33 @@ def evaluate_sample(
             }
         )
 
+    compatibility_errors = matrix_compatibility_errors(sample, reference, predicted)
+    compatibility_warnings = matrix_compatibility_warnings(sample, reference, predicted)
+    if compatibility_warnings:
+        rows["warnings"].extend(compatibility_warnings)
+        sample_warnings.extend(compatibility_warnings)
+    if compatibility_errors:
+        rows["fatal_errors"].extend(compatibility_errors)
+        rows["errors"].extend(compatibility_errors)
+        sample_errors.extend(compatibility_errors)
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=sample_errors,
+                warnings=sample_warnings,
+            )
+        )
+        return rows
+
     try:
         rows["sparse"].append(sparse_metrics(sample, reference, predicted))
         rows["sparse_sweep"].extend(sparse_threshold_sweep_metrics(sample, reference, predicted))
     except Exception as exc:
-        rows["errors"].append({"sample": sample, "kind": "sparse_metrics", "error": str(exc)})
+        issue = append_issue(rows, "fatal_errors", sample=sample, kind="sparse_metrics", message=str(exc))
+        rows["errors"].append(issue)
+        sample_errors.append(issue)
 
     try:
         structural = structural_sparse_metrics(
@@ -170,7 +420,9 @@ def evaluate_sample(
             rows["structural_unavailable"].append({"sample": sample, "reason": structural["reason"]})
     except Exception as exc:
         rows["structural_unavailable"].append({"sample": sample, "reason": str(exc)})
-        rows["errors"].append({"sample": sample, "kind": "structural_metrics", "error": str(exc)})
+        sample_warnings.append(
+            append_issue(rows, "warnings", sample=sample, kind="structural_metrics", message=str(exc))
+        )
 
     eigen_root = result_dir / "eigenvalues"
     dos_root = result_dir / "dos"
@@ -184,15 +436,17 @@ def evaluate_sample(
         same_band_count = ref_eig.size == pred_eig.size
         spectral_comparable = bool(reference.has_overlap and same_band_count and fermi_level is not None)
         if fermi_level is None or not math.isfinite(fermi_level):
-            rows["errors"].append(
-                {
-                    "sample": sample,
-                    "kind": "missing_fermi_level",
-                    "error": (
+            sample_warnings.append(
+                append_issue(
+                    rows,
+                    "warnings",
+                    sample=sample,
+                    kind="missing_fermi_level",
+                    message=(
                         "SIESTA reference does not provide a Fermi level; "
-                        "near-Fermi, occupied-band, and gap metrics were left unavailable."
+                        "near-Fermi, occupied-band, frontier, and gap metrics were left unavailable."
                     ),
-                }
+                )
             )
             fermi_level = None
             fermi_source = "unavailable"
@@ -212,12 +466,14 @@ def evaluate_sample(
             )
             spectral_metrics.update(low_metrics)
             if low_metrics.get("low_energy_warning"):
-                rows["errors"].append(
-                    {
-                        "sample": sample,
-                        "kind": "low_energy_metrics",
-                        "error": str(low_metrics["low_energy_warning"]),
-                    }
+                sample_warnings.append(
+                    append_issue(
+                        rows,
+                        "warnings",
+                        sample=sample,
+                        kind="low_energy_metrics",
+                        message=str(low_metrics["low_energy_warning"]),
+                    )
                 )
         write_csv(
             eigen_root / "band_errors" / f"{sample}.csv",
@@ -248,32 +504,52 @@ def evaluate_sample(
             _grid_rows, sweep_metrics = dos_for_sample(ref_eig, pred_eig, sigma_ev=sigma)
             rows["dos_sweep"].append({"sample": sample, **sweep_metrics})
     except Exception as exc:
-        rows["errors"].append({"sample": sample, "kind": "spectral_or_dos_metrics", "error": str(exc)})
+        issue = append_issue(rows, "fatal_errors", sample=sample, kind="spectral_or_dos_metrics", message=str(exc))
+        rows["errors"].append(issue)
+        sample_errors.append(issue)
+    rows["sample_status"].append(
+        sample_status_row(
+            sample,
+            prediction_path=predicted_path,
+            reference_path=reference_path,
+            errors=sample_errors,
+            warnings=sample_warnings,
+        )
+    )
     return rows
 
 
 def find_reference(sample_dir: Path) -> Path | None:
-    matrices = [
-        path
-        for path in sorted(
-            list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX")),
-            key=matrix_sort_key,
-        )
-        if path.name != "ML_prediction.HSX"
-    ]
-    return matrices[0] if matrices else None
+    selection = choose_reference_matrix(sample_dir)
+    return selection.path if selection.ok else None
+
+
+def infer_component_count(hamiltonian_obj: Any) -> int:
+    value = getattr(hamiltonian_obj, "dim", None)
+    if callable(value):
+        try:
+            value = value()
+        except TypeError:
+            value = None
+    if isinstance(value, (int, np.integer)) and int(value) > 0:
+        raw_dim = int(value)
+        if not bool(getattr(hamiltonian_obj, "orthogonal", False)) and raw_dim > 1:
+            return raw_dim - 1
+        return raw_dim
+    return 1
 
 
 def read_matrix(path: Path) -> MatrixData:
     sile = sisl.get_sile(str(path))
     hamiltonian_obj = sile.read_hamiltonian()
-    hamiltonian = hamiltonian_obj.tocsr(0).astype(float)
+    component_count = infer_component_count(hamiltonian_obj)
+    hamiltonian = hamiltonian_obj.tocsr(0)
     overlap = None
     has_overlap = False
     overlap_error = None
     try:
         overlap_obj = sile.read_overlap()
-        overlap = overlap_obj.tocsr().astype(float)
+        overlap = overlap_obj.tocsr()
         has_overlap = overlap is not None
     except Exception as exc:  # pragma: no cover - backend dependent.
         overlap_error = str(exc)
@@ -297,7 +573,123 @@ def read_matrix(path: Path) -> MatrixData:
         orthogonal=bool(getattr(hamiltonian_obj, "orthogonal", False)),
         has_overlap=has_overlap,
         overlap_error=overlap_error,
+        sha256=file_sha256(path),
+        component_count=component_count,
+        spin_kind=str(getattr(hamiltonian_obj, "spin", "")) or None,
     )
+
+
+def matrix_compatibility_errors(sample: str, reference: MatrixData, predicted: MatrixData) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    if reference.hamiltonian.shape != predicted.hamiltonian.shape:
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "matrix_shape_mismatch",
+                "error": (
+                    "Reference and prediction Hamiltonian shapes differ: "
+                    f"{reference.hamiltonian.shape} vs {predicted.hamiltonian.shape}."
+                ),
+                "reference_shape": list(reference.hamiltonian.shape),
+                "predicted_shape": list(predicted.hamiltonian.shape),
+            }
+        )
+    graph2mat_auxiliary_prediction = is_graph2mat_auxiliary_prediction(reference, predicted)
+    if reference.component_count != 1:
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "unsupported_matrix_components",
+                "error": f"Unsupported reference matrix component count: {reference.component_count}.",
+                "component_count": reference.component_count,
+            }
+        )
+    if predicted.component_count != 1 and not graph2mat_auxiliary_prediction:
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "unsupported_matrix_components",
+                "error": f"Unsupported prediction matrix component count: {predicted.component_count}.",
+                "component_count": predicted.component_count,
+            }
+        )
+    if (
+        reference.spin_kind
+        and predicted.spin_kind
+        and reference.spin_kind != predicted.spin_kind
+        and not graph2mat_auxiliary_prediction
+    ):
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "spin_state_mismatch",
+                "error": (
+                    "Reference and prediction spin metadata differ: "
+                    f"{reference.spin_kind} vs {predicted.spin_kind}."
+                ),
+                "reference_spin": reference.spin_kind,
+                "predicted_spin": predicted.spin_kind,
+            }
+        )
+    if reference.overlap is not None and reference.overlap.shape != reference.hamiltonian.shape:
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "invalid_overlap_shape",
+                "error": (
+                    "Reference overlap shape does not match reference Hamiltonian shape: "
+                    f"{reference.overlap.shape} vs {reference.hamiltonian.shape}."
+                ),
+                "overlap_shape": list(reference.overlap.shape),
+                "reference_shape": list(reference.hamiltonian.shape),
+            }
+        )
+    if not reference.orthogonal and reference.overlap is None:
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "missing_required_overlap",
+                "error": (
+                    "Reference Hamiltonian is non-orthogonal but no overlap matrix was readable; "
+                    "generalized spectral/DOS metrics are invalid."
+                ),
+                "overlap_error": reference.overlap_error,
+            }
+        )
+    return errors
+
+
+def is_graph2mat_auxiliary_prediction(reference: MatrixData, predicted: MatrixData) -> bool:
+    reference_spin = str(reference.spin_kind or "").lower()
+    predicted_spin = str(predicted.spin_kind or "").lower()
+    return (
+        reference.component_count == 1
+        and predicted.component_count == 2
+        and not reference.orthogonal
+        and not predicted.orthogonal
+        and "unpolarized" in reference_spin
+        and "polarized" in predicted_spin
+    )
+
+
+def matrix_compatibility_warnings(sample: str, reference: MatrixData, predicted: MatrixData) -> list[dict[str, Any]]:
+    if not is_graph2mat_auxiliary_prediction(reference, predicted):
+        return []
+    return [
+        {
+            "sample": sample,
+            "kind": "graph2mat_auxiliary_component_ignored",
+            "error": (
+                "Graph2Mat wrote a non-orthogonal prediction container with two matrix components. "
+                "Metrics compare Hamiltonian component 0 only; the auxiliary predicted overlap/spin-like "
+                "component is ignored, and spectral metrics use the SIESTA reference overlap."
+            ),
+            "reference_components": reference.component_count,
+            "predicted_components": predicted.component_count,
+            "reference_spin": reference.spin_kind,
+            "predicted_spin": predicted.spin_kind,
+        }
+    ]
 
 
 def sparse_norm(matrix: sparse.spmatrix) -> float:
@@ -617,7 +1009,7 @@ def structural_sparse_metrics(
 
 def symmetrized_dense(matrix: sparse.csr_matrix) -> np.ndarray:
     dense = matrix.toarray()
-    return np.asarray((dense + dense.conj().T) / 2.0, dtype=float)
+    return np.asarray((dense + dense.conj().T) / 2.0)
 
 
 def generalized_eigenvalues(
@@ -790,12 +1182,6 @@ def eigen_error_metrics(
         if occ_indices.size and virt_indices.size:
             homo_index = int(occ_indices[-1])
             lumo_index = int(virt_indices[0])
-    else:
-        # Molecule fallback: infer HOMO/LUMO from index ordering when no Fermi level is stored.
-        if n_bands >= 2:
-            homo_index = max(0, (n_bands // 2) - 1)
-            lumo_index = min(n_bands - 1, homo_index + 1)
-            fermi_mask[homo_index:lumo_index + 1] = True
     if homo_index is not None:
         frontier_mask[homo_index] = True
     if lumo_index is not None:
@@ -1028,6 +1414,7 @@ def matrix_spectrum_rows(
                 "relative_frobenius_union": sparse_row.get("relative_frobenius_union"),
                 "support_f1": sparse_row.get("support_f1"),
                 "global_rmse_eV": spectral_row.get("global_rmse_eV"),
+                "low_energy_rmse_eV": spectral_row.get("low_energy_rmse_eV"),
                 "fermi_window_rmse_eV": spectral_row.get("fermi_window_rmse_eV"),
                 "frontier_window_rmse_eV": spectral_row.get("frontier_window_rmse_eV"),
                 "gap_abs_error_eV": spectral_row.get("gap_abs_error_eV"),
@@ -1091,6 +1478,7 @@ def extract(
     reference_dirs = sample_dirs(reference_root)
     sample_names = sorted(set(prediction_dirs) | set(reference_dirs))
     basis_dirs = find_basis_dirs(result_dir)
+    method_id = result_method_id(result_dir)
 
     sparse_rows: list[dict[str, Any]] = []
     spectral_rows: list[dict[str, Any]] = []
@@ -1103,7 +1491,10 @@ def extract(
     distance_bin_rows: list[dict[str, Any]] = []
     structural_unavailable: list[dict[str, str]] = []
     structural_basis_error = ""
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
+    fatal_errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    sample_status: list[dict[str, Any]] = []
     try:
         basis_counts = basis_orbital_counts(basis_dirs)
         if not basis_counts:
@@ -1113,7 +1504,7 @@ def extract(
     except Exception as exc:
         basis_counts = {}
         structural_basis_error = str(exc)
-        errors.append({"sample": "*", "kind": "structural_basis", "error": structural_basis_error})
+        warnings.append({"sample": "*", "kind": "structural_basis", "error": structural_basis_error})
 
     def merge_sample_rows(sample_rows: dict[str, list[dict[str, Any]]]) -> None:
         sparse_rows.extend(sample_rows["sparse"])
@@ -1127,6 +1518,9 @@ def extract(
         distance_bin_rows.extend(sample_rows["distance_bin"])
         structural_unavailable.extend(sample_rows["structural_unavailable"])
         errors.extend(sample_rows["errors"])
+        fatal_errors.extend(sample_rows.get("fatal_errors", []))
+        warnings.extend(sample_rows.get("warnings", []))
+        sample_status.extend(sample_rows.get("sample_status", []))
 
     worker_count = max(1, int(workers))
     if worker_count > 1 and len(sample_names) > 1:
@@ -1140,6 +1534,7 @@ def extract(
                     reference_dirs.get(sample),
                     result_dir,
                     basis_counts,
+                    method_id=method_id,
                     low_energy_enabled=low_energy_enabled,
                     low_energy_n_states=low_energy_n_states,
                     low_energy_alignment=low_energy_alignment,
@@ -1159,6 +1554,7 @@ def extract(
                     reference_dirs.get(sample),
                     result_dir,
                     basis_counts,
+                    method_id=method_id,
                     low_energy_enabled=low_energy_enabled,
                     low_energy_n_states=low_energy_n_states,
                     low_energy_alignment=low_energy_alignment,
@@ -1282,6 +1678,8 @@ def extract(
         "kind",
         "matrix_path",
         "n_bands",
+        "hamiltonian_components",
+        "spin_kind",
         "orthogonal",
         "has_overlap",
         "overlap_error",
@@ -1361,9 +1759,12 @@ def extract(
         "result_dir": str(result_dir),
         "samples_seen": len(sample_names),
         "samples_compared": len(spectral_rows),
+        "samples_failed": len([row for row in sample_status if row.get("status") == "failed"]),
         "sparse_samples": len(sparse_rows),
         "dos_samples": len(dos_rows),
         "overlap_entries": len(overlap_rows),
+        "reference_selection_policy": REFERENCE_SELECTION_POLICY,
+        "sample_status": sample_status,
         "structural_metrics_basis_required": True,
         "structural_basis_dirs": [str(path) for path in basis_dirs],
         "structural_basis_orbital_counts": basis_counts,
@@ -1390,6 +1791,8 @@ def extract(
         "support_threshold_sweep": SUPPORT_THRESHOLDS_SWEEP,
         "dos_points": DOS_POINTS,
         "metric_workers": max(1, int(workers)),
+        "fatal_errors": fatal_errors,
+        "warnings": warnings,
         "errors": errors,
         "summary": summary,
         "outputs": {
@@ -1435,7 +1838,7 @@ def main() -> int:
         workers=args.workers,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=False, allow_nan=False))
-    return 0 if not manifest["errors"] else 2
+    return 0 if not manifest["fatal_errors"] else 2
 
 
 if __name__ == "__main__":

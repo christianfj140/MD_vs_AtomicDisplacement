@@ -159,7 +159,7 @@ def main() -> int:
     if "batch_size" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["batch_size"] = 1
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
-        datamodule_kwargs["n_matrix_components"] = int(data["n_matrix_components"])
+        datamodule_kwargs["n_matrix_components"] = int(data.get("n_matrix_components", 2))
     datamodule = MatrixDataModule(**datamodule_kwargs)
     callbacks = []
     if bool(callbacks_config["matrix_writer"]):

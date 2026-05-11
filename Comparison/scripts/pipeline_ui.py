@@ -14,8 +14,10 @@ import os
 import json
 import platform
 import select
+import secrets
 import shutil
 import shlex
+import string
 import subprocess
 import sys
 import threading
@@ -32,6 +34,8 @@ from urllib.parse import parse_qs, urlparse
 import yaml
 from siesta_settings import DEFAULT_SHARED, compare_settings, file_digest
 from model_settings import compare_model_settings
+from reference_selection import choose_reference_matrix as strict_choose_reference_matrix
+from reference_selection import reference_candidates
 
 try:
     import pty
@@ -59,6 +63,40 @@ def format_duration(seconds: float | int | None) -> str:
     if minutes:
         return f"{minutes}m {secs:02d}s"
     return f"{secs}s"
+
+
+def remove_tree_with_retries(path: Path, *, attempts: int = 5) -> bool:
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    if last_error is not None:
+        return False
+    return True
+
+
+def reset_output_directory(path: Path) -> None:
+    """Create an empty output directory without deleting an active tree in place."""
+    if path.exists():
+        stale_root = path.parent / ".stale"
+        stale_root.mkdir(parents=True, exist_ok=True)
+        stale_path = stale_root / f"{path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(6)}"
+        try:
+            path.rename(stale_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not remove_tree_with_retries(path):
+                raise
+        else:
+            remove_tree_with_retries(stale_path)
+    path.mkdir(parents=True, exist_ok=False)
 
 
 @dataclass(frozen=True)
@@ -276,6 +314,129 @@ def recipe_set_hash(recipes: dict[str, Any] | list[Any] | None) -> str:
     return stable_payload_hash(recipes or {}, length=16)
 
 
+MAX_DATASET_LABEL_LENGTH = 96
+DATASET_ID_LENGTH = 6
+DATASET_ID_ALPHABET = string.ascii_letters + string.digits
+CROSS_ID_LENGTH = 12
+DATASET_LABEL_PREFIXES = {
+    "md": "MD",
+    "fc": "FC",
+    "siesta_fc_cartesian": "FC",
+    "atom_displacement": "FC",
+    "random_cartesian": "RC",
+    "rc": "RC",
+}
+METHOD_LABEL_SLUGS = {
+    "md": "md",
+    "atom_displacement": "fc",
+    "siesta_fc_cartesian": "fc",
+    "random_cartesian": "rc",
+}
+TEST_SET_LABEL_SLUGS = {
+    "test_md": "test_md",
+    "test_atomdisp": "test_ad",
+    "test_siesta_fc_cartesian": "test_fc",
+    "test_random_cartesian": "test_rc",
+    "test_mixed": "test_mixed",
+}
+
+
+def compact_dataset_label(label: str, payload: Any, *, max_length: int = MAX_DATASET_LABEL_LENGTH) -> str:
+    clean = slugify_label(label, "dataset")
+    if len(clean) <= max_length:
+        return clean
+    digest = stable_payload_hash(payload, length=10)
+    keep = max(16, max_length - len(digest) - 1)
+    return f"{clean[:keep].rstrip('_')}_{digest}"
+
+
+def _dataset_label_prefix(method: str) -> str:
+    return DATASET_LABEL_PREFIXES.get(str(method).strip().lower(), slugify_label(method, "DS").upper())
+
+
+def _random_dataset_id(used_ids: set[str]) -> str:
+    for _attempt in range(4096):
+        token = "".join(secrets.choice(DATASET_ID_ALPHABET) for _ in range(DATASET_ID_LENGTH))
+        if token not in used_ids:
+            used_ids.add(token)
+            return token
+    raise RuntimeError("No se pudo generar un id de dataset unico.")
+
+
+def allocate_dataset_label(
+    method: str,
+    dataset_index: int,
+    *,
+    used_ids: set[str],
+    used_labels: set[str] | None = None,
+) -> tuple[str, str]:
+    used_labels = used_labels if used_labels is not None else set()
+    prefix = _dataset_label_prefix(method)
+    for _attempt in range(4096):
+        token = _random_dataset_id(used_ids)
+        label = f"{prefix}_dataset{int(dataset_index) + 1}_{token}"
+        if label not in used_labels:
+            used_labels.add(label)
+            return label, token
+    raise RuntimeError("No se pudo generar un nombre de dataset unico.")
+
+
+def register_dataset_label(label: Any, used_ids: set[str], used_labels: set[str]) -> None:
+    text = str(label or "").strip()
+    if not text:
+        return
+    used_labels.add(text)
+    token = text.rsplit("_", 1)[-1]
+    if len(token) == DATASET_ID_LENGTH and token.isascii() and token.isalnum():
+        used_ids.add(token)
+
+
+def method_slug_for_cross(method: Any) -> str:
+    method_id = str(method or "").strip().lower()
+    return METHOD_LABEL_SLUGS.get(method_id, slugify_label(method_id, "method"))
+
+
+def test_set_slug_for_cross(test_set: Any) -> str:
+    value = str(test_set or "").strip().lower()
+    return TEST_SET_LABEL_SLUGS.get(value, slugify_label(value, "test"))
+
+
+def cross_pair_id(combo_by_method: dict[str, dict[str, Any]], methods: list[str]) -> str:
+    payload: dict[str, Any] = {}
+    for method in methods:
+        run = combo_by_method.get(method) or {}
+        payload[method_slug_for_cross(method)] = {
+            "method": method,
+            "dataset_label": run.get("dataset_label"),
+            "dataset_short_id": run.get("dataset_short_id"),
+            "dataset_size": run.get("dataset_size"),
+            "recipe_id": run.get("recipe_id"),
+            "recipe_set_hash": run.get("recipe_set_hash"),
+            "result_dir": run.get("result_dir"),
+            "split_manifest": run.get("split_manifest"),
+        }
+    return f"cross_{stable_payload_hash(payload, length=CROSS_ID_LENGTH)}"
+
+
+def cross_result_name(pair_id: str, train_method: Any, test_set: Any) -> str:
+    return f"{pair_id}__{method_slug_for_cross(train_method)}__on__{test_set_slug_for_cross(test_set)}"
+
+
+def deduplicate_common_test_sets(test_sets: Any) -> list[str]:
+    requested = [str(item).strip() for item in (test_sets or []) if str(item).strip()]
+    has_canonical_fc = "test_siesta_fc_cartesian" in requested
+    selected: list[str] = []
+    seen: set[str] = set()
+    for test_set in requested:
+        if has_canonical_fc and test_set == "test_atomdisp":
+            continue
+        if test_set in seen:
+            continue
+        seen.add(test_set)
+        selected.append(test_set)
+    return selected
+
+
 def _recipe_metadata(
     *,
     method: str,
@@ -313,14 +474,26 @@ def _recipe_metadata(
     }
 
 
-def _dataset_label_from_recipe(method: str, metadata: dict[str, Any], size: int) -> str:
-    parts = [
+def _dataset_label_from_recipe(
+    method: str,
+    metadata: dict[str, Any],
+    size: int,
+    *,
+    dataset_index: int,
+    used_ids: set[str],
+    used_labels: set[str],
+) -> str:
+    label, short_id = allocate_dataset_label(
         method,
-        slugify_label(metadata.get("recipe_id"), "recipe"),
-        slugify_label(metadata.get("block_id"), "block"),
-        str(int(size)),
-    ]
-    return "_".join(part for part in parts if part)
+        dataset_index,
+        used_ids=used_ids,
+        used_labels=used_labels,
+    )
+    metadata["dataset_short_id"] = short_id
+    metadata["dataset_label"] = label
+    metadata["dataset_label_policy"] = "short_random_alnum6_v1"
+    metadata["dataset_size"] = int(size)
+    return label
 
 
 def legacy_payload_to_dataset_recipes(
@@ -427,27 +600,27 @@ def dataset_recipes_to_execution_specs(
     md_specs: list[dict[str, Any]] = []
     atom_specs: list[dict[str, Any]] = []
     random_specs: list[dict[str, Any]] = []
+    used_dataset_ids: set[str] = set()
+    used_dataset_labels: set[str] = set()
 
     if "md" in selected_methods:
         md_recipes = _recipe_list(raw_recipes.get("md"), "md")
         normalized["md"] = md_recipes
         for recipe_index, recipe in enumerate(md_recipes):
+            block_metadata: list[dict[str, Any]] = []
+            temperature_blocks: list[dict[str, Any]] = []
             for block_index, block in enumerate(recipe["blocks"]):
                 if not isinstance(block, dict):
                     raise RuntimeError("Cada bloque MD debe ser un objeto.")
-                unsupported = [
-                    key
-                    for key in ("temperature_K", "thermostat", "ensemble", "timestep_fs")
-                    if block.get(key) not in (None, "", {})
-                ]
-                if unsupported:
-                    raise RuntimeError(
-                        "Las recetas MD con temperatura/termostato aun no estan habilitadas: "
-                        "no hay renderer verificado de keywords SIESTA 5.4 en este repo. "
-                        f"Campos rechazados: {unsupported}."
-                    )
                 size = int(block.get("n_snapshots") or block.get("n_structures") or 0)
-                validate_split_sizes(size, split_ratios, label=f"MD recipe {recipe.get('recipe_id', recipe_index + 1)}")
+                if size <= 0:
+                    raise RuntimeError("Cada bloque MD necesita n_snapshots positivo.")
+                temperature = float(block.get("temperature_K", recipe.get("temperature_K", 300.0)))
+                if temperature < 0:
+                    raise RuntimeError("temperature_K no puede ser negativa.")
+                timestep = block.get("timestep_fs")
+                if timestep not in (None, "") and float(timestep) <= 0:
+                    raise RuntimeError("timestep_fs debe ser > 0.")
                 metadata = _recipe_metadata(
                     method="md",
                     recipe=recipe,
@@ -456,13 +629,65 @@ def dataset_recipes_to_execution_specs(
                     recipe_index=recipe_index,
                     block_index=block_index,
                 )
-                md_specs.append(
+                block_metadata.append(metadata)
+                temperature_blocks.append(
                     {
-                        "label": _dataset_label_from_recipe("md", metadata, size),
-                        "size": size,
-                        "recipe_metadata": metadata,
+                        "block_id": metadata["block_id"],
+                        "label": metadata["block_label"],
+                        "n_snapshots": size,
+                        "temperature_K": temperature,
+                        "seed": block.get("seed", recipe.get("seed")),
+                        **(
+                            {"timestep_fs": float(timestep)}
+                            if timestep not in (None, "")
+                            else {}
+                        ),
+                        **(
+                            {"ensemble": str(block["ensemble"])}
+                            if block.get("ensemble") not in (None, "")
+                            else {}
+                        ),
+                        **(
+                            {"thermostat": str(block["thermostat"])}
+                            if block.get("thermostat") not in (None, "")
+                            else {}
+                        ),
                     }
                 )
+            total_size = sum(int(block["n_snapshots"]) for block in temperature_blocks)
+            validate_split_sizes(total_size, split_ratios, label=f"MD recipe {recipe.get('recipe_id', recipe_index + 1)}")
+            recipe_metadata = {
+                "method": "md",
+                "recipe_id": str(recipe.get("recipe_id") or f"md_recipe_{recipe_index + 1}"),
+                "recipe_label": str(recipe.get("label") or recipe.get("recipe_id") or f"MD recipe {recipe_index + 1}"),
+                "block_id": "__".join(meta["block_id"] for meta in block_metadata),
+                "block_label": "__".join(meta["block_label"] for meta in block_metadata),
+                "dataset_size": total_size,
+                "blocks": block_metadata,
+                "md_temperature_blocks": temperature_blocks,
+                "generation_parameters": {"temperature_blocks": temperature_blocks},
+                "generation_parameters_json": json.dumps(
+                    {"temperature_blocks": temperature_blocks},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                "seed": recipe.get("seed"),
+            }
+            md_specs.append(
+                {
+                    "label": _dataset_label_from_recipe(
+                        "md",
+                        recipe_metadata,
+                        total_size,
+                        dataset_index=recipe_index,
+                        used_ids=used_dataset_ids,
+                        used_labels=used_dataset_labels,
+                    ),
+                    "size": total_size,
+                    "temperature_blocks": temperature_blocks,
+                    "recipe_metadata": recipe_metadata,
+                }
+            )
 
     if "siesta_fc_cartesian" in selected_methods:
         fc_recipes = _recipe_list(raw_recipes.get("siesta_fc_cartesian"), "siesta_fc_cartesian")
@@ -518,7 +743,14 @@ def dataset_recipes_to_execution_specs(
             }
             atom_specs.append(
                 {
-                    "label": _dataset_label_from_recipe("fc", recipe_metadata, size),
+                    "label": _dataset_label_from_recipe(
+                        "fc",
+                        recipe_metadata,
+                        size,
+                        dataset_index=recipe_index,
+                        used_ids=used_dataset_ids,
+                        used_labels=used_dataset_labels,
+                    ),
                     "size": size,
                     "displacements": entries,
                     "recipe_metadata": recipe_metadata,
@@ -529,11 +761,14 @@ def dataset_recipes_to_execution_specs(
         rc_recipes = _recipe_list(raw_recipes.get("random_cartesian"), "random_cartesian")
         normalized["random_cartesian"] = rc_recipes
         for recipe_index, recipe in enumerate(rc_recipes):
+            block_metadata: list[dict[str, Any]] = []
+            random_blocks: list[dict[str, Any]] = []
             for block_index, block in enumerate(recipe["blocks"]):
                 if not isinstance(block, dict):
                     raise RuntimeError("Cada bloque Random Cartesian debe ser un objeto.")
                 size = int(block.get("n_structures") or 0)
-                validate_split_sizes(size, split_ratios, label=f"Random Cartesian recipe {recipe.get('recipe_id', recipe_index + 1)}")
+                if size <= 0:
+                    raise RuntimeError("Cada bloque Random Cartesian necesita n_structures positivo.")
                 metadata = _recipe_metadata(
                     method="random_cartesian",
                     recipe=recipe,
@@ -542,17 +777,55 @@ def dataset_recipes_to_execution_specs(
                     recipe_index=recipe_index,
                     block_index=block_index,
                 )
-                options = {**random_cartesian_defaults, **block, "n_structures": size}
-                options.pop("block_id", None)
-                options.pop("label", None)
-                random_specs.append(
-                    {
-                        "label": _dataset_label_from_recipe("rc", metadata, size),
-                        "size": size,
-                        "options": options,
-                        "recipe_metadata": metadata,
-                    }
-                )
+                block_options = {**random_cartesian_defaults, **block, "n_structures": size}
+                block_options["block_id"] = metadata["block_id"]
+                block_options["label"] = metadata["block_label"]
+                block_metadata.append(metadata)
+                random_blocks.append(block_options)
+            total_size = sum(int(block["n_structures"]) for block in random_blocks)
+            validate_split_sizes(total_size, split_ratios, label=f"Random Cartesian recipe {recipe.get('recipe_id', recipe_index + 1)}")
+            recipe_metadata = {
+                "method": "random_cartesian",
+                "recipe_id": str(recipe.get("recipe_id") or f"rc_recipe_{recipe_index + 1}"),
+                "recipe_label": str(recipe.get("label") or recipe.get("recipe_id") or f"Random Cartesian recipe {recipe_index + 1}"),
+                "block_id": "__".join(meta["block_id"] for meta in block_metadata),
+                "block_label": "__".join(meta["block_label"] for meta in block_metadata),
+                "dataset_size": total_size,
+                "blocks": block_metadata,
+                "generation_parameters": {"random_cartesian_blocks": random_blocks},
+                "generation_parameters_json": json.dumps(
+                    {"random_cartesian_blocks": random_blocks},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                "seed": recipe.get("seed"),
+            }
+            first_block_defaults = {
+                key: value
+                for key, value in (random_blocks[0] if random_blocks else {}).items()
+                if key not in {"block_id", "label", "n_structures"}
+            }
+            options = {
+                **random_cartesian_defaults,
+                **first_block_defaults,
+                "n_structures": total_size,
+                "blocks": random_blocks,
+            }
+            random_specs.append(
+                {
+                    "label": _dataset_label_from_recipe(
+                        "rc",
+                        recipe_metadata,
+                        total_size,
+                        dataset_index=recipe_index,
+                        used_ids=used_dataset_ids,
+                        used_labels=used_dataset_labels,
+                    ),
+                    "size": total_size,
+                    "options": options,
+                    "recipe_metadata": recipe_metadata,
+                }
+            )
 
     normalized = {key: value for key, value in normalized.items() if value}
     return {
@@ -1091,9 +1364,24 @@ def copy_matching_files(source_root: Path, pattern: str, destination_root: Path)
     return count
 
 
+def copy_selected_reference_files(source_root: Path, destination_root: Path) -> int:
+    if not source_root.exists():
+        return 0
+    count = 0
+    for sample_dir in sorted(path for path in source_root.iterdir() if path.is_dir()):
+        selection = strict_choose_reference_matrix(sample_dir)
+        if not selection.ok or selection.path is None:
+            continue
+        dst = destination_root / sample_dir.name / selection.path.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(selection.path, dst)
+        count += 1
+    return count
+
+
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
-DEFAULT_PRIMARY_METRIC = "frontier_window_rmse_eV"
+DEFAULT_PRIMARY_METRIC = "fermi_window_rmse_eV"
 MINIMUM_ROBUST_SEEDS = 3
 STRICT_COMPARISON_MODE = True
 SPLIT_MANIFEST_FIELDS = [
@@ -1379,7 +1667,7 @@ def parse_test_sets(value: Any) -> list[str]:
     unknown = sorted(set(selected) - allowed)
     if unknown:
         raise RuntimeError(f"test_sets contiene valores no soportados: {unknown}.")
-    return selected or list(DEFAULT_COMMON_TEST_SETS)
+    return deduplicate_common_test_sets(selected) or list(DEFAULT_COMMON_TEST_SETS)
 
 
 def parse_compute_budget_mode(value: Any) -> str:
@@ -1429,6 +1717,502 @@ DEFAULT_PERFORMANCE_SETTINGS: dict[str, Any] = {
     "torch_float32_matmul_precision": None,
 }
 
+PERFORMANCE_PRESET_IDS = {
+    "soft",
+    "balanced",
+    "aggressive",
+    "aggressive_local",
+    "gpu_focused",
+    "gpu_only",
+    "cpu_only",
+    "max_aggressive",
+    "stress",
+    "auto_detect",
+    "single_run_debug",
+}
+
+
+def _read_meminfo_gb() -> float | None:
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return None
+    for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return round(int(parts[1]) / (1024 * 1024), 2)
+    return None
+
+
+def _physical_cpu_cores() -> int | None:
+    cpuinfo = Path("/proc/cpuinfo")
+    if not cpuinfo.exists():
+        return None
+    cores: set[tuple[str, str]] = set()
+    current: dict[str, str] = {}
+    for line in cpuinfo.read_text(encoding="utf-8", errors="ignore").splitlines() + [""]:
+        if not line.strip():
+            if "physical id" in current and "core id" in current:
+                cores.add((current["physical id"], current["core id"]))
+            current = {}
+            continue
+        if ":" in line:
+            key, value = line.split(":", 1)
+            current[key.strip()] = value.strip()
+    return len(cores) or None
+
+
+def _nvidia_smi_gpu_info() -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except Exception:
+        return {"available": False, "source": "nvidia-smi-unavailable"}
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {"available": False, "source": "nvidia-smi-unavailable"}
+    first = proc.stdout.strip().splitlines()[0]
+    parts = [part.strip() for part in first.split(",")]
+    if len(parts) < 3:
+        return {"available": False, "source": "nvidia-smi-unparseable"}
+    try:
+        total_mb = int(float(parts[1]))
+        free_mb = int(float(parts[2]))
+    except ValueError:
+        total_mb = None
+        free_mb = None
+    return {
+        "available": True,
+        "source": "nvidia-smi",
+        "name": parts[0],
+        "vram_total_mb": total_mb,
+        "vram_free_mb": free_mb,
+        "vram_total_gb": round(total_mb / 1024, 2) if total_mb else None,
+        "vram_free_gb": round(free_mb / 1024, 2) if free_mb else None,
+    }
+
+
+def _torch_cuda_info() -> dict[str, Any]:
+    try:
+        import torch  # type: ignore
+    except Exception as exc:
+        return {"torch_available": False, "cuda_available": False, "error": type(exc).__name__}
+    try:
+        available = bool(torch.cuda.is_available())
+        name = torch.cuda.get_device_name(0) if available else None
+        total = None
+        free = None
+        if available:
+            props = torch.cuda.get_device_properties(0)
+            total = int(getattr(props, "total_memory", 0) // (1024 * 1024))
+            try:
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                free = int(free_bytes // (1024 * 1024))
+                total = int(total_bytes // (1024 * 1024))
+            except Exception:
+                pass
+        return {
+            "torch_available": True,
+            "cuda_available": available,
+            "device_name": name,
+            "vram_total_mb": total,
+            "vram_free_mb": free,
+        }
+    except Exception as exc:
+        return {"torch_available": True, "cuda_available": False, "error": type(exc).__name__}
+
+
+def detect_hardware() -> dict[str, Any]:
+    logical = int(os.cpu_count() or 1)
+    physical = _physical_cpu_cores() or max(1, logical // 2)
+    gpu = _nvidia_smi_gpu_info()
+    torch_info = _torch_cuda_info()
+    cuda_available = bool(gpu.get("available") or torch_info.get("cuda_available"))
+    gpu_name = torch_info.get("device_name") or gpu.get("name")
+    vram_total_mb = torch_info.get("vram_total_mb") or gpu.get("vram_total_mb")
+    vram_free_mb = torch_info.get("vram_free_mb") or gpu.get("vram_free_mb")
+    return {
+        "platform": platform.platform(),
+        "cpu_physical_cores": physical,
+        "cpu_logical_cores": logical,
+        "ram_total_gb": _read_meminfo_gb(),
+        "gpu_available": bool(gpu.get("available")),
+        "gpu_name": gpu_name,
+        "gpu_vram_total_gb": round(vram_total_mb / 1024, 2) if vram_total_mb else None,
+        "gpu_vram_free_gb": round(vram_free_mb / 1024, 2) if vram_free_mb else None,
+        "cuda_available": cuda_available,
+        "torch_available": bool(torch_info.get("torch_available")),
+        "torch_cuda_available": bool(torch_info.get("cuda_available")),
+        "detection_notes": [
+            note
+            for note in [
+                None if gpu.get("available") else "nvidia-smi GPU info unavailable",
+                None if torch_info.get("torch_available") else "PyTorch unavailable in the UI environment",
+                None if torch_info.get("cuda_available") else "PyTorch CUDA unavailable in the UI environment",
+            ]
+            if note
+        ],
+    }
+
+
+def _clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(value, high))
+
+
+def _vram_batch_size(vram_gb: float | None, *, mode: str) -> int:
+    if not vram_gb:
+        return 32 if mode == "cpu" else 64
+    if mode == "soft":
+        return 64 if vram_gb >= 16 else 32
+    if mode == "balanced":
+        if vram_gb >= 24:
+            return 128
+        if vram_gb >= 12:
+            return 96
+        return 64
+    if mode == "aggressive":
+        if vram_gb >= 28:
+            return 256
+        if vram_gb >= 16:
+            return 192
+        return 96
+    if mode == "stress":
+        if vram_gb >= 28:
+            return 384
+        if vram_gb >= 16:
+            return 256
+        return 128
+    if mode == "gpu_focused":
+        if vram_gb >= 28:
+            return 320
+        if vram_gb >= 16:
+            return 192
+        return 96
+    return 32
+
+
+def _base_profile(
+    *,
+    preset: str,
+    hardware: dict[str, Any],
+    accelerator: str,
+    batch_size: int,
+    siesta_jobs: int,
+    evaluation_jobs: int,
+    metric_jobs: int,
+    threads: int,
+    torch_threads: int,
+    store_in_memory: bool | None = True,
+) -> dict[str, Any]:
+    return {
+        "max_parallel_siesta_jobs": int(siesta_jobs),
+        "max_parallel_dataset_jobs": 1,
+        "max_parallel_prediction_jobs": 1,
+        "max_parallel_evaluation_jobs": int(evaluation_jobs),
+        "max_parallel_metric_jobs": int(metric_jobs),
+        "omp_num_threads": int(threads),
+        "mkl_num_threads": int(threads),
+        "openblas_num_threads": int(threads),
+        "numexpr_num_threads": int(max(metric_jobs, torch_threads, 1)),
+        "torch_num_threads": int(torch_threads),
+        "compute_accelerator": accelerator,
+        "batch_size": int(batch_size),
+        "store_in_memory": store_in_memory,
+        "reuse_validated_siesta_outputs": True,
+        "enable_experiment_cache": False,
+        "error_policy": "fail_fast",
+        "preset": preset,
+        "torch_float32_matmul_precision": "high" if accelerator != "cpu" else None,
+    }
+
+
+def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[str, Any]:
+    hw = hardware or detect_hardware()
+    logical = max(1, int(hw.get("cpu_logical_cores") or 1))
+    physical = max(1, int(hw.get("cpu_physical_cores") or max(1, logical // 2)))
+    ram_gb = hw.get("ram_total_gb")
+    vram_gb = hw.get("gpu_vram_total_gb")
+    has_cuda = bool(hw.get("cuda_available"))
+    low_ram = bool(ram_gb is not None and float(ram_gb) < 32)
+    strong_gpu = bool(has_cuda and vram_gb is not None and float(vram_gb) >= 20)
+
+    soft = _base_profile(
+        preset="soft",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=_vram_batch_size(vram_gb, mode="soft") if has_cuda else 16,
+        siesta_jobs=1,
+        evaluation_jobs=1,
+        metric_jobs=_clamp(logical // 4, 1, 4),
+        threads=1,
+        torch_threads=_clamp(logical // 4, 1, 4),
+        store_in_memory=False if low_ram else True,
+    )
+    balanced = _base_profile(
+        preset="balanced",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=_vram_batch_size(vram_gb, mode="balanced") if has_cuda else 32,
+        siesta_jobs=_clamp(physical // 3, 1, 4),
+        evaluation_jobs=_clamp(logical // 6, 1, 4),
+        metric_jobs=_clamp(logical // 2, 4, 16),
+        threads=2 if logical >= 8 else 1,
+        torch_threads=_clamp(logical // 3, 2, 8),
+        store_in_memory=False if low_ram else True,
+    )
+    aggressive = _base_profile(
+        preset="aggressive",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=_vram_batch_size(vram_gb, mode="aggressive") if has_cuda else 48,
+        siesta_jobs=_clamp(physical // 2, 2, 8),
+        evaluation_jobs=_clamp(logical // 3, 2, 8),
+        metric_jobs=_clamp(logical, 8, 32),
+        threads=_clamp(logical // max(1, _clamp(physical // 2, 2, 8)), 1, 4),
+        torch_threads=_clamp(logical // 2, 4, 16),
+        store_in_memory=False if low_ram else True,
+    )
+    gpu_focused = _base_profile(
+        preset="gpu_focused",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=_vram_batch_size(vram_gb, mode="gpu_focused") if has_cuda else 32,
+        siesta_jobs=_clamp(physical // 6, 1, 3),
+        evaluation_jobs=_clamp(logical // 8, 1, 3),
+        metric_jobs=_clamp(logical // 3, 2, 8),
+        threads=1,
+        torch_threads=_clamp(logical // 2, 4, 16),
+        store_in_memory=False if low_ram else True,
+    )
+    cpu_only = _base_profile(
+        preset="cpu_only",
+        hardware=hw,
+        accelerator="cpu",
+        batch_size=32 if not low_ram else 16,
+        siesta_jobs=_clamp(physical // 2, 1, 6),
+        evaluation_jobs=_clamp(logical // 4, 1, 6),
+        metric_jobs=_clamp(logical // 2, 2, 16),
+        threads=_clamp(logical // max(1, _clamp(physical // 2, 1, 6)), 1, 4),
+        torch_threads=_clamp(logical // 2, 2, 12),
+        store_in_memory=False if low_ram else True,
+    )
+    stress = _base_profile(
+        preset="max_aggressive",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=_vram_batch_size(vram_gb, mode="stress") if has_cuda else 64,
+        siesta_jobs=_clamp(physical, 2, 12),
+        evaluation_jobs=_clamp(logical // 2, 4, 12),
+        metric_jobs=_clamp(logical * 2, 16, 64),
+        threads=_clamp(logical // max(1, _clamp(physical, 2, 12)), 1, 4),
+        torch_threads=_clamp(logical, 8, 24),
+        store_in_memory=False if low_ram else True,
+    )
+    debug = _base_profile(
+        preset="single_run_debug",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=16,
+        siesta_jobs=1,
+        evaluation_jobs=1,
+        metric_jobs=1,
+        threads=1,
+        torch_threads=1,
+        store_in_memory=False,
+    )
+
+    recommended = "cpu_only"
+    if low_ram:
+        recommended = "soft"
+    elif strong_gpu and logical < 16:
+        recommended = "gpu_focused"
+    elif strong_gpu:
+        recommended = "balanced"
+    elif has_cuda:
+        recommended = "balanced"
+
+    dynamic: list[dict[str, Any]] = []
+    if has_cuda and hw.get("gpu_name"):
+        name = str(hw["gpu_name"])
+        profile = dict(gpu_focused if strong_gpu else balanced)
+        profile["preset"] = "dynamic_gpu_focused"
+        dynamic.append({
+            "id": "dynamic_gpu_focused",
+            "label": f"{name} GPU-focused",
+            "description": "Auto-generated profile for the detected GPU and VRAM.",
+            "settings": profile,
+            "warnings": performance_warnings(profile, hw),
+        })
+    if ram_gb is not None and float(ram_gb) >= 64:
+        profile = dict(aggressive)
+        profile["preset"] = "dynamic_high_ram_aggressive"
+        dynamic.append({
+            "id": "dynamic_high_ram_aggressive",
+            "label": "High-RAM aggressive",
+            "description": "Auto-generated profile that keeps store_in_memory enabled and raises CPU-side throughput.",
+            "settings": profile,
+            "warnings": performance_warnings(profile, hw),
+        })
+    cpu_profile = dict(cpu_only)
+    cpu_profile["preset"] = "dynamic_cpu_heavy_siesta"
+    cpu_profile["max_parallel_siesta_jobs"] = _clamp(physical, 1, 10)
+    cpu_profile["omp_num_threads"] = _clamp(logical // max(1, cpu_profile["max_parallel_siesta_jobs"]), 1, 4)
+    cpu_profile["mkl_num_threads"] = cpu_profile["omp_num_threads"]
+    cpu_profile["openblas_num_threads"] = cpu_profile["omp_num_threads"]
+    dynamic.append({
+        "id": "dynamic_cpu_heavy_siesta",
+        "label": "CPU-heavy SIESTA mode",
+        "description": "Auto-generated profile for throughput in SIESTA single-point generation.",
+        "settings": cpu_profile,
+        "warnings": performance_warnings(cpu_profile, hw),
+    })
+    if low_ram:
+        low_mem = dict(soft)
+        low_mem["preset"] = "dynamic_low_memory_safe"
+        low_mem["store_in_memory"] = False
+        dynamic.append({
+            "id": "dynamic_low_memory_safe",
+            "label": "Low-memory safe mode",
+            "description": "Auto-generated fallback for limited RAM.",
+            "settings": low_mem,
+            "warnings": performance_warnings(low_mem, hw),
+        })
+    dynamic.append({
+        "id": "dynamic_single_run_debug",
+        "label": "Single-run debug mode",
+        "description": "Auto-generated low-parallelism profile for debugging one pipeline at a time.",
+        "settings": debug,
+        "warnings": performance_warnings(debug, hw),
+    })
+
+    builtins = [
+        ("soft", "Soft", "Conservative mode for keeping the PC responsive.", soft, []),
+        ("balanced", "Balanced", "Recommended default: good GPU usage without overloading CPU/RAM/I/O.", balanced, []),
+        ("aggressive", "Aggressive", "High-performance local mode with controlled CPU parallelism.", aggressive, []),
+        ("gpu_focused", "GPU-focused", "Prioritizes GPU training/inference and keeps CPU-side jobs moderate.", gpu_focused, []),
+        ("cpu_only", "CPU-only", "Disables GPU assumptions and uses CPU-safe throughput settings.", cpu_only, []),
+        (
+            "max_aggressive",
+            "Max aggressive / stress",
+            "Very aggressive mode for dedicated machines.",
+            stress,
+            ["May make the machine unresponsive, exhaust RAM/VRAM, or lose efficiency from oversubscription."],
+        ),
+        ("auto_detect", "Auto detect", f"Uses detected hardware and currently resolves to {recommended}.", {}, []),
+    ]
+    presets = [
+        {
+            "id": preset_id,
+            "label": label,
+            "description": description,
+            "settings": settings,
+            "warnings": warnings + performance_warnings(settings, hw),
+            "recommended": preset_id == "balanced",
+        }
+        for preset_id, label, description, settings, warnings in builtins
+    ]
+    return {
+        "hardware": hw,
+        "default_preset": "balanced",
+        "auto_detect_choice": recommended,
+        "presets": presets,
+        "dynamic_profiles": dynamic,
+    }
+
+
+def performance_oversubscription_score(settings: dict[str, Any]) -> int:
+    blas_threads = max(
+        int(settings.get("omp_num_threads") or 1),
+        int(settings.get("mkl_num_threads") or 1),
+        int(settings.get("openblas_num_threads") or 1),
+    )
+    return (
+        int(settings.get("max_parallel_siesta_jobs") or 1) * blas_threads
+        + int(settings.get("max_parallel_evaluation_jobs") or 1)
+        + int(settings.get("max_parallel_metric_jobs") or 1)
+        + int(settings.get("torch_num_threads") or 1)
+    )
+
+
+def performance_warnings(settings: dict[str, Any], hardware: dict[str, Any] | None = None) -> list[str]:
+    hw = hardware or detect_hardware()
+    warnings: list[str] = []
+    logical = max(1, int(hw.get("cpu_logical_cores") or 1))
+    score = performance_oversubscription_score(settings)
+    if score > logical * 2:
+        warnings.append(
+            f"Estimated CPU pressure {score} exceeds 2x logical cores ({logical}); this can reduce efficiency."
+        )
+    if settings.get("compute_accelerator") == "gpu" and not hw.get("cuda_available"):
+        warnings.append("GPU selected, but CUDA/GPU availability could not be confirmed in the UI environment.")
+    vram = hw.get("gpu_vram_total_gb")
+    batch = int(settings.get("batch_size") or 0)
+    if settings.get("compute_accelerator") == "gpu" and vram is not None:
+        if float(vram) < 12 and batch > 96:
+            warnings.append("Batch size may be too high for the detected VRAM.")
+        if float(vram) >= 24 and batch < 64:
+            warnings.append("Detected high VRAM; this profile may underuse the GPU.")
+    ram = hw.get("ram_total_gb")
+    if settings.get("store_in_memory") and ram is not None and float(ram) < 32:
+        warnings.append("store_in_memory is enabled on a low-RAM machine.")
+    if str(settings.get("preset")) in {"max_aggressive", "stress"}:
+        warnings.append("Stress mode can make the machine unresponsive or exhaust RAM/VRAM.")
+    return warnings
+
+
+def validate_performance_settings(settings: dict[str, Any], hardware: dict[str, Any] | None = None) -> None:
+    hw = hardware or detect_hardware()
+    logical = max(1, int(hw.get("cpu_logical_cores") or 1))
+    hard_limit = max(16, logical * 8)
+    score = performance_oversubscription_score(settings)
+    if score > hard_limit:
+        raise RuntimeError(
+            "performance settings are dangerously oversubscribed: "
+            f"estimated CPU pressure {score} > hard limit {hard_limit}. "
+            "Reduce SIESTA/evaluation/metric jobs or BLAS/Torch threads."
+        )
+    for key in (
+        "max_parallel_siesta_jobs",
+        "max_parallel_dataset_jobs",
+        "max_parallel_prediction_jobs",
+        "max_parallel_evaluation_jobs",
+        "max_parallel_metric_jobs",
+    ):
+        value = int(settings.get(key) or 1)
+        if value > max(64, logical * 4):
+            raise RuntimeError(f"performance.{key}={value} is too high for this machine.")
+
+
+def preset_settings_by_id(preset: str, hardware: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    normalized = str(preset).strip().lower()
+    if normalized == "gpu_only":
+        normalized = "gpu_focused"
+    if normalized == "stress":
+        normalized = "max_aggressive"
+    if normalized == "aggressive_local":
+        normalized = "aggressive"
+    catalog = performance_preset_catalog(hardware)
+    if normalized == "auto_detect":
+        normalized = str(catalog["auto_detect_choice"])
+    for item in list(catalog["presets"]) + list(catalog["dynamic_profiles"]):
+        if item["id"] == normalized:
+            settings = dict(item.get("settings") or {})
+            settings["preset"] = normalized
+            return normalized, settings
+    raise RuntimeError(
+        "performance.preset debe ser uno de "
+        f"{', '.join(sorted(PERFORMANCE_PRESET_IDS))} o un perfil dynamic_* conocido."
+    )
+
 
 def parse_optional_positive_int(value: Any, name: str) -> int | None:
     if value in (None, "", "null"):
@@ -1439,6 +2223,30 @@ def parse_optional_positive_int(value: Any, name: str) -> int | None:
         raise RuntimeError(f"{name} debe ser un entero positivo.") from exc
     if number <= 0:
         raise RuntimeError(f"{name} debe ser un entero positivo.")
+    return number
+
+
+def parse_optional_nonnegative_int(value: Any, name: str) -> int | None:
+    if value in (None, "", "null"):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} debe ser un entero >= 0.") from exc
+    if number < 0:
+        raise RuntimeError(f"{name} debe ser un entero >= 0.")
+    return number
+
+
+def parse_optional_positive_float(value: Any, name: str) -> float | None:
+    if value in (None, "", "null"):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} debe ser un numero positivo.") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise RuntimeError(f"{name} debe ser un numero positivo.")
     return number
 
 
@@ -1455,16 +2263,85 @@ def parse_optional_bool(value: Any, name: str, default: bool | None = None) -> b
     raise RuntimeError(f"{name} debe ser booleano o null.")
 
 
+def parse_optional_text(value: Any, name: str) -> str | None:
+    if value in (None, "", "null"):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "\n" in text or "\r" in text:
+        raise RuntimeError(f"{name} debe caber en una linea.")
+    return text
+
+
+def parse_training_settings(value: Any) -> dict[str, Any]:
+    if value in (None, ""):
+        raw: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        raw = value
+    else:
+        raise RuntimeError("training_settings debe ser un objeto.")
+    settings: dict[str, Any] = {}
+    for key in ("max_epochs", "batch_size", "num_interactions", "correlation"):
+        parsed = parse_optional_positive_int(raw.get(key), f"training_settings.{key}")
+        if parsed is not None:
+            settings[key] = parsed
+    max_ell = parse_optional_nonnegative_int(raw.get("max_ell"), "training_settings.max_ell")
+    if max_ell is not None:
+        settings["max_ell"] = max_ell
+    optim_lr = parse_optional_positive_float(raw.get("optim_lr"), "training_settings.optim_lr")
+    if optim_lr is not None:
+        settings["optim_lr"] = optim_lr
+    for key in ("loss", "hidden_irreps"):
+        parsed_text = parse_optional_text(raw.get(key), f"training_settings.{key}")
+        if parsed_text is not None:
+            settings[key] = parsed_text
+    return settings
+
+
+def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str, Any] | None) -> None:
+    if not settings:
+        return
+    training = config.setdefault("training", {})
+    data = training.setdefault("data", {})
+    model = training.setdefault("model", {})
+    trainer = training.setdefault("trainer", {})
+    if settings.get("max_epochs") is not None:
+        trainer["max_epochs"] = int(settings["max_epochs"])
+    if settings.get("batch_size") is not None:
+        data["batch_size"] = int(settings["batch_size"])
+    for key in ("num_interactions", "correlation", "max_ell"):
+        if settings.get(key) is not None:
+            model[key] = int(settings[key])
+    if settings.get("optim_lr") is not None:
+        model["optim_lr"] = float(settings["optim_lr"])
+    for key in ("loss", "hidden_irreps"):
+        if settings.get(key) is not None:
+            model[key] = str(settings[key])
+    training["ui_training_settings"] = dict(settings)
+
+
 def aggressive_local_performance_defaults() -> dict[str, Any]:
     cores = max(1, os.cpu_count() or 1)
-    siesta_jobs = max(1, min(cores // 2, 4))
+    siesta_jobs = max(1, min(max(1, cores // 2), 8))
     return {
         "max_parallel_siesta_jobs": siesta_jobs,
         "max_parallel_dataset_jobs": 1,
         "max_parallel_prediction_jobs": 1,
-        "max_parallel_evaluation_jobs": min(cores, 4),
+        "max_parallel_evaluation_jobs": min(cores, 8),
         "max_parallel_metric_jobs": cores,
         "omp_num_threads": max(1, cores // siesta_jobs),
+        "mkl_num_threads": max(1, cores // siesta_jobs),
+        "openblas_num_threads": max(1, cores // siesta_jobs),
+        "numexpr_num_threads": cores,
+        "torch_num_threads": min(cores, 16),
+        "compute_accelerator": "gpu",
+        "batch_size": 64,
+        "store_in_memory": True,
+        "reuse_validated_siesta_outputs": True,
+        "enable_experiment_cache": False,
+        "error_policy": "fail_fast",
+        "torch_float32_matmul_precision": "high",
     }
 
 
@@ -1476,17 +2353,18 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
     else:
         raise RuntimeError("performance debe ser un objeto.")
     settings = dict(DEFAULT_PERFORMANCE_SETTINGS)
-    preset = raw.get("preset")
+    preset = raw.get("preset", "balanced")
     if preset in (None, "", "null"):
         settings["preset"] = None
     else:
-        preset = str(preset).strip().lower()
-        if preset != "aggressive_local":
-            raise RuntimeError("performance.preset debe ser null o aggressive_local.")
-        settings.update(aggressive_local_performance_defaults())
-        settings["preset"] = preset
+        resolved_preset, preset_settings = preset_settings_by_id(str(preset))
+        settings.update(preset_settings)
+        settings["preset"] = resolved_preset
     settings["compute_accelerator"] = parse_compute_accelerator(
-        raw.get("compute_accelerator", compute_accelerator)
+        raw.get(
+            "compute_accelerator",
+            compute_accelerator if compute_accelerator is not None else settings.get("compute_accelerator"),
+        )
     )
     for key in (
         "max_parallel_siesta_jobs",
@@ -1532,7 +2410,10 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
     if error_policy not in {"fail_fast", "continue_on_error"}:
         raise RuntimeError("performance.error_policy debe ser fail_fast o continue_on_error.")
     settings["error_policy"] = error_policy
-    precision = raw.get("torch_float32_matmul_precision")
+    precision = raw.get(
+        "torch_float32_matmul_precision",
+        settings.get("torch_float32_matmul_precision"),
+    )
     if precision in (None, "", "null"):
         settings["torch_float32_matmul_precision"] = None
     else:
@@ -1540,6 +2421,9 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
         if precision not in {"high", "medium"}:
             raise RuntimeError("performance.torch_float32_matmul_precision debe ser null, high o medium.")
         settings["torch_float32_matmul_precision"] = precision
+    warnings = performance_warnings(settings)
+    settings["warnings"] = warnings
+    validate_performance_settings(settings)
     return settings
 
 
@@ -1723,6 +2607,7 @@ def build_fc_aligned_dataset_specs(
             "Reduce filas o aumenta max_datasets."
         )
     specs: list[dict[str, Any]] = []
+    used_dataset_ids: set[str] = set()
     seen_labels: set[str] = set()
     for dataset_index, combo in enumerate(zip(*(displacement_options[key] for key in keys))):
         entries = []
@@ -1734,12 +2619,14 @@ def build_fc_aligned_dataset_specs(
                 )
             entries.append({"value": displacement, "n_structures": int(count)})
         size = sum(int(entry["n_structures"]) for entry in entries)
-        label = f"dataset_{dataset_index}_" + make_aligned_dataset_label(entries).removeprefix("dataset_")
+        label, short_id = allocate_dataset_label(
+            "fc",
+            dataset_index,
+            used_ids=used_dataset_ids,
+            used_labels=seen_labels,
+        )
         validate_split_sizes(size, split_ratios, label=label)
-        if label in seen_labels:
-            raise RuntimeError(f"Nombre de dataset duplicado: {label}.")
-        seen_labels.add(label)
-        specs.append({"label": label, "size": size, "displacements": entries})
+        specs.append({"label": label, "dataset_short_id": short_id, "size": size, "displacements": entries})
     return specs
 
 
@@ -1770,6 +2657,7 @@ def build_fc_cartesian_dataset_specs(
         )
 
     specs: list[dict[str, Any]] = []
+    used_dataset_ids: set[str] = set()
     seen_labels: set[str] = set()
     for dataset_index, combo in enumerate(
         itertools.product(*(displacement_options[key] for key in keys))
@@ -1783,12 +2671,14 @@ def build_fc_cartesian_dataset_specs(
                 )
             entries.append({"value": displacement, "n_structures": int(count)})
         size = sum(int(entry["n_structures"]) for entry in entries)
-        label = f"dataset_{dataset_index}_" + make_aligned_dataset_label(entries).removeprefix("dataset_")
+        label, short_id = allocate_dataset_label(
+            "fc",
+            dataset_index,
+            used_ids=used_dataset_ids,
+            used_labels=seen_labels,
+        )
         validate_split_sizes(size, split_ratios, label=label)
-        if label in seen_labels:
-            raise RuntimeError(f"Nombre de dataset duplicado: {label}.")
-        seen_labels.add(label)
-        specs.append({"label": label, "size": size, "displacements": entries})
+        specs.append({"label": label, "dataset_short_id": short_id, "size": size, "displacements": entries})
     return specs
 
 
@@ -1990,8 +2880,62 @@ ATOM_SPLIT_GROUP_FIELDS = [
 ]
 
 
+def _metadata_float(metadata: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = metadata.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _positions_payload_for_group(sample_dir: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    positions = metadata.get("positions_ang")
+    if isinstance(positions, list) and positions:
+        return {
+            "positions_ang": positions,
+            "pseudopotentials": metadata.get("pseudopotentials", []),
+        }
+    run_fdf = sample_dir / "RUN.fdf"
+    coords: list[list[Any]] = []
+    if run_fdf.exists():
+        inside = False
+        for line in run_fdf.read_text(encoding="utf-8", errors="ignore").splitlines():
+            clean = line.split("#", 1)[0].strip()
+            lower = clean.lower()
+            if lower.startswith("%block atomiccoordinatesandatomicspecies"):
+                inside = True
+                continue
+            if inside and lower.startswith("%endblock atomiccoordinatesandatomicspecies"):
+                break
+            if not inside or not clean:
+                continue
+            parts = clean.split()
+            if len(parts) >= 4:
+                coords.append(parts[:4])
+    return {"run_fdf_coordinates": coords}
+
+
+def atom_zero_reference_group_id(sample_dir: Path, metadata: dict[str, Any] | None = None) -> str | None:
+    metadata = metadata if metadata is not None else load_sample_metadata(sample_dir)
+    displacement = _metadata_float(metadata, "displacement_ang", "displacement_magnitude")
+    if displacement is None or abs(displacement) > 1e-12:
+        return None
+    if any(str(metadata.get(key) or "").strip() for key in ("atom", "direction", "sign")):
+        return None
+    payload = _positions_payload_for_group(sample_dir, metadata)
+    digest = stable_payload_hash(payload, length=16)
+    return f"fc_zero_reference|{digest}"
+
+
 def atom_split_group_id(sample_dir: Path) -> str:
     metadata = load_sample_metadata(sample_dir)
+    zero_reference_group = atom_zero_reference_group_id(sample_dir, metadata)
+    if zero_reference_group:
+        return zero_reference_group
     if metadata.get("split_group_id"):
         return str(metadata["split_group_id"])
     values = {field: metadata.get(field, "") for field in ATOM_SPLIT_GROUP_FIELDS}
@@ -2001,9 +2945,13 @@ def atom_split_group_id(sample_dir: Path) -> str:
     return readable or digest
 
 
+def atom_visible_split_samples(items: list[Path]) -> list[Path]:
+    return [item for item in items if atom_zero_reference_group_id(item) is None]
+
+
 def split_grouped_exact(items: list[Path], counts: dict[str, int]) -> dict[str, list[Path]]:
     groups: dict[str, list[Path]] = defaultdict(list)
-    for item in items:
+    for item in atom_visible_split_samples(items):
         groups[atom_split_group_id(item)].append(item)
     ordered_groups = [(key, sorted(value, key=sample_sort_key)) for key, value in sorted(groups.items())]
     result = {"train": [], "validation": [], "test": []}
@@ -2060,14 +3008,7 @@ def read_system_label(run_fdf: Path) -> str:
 
 
 def reference_matrices(sample_dir: Path) -> list[Path]:
-    return sorted(
-        [
-            path
-            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
-            if path.name != "ML_prediction.HSX"
-        ],
-        key=natural_matrix_sort_key,
-    )
+    return reference_candidates(sample_dir)
 
 
 def _metadata_reference_matrix(sample_dir: Path) -> Path | None:
@@ -2124,38 +3065,9 @@ def _canonical_reference_matrix(sample_dir: Path) -> Path | None:
 
 
 def _choose_reference_matrix(sample_dir: Path) -> tuple[Path | None, str]:
-    """Choose one SIESTA reference matrix deterministically.
-
-    A sample may legitimately contain both TSHS and HSX. That is not ambiguous:
-    prefer TSHS. Ambiguity only remains if there are multiple TSHS files and no
-    metadata/canonical SystemLabel can identify the intended one.
-    """
-    metadata_matrix = _metadata_reference_matrix(sample_dir)
-    if metadata_matrix is not None:
-        return metadata_matrix, "ok"
-
-    canonical_matrix = _canonical_reference_matrix(sample_dir)
-    if canonical_matrix is not None:
-        return canonical_matrix, "ok"
-
-    matrices = reference_matrices(sample_dir)
-    if not matrices:
-        return None, "missing_matrix"
-
-    tshs = [path for path in matrices if path.suffix == ".TSHS"]
-    hsx = [path for path in matrices if path.suffix == ".HSX"]
-
-    if len(tshs) == 1:
-        return tshs[0], "ok"
-    if len(tshs) > 1:
-        return None, "ambiguous_reference_matrix"
-
-    if len(hsx) == 1:
-        return hsx[0], "ok"
-    if len(hsx) > 1:
-        return None, "ambiguous_reference_matrix"
-
-    return None, "missing_matrix"
+    """Choose one SIESTA reference matrix with the shared strict policy."""
+    selection = strict_choose_reference_matrix(sample_dir)
+    return selection.path, selection.reason
 
 
 def find_reference_matrix(sample_dir: Path) -> Path | None:
@@ -2186,9 +3098,10 @@ def validated_reference_for_sample(sample_dir: Path) -> tuple[Path | None, bool,
     if not (sample_dir / "RUN.fdf").exists():
         reasons.append("missing_run_fdf")
 
-    matrix = find_reference_matrix(sample_dir)
-    if matrix is None:
-        reasons.append("missing_matrix")
+    selection = strict_choose_reference_matrix(sample_dir)
+    matrix = selection.path if selection.ok else None
+    if not selection.ok:
+        reasons.append(selection.reason)
 
     output_ok, output_reason = sample_output_status(sample_dir / "RUN.out")
     if not output_ok:
@@ -2655,14 +3568,102 @@ def finite_metric_count(rows: list[dict[str, Any]], metric: str) -> int:
     return count
 
 
+SPECTRAL_PLOT_AVAILABILITY_METRICS = [
+    "fermi_window_rmse_eV",
+    "frontier_window_rmse_eV",
+    "low_energy_rmse_eV",
+]
+
+CROSS_PLOT_AVAILABILITY_METRICS = [
+    "fermi_window_rmse_eV",
+    "frontier_window_rmse_eV",
+    "low_energy_rmse_eV",
+    "global_rmse_eV",
+    "relative_frobenius_union",
+    "mae_ref_eV",
+]
+
+
+def metric_availability_for_rows(
+    rows: list[dict[str, Any]],
+    metrics: list[str],
+) -> dict[str, dict[str, Any]]:
+    total = len(rows)
+    availability: dict[str, dict[str, Any]] = {}
+    for metric in metrics:
+        finite = finite_metric_count(rows, metric)
+        availability[metric] = {
+            "n_total": total,
+            "n_finite": finite,
+            "missing_count": max(0, total - finite),
+            "metric_available": finite > 0,
+        }
+    return availability
+
+
+def availability_size_value(value: str) -> Any:
+    if value == "":
+        return ""
+    try:
+        number = float(value)
+    except ValueError:
+        return value
+    if math.isfinite(number) and number.is_integer():
+        return int(number)
+    return number
+
+
+def cross_metric_availability(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            str(row.get("experiment_id") or ""),
+            str(row.get("train_method") or ""),
+            str(row.get("test_set") or ""),
+            str(row.get("md_dataset_size") or row.get("dataset_size") or ""),
+            str(row.get("atom_dataset_size") or row.get("dataset_size") or ""),
+            str(row.get("random_dataset_size") or ""),
+            str(row.get("train_dataset_size") or row.get("dataset_size") or ""),
+        )
+        groups.setdefault(key, []).append(row)
+    availability = []
+    for (
+        experiment_id,
+        train_method,
+        test_set,
+        md_dataset_size,
+        atom_dataset_size,
+        random_dataset_size,
+        train_dataset_size,
+    ), group_rows in sorted(groups.items()):
+        availability.append(
+            {
+                "experiment_id": experiment_id,
+                "train_method": train_method,
+                "test_set": test_set,
+                "md_dataset_size": availability_size_value(md_dataset_size),
+                "atom_dataset_size": availability_size_value(atom_dataset_size),
+                "random_dataset_size": availability_size_value(random_dataset_size),
+                "train_dataset_size": availability_size_value(train_dataset_size),
+                "metrics": metric_availability_for_rows(
+                    group_rows,
+                    CROSS_PLOT_AVAILABILITY_METRICS,
+                ),
+            }
+        )
+    return availability
+
+
 def metric_diagnostics(
     spectral_rows: list[dict[str, Any]],
     relationship_rows: list[dict[str, Any]],
     errors: list[dict[str, Any]],
+    warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    issues = errors + list(warnings or [])
     missing_fermi_errors = [
         error
-        for error in errors
+        for error in issues
         if error.get("kind") == "missing_fermi_level"
     ]
     unavailable_fermi_rows = [
@@ -2680,7 +3681,18 @@ def metric_diagnostics(
         ),
         "missing_fermi_level_samples": len(missing_fermi_errors),
         "unavailable_fermi_source_samples": len(unavailable_fermi_rows),
+        "metric_availability": {
+            "spectral": metric_availability_for_rows(
+                spectral_rows,
+                SPECTRAL_PLOT_AVAILABILITY_METRICS,
+            ),
+            "matrix_spectrum": metric_availability_for_rows(
+                relationship_rows,
+                SPECTRAL_PLOT_AVAILABILITY_METRICS,
+            ),
+        },
         "errors": errors,
+        "warnings": warnings or [],
     }
 
 
@@ -2694,7 +3706,7 @@ def plot_data_summary() -> dict[str, Any]:
     for key, root in groups.items():
         if not root.exists():
             continue
-        for manifest_path in sorted(root.glob("dataset_*/run_*/manifest.json")):
+        for manifest_path in archived_result_manifest_paths(root):
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except Exception:
@@ -2717,6 +3729,19 @@ def plot_data_summary() -> dict[str, Any]:
             errors = manifest.get("errors", [])
             if not isinstance(errors, list):
                 errors = []
+            metric_manifest = {}
+            metric_manifest_path = result_dir / "metrics" / "manifest.json"
+            if metric_manifest_path.exists():
+                try:
+                    metric_manifest = json.loads(metric_manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    metric_manifest = {}
+            metric_errors = metric_manifest.get("fatal_errors", metric_manifest.get("errors", []))
+            if isinstance(metric_errors, list):
+                errors = errors + metric_errors
+            warnings = metric_manifest.get("warnings", [])
+            if not isinstance(warnings, list):
+                warnings = []
             runs.append(
                 {
                     "pipeline": key,
@@ -2774,7 +3799,14 @@ def plot_data_summary() -> dict[str, Any]:
                         spectral_rows,
                         relationship_rows,
                         errors,
+                            warnings,
                     ),
+                    "metric_availability": {
+                        "spectral": metric_availability_for_rows(
+                            spectral_rows,
+                            SPECTRAL_PLOT_AVAILABILITY_METRICS,
+                        ),
+                    },
                     "summary": manifest.get("summary", {}),
                 }
             )
@@ -2811,6 +3843,7 @@ def plot_data_summary() -> dict[str, Any]:
             {
                 "experiment_id": experiment_dir.name,
                 "metrics": rows,
+                "metric_availability": cross_metric_availability(rows),
                 "recommendation": recommendation,
                 "manifest": manifest,
                 "compatibility": compatibility,
@@ -2837,19 +3870,30 @@ def plot_data_summary() -> dict[str, Any]:
         )
         group["experiment_ids"].append(experiment["experiment_id"])
         group["rows"] += len(experiment.get("metrics") or [])
+        metric_version = (experiment.get("compatibility") or {}).get("metric_version")
+        if metric_version is not None:
+            group.setdefault("metric_versions", [])
+            if metric_version not in group["metric_versions"]:
+                group["metric_versions"].append(metric_version)
     compatible_groups = sorted(
         groups_by_id.values(),
         key=lambda group: (str(group["experiment_ids"][-1]) if group["experiment_ids"] else "", group["group_id"]),
     )
     latest_group = compatible_groups[-1] if compatible_groups else None
+    visualization_warnings = []
+    if len(compatible_groups) > 1:
+        visualization_warnings.append(
+            "All experiments are shown by default for visualization; compatibility or metric_version groups differ."
+        )
     return {
         "runs": runs,
         "cross_experiments": cross_experiments,
         "compatible_experiment_groups": compatible_groups,
+        "visualization_warnings": visualization_warnings,
         "default_plot_selection": {
-            "mode": "all_compatible",
+            "mode": "all",
             "group_id": latest_group.get("group_id") if latest_group else None,
-            "experiment_ids": latest_group.get("experiment_ids") if latest_group else [],
+            "experiment_ids": [experiment["experiment_id"] for experiment in cross_experiments],
         },
     }
 
@@ -2936,6 +3980,7 @@ class ExperimentRunner:
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
         performance: dict[str, Any] | None = None,
+        training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
         dataset_recipes_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2948,6 +3993,7 @@ class ExperimentRunner:
                 performance,
                 compute_accelerator=compute_accelerator,
             )
+            training_settings = parse_training_settings(training_settings)
             compute_accelerator = str(performance_settings["compute_accelerator"])
             pipeline_keys = pipeline_keys_for_methods(selected_methods)
             random_cartesian_options = random_cartesian_options or {}
@@ -3014,6 +4060,7 @@ class ExperimentRunner:
                     run_mode,
                     random_cartesian_options,
                     performance_settings,
+                    training_settings,
                     venv_activate_path,
                     dataset_recipes_info,
                 ),
@@ -3092,10 +4139,19 @@ class ExperimentRunner:
         run_mode: str,
         random_cartesian_options: dict[str, Any] | None = None,
         performance: dict[str, Any] | None = None,
+        training_settings: dict[str, Any] | None = None,
         dataset_recipes_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         md_config = load_config(PIPELINES["md"].config_path)
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+        performance_settings = parse_performance_settings(
+            performance,
+            compute_accelerator=compute_accelerator,
+        )
+        training_settings = parse_training_settings(training_settings)
+        for config in (md_config, atom_config):
+            apply_performance_to_config(config, performance_settings)
+            apply_training_settings_to_config(config, training_settings)
         shared_settings = load_config(DEFAULT_SHARED) if DEFAULT_SHARED.exists() else {}
         siesta_report = compare_settings(md_config, atom_config, shared_settings)
         model_report = compare_model_settings(md_config, atom_config)
@@ -3234,8 +4290,9 @@ class ExperimentRunner:
             },
             "compute_budget_mode": compute_budget_mode,
             "compute_accelerator": compute_accelerator,
-            "performance": dict(performance or DEFAULT_PERFORMANCE_SETTINGS),
-            "optimization_settings": dict(performance or DEFAULT_PERFORMANCE_SETTINGS),
+            "performance": dict(performance_settings),
+            "optimization_settings": dict(performance_settings),
+            "training_settings": dict(training_settings),
             "strict_comparison_mode": STRICT_COMPARISON_MODE,
             "output_directories": {
                 "experiment_root": str(experiment_root(run_id)),
@@ -3528,6 +4585,7 @@ class ExperimentRunner:
         run_mode: str = "full_strict_pipeline",
         random_cartesian_options: dict[str, Any] | None = None,
         performance: dict[str, Any] | None = None,
+        training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
         dataset_recipes_info: dict[str, Any] | None = None,
     ) -> None:
@@ -3538,6 +4596,7 @@ class ExperimentRunner:
             performance,
             compute_accelerator=compute_accelerator,
         )
+        training_settings = parse_training_settings(training_settings)
         if venv_activate_path in (None, ""):
             venv_activate_path = resolve_venv_activate_from_command(DEFAULT_VENV_ACTIVATE_COMMAND)
         compute_accelerator = str(performance_settings["compute_accelerator"])
@@ -3560,6 +4619,7 @@ class ExperimentRunner:
             run_mode,
             random_cartesian_options,
             performance_settings,
+            training_settings,
             dataset_recipes_info,
         )
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
@@ -3591,6 +4651,7 @@ class ExperimentRunner:
                 f"accelerator: {compute_accelerator}\n"
             )
             self._append(f"[PERF] Effective settings: {json.dumps(json_safe(performance_settings), sort_keys=True)}\n")
+            self._append(f"[TRAIN] Effective overrides: {json.dumps(json_safe(training_settings), sort_keys=True)}\n")
             if manifest.get("siesta_settings_warning"):
                 self._append(f"[WARN] {manifest['siesta_settings_warning']}\n")
             if manifest.get("model_config_warning"):
@@ -3645,9 +4706,30 @@ class ExperimentRunner:
             manifest["timing"]["counters"]["dataset_workers_used"] = dataset_workers
 
             dataset_tasks: list[tuple[str, Any]] = []
+            used_dataset_ids: set[str] = set()
+            used_dataset_labels: set[str] = set()
+            for existing_specs in (
+                dataset_recipes_info.get("md_dataset_specs") or [],
+                dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [],
+                dataset_recipes_info.get("random_cartesian_dataset_specs")
+                or random_cartesian_options.get("_dataset_specs")
+                or [],
+            ):
+                for existing_spec in existing_specs:
+                    register_dataset_label(existing_spec.get("label"), used_dataset_ids, used_dataset_labels)
+
+            def fallback_dataset_label(method: str, index: int) -> str:
+                label, _short_id = allocate_dataset_label(
+                    method,
+                    index,
+                    used_ids=used_dataset_ids,
+                    used_labels=used_dataset_labels,
+                )
+                return label
+
             md_task_specs = dataset_recipes_info.get("md_dataset_specs") or [
-                {"label": f"dataset_{size}", "size": size, "recipe_metadata": None}
-                for size in md_sizes
+                {"label": fallback_dataset_label("md", index), "size": size, "recipe_metadata": None}
+                for index, size in enumerate(md_sizes)
             ]
             for md_spec in (md_task_specs if "md" in pipeline_keys else []):
                 size = int(md_spec["size"])
@@ -3659,21 +4741,23 @@ class ExperimentRunner:
                         run_id,
                         dataset_label=str(md_spec.get("label") or f"dataset_{size}"),
                         recipe_metadata=md_spec.get("recipe_metadata"),
+                        md_temperature_blocks=md_spec.get("temperature_blocks"),
                         split_ratios=split_ratios,
                         split_mode=split_mode,
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
+                        training_settings=training_settings,
                         venv_activate_path=venv_activate_path,
                     ),
                 ))
             atom_runs = atom_dataset_specs or [
                 {
-                    "label": f"dataset_{size}",
+                    "label": fallback_dataset_label("fc", index),
                     "size": size,
                     "displacements": fc_dataset_specs.get(size) if fc_dataset_specs else None,
                 }
-                for size in atom_sizes
+                for index, size in enumerate(atom_sizes)
             ]
             for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
                 dataset_tasks.append((
@@ -3691,18 +4775,19 @@ class ExperimentRunner:
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
+                        training_settings=training_settings,
                         venv_activate_path=venv_activate_path,
                     ),
                 ))
             if "random_cartesian" in selected_methods:
                 random_specs = random_cartesian_options.get("_dataset_specs") or [
                     {
-                        "label": f"dataset_{random_size}",
+                        "label": fallback_dataset_label("rc", index),
                         "size": random_size,
                         "options": {**random_cartesian_options, "n_structures": random_size},
                         "recipe_metadata": None,
                     }
-                    for random_size in random_cartesian_sizes_from_options(random_cartesian_options)
+                    for index, random_size in enumerate(random_cartesian_sizes_from_options(random_cartesian_options))
                 ]
                 for random_spec in random_specs:
                     random_size = int(random_spec["size"])
@@ -3724,6 +4809,7 @@ class ExperimentRunner:
                             run_mode=run_mode,
                             compute_accelerator=compute_accelerator,
                             performance=performance_settings,
+                            training_settings=training_settings,
                             venv_activate_path=venv_activate_path,
                         ),
                     ))
@@ -3842,12 +4928,14 @@ class ExperimentRunner:
         dataset_label: str | None = None,
         fc_displacements: list[dict[str, Any]] | None = None,
         recipe_metadata: dict[str, Any] | None = None,
+        md_temperature_blocks: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
         split_mode: str = "block",
         run_mode: str = "full_strict_pipeline",
         compute_accelerator: str = "cpu",
         performance: dict[str, Any] | None = None,
+        training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
@@ -3879,6 +4967,8 @@ class ExperimentRunner:
         self._append(f"[UI] Config snapshot: {config_snapshot_path}\n")
         performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
         apply_performance_to_config(config, performance)
+        training_settings = parse_training_settings(training_settings)
+        apply_training_settings_to_config(config, training_settings)
         if recipe_metadata:
             config["dataset_recipe"] = dict(recipe_metadata)
         if venv_activate_path:
@@ -3886,11 +4976,19 @@ class ExperimentRunner:
         compute_accelerator = str(performance["compute_accelerator"])
         self._append(f"[UI] Accelerator: {compute_accelerator}\n")
         self._append(f"[PERF] {key} {dataset_label}: {json.dumps(json_safe(performance), sort_keys=True)}\n")
+        self._append(f"[TRAIN] {key} {dataset_label}: {json.dumps(json_safe(training_settings), sort_keys=True)}\n")
         with self._lock:
             log_start = len(self._logs)
         prepare_metadata: dict[str, Any] = {}
         if key == "md":
-            self._prepare_md_config(config, workspace, size, split_ratios, split_mode=split_mode)
+            self._prepare_md_config(
+                config,
+                workspace,
+                size,
+                split_ratios,
+                split_mode=split_mode,
+                temperature_blocks=md_temperature_blocks,
+            )
             original_steps = list(config.get("pipeline", {}).get("steps", []))
             config.setdefault("pipeline", {})["steps"] = ["generate_md_dataset"]
             write_yaml(config_snapshot_path, config)
@@ -4009,6 +5107,7 @@ class ExperimentRunner:
         run_mode: str = "dataset_only",
         compute_accelerator: str = "cpu",
         performance: dict[str, Any] | None = None,
+        training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
@@ -4025,6 +5124,8 @@ class ExperimentRunner:
         config = load_config(spec.config_path)
         performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
         apply_performance_to_config(config, performance)
+        training_settings = parse_training_settings(training_settings)
+        apply_training_settings_to_config(config, training_settings)
         if recipe_metadata:
             config["dataset_recipe"] = dict(recipe_metadata)
         if venv_activate_path:
@@ -4032,6 +5133,7 @@ class ExperimentRunner:
         compute_accelerator = str(performance["compute_accelerator"])
         self._append(f"[UI] Accelerator: {compute_accelerator}\n")
         self._append(f"[PERF] random_cartesian {dataset_label}: {json.dumps(json_safe(performance), sort_keys=True)}\n")
+        self._append(f"[TRAIN] random_cartesian {dataset_label}: {json.dumps(json_safe(training_settings), sort_keys=True)}\n")
         workspace = WORKSPACES_ROOT / run_id / "random_cartesian" / dataset_label
         dataset_dir = workspace / "dataset"
         training_dir = workspace / "training"
@@ -4181,6 +5283,7 @@ class ExperimentRunner:
         size: int,
         split_ratios: dict[str, float] | None = None,
         split_mode: str = "block",
+        temperature_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         dataset_dir = workspace / "dataset"
         pseudo_count = copy_pseudopotentials(PIPELINES["md"].root / "dataset", dataset_dir)
@@ -4189,6 +5292,15 @@ class ExperimentRunner:
         config["paths"]["dataset_dir"] = str(dataset_dir)
         config["paths"]["training_dir"] = str(workspace / "training")
         config["md"]["steps"] = size
+        if temperature_blocks:
+            total = sum(int(block.get("n_snapshots") or 0) for block in temperature_blocks)
+            if total != size:
+                raise RuntimeError(
+                    f"MD temperature_blocks total {total} no coincide con dataset size {size}."
+                )
+            config["md"]["temperature_blocks"] = list(temperature_blocks)
+        else:
+            config["md"]["temperature_blocks"] = []
         config["splits"] = {
             "enabled": True,
             "strategy": split_mode,
@@ -4208,6 +5320,15 @@ class ExperimentRunner:
         self._append(f"[UI] MD training_dir: {workspace / 'training'}\n")
         self._append(f"[UI] MD pseudopotenciales copiados: {pseudo_count}\n")
         self._append(f"[UI] MD steps configurados: {size}\n")
+        if temperature_blocks:
+            self._append(
+                "[UI] MD temperature blocks: "
+                + ", ".join(
+                    f"{block.get('temperature_K')} K -> {block.get('n_snapshots')}"
+                    for block in temperature_blocks
+                )
+                + "\n"
+            )
         self._append(
             "[UI] MD split: "
             f"{counts['train']} train, {counts['test']} test, "
@@ -4315,22 +5436,40 @@ class ExperimentRunner:
         if not source_samples_dir.exists():
             source_samples_dir = atom_source_samples_dir(PIPELINES["atom_displacement"], config)
         basis_count = copy_basis_files(source_samples_dir, basis_dir)
-        all_samples = generated_atom_samples(source_samples_dir)
+        generated_samples = generated_atom_samples(source_samples_dir)
+        excluded_reference_samples = (
+            []
+            if method_id == "random_cartesian"
+            else [path for path in generated_samples if atom_zero_reference_group_id(path) is not None]
+        )
+        all_samples = (
+            generated_samples
+            if method_id == "random_cartesian"
+            else [path for path in generated_samples if atom_zero_reference_group_id(path) is None]
+        )
         validated_sample_paths = validated_atom_sample_paths_from_validation(dataset_dir)
         completed_samples = [
             path
             for path in all_samples
             if is_completed_atom_sample_with_validation_csv(path, validated_sample_paths)
         ]
-        if not all_samples:
+        if not generated_samples:
             raise RuntimeError(
                 "AtomDisplacement: SIESTA FC no genero muestras normalizadas en FC_steps. "
                 f"Revisa {dataset_dir / 'run_summary.json'}."
             )
+        if not all_samples:
+            raise RuntimeError(
+                "AtomDisplacement: SIESTA FC solo genero estructuras de referencia cero, "
+                "que se excluyen del benchmark. Aumenta FC.First/FC.Last o revisa "
+                f"{dataset_dir / 'run_summary.json'}."
+            )
         if len(all_samples) < size:
             raise RuntimeError(
-                "AtomDisplacement: SIESTA FC genero menos estructuras de las pedidas "
-                f"({len(all_samples)} < {size}). Revisa FC.First/FC.Last y {dataset_dir / 'run_summary.json'}."
+                "AtomDisplacement: SIESTA FC genero menos estructuras utiles de las pedidas "
+                f"tras excluir referencias cero ({len(all_samples)} < {size}; "
+                f"{len(generated_samples)} generadas, {len(excluded_reference_samples)} excluidas). "
+                f"Revisa FC.First/FC.Last y {dataset_dir / 'run_summary.json'}."
             )
         ratios = split_ratios or split_ratios_from_config(config)
         counts = validate_split_sizes(size, ratios, label=f"AtomDisplacement dataset_{size}")
@@ -4394,9 +5533,11 @@ class ExperimentRunner:
         config["single_points"]["rerun"] = False
         basis_files_pattern = "../dataset/basis/*.ion.xml" if basis_count else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
-        config["training"]["data"].pop("n_matrix_components", None)
+        config["training"]["data"].setdefault("n_matrix_components", 2)
         config["prediction"]["data"]["basis_files"] = basis_files_pattern
+        config["prediction"]["data"].setdefault("n_matrix_components", 2)
         config["testing"]["data"]["basis_files"] = basis_files_pattern
+        config["testing"]["data"].setdefault("n_matrix_components", 2)
         config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
         config["prediction"]["data"]["predict_structs"] = "../dataset/test_samples/*/RUN.fdf"
         config["checkpoint"]["path"] = None
@@ -4415,7 +5556,9 @@ class ExperimentRunner:
         self._append(f"[UI] AtomDisplacement source_samples_dir: {source_samples_dir}\n")
         self._append(f"[UI] AtomDisplacement basis dataset copiados: {basis_count}\n")
         self._append(
-            f"[UI] AtomDisplacement FC raw disponibles: {len(all_samples)} generadas, "
+            f"[UI] AtomDisplacement FC raw disponibles: {len(generated_samples)} generadas, "
+            f"{len(excluded_reference_samples)} referencias cero excluidas, "
+            f"{len(all_samples)} utiles, "
             f"{len(completed_samples)} con referencia SIESTA; "
             f"seleccionadas para dataset_{size}: {len(selected_samples)}.\n"
         )
@@ -4445,7 +5588,9 @@ class ExperimentRunner:
                 for path in selected_samples
                 if is_completed_atom_sample_with_validation_csv(path, validated_sample_paths)
             ),
-            "fc_generated_samples": len(all_samples),
+            "fc_generated_samples": len(generated_samples),
+            "fc_excluded_reference_samples": len(excluded_reference_samples),
+            "fc_usable_samples": len(all_samples),
             "fc_completed_samples": len(completed_samples),
             "split_manifest_paths": {key: str(value) for key, value in split_manifest_paths.items()},
             "seed": (config.get("structure", {}).get("force_constants", {}) or {}).get("random_seed"),
@@ -4826,19 +5971,18 @@ class ExperimentRunner:
                 "*/RUN.fdf",
                 result_dir / "structures",
             )
+            copy_matching_files(
+                md_outputs_root,
+                "*/metadata.json",
+                result_dir / "structures",
+            )
             prediction_count = copy_matching_files(
                 md_outputs_root,
                 "*/ML_prediction.HSX",
                 result_dir / "predicted_hamiltonians",
             )
-            reference_count += copy_matching_files(
+            reference_count += copy_selected_reference_files(
                 md_outputs_root,
-                "*/siesta.TSHS",
-                result_dir / "siesta_hamiltonians",
-            )
-            reference_count += copy_matching_files(
-                md_outputs_root,
-                "*/siesta.HSX",
                 result_dir / "siesta_hamiltonians",
             )
         else:
@@ -4859,33 +6003,10 @@ class ExperimentRunner:
                 "*/ML_prediction.HSX",
                 result_dir / "predicted_hamiltonians",
             )
-            for sample_dir in sorted(
-                path
-                for path in samples_dir.iterdir()
-                if path.is_dir() and (path / "RUN.fdf").exists()
-            ):
-                system_label = read_system_label(sample_dir / "RUN.fdf")
-                canonical = [
-                    path
-                    for path in (
-                        sample_dir / f"{system_label}.HSX",
-                        sample_dir / f"{system_label}.TSHS",
-                    )
-                    if path.exists()
-                ]
-                sources = canonical or [
-                    src
-                    for src in sorted(
-                        list(sample_dir.glob("*.HSX")) + list(sample_dir.glob("*.TSHS")),
-                        key=natural_matrix_sort_key,
-                    )
-                    if src.name != "ML_prediction.HSX"
-                ]
-                for src in sources:
-                    dst = result_dir / "siesta_hamiltonians" / sample_dir.name / src.name
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-                    reference_count += 1
+            reference_count += copy_selected_reference_files(
+                samples_dir,
+                result_dir / "siesta_hamiltonians",
+            )
 
         copy_if_exists(training_dir / "sample_metrics.csv", result_dir / "sample_metrics.csv")
         copy_if_exists(dataset_dir / "run_summary.json", result_dir / "run_summary.json")
@@ -4996,6 +6117,8 @@ class ExperimentRunner:
             "timing_breakdown": timing_breakdown,
             "siesta_counts": siesta_counts,
             "performance": config.get("performance", {}),
+            "training_settings": config.get("training", {}).get("ui_training_settings", {}),
+            "training_hyperparameters": config.get("training", {}),
             "generated_samples": prepare_metadata.get("generated_samples"),
             "completed_samples": prepare_metadata.get("completed_samples"),
             "fc_generated_samples": prepare_metadata.get("fc_generated_samples"),
@@ -5067,6 +6190,12 @@ class ExperimentRunner:
             self._append(
                 "[WARN] Evaluacion Hamiltoniana termino con codigo "
                 f"{result.returncode}. Revisa {manifest_path}.\n"
+            )
+        fatal_errors = summary.get("fatal_errors") or summary.get("errors") or []
+        if result.returncode != 0 or fatal_errors:
+            raise RuntimeError(
+                "Evaluacion Hamiltoniana fallo con errores fatales: "
+                + json.dumps(fatal_errors, ensure_ascii=False)[:1200]
             )
         if summary.get("structural_metrics_error"):
             raise RuntimeError(
@@ -5151,9 +6280,7 @@ class ExperimentRunner:
         test_manifest: Path,
         basis_files_glob: str | None = None,
     ) -> dict[str, int]:
-        if cross_result_dir.exists():
-            shutil.rmtree(cross_result_dir)
-        cross_result_dir.mkdir(parents=True, exist_ok=True)
+        reset_output_directory(cross_result_dir)
         prediction_root = prediction_dir / "predicted_hamiltonians"
         if not prediction_root.exists():
             raise RuntimeError(f"Prediction output missing: {prediction_root}")
@@ -5195,9 +6322,10 @@ class ExperimentRunner:
         return {"references": references, "structures": structures}
 
     def _common_test_pair_id(self, md_result: dict[str, Any], atom_result: dict[str, Any]) -> str:
-        md_label = str(md_result.get("dataset_label", f"dataset_{md_result.get('dataset_size')}"))
-        atom_label = str(atom_result.get("dataset_label", f"dataset_{atom_result.get('dataset_size')}"))
-        return f"{md_label}__{atom_label}".replace("/", "_").replace("\\", "_")
+        return cross_pair_id(
+            {"md": md_result, "atom_displacement": atom_result},
+            ["md", "atom_displacement"],
+        )
 
     def _run_cross_evaluation(self, run_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
         runs = [run for run in manifest.get("runs", []) if run.get("returncode") == 0]
@@ -5219,7 +6347,7 @@ class ExperimentRunner:
         cross_root = experiment_root(run_id) / "cross_evaluations"
         prediction_root = experiment_root(run_id) / "cross_predictions"
         summary_root = experiment_root(run_id) / "summary"
-        test_sets = list(manifest.get("test_sets") or DEFAULT_COMMON_TEST_SETS)
+        test_sets = deduplicate_common_test_sets(manifest.get("test_sets") or DEFAULT_COMMON_TEST_SETS)
         common_root.mkdir(parents=True, exist_ok=True)
         cross_root.mkdir(parents=True, exist_ok=True)
         prediction_root.mkdir(parents=True, exist_ok=True)
@@ -5325,7 +6453,7 @@ class ExperimentRunner:
                             frozen_test_warning = f"Missing frozen test manifest for {pair_id} {test_set}."
                             if STRICT_COMPARISON_MODE:
                                 raise RuntimeError(frozen_test_warning)
-                        cross_name = f"{pair_id}__{train_method}__on__{test_set}"
+                        cross_name = cross_result_name(pair_id, train_method, test_set)
                         prediction_dir = prediction_root / cross_name
                         predict_command = [
                             train_python,
@@ -5517,7 +6645,9 @@ class ExperimentRunner:
         cross_root = experiment_root(run_id) / "cross_evaluations"
         prediction_root = experiment_root(run_id) / "cross_predictions"
         summary_root = experiment_root(run_id) / "summary"
-        test_sets = list(manifest.get("test_sets") or [f"test_{method}" for method in selected_methods] + ["test_mixed"])
+        test_sets = deduplicate_common_test_sets(
+            manifest.get("test_sets") or [f"test_{method}" for method in selected_methods] + ["test_mixed"]
+        )
         common_root.mkdir(parents=True, exist_ok=True)
         cross_root.mkdir(parents=True, exist_ok=True)
         prediction_root.mkdir(parents=True, exist_ok=True)
@@ -5558,10 +6688,7 @@ class ExperimentRunner:
                 method: combo_by_method[method].get("recipe_set_hash")
                 for method in selected_methods
             }
-            pair_id = "__".join(
-                f"{method}_{combo_by_method[method].get('dataset_label', combo_by_method[method].get('dataset_size'))}"
-                for method in selected_methods
-            ).replace("/", "_").replace("\\", "_")
+            pair_id = cross_pair_id(combo_by_method, selected_methods)
             pair_common_dir = common_root / pair_id
             build_command = [
                 sys.executable,
@@ -5669,7 +6796,7 @@ class ExperimentRunner:
                         summary["missing_cells"].append(required_cell)
                         if STRICT_COMPARISON_MODE:
                             raise RuntimeError(frozen_test_warning)
-                    cross_name = f"{pair_id}__{train_method}__on__{test_set}"
+                    cross_name = cross_result_name(pair_id, train_method, test_set)
                     prediction_dir = prediction_root / cross_name
                     predict_command = [
                         train_python,
@@ -5998,13 +7125,21 @@ def archived_results_summary() -> dict[str, Any]:
     for key, root in groups.items():
         if not root.exists():
             continue
-        for manifest_path in sorted(root.glob("dataset_*/run_*/manifest.json")):
+        for manifest_path in archived_result_manifest_paths(root):
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
             summary[key].append(manifest)
     return summary
+
+
+def archived_result_manifest_paths(root: Path) -> list[Path]:
+    """Return archived run manifests for both legacy and recipe-based dataset names."""
+    candidates = list(root.glob("*/run_*/manifest.json"))
+    candidates.extend(root.glob("run_*/manifest.json"))
+    unique = {path.resolve(): path for path in candidates}
+    return sorted(unique.values())
 
 
 def json_response(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -6066,6 +7201,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, plot_data_summary())
             elif path == "/api/atom-fc-config":
                 json_response(self, atom_fc_ui_config())
+            elif path == "/api/performance-presets":
+                json_response(self, performance_preset_catalog())
             elif path == "/api/methods":
                 json_response(self, {"methods": method_registry_payload(), "run_modes": sorted(RUN_MODES)})
             elif path == "/api/experiment/status":
@@ -6138,6 +7275,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     payload.get("performance"),
                     compute_accelerator=compute_accelerator,
                 )
+                training_settings = parse_training_settings(payload.get("training_settings"))
                 compute_accelerator = str(performance_settings["compute_accelerator"])
                 raw_venv_activate_command = payload.get("venv_activate_command")
                 venv_activate_command = (
@@ -6259,6 +7397,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         run_mode,
                         random_cartesian_options,
                         performance_settings,
+                        training_settings,
                         venv_activate_path,
                         dataset_recipes_info,
                     ),

@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,8 @@ DEFAULT_RANDOM_CARTESIAN_CONFIG: dict[str, Any] = {
     "remove_center_of_mass_translation": True,
 }
 
+BOHR_TO_ANG = 0.529177210903
+
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -58,6 +61,36 @@ def json_sha256(payload: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def numeric_value_with_unit(value: Any, *, default_unit: str = "ang") -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    match = text and re.search(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?", text)
+    if not match:
+        raise RuntimeError(f"No se pudo leer una amplitud numerica: {value!r}.")
+    amount = float(match.group(0))
+    unit_text = text[match.end() :].strip().lower() or default_unit
+    if "bohr" in unit_text:
+        return amount * BOHR_TO_ANG
+    if unit_text in {"ang", "angs", "angstrom", "angstroms", "a", "å"} or "ang" in unit_text:
+        return amount
+    return amount
+
+
+def apply_random_cartesian_amplitude(config: dict[str, Any]) -> None:
+    raw = config.get("max_displacement", None)
+    if raw in (None, ""):
+        raw = config.get("amplitude_ang", None)
+    if raw in (None, ""):
+        return
+    amplitude = numeric_value_with_unit(raw)
+    config["amplitude_ang"] = amplitude
+    if str(config.get("distribution", "gaussian")).strip().lower() == "uniform":
+        config["uniform_range_ang"] = amplitude
+    else:
+        config["sigma_ang"] = amplitude
+
+
 def random_cartesian_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     root = config or PIPELINE_CONFIG
     raw = (root.get("structure", {}) or {}).get("random_cartesian", {}) or {}
@@ -66,6 +99,7 @@ def random_cartesian_config(config: dict[str, Any] | None = None) -> dict[str, A
     merged["n_structures"] = int(merged["n_structures"])
     merged["seed"] = int(merged["seed"])
     merged["distribution"] = str(merged["distribution"]).strip().lower()
+    apply_random_cartesian_amplitude(merged)
     merged["sigma_ang"] = float(merged["sigma_ang"])
     merged["uniform_range_ang"] = float(merged["uniform_range_ang"])
     merged["min_distance_ang"] = float(merged["min_distance_ang"])
@@ -82,6 +116,54 @@ def random_cartesian_config(config: dict[str, Any] | None = None) -> dict[str, A
     if merged["sigma_ang"] < 0 or merged["uniform_range_ang"] < 0:
         raise RuntimeError("Las amplitudes random_cartesian no pueden ser negativas.")
     return merged
+
+
+def public_random_cartesian_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in config.items() if not str(key).startswith("_")}
+
+
+def random_cartesian_block_configs(rc_config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_blocks = rc_config.get("blocks") or []
+    if not raw_blocks:
+        block = copy.deepcopy(rc_config)
+        block.pop("blocks", None)
+        block.setdefault("block_id", "rc_block_1")
+        block.setdefault("label", f"{block['n_structures']} random structures")
+        block["_seed_explicit"] = True
+        return [block]
+    if not isinstance(raw_blocks, list):
+        raise RuntimeError("random_cartesian.blocks debe ser una lista.")
+    blocks: list[dict[str, Any]] = []
+    for index, raw_block in enumerate(raw_blocks):
+        if not isinstance(raw_block, dict):
+            raise RuntimeError("Cada bloque random_cartesian debe ser un objeto.")
+        block = copy.deepcopy(rc_config)
+        block.pop("blocks", None)
+        block.update(raw_block)
+        block["n_structures"] = int(block.get("n_structures") or 0)
+        if block["n_structures"] <= 0:
+            raise RuntimeError("Cada bloque random_cartesian necesita n_structures positivo.")
+        block["seed"] = int(block.get("seed", rc_config["seed"]))
+        block["_seed_explicit"] = "seed" in raw_block
+        block["distribution"] = str(block.get("distribution", rc_config["distribution"])).strip().lower()
+        apply_random_cartesian_amplitude(block)
+        block["sigma_ang"] = float(block["sigma_ang"])
+        block["uniform_range_ang"] = float(block["uniform_range_ang"])
+        block["min_distance_ang"] = float(block["min_distance_ang"])
+        block["max_attempts_per_structure"] = int(block["max_attempts_per_structure"])
+        if block["distribution"] not in {"gaussian", "uniform"}:
+            raise RuntimeError("random_cartesian.distribution debe ser 'gaussian' o 'uniform'.")
+        if block["sigma_ang"] < 0 or block["uniform_range_ang"] < 0:
+            raise RuntimeError("Las amplitudes random_cartesian no pueden ser negativas.")
+        block.setdefault("block_id", f"rc_block_{index + 1}")
+        block.setdefault("label", f"RC block {index + 1}")
+        blocks.append(block)
+    total = sum(int(block["n_structures"]) for block in blocks)
+    if total != int(rc_config["n_structures"]):
+        raise RuntimeError(
+            f"random_cartesian.blocks suman {total}, pero n_structures={rc_config['n_structures']}."
+        )
+    return blocks
 
 
 def moving_atom_indices(structure: Structure, config: dict[str, Any]) -> list[int]:
@@ -253,94 +335,109 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
     resources = copy_required_resources(dataset_root)
     reference, source_path = load_reference_structure()
     base_geometry_hash = json_sha256(reference.to_json_dict())
-    split_group_id = deterministic_split_group_id(base_geometry_hash, rc_config)
-    rng = random.Random(int(rc_config["seed"]))
+    block_configs = random_cartesian_block_configs(rc_config)
+    dataset_rng = random.Random(int(rc_config["seed"]))
     samples: list[dict[str, Any]] = []
 
     print("=== Random Cartesian dataset generation ===")
     print(f"[INFO] Geometria base: {source_path}")
     print(f"[INFO] Output root: {dataset_root}")
     print(f"[INFO] n_structures: {rc_config['n_structures']}")
+    print(f"[INFO] blocks: {len(block_configs)}")
 
-    for sample_index in range(int(rc_config["n_structures"])):
-        accepted: tuple[int, list[list[float]], Structure] | None = None
-        last_reason = "not_attempted"
-        for attempt in range(1, int(rc_config["max_attempts_per_structure"]) + 1):
-            displacements = displacement_field(reference, rc_config, rng)
-            positions = positions_with_displacements(reference, displacements)
-            candidate = structure_with_positions(reference, positions)
-            ok, reason = validate_random_structure(
-                reference,
-                candidate,
-                min_distance_ang=float(rc_config["min_distance_ang"]),
-            )
-            last_reason = reason
-            if ok:
-                accepted = (attempt, displacements, candidate)
-                break
-        if accepted is None:
-            raise RuntimeError(
-                "random_cartesian could not generate a valid structure "
-                f"for sample_index={sample_index} after "
-                f"{rc_config['max_attempts_per_structure']} attempts: {last_reason}."
-            )
-        accepted_attempt, displacements, candidate = accepted
-        sample_id = f"sample_{sample_index + 1:06d}"
-        sample_dir = dataset_root / sample_id
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        for pseudo in resources["pseudopotentials"]:
-            shutil.copy2(pseudo, sample_dir / Path(pseudo).name)
-        single_point_config = copy.deepcopy(PIPELINE_CONFIG)
-        single_point_config.setdefault("structure", {}).setdefault("force_constants", {})["enabled"] = False
-        content = render_single_point_fdf(
-            single_point_config,
-            positions_ang=candidate.positions_ang,
-            atom_species=candidate.atom_species,
-            sample_id=sample_id,
+    sample_index = 0
+    for block_index, block_config in enumerate(block_configs):
+        block_public_config = public_random_cartesian_config(block_config)
+        split_group_id = deterministic_split_group_id(base_geometry_hash, block_config)
+        rng = random.Random(int(block_config["seed"])) if block_config.get("_seed_explicit") else dataset_rng
+        print(
+            "[INFO] block "
+            f"{block_index + 1}/{len(block_configs)}: "
+            f"{block_config.get('label')} · {block_config['n_structures']} structures"
         )
-        (sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]).write_text(content, encoding="utf-8")
-        metadata = {
-            "id": sample_id,
-            "generation_method": "random_cartesian",
-            "method": "random_cartesian",
-            "recipe_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_id"),
-            "recipe_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_label"),
-            "block_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_id"),
-            "block_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_label"),
-            "generation_parameters_json": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("generation_parameters_json"),
-            "base_geometry_hash": base_geometry_hash,
-            "base_geometry_source": source_path,
-            "seed": int(rc_config["seed"]),
-            "sample_index": sample_index,
-            "sample_index_within_block": sample_index,
-            "global_sample_id": sample_id,
-            "distribution": rc_config["distribution"],
-            "sigma_ang": float(rc_config["sigma_ang"]) if rc_config["distribution"] == "gaussian" else None,
-            "uniform_range_ang": float(rc_config["uniform_range_ang"]) if rc_config["distribution"] == "uniform" else None,
-            "displacements_ang": displacements,
-            "min_distance_ang": float(rc_config["min_distance_ang"]),
-            "accepted_attempt": accepted_attempt,
-            "split_group_id": split_group_id,
-        }
-        write_json(sample_dir / "metadata.json", metadata)
-        samples.append(
-            {
-                "sample_id": sample_id,
-                "sample_dir": str(sample_dir),
-                "run_fdf": str(sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]),
-                "metadata": str(sample_dir / "metadata.json"),
-                "split_group_id": split_group_id,
-                "accepted_attempt": accepted_attempt,
+        for sample_index_within_block in range(int(block_config["n_structures"])):
+            accepted: tuple[int, list[list[float]], Structure] | None = None
+            last_reason = "not_attempted"
+            for attempt in range(1, int(block_config["max_attempts_per_structure"]) + 1):
+                displacements = displacement_field(reference, block_config, rng)
+                positions = positions_with_displacements(reference, displacements)
+                candidate = structure_with_positions(reference, positions)
+                ok, reason = validate_random_structure(
+                    reference,
+                    candidate,
+                    min_distance_ang=float(block_config["min_distance_ang"]),
+                )
+                last_reason = reason
+                if ok:
+                    accepted = (attempt, displacements, candidate)
+                    break
+            if accepted is None:
+                raise RuntimeError(
+                    "random_cartesian could not generate a valid structure "
+                    f"for block={block_config.get('block_id')} sample_index={sample_index_within_block} after "
+                    f"{block_config['max_attempts_per_structure']} attempts: {last_reason}."
+                )
+            accepted_attempt, displacements, candidate = accepted
+            sample_id = f"sample_{sample_index + 1:06d}"
+            sample_dir = dataset_root / sample_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            for pseudo in resources["pseudopotentials"]:
+                shutil.copy2(pseudo, sample_dir / Path(pseudo).name)
+            single_point_config = copy.deepcopy(PIPELINE_CONFIG)
+            single_point_config.setdefault("structure", {}).setdefault("force_constants", {})["enabled"] = False
+            content = render_single_point_fdf(
+                single_point_config,
+                positions_ang=candidate.positions_ang,
+                atom_species=candidate.atom_species,
+                sample_id=sample_id,
+            )
+            (sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]).write_text(content, encoding="utf-8")
+            metadata = {
+                "id": sample_id,
+                "generation_method": "random_cartesian",
                 "method": "random_cartesian",
-                "recipe_id": metadata.get("recipe_id"),
-                "recipe_label": metadata.get("recipe_label"),
-                "block_id": metadata.get("block_id"),
-                "block_label": metadata.get("block_label"),
-                "generation_parameters_json": metadata.get("generation_parameters_json"),
-                "sample_index_within_block": sample_index,
+                "recipe_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_id"),
+                "recipe_label": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_label"),
+                "block_id": block_config.get("block_id") or (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_id"),
+                "block_label": block_config.get("label") or (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_label"),
+                "generation_parameters_json": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("generation_parameters_json"),
+                "base_geometry_hash": base_geometry_hash,
+                "base_geometry_source": source_path,
+                "seed": int(block_config["seed"]),
+                "sample_index": sample_index,
+                "sample_index_within_block": sample_index_within_block,
                 "global_sample_id": sample_id,
+                "distribution": block_config["distribution"],
+                "sigma_ang": float(block_config["sigma_ang"]) if block_config["distribution"] == "gaussian" else None,
+                "uniform_range_ang": float(block_config["uniform_range_ang"]) if block_config["distribution"] == "uniform" else None,
+                "amplitude_ang": block_public_config.get("amplitude_ang"),
+                "block_n_structures": int(block_config["n_structures"]),
+                "block_config": block_public_config,
+                "displacements_ang": displacements,
+                "min_distance_ang": float(block_config["min_distance_ang"]),
+                "accepted_attempt": accepted_attempt,
+                "split_group_id": split_group_id,
             }
-        )
+            write_json(sample_dir / "metadata.json", metadata)
+            samples.append(
+                {
+                    "sample_id": sample_id,
+                    "sample_dir": str(sample_dir),
+                    "run_fdf": str(sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]),
+                    "metadata": str(sample_dir / "metadata.json"),
+                    "split_group_id": split_group_id,
+                    "accepted_attempt": accepted_attempt,
+                    "method": "random_cartesian",
+                    "recipe_id": metadata.get("recipe_id"),
+                    "recipe_label": metadata.get("recipe_label"),
+                    "block_id": metadata.get("block_id"),
+                    "block_label": metadata.get("block_label"),
+                    "generation_parameters_json": metadata.get("generation_parameters_json"),
+                    "sample_index_within_block": sample_index_within_block,
+                    "global_sample_id": sample_id,
+                }
+            )
+            sample_index += 1
 
     manifest = {
         "method_id": "random_cartesian",
@@ -350,7 +447,8 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "generated_structures": len(samples),
         "base_geometry_hash": base_geometry_hash,
         "base_geometry_source": source_path,
-        "config_snapshot": rc_config,
+        "config_snapshot": public_random_cartesian_config(rc_config),
+        "blocks": [public_random_cartesian_config(block) for block in block_configs],
         "dataset_recipe": PIPELINE_CONFIG.get("dataset_recipe") or {},
         "samples": samples,
         "siesta_input_hashes": {

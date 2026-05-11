@@ -124,8 +124,12 @@ def copy_file_if_exists(src_value: str, destination_dir: Path) -> str:
 
 def freeze_rows(rows: list[dict[str, str]], test_set: str, output_dir: Path) -> list[dict[str, Any]]:
     frozen = []
+    seen_sample_ids: set[str] = set()
     for row in rows:
         sample_id = row["sample_id"]
+        if sample_id in seen_sample_ids:
+            raise RuntimeError(f"Duplicate sample_id {sample_id!r} in {test_set}; sample ids must be globally unique.")
+        seen_sample_ids.add(sample_id)
         sample_dir = output_dir / test_set / "samples" / sample_id
         item = dict(row)
         item["test_set"] = test_set

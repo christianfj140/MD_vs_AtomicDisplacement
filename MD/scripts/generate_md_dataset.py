@@ -5,13 +5,21 @@ from __future__ import annotations
 
 import os
 import csv
+import copy
 import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from md_pipeline_config import command, load_pipeline_config, paths, render_run_fdf
+from md_pipeline_config import (
+    command,
+    load_pipeline_config,
+    md_temperature_blocks,
+    md_total_steps,
+    paths,
+    render_run_fdf,
+)
 
 BOHR_TO_ANG = 0.529177210903
 MANIFEST_FIELDS = [
@@ -48,6 +56,13 @@ MANIFEST_FIELDS = [
     "generation_parameters_json",
     "sample_index_within_block",
     "global_sample_id",
+    "temperature_K",
+    "md_block_id",
+    "md_block_label",
+    "md_source_block_dir",
+    "md_source_frame_index",
+    "timestep_fs",
+    "md_type_of_run",
 ]
 
 
@@ -120,10 +135,10 @@ def setup_store(config: dict) -> None:
     )
 
 
-def write_run_fdf(config: dict) -> None:
+def write_run_fdf(config: dict, block: dict | None = None) -> None:
     pipeline_paths = paths(config)
     # Asumimos que queremos un RUN.fdf determinista: lo sobreescribimos siempre.
-    pipeline_paths["run_fdf_path"].write_text(render_run_fdf(config), encoding="utf-8")
+    pipeline_paths["run_fdf_path"].write_text(render_run_fdf(config, block=block), encoding="utf-8")
     print(f"[OK] RUN.fdf escrito en {pipeline_paths['run_fdf_path']}")
 
 
@@ -375,6 +390,12 @@ def _set_fdf_directive(text: str, key: str, value: str) -> str:
     return "\n".join(output).rstrip() + "\n"
 
 
+MD_RUN_FDF_XV_MARKER = (
+    "# Graph2Mat MD geometry materialized from siesta.XV after SIESTA; "
+    "reference matrix timestamp may predate this RUN.fdf rewrite."
+)
+
+
 def rewrite_run_fdf_from_xv(run_fdf_path: Path, xv_path: Path) -> None:
     lattice, atoms = parse_xv_geometry(xv_path)
     lattice_lines = [f"{x:.12f} {y:.12f} {z:.12f}" for x, y, z in lattice]
@@ -387,7 +408,45 @@ def rewrite_run_fdf_from_xv(run_fdf_path: Path, xv_path: Path) -> None:
     text = _set_fdf_directive(text, "AtomicCoordinatesFormat", "Ang")
     text = _replace_or_append_block(text, "LatticeVectors", lattice_lines)
     text = _replace_or_append_block(text, "AtomicCoordinatesAndAtomicSpecies", atom_lines)
+    if MD_RUN_FDF_XV_MARKER not in text:
+        text = text.rstrip() + "\n\n" + MD_RUN_FDF_XV_MARKER + "\n"
     run_fdf_path.write_text(text, encoding="utf-8")
+
+
+def write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_sample_metadata(sample_dir: Path) -> dict:
+    metadata_path = sample_dir / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def md_sample_manifest_fields(sample_dir: Path) -> dict[str, str]:
+    metadata = read_sample_metadata(sample_dir)
+    def text(key: str) -> str:
+        value = metadata.get(key)
+        return "" if value is None else str(value)
+    return {
+        "metadata_path": str(sample_dir / "metadata.json") if metadata else "",
+        "seed": text("seed"),
+        "temperature_K": text("temperature_K"),
+        "md_block_id": text("source_block_id"),
+        "md_block_label": text("source_block_label"),
+        "md_source_block_dir": text("source_block_dir"),
+        "md_source_frame_index": text("source_frame_index"),
+        "timestep_fs": text("timestep_fs"),
+        "md_type_of_run": text("type_of_run"),
+        "block_id": text("source_block_id"),
+        "block_label": text("source_block_label"),
+        "sample_index_within_block": text("sample_index_within_block"),
+    }
 
 
 def effective_fdf_geometry_signature(run_fdf_path: Path) -> tuple[str, ...]:
@@ -447,6 +506,15 @@ def refresh_md_step_geometries(config: dict) -> None:
             raise RuntimeError(f"Missing per-step siesta.XV geometry: {xv_path}")
         xv_signatures.add(xv_geometry_signature(xv_path))
         rewrite_run_fdf_from_xv(run_fdf_path, xv_path)
+        metadata = read_sample_metadata(step_dir)
+        metadata.update(
+            {
+                "run_fdf_geometry_source": "siesta.XV",
+                "run_fdf_rewritten_from_xv": True,
+                "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
+            }
+        )
+        write_json(step_dir / "metadata.json", metadata)
         rewritten += 1
 
     signatures = {effective_fdf_geometry_signature(step_dir / "RUN.fdf") for step_dir in step_dirs}
@@ -456,6 +524,134 @@ def refresh_md_step_geometries(config: dict) -> None:
             "effective RUN.fdf geometry to Graph2Mat."
         )
     print(f"[OK] Geometrias MD por frame escritas en RUN.fdf: {rewritten} muestras.")
+
+
+def _copy_pseudopotentials_for_block(source_dir: Path, block_dir: Path) -> None:
+    for pseudo in sorted(list(source_dir.glob("*.psf")) + list(source_dir.glob("*.psml"))):
+        shutil.copy2(pseudo, block_dir / pseudo.name)
+
+
+def _block_config(config: dict, block_dir: Path, block: dict) -> dict:
+    block_config = copy.deepcopy(config)
+    block_config["paths"]["dataset_dir"] = str(block_dir)
+    block_config["md"]["steps"] = int(block["n_snapshots"])
+    block_config["md"].pop("temperature_blocks", None)
+    block_config["md"].pop("blocks", None)
+    return block_config
+
+
+def run_temperature_block(config: dict, block: dict, block_dir: Path) -> None:
+    pipeline_paths = paths(config)
+    block_dir.mkdir(parents=True, exist_ok=True)
+    _copy_pseudopotentials_for_block(pipeline_paths["dataset_dir"], block_dir)
+    block_config = _block_config(config, block_dir, block)
+    setup_store(block_config)
+    write_run_fdf(block_config, block=block)
+    run_siesta_with_venv(block_config)
+    refresh_md_step_geometries(block_config)
+
+
+def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
+    pipeline_paths = paths(config)
+    dataset_dir = pipeline_paths["dataset_dir"]
+    blocks_root = dataset_dir / "md_temperature_blocks"
+    final_steps_dir = dataset_dir / "MD_steps"
+    if final_steps_dir.exists():
+        shutil.rmtree(final_steps_dir)
+    final_steps_dir.mkdir(parents=True, exist_ok=True)
+
+    samples = []
+    global_index = 0
+    basis_copied = False
+    combined_run_out = []
+    for block_index, block in enumerate(blocks):
+        block_id = str(block.get("block_id") or f"md_block_{block_index + 1}")
+        block_label = str(block.get("label") or block_id)
+        block_dir = blocks_root / block_id
+        source_steps_dir = block_dir / "MD_steps"
+        if not source_steps_dir.exists():
+            raise RuntimeError(f"Bloque MD sin MD_steps: {source_steps_dir}")
+        if not basis_copied and (source_steps_dir / "basis").exists():
+            shutil.copytree(source_steps_dir / "basis", final_steps_dir / "basis")
+            basis_copied = True
+        step_dirs = sorted(
+            (path for path in source_steps_dir.iterdir() if path.is_dir() and path.name.isdigit()),
+            key=lambda path: int(path.name),
+        )
+        expected = int(block["n_snapshots"])
+        if len(step_dirs) < expected:
+            raise RuntimeError(
+                f"Bloque MD {block_id} genero menos snapshots de los pedidos: {len(step_dirs)} < {expected}."
+            )
+        for sample_index, source_sample in enumerate(step_dirs[:expected]):
+            target_sample = final_steps_dir / str(global_index)
+            shutil.copytree(source_sample, target_sample)
+            metadata = {
+                "generation_method": "md_temperature_block",
+                "method": "md",
+                "temperature_K": block.get("temperature_K"),
+                "n_snapshots_in_block": expected,
+                "source_block_id": block_id,
+                "source_block_label": block_label,
+                "source_block_dir": str(block_dir),
+                "source_frame_index": source_sample.name,
+                "sample_index_within_block": sample_index,
+                "global_sample_id": str(global_index),
+                "seed": block.get("seed"),
+                "timestep_fs": block.get("timestep_fs", config["md"].get("timestep_fs")),
+                "ensemble": block.get("ensemble", config["md"].get("ensemble", "nve")),
+                "thermostat": block.get("thermostat", config["md"].get("thermostat")),
+                "type_of_run": block.get("type_of_run", config["md"].get("type_of_run", "Verlet")),
+                "source_run_fdf": str(block_dir / "RUN.fdf"),
+                "source_run_out": str(block_dir / "RUN.out"),
+                "run_fdf_geometry_source": "siesta.XV",
+                "run_fdf_rewritten_from_xv": True,
+                "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
+            }
+            write_json(target_sample / "metadata.json", metadata)
+            samples.append(metadata)
+            global_index += 1
+        run_out = block_dir / "RUN.out"
+        if run_out.exists():
+            combined_run_out.append(f"\n# ==== MD block {block_id} ({block_label}) ====\n")
+            combined_run_out.append(run_out.read_text(encoding="utf-8", errors="replace"))
+
+    if global_index != md_total_steps(config):
+        raise RuntimeError(f"Total MD combinado incorrecto: {global_index} != {md_total_steps(config)}")
+    write_json(
+        dataset_dir / "md_temperature_blocks_manifest.json",
+        {
+            "method": "md",
+            "generation_method": "md_temperature_blocks",
+            "total_snapshots": global_index,
+            "blocks": blocks,
+            "samples": samples,
+        },
+    )
+    pipeline_paths["run_out_path"].write_text("".join(combined_run_out), encoding="utf-8")
+    pipeline_paths["run_fdf_path"].write_text(render_run_fdf(config, block={"n_snapshots": md_total_steps(config)}), encoding="utf-8")
+    print(f"[OK] Bloques MD combinados: {global_index} snapshots en {final_steps_dir}.")
+
+
+def run_temperature_block_dataset(config: dict) -> None:
+    blocks = md_temperature_blocks(config)
+    if not blocks:
+        return
+    pipeline_paths = paths(config)
+    dataset_dir = pipeline_paths["dataset_dir"]
+    blocks_root = dataset_dir / "md_temperature_blocks"
+    if blocks_root.exists():
+        shutil.rmtree(blocks_root)
+    blocks_root.mkdir(parents=True, exist_ok=True)
+    for block in blocks:
+        block_id = str(block.get("block_id") or "md_block")
+        print(
+            "[INFO] MD block "
+            f"{block_id}: {block['n_snapshots']} snapshots, "
+            f"T={block.get('temperature_K', config['md'].get('temperature_K', config['md'].get('initial_temperature_K', 300)))} K"
+        )
+        run_temperature_block(config, block, blocks_root / block_id)
+    combine_temperature_blocks(config, blocks)
 
 
 def _find_hamiltonian(sample_dir: Path) -> Path | None:
@@ -508,7 +704,7 @@ def write_excluded_gap_manifest(
             "hamiltonian_path": str(_find_hamiltonian(sample) or ""),
             "output_path": str(pipeline_paths["run_out_path"]),
             "run_out_path": str(pipeline_paths["run_out_path"]),
-            "metadata_path": "",
+            "metadata_path": str(sample / "metadata.json") if (sample / "metadata.json").exists() else "",
             "valid": False,
             "validation_reason": "excluded_temporal_gap",
             "split": "excluded_gap",
@@ -520,6 +716,7 @@ def write_excluded_gap_manifest(
             "status": "excluded",
             "sample_dir": str(sample),
             **recipe_manifest_fields(config, sample_index=sample.name),
+            **md_sample_manifest_fields(sample),
         }
         for sample, reason in excluded_samples
     ]
@@ -543,6 +740,7 @@ def write_split_manifests(
             sample_dir = split_root / split_name / source_sample.name
             structure_path = sample_dir / "RUN.fdf"
             hamiltonian_path = _find_hamiltonian(sample_dir)
+            sample_metadata = md_sample_manifest_fields(sample_dir)
             rows.append(
                 {
                     "sample_id": f"md_{source_sample.name}",
@@ -560,7 +758,7 @@ def write_split_manifests(
                     "hamiltonian_path": str(hamiltonian_path or ""),
                     "output_path": str(run_out_path),
                     "run_out_path": str(run_out_path),
-                    "metadata_path": "",
+                    "metadata_path": sample_metadata.get("metadata_path", ""),
                     "valid": bool(structure_path.exists() and hamiltonian_path and run_out_path.exists()),
                     "validation_reason": "ok" if structure_path.exists() and hamiltonian_path and run_out_path.exists() else "missing_run_fdf_or_matrix_or_output",
                     "split": split_name,
@@ -568,10 +766,11 @@ def write_split_manifests(
                     "temporal_gap": str(temporal_gap),
                     "source_frame_index": source_sample.name,
                     "excluded_gap_reason": "",
-                    "seed": "",
+                    "seed": sample_metadata.get("seed", ""),
                     "status": "completed" if structure_path.exists() and hamiltonian_path and run_out_path.exists() else "incomplete",
                     "sample_dir": str(sample_dir),
                     **recipe_manifest_fields(config, sample_index=source_sample.name),
+                    **sample_metadata,
                 }
             )
         _write_manifest(split_root / f"{split_name}_manifest.csv", rows)
@@ -589,7 +788,7 @@ def prepare_dataset_splits(config: dict) -> None:
         (path for path in steps_dir.iterdir() if path.is_dir() and path.name.isdigit()),
         key=lambda path: int(path.name),
     )
-    total = int(config["md"]["steps"])
+    total = md_total_steps(config)
     if len(step_dirs) < total:
         raise RuntimeError(
             f"Se esperaban {total} muestras MD, pero solo hay {len(step_dirs)} en {steps_dir}."
@@ -666,10 +865,13 @@ def main() -> int:
     require_command(command(config, "siesta"))
 
     pipeline_paths["dataset_dir"].mkdir(parents=True, exist_ok=True)
-    setup_store(config)
-    write_run_fdf(config)
-    run_siesta_with_venv(config)
-    refresh_md_step_geometries(config)
+    if md_temperature_blocks(config):
+        run_temperature_block_dataset(config)
+    else:
+        setup_store(config)
+        write_run_fdf(config)
+        run_siesta_with_venv(config)
+        refresh_md_step_geometries(config)
     prepare_dataset_splits(config)
 
     print("\n=== Pipeline completado correctamente ===")

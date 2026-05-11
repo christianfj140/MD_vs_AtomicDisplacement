@@ -12,6 +12,12 @@ commands:
 md:
   type_of_run: verlet
   steps: 10
+  temperature_K: 300.0
+  timestep_fs: 1.0
+  ensemble: nve
+  thermostat: none
+  write_md_history: true
+  temperature_blocks: []
   basis_size: DZP
   basis_type: split
   energy_shift: 0.03 eV
@@ -28,6 +34,7 @@ md:
   spin_polarized: F
   fix_spin: F
   non_collinear_spin: F
+  xml_write: true
   save_hs_file: true
   save_hs: true
   save_de: true
@@ -54,6 +61,19 @@ md:
     atomic_number: 1
     symbol: H
   coordinates_format: Ang
+  kgrid_monkhorst_pack:
+  - - 1
+    - 0
+    - 0
+    - 0.0
+  - - 0
+    - 1
+    - 0
+    - 0.0
+  - - 0
+    - 0
+    - 1
+    - 0.0
   atoms:
   - label: O
     species_index: 1
