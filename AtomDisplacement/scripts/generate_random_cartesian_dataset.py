@@ -251,24 +251,30 @@ def validate_random_structure(
     return True, "ok"
 
 
-def deterministic_split_group_id(base_geometry_hash: str, config: dict[str, Any]) -> str:
+def random_cartesian_family_payload(base_geometry_hash: str, config: dict[str, Any]) -> dict[str, Any]:
     amplitude = (
         config["sigma_ang"]
         if config["distribution"] == "gaussian"
         else config["uniform_range_ang"]
     )
     seed_family = int(config["seed"])
-    return json_sha256(
-        {
-            "generation_method": "random_cartesian",
-            "base_geometry_hash": base_geometry_hash,
-            "distribution": config["distribution"],
-            "amplitude_ang": amplitude,
-            "seed_family": seed_family,
-            "species_filter": config.get("species_filter") or [],
-            "move_atoms": config.get("move_atoms", "all"),
-        }
-    )
+    return {
+        "generation_method": "random_cartesian",
+        "base_geometry_hash": base_geometry_hash,
+        "distribution": config["distribution"],
+        "amplitude_ang": amplitude,
+        "sigma_ang": float(config["sigma_ang"]) if config["distribution"] == "gaussian" else None,
+        "uniform_range_ang": float(config["uniform_range_ang"]) if config["distribution"] == "uniform" else None,
+        "seed_family": seed_family,
+        "species_filter": config.get("species_filter") or [],
+        "move_atoms": config.get("move_atoms", "all"),
+        "recipe_id": (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("recipe_id"),
+        "block_id": config.get("block_id") or (PIPELINE_CONFIG.get("dataset_recipe") or {}).get("block_id"),
+    }
+
+
+def deterministic_split_group_id(base_geometry_hash: str, config: dict[str, Any]) -> str:
+    return json_sha256(random_cartesian_family_payload(base_geometry_hash, config))
 
 
 def copy_required_resources(dataset_root: Path) -> dict[str, list[str]]:
@@ -348,7 +354,8 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
     sample_index = 0
     for block_index, block_config in enumerate(block_configs):
         block_public_config = public_random_cartesian_config(block_config)
-        split_group_id = deterministic_split_group_id(base_geometry_hash, block_config)
+        family_payload = random_cartesian_family_payload(base_geometry_hash, block_config)
+        split_group_id = json_sha256(family_payload)
         rng = random.Random(int(block_config["seed"])) if block_config.get("_seed_explicit") else dataset_rng
         print(
             "[INFO] block "
@@ -404,6 +411,7 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
                 "base_geometry_hash": base_geometry_hash,
                 "base_geometry_source": source_path,
                 "seed": int(block_config["seed"]),
+                "seed_family": int(block_config["seed"]),
                 "sample_index": sample_index,
                 "sample_index_within_block": sample_index_within_block,
                 "global_sample_id": sample_id,
@@ -411,12 +419,16 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
                 "sigma_ang": float(block_config["sigma_ang"]) if block_config["distribution"] == "gaussian" else None,
                 "uniform_range_ang": float(block_config["uniform_range_ang"]) if block_config["distribution"] == "uniform" else None,
                 "amplitude_ang": block_public_config.get("amplitude_ang"),
+                "move_atoms": block_config.get("move_atoms", "all"),
+                "species_filter": block_config.get("species_filter") or [],
                 "block_n_structures": int(block_config["n_structures"]),
                 "block_config": block_public_config,
                 "displacements_ang": displacements,
                 "min_distance_ang": float(block_config["min_distance_ang"]),
                 "accepted_attempt": accepted_attempt,
                 "split_group_id": split_group_id,
+                "random_cartesian_family": family_payload,
+                "random_cartesian_family_id": split_group_id,
             }
             write_json(sample_dir / "metadata.json", metadata)
             samples.append(
@@ -426,6 +438,14 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
                     "run_fdf": str(sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]),
                     "metadata": str(sample_dir / "metadata.json"),
                     "split_group_id": split_group_id,
+                    "random_cartesian_family_id": split_group_id,
+                    "base_geometry_hash": base_geometry_hash,
+                    "distribution": metadata.get("distribution"),
+                    "sigma_ang": metadata.get("sigma_ang"),
+                    "uniform_range_ang": metadata.get("uniform_range_ang"),
+                    "seed_family": metadata.get("seed_family"),
+                    "move_atoms": json.dumps(metadata.get("move_atoms", "all"), sort_keys=True),
+                    "species_filter": json.dumps(metadata.get("species_filter", []), sort_keys=True),
                     "accepted_attempt": accepted_attempt,
                     "method": "random_cartesian",
                     "recipe_id": metadata.get("recipe_id"),

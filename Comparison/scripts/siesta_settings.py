@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the SIESTA settings used by MD and AtomDisplacement configs.
+"""Compare SIESTA settings used by the scientific methods.
 
 This module deliberately does not rewrite pipeline configs. It provides a strict
 hash/comparison layer so the UI can warn when a run is not a clean comparison of
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from method_registry import normalize_method_id
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +49,38 @@ COMMON_KEYS = [
     "TS.HS.Save",
     "TS.DE.Save",
     "XML.Write",
+    "overlap_policy",
 ]
+
+PHYSICS_RELEVANT_KEYS = {
+    "lattice_constant",
+    "lattice_vectors",
+    "PAO.BasisType",
+    "PAO.BasisSize",
+    "PAO.EnergyShift",
+    "MeshCutoff",
+    "XC.functional",
+    "XC.authors",
+    "MaxSCFIterations",
+    "SolutionMethod",
+    "DM.MixingWeight",
+    "DM.NumberPulay",
+    "DM.Tolerance",
+    "DM.Require.Energy.Convergence",
+    "DM.Energy.Tolerance",
+    "SpinPolarized",
+    "FixSpin",
+    "NonCollinearSpin",
+    "ForceAuxCell",
+    "overlap_policy",
+}
+
+OUTPUT_ARTIFACT_KEYS = {
+    "Save.HS",
+    "TS.HS.Save",
+    "TS.DE.Save",
+    "XML.Write",
+}
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -118,37 +151,240 @@ def atom_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def random_cartesian_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
+    structure = config.get("structure", {}) or {}
+    random_cartesian = structure.get("random_cartesian", {}) or {}
+    settings = dict(atom_siesta_settings(config))
+    random_siesta = random_cartesian.get("siesta", {}) or {}
+    if isinstance(random_siesta, dict):
+        settings.update(random_siesta)
+    if random_cartesian.get("overlap_policy") not in (None, ""):
+        settings["overlap_policy"] = random_cartesian.get("overlap_policy")
+    return settings
+
+
+def method_siesta_settings(method: str, config: dict[str, Any]) -> dict[str, Any]:
+    method_id = normalize_method_id(method, allow_unknown=True)
+    if method_id == "md":
+        return md_siesta_settings(config)
+    if method_id == "siesta_fc_cartesian":
+        return atom_siesta_settings(config)
+    if method_id == "random_cartesian":
+        return random_cartesian_siesta_settings(config)
+    raise ValueError(f"Unsupported SIESTA settings method: {method!r}")
+
+
+def files_content_hash(paths: list[Path]) -> str:
+    content_hashes = []
+    for path in paths:
+        if path.exists() and path.is_file():
+            content_hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    if not content_hashes:
+        return ""
+    digest = hashlib.sha256()
+    for content_hash in sorted(content_hashes):
+        digest.update(content_hash.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def artifact_hash_payload(
+    *,
+    basis_files: list[Path] | None = None,
+    pseudopotential_files: list[Path] | None = None,
+) -> dict[str, str]:
+    return {
+        "basis_hash": files_content_hash(basis_files or []),
+        "pseudopotential_hash": files_content_hash(pseudopotential_files or []),
+    }
+
+
+def mismatch_payload(
+    *,
+    method_a: str,
+    method_b: str,
+    key: str,
+    value_a: Any,
+    value_b: Any,
+    shared_value: Any = None,
+    severity: str,
+    mismatch_type: str = "siesta_setting",
+) -> dict[str, Any]:
+    return {
+        "type": mismatch_type,
+        "key": key,
+        "methods": [method_a, method_b],
+        "values": {
+            method_a: value_a,
+            method_b: value_b,
+        },
+        "shared_reference": shared_value,
+        "severity": severity,
+        "scientifically_relevant": severity == "severe",
+    }
+
+
+def pairwise_mismatch_report(
+    method_settings: dict[str, dict[str, Any]],
+    shared_settings: dict[str, Any],
+    artifact_hashes_by_method: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    artifact_hashes_by_method = artifact_hashes_by_method or {}
+    methods = sorted(method_settings)
+    mismatches: list[dict[str, Any]] = []
+    for index, method_a in enumerate(methods):
+        for method_b in methods[index + 1 :]:
+            settings_a = method_settings[method_a]
+            settings_b = method_settings[method_b]
+            for key in COMMON_KEYS:
+                value_a = normalize_value(settings_a.get(key))
+                value_b = normalize_value(settings_b.get(key))
+                if value_a == value_b:
+                    continue
+                severity = "severe" if key in PHYSICS_RELEVANT_KEYS else "warning"
+                mismatches.append(
+                    mismatch_payload(
+                        method_a=method_a,
+                        method_b=method_b,
+                        key=key,
+                        value_a=value_a,
+                        value_b=value_b,
+                        shared_value=normalize_value(shared_settings.get(key)),
+                        severity=severity,
+                    )
+                )
+            artifacts_a = artifact_hashes_by_method.get(method_a, {}) or {}
+            artifacts_b = artifact_hashes_by_method.get(method_b, {}) or {}
+            for artifact_key in ("basis_hash", "pseudopotential_hash"):
+                value_a = artifacts_a.get(artifact_key) or ""
+                value_b = artifacts_b.get(artifact_key) or ""
+                if not value_a or not value_b or value_a == value_b:
+                    continue
+                mismatches.append(
+                    mismatch_payload(
+                        method_a=method_a,
+                        method_b=method_b,
+                        key=artifact_key,
+                        value_a=value_a,
+                        value_b=value_b,
+                        severity="severe",
+                        mismatch_type="basis_pseudopotential",
+                    )
+                )
+    return mismatches
+
+
+def compare_method_settings(
+    configs_by_method: dict[str, dict[str, Any]],
+    shared_settings: dict[str, Any] | None = None,
+    *,
+    artifact_hashes_by_method: dict[str, dict[str, str]] | None = None,
+    selected_methods: list[str] | None = None,
+) -> dict[str, Any]:
+    shared_settings = shared_settings or {}
+    normalized_configs = {
+        normalize_method_id(method, allow_unknown=True): config
+        for method, config in configs_by_method.items()
+    }
+    methods = selected_methods or list(normalized_configs)
+    canonical_methods = []
+    for method in methods:
+        method_id = normalize_method_id(method, allow_unknown=True)
+        if method_id in normalized_configs and method_id not in canonical_methods:
+            canonical_methods.append(method_id)
+    method_settings = {
+        method_id: method_siesta_settings(method_id, normalized_configs[method_id])
+        for method_id in canonical_methods
+    }
+    artifact_hashes_by_method = {
+        normalize_method_id(method, allow_unknown=True): dict(payload or {})
+        for method, payload in (artifact_hashes_by_method or {}).items()
+    }
+    pairwise_mismatches = pairwise_mismatch_report(
+        method_settings,
+        shared_settings,
+        artifact_hashes_by_method,
+    )
+    severe_mismatches = [mismatch for mismatch in pairwise_mismatches if mismatch.get("severity") == "severe"]
+    warning_mismatches = [mismatch for mismatch in pairwise_mismatches if mismatch.get("severity") != "severe"]
+    hash_by_method = {
+        method_id: settings_hash(settings)
+        for method_id, settings in method_settings.items()
+    }
+    basis_hash_by_method = {
+        method_id: (artifact_hashes_by_method.get(method_id, {}) or {}).get("basis_hash", "")
+        for method_id in canonical_methods
+    }
+    pseudopotential_hash_by_method = {
+        method_id: (artifact_hashes_by_method.get(method_id, {}) or {}).get("pseudopotential_hash", "")
+        for method_id in canonical_methods
+    }
+    warning = (
+        "SIESTA settings or basis/pseudopotential artifacts differ across selected methods."
+        if pairwise_mismatches
+        else ""
+    )
+    severe_warning = (
+        "Physics-relevant SIESTA settings or basis/pseudopotential artifacts differ across selected methods."
+        if severe_mismatches
+        else ""
+    )
+    report = {
+        "ok": not severe_mismatches,
+        "selected_methods": canonical_methods,
+        "siesta_settings_hash": settings_hash(method_settings),
+        "siesta_settings_hash_by_method": hash_by_method,
+        "method_siesta_settings": method_settings,
+        "basis_hash_by_method": basis_hash_by_method,
+        "pseudopotential_hash_by_method": pseudopotential_hash_by_method,
+        "shared_siesta_settings_hash": settings_hash(shared_settings) if shared_settings else None,
+        "pairwise_mismatch_report": pairwise_mismatches,
+        "severe_mismatches": severe_mismatches,
+        "warning_mismatches": warning_mismatches,
+        "warning": warning,
+        "severe_warning": severe_warning,
+        "basis_pseudopotential_warning": (
+            "Basis or pseudopotential content hashes differ across selected methods."
+            if any(mismatch.get("type") == "basis_pseudopotential" for mismatch in severe_mismatches)
+            else ""
+        ),
+    }
+    if "md" in hash_by_method:
+        report["md_siesta_settings_hash"] = hash_by_method["md"]
+    if "siesta_fc_cartesian" in hash_by_method:
+        report["siesta_fc_cartesian_siesta_settings_hash"] = hash_by_method["siesta_fc_cartesian"]
+        report["atom_displacement_siesta_settings_hash"] = hash_by_method["siesta_fc_cartesian"]
+    if "random_cartesian" in hash_by_method:
+        report["random_cartesian_siesta_settings_hash"] = hash_by_method["random_cartesian"]
+    return report
+
+
 def compare_settings(
     md_config: dict[str, Any],
     atom_config: dict[str, Any],
     shared_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    md_settings = md_siesta_settings(md_config)
-    atom_settings = atom_siesta_settings(atom_config)
-    shared_settings = shared_settings or {}
-    mismatches = []
-    for key in COMMON_KEYS:
-        md_value = normalize_value(md_settings.get(key))
-        atom_value = normalize_value(atom_settings.get(key))
-        shared_value = normalize_value(shared_settings.get(key))
-        if md_value != atom_value:
-            mismatches.append(
-                {
-                    "key": key,
-                    "md": md_value,
-                    "atom_displacement": atom_value,
-                    "shared_reference": shared_value,
-                }
-            )
-    return {
-        "ok": not mismatches,
-        "siesta_settings_hash": settings_hash({"md": md_settings, "atom_displacement": atom_settings}),
-        "md_siesta_settings_hash": settings_hash(md_settings),
-        "atom_displacement_siesta_settings_hash": settings_hash(atom_settings),
-        "shared_siesta_settings_hash": settings_hash(shared_settings) if shared_settings else None,
-        "mismatches": mismatches,
-        "warning": "" if not mismatches else "MD and AtomDisplacement SIESTA settings differ; comparison is not strict.",
-    }
+    report = compare_method_settings(
+        {"md": md_config, "siesta_fc_cartesian": atom_config},
+        shared_settings,
+        selected_methods=["md", "siesta_fc_cartesian"],
+    )
+    legacy_mismatches = []
+    for mismatch in report["pairwise_mismatch_report"]:
+        values = mismatch.get("values", {})
+        legacy_mismatches.append(
+            {
+                "key": mismatch.get("key"),
+                "md": values.get("md"),
+                "atom_displacement": values.get("siesta_fc_cartesian"),
+                "shared_reference": mismatch.get("shared_reference"),
+                "severity": mismatch.get("severity"),
+            }
+        )
+    report["mismatches"] = legacy_mismatches
+    if report["warning"]:
+        report["warning"] = "MD and AtomDisplacement SIESTA settings differ; comparison is not strict."
+    return report
 
 
 def file_digest(paths: list[Path]) -> str:

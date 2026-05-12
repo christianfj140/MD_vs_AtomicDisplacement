@@ -1,0 +1,211 @@
+{
+  "md": [
+    {
+      "recipe_id": "md_h2o_weighted_temp_190",
+      "label": "H2O MD weighted temperature ladder 190",
+      "comparison_role": "primary_equal_N",
+      "scientific_note": "Weighted 300-1000 K ladder concentrated toward 300-700 K.",
+      "blocks": [
+        { "block_id": "md_T300", "n_snapshots": 18, "temperature_K": 300, "seed": 1001 },
+        { "block_id": "md_T350", "n_snapshots": 17, "temperature_K": 350, "seed": 1002 },
+        { "block_id": "md_T400", "n_snapshots": 16, "temperature_K": 400, "seed": 1003 },
+        { "block_id": "md_T450", "n_snapshots": 15, "temperature_K": 450, "seed": 1004 },
+        { "block_id": "md_T500", "n_snapshots": 15, "temperature_K": 500, "seed": 1005 },
+        { "block_id": "md_T550", "n_snapshots": 14, "temperature_K": 550, "seed": 1006 },
+        { "block_id": "md_T600", "n_snapshots": 14, "temperature_K": 600, "seed": 1007 },
+        { "block_id": "md_T650", "n_snapshots": 12, "temperature_K": 650, "seed": 1008 },
+        { "block_id": "md_T700", "n_snapshots": 12, "temperature_K": 700, "seed": 1009 },
+        { "block_id": "md_T750", "n_snapshots": 11, "temperature_K": 750, "seed": 1010 },
+        { "block_id": "md_T800", "n_snapshots": 11, "temperature_K": 800, "seed": 1011 },
+        { "block_id": "md_T850", "n_snapshots": 10, "temperature_K": 850, "seed": 1012 },
+        { "block_id": "md_T900", "n_snapshots": 9, "temperature_K": 900, "seed": 1013 },
+        { "block_id": "md_T950", "n_snapshots": 8, "temperature_K": 950, "seed": 1014 },
+        { "block_id": "md_T1000", "n_snapshots": 8, "temperature_K": 1000, "seed": 1015 }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_temp_570",
+      "label": "H2O MD weighted temperature ladder 570",
+      "comparison_role": "medium_exploratory",
+      "scientific_note": "Second-stage MD dataset for MD vs random_cartesian scaling.",
+      "blocks": [
+        { "block_id": "md_T300", "n_snapshots": 54, "temperature_K": 300, "seed": 1101 },
+        { "block_id": "md_T350", "n_snapshots": 51, "temperature_K": 350, "seed": 1102 },
+        { "block_id": "md_T400", "n_snapshots": 48, "temperature_K": 400, "seed": 1103 },
+        { "block_id": "md_T450", "n_snapshots": 45, "temperature_K": 450, "seed": 1104 },
+        { "block_id": "md_T500", "n_snapshots": 45, "temperature_K": 500, "seed": 1105 },
+        { "block_id": "md_T550", "n_snapshots": 42, "temperature_K": 550, "seed": 1106 },
+        { "block_id": "md_T600", "n_snapshots": 42, "temperature_K": 600, "seed": 1107 },
+        { "block_id": "md_T650", "n_snapshots": 36, "temperature_K": 650, "seed": 1108 },
+        { "block_id": "md_T700", "n_snapshots": 36, "temperature_K": 700, "seed": 1109 },
+        { "block_id": "md_T750", "n_snapshots": 33, "temperature_K": 750, "seed": 1110 },
+        { "block_id": "md_T800", "n_snapshots": 33, "temperature_K": 800, "seed": 1111 },
+        { "block_id": "md_T850", "n_snapshots": 30, "temperature_K": 850, "seed": 1112 },
+        { "block_id": "md_T900", "n_snapshots": 27, "temperature_K": 900, "seed": 1113 },
+        { "block_id": "md_T950", "n_snapshots": 24, "temperature_K": 950, "seed": 1114 },
+        { "block_id": "md_T1000", "n_snapshots": 24, "temperature_K": 1000, "seed": 1115 }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_temp_1140",
+      "label": "H2O MD weighted temperature ladder 1140",
+      "comparison_role": "large_learning_curve",
+      "scientific_note": "Large MD dataset for checking whether MD continues improving after 570 structures.",
+      "blocks": [
+        { "block_id": "md_T300", "n_snapshots": 108, "temperature_K": 300, "seed": 1201 },
+        { "block_id": "md_T350", "n_snapshots": 102, "temperature_K": 350, "seed": 1202 },
+        { "block_id": "md_T400", "n_snapshots": 96, "temperature_K": 400, "seed": 1203 },
+        { "block_id": "md_T450", "n_snapshots": 90, "temperature_K": 450, "seed": 1204 },
+        { "block_id": "md_T500", "n_snapshots": 90, "temperature_K": 500, "seed": 1205 },
+        { "block_id": "md_T550", "n_snapshots": 84, "temperature_K": 550, "seed": 1206 },
+        { "block_id": "md_T600", "n_snapshots": 84, "temperature_K": 600, "seed": 1207 },
+        { "block_id": "md_T650", "n_snapshots": 72, "temperature_K": 650, "seed": 1208 },
+        { "block_id": "md_T700", "n_snapshots": 72, "temperature_K": 700, "seed": 1209 },
+        { "block_id": "md_T750", "n_snapshots": 66, "temperature_K": 750, "seed": 1210 },
+        { "block_id": "md_T800", "n_snapshots": 66, "temperature_K": 800, "seed": 1211 },
+        { "block_id": "md_T850", "n_snapshots": 60, "temperature_K": 850, "seed": 1212 },
+        { "block_id": "md_T900", "n_snapshots": 54, "temperature_K": 900, "seed": 1213 },
+        { "block_id": "md_T950", "n_snapshots": 48, "temperature_K": 950, "seed": 1214 },
+        { "block_id": "md_T1000", "n_snapshots": 48, "temperature_K": 1000, "seed": 1215 }
+      ]
+    }
+  ],
+  "siesta_fc_cartesian": [
+    {
+      "recipe_id": "fc_h2o_harmonic_core_190",
+      "label": "H2O FC harmonic core 190",
+      "comparison_role": "primary_equal_N",
+      "scientific_note": "Dense small-amplitude frozen-phonon core: 10 amplitudes x 19 structures.",
+      "blocks": [
+        { "block_id": "fc_A0005", "displacement": "0.005 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0010", "displacement": "0.010 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0015", "displacement": "0.015 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0020", "displacement": "0.020 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0025", "displacement": "0.025 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0030", "displacement": "0.030 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0035", "displacement": "0.035 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0040", "displacement": "0.040 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0045", "displacement": "0.045 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0050", "displacement": "0.050 Ang", "n_structures": 19 }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_saturation_570",
+      "label": "H2O FC saturation 570",
+      "comparison_role": "optional_saturation_reference",
+      "scientific_note": "Optional saturation reference only; not recommended as the automatic second main benchmark.",
+      "blocks": [
+        { "block_id": "fc_A0005", "displacement": "0.005 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0010", "displacement": "0.010 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0015", "displacement": "0.015 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0020", "displacement": "0.020 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0025", "displacement": "0.025 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0030", "displacement": "0.030 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0035", "displacement": "0.035 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0040", "displacement": "0.040 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0045", "displacement": "0.045 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0050", "displacement": "0.050 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0055", "displacement": "0.055 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0060", "displacement": "0.060 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0065", "displacement": "0.065 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0070", "displacement": "0.070 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0075", "displacement": "0.075 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0080", "displacement": "0.080 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0085", "displacement": "0.085 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0090", "displacement": "0.090 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0095", "displacement": "0.095 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0100", "displacement": "0.100 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0105", "displacement": "0.105 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0110", "displacement": "0.110 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0115", "displacement": "0.115 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0120", "displacement": "0.120 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0125", "displacement": "0.125 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0130", "displacement": "0.130 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0135", "displacement": "0.135 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0140", "displacement": "0.140 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0145", "displacement": "0.145 Ang", "n_structures": 19 },
+        { "block_id": "fc_A0150", "displacement": "0.150 Ang", "n_structures": 19 }
+      ]
+    }
+  ],
+  "random_cartesian": [
+    {
+      "recipe_id": "rc_h2o_multisigma_190",
+      "label": "H2O Random Cartesian multisigma 190",
+      "comparison_role": "primary_equal_N",
+      "scientific_note": "Multi-sigma local Cartesian perturbations concentrated around 0.010-0.020 Ang.",
+      "blocks": [
+        { "block_id": "rc_sigma0005", "n_structures": 25, "distribution": "gaussian", "sigma_ang": 0.005, "seed": 2001, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0010", "n_structures": 45, "distribution": "gaussian", "sigma_ang": 0.010, "seed": 2002, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0020", "n_structures": 55, "distribution": "gaussian", "sigma_ang": 0.020, "seed": 2003, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0035", "n_structures": 40, "distribution": "gaussian", "sigma_ang": 0.035, "seed": 2004, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0050", "n_structures": 25, "distribution": "gaussian", "sigma_ang": 0.050, "seed": 2005, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_570",
+      "label": "H2O Random Cartesian multisigma 570",
+      "comparison_role": "medium_exploratory",
+      "scientific_note": "Second-stage random_cartesian dataset for MD vs random_cartesian scaling.",
+      "blocks": [
+        { "block_id": "rc_sigma0005", "n_structures": 75, "distribution": "gaussian", "sigma_ang": 0.005, "seed": 2101, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0010", "n_structures": 135, "distribution": "gaussian", "sigma_ang": 0.010, "seed": 2102, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0020", "n_structures": 165, "distribution": "gaussian", "sigma_ang": 0.020, "seed": 2103, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0035", "n_structures": 120, "distribution": "gaussian", "sigma_ang": 0.035, "seed": 2104, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0050", "n_structures": 75, "distribution": "gaussian", "sigma_ang": 0.050, "seed": 2105, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_1140",
+      "label": "H2O Random Cartesian multisigma 1140",
+      "comparison_role": "large_learning_curve",
+      "scientific_note": "Large random_cartesian dataset for checking whether additional samples keep improving metrics.",
+      "blocks": [
+        { "block_id": "rc_sigma0005", "n_structures": 150, "distribution": "gaussian", "sigma_ang": 0.005, "seed": 2201, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0010", "n_structures": 270, "distribution": "gaussian", "sigma_ang": 0.010, "seed": 2202, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0020", "n_structures": 330, "distribution": "gaussian", "sigma_ang": 0.020, "seed": 2203, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0035", "n_structures": 240, "distribution": "gaussian", "sigma_ang": 0.035, "seed": 2204, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0050", "n_structures": 150, "distribution": "gaussian", "sigma_ang": 0.050, "seed": 2205, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_1800",
+      "label": "H2O Random Cartesian multisigma 1800",
+      "comparison_role": "extended_random_cartesian_scaling",
+      "scientific_note": "Extra random_cartesian scaling point to test whether multisigma sampling can overtake MD at larger N.",
+      "blocks": [
+        { "block_id": "rc_sigma0005", "n_structures": 237, "distribution": "gaussian", "sigma_ang": 0.005, "seed": 2301, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0010", "n_structures": 426, "distribution": "gaussian", "sigma_ang": 0.010, "seed": 2302, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0020", "n_structures": 521, "distribution": "gaussian", "sigma_ang": 0.020, "seed": 2303, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0035", "n_structures": 379, "distribution": "gaussian", "sigma_ang": 0.035, "seed": 2304, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0050", "n_structures": 237, "distribution": "gaussian", "sigma_ang": 0.050, "seed": 2305, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_2500",
+      "label": "H2O Random Cartesian multisigma 2500",
+      "comparison_role": "extended_random_cartesian_scaling",
+      "scientific_note": "Extra random_cartesian scaling point to test whether multisigma sampling can overtake MD at larger N.",
+      "blocks": [
+        { "block_id": "rc_sigma0005", "n_structures": 329, "distribution": "gaussian", "sigma_ang": 0.005, "seed": 2401, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0010", "n_structures": 592, "distribution": "gaussian", "sigma_ang": 0.010, "seed": 2402, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0020", "n_structures": 724, "distribution": "gaussian", "sigma_ang": 0.020, "seed": 2403, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0035", "n_structures": 526, "distribution": "gaussian", "sigma_ang": 0.035, "seed": 2404, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0050", "n_structures": 329, "distribution": "gaussian", "sigma_ang": 0.050, "seed": 2405, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_3500",
+      "label": "H2O Random Cartesian multisigma 3500",
+      "comparison_role": "extended_random_cartesian_scaling",
+      "scientific_note": "Extra random_cartesian scaling point to test whether multisigma sampling can overtake MD at larger N.",
+      "blocks": [
+        { "block_id": "rc_sigma0005", "n_structures": 460, "distribution": "gaussian", "sigma_ang": 0.005, "seed": 2501, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0010", "n_structures": 829, "distribution": "gaussian", "sigma_ang": 0.010, "seed": 2502, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0020", "n_structures": 1013, "distribution": "gaussian", "sigma_ang": 0.020, "seed": 2503, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0035", "n_structures": 738, "distribution": "gaussian", "sigma_ang": 0.035, "seed": 2504, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true },
+        { "block_id": "rc_sigma0050", "n_structures": 460, "distribution": "gaussian", "sigma_ang": 0.050, "seed": 2505, "min_distance_ang": 0.65, "remove_center_of_mass_translation": true }
+      ]
+    }
+  ]
+}

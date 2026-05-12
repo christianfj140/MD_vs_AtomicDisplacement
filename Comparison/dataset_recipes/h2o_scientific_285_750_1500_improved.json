@@ -1,0 +1,2942 @@
+{
+  "md": [
+    {
+      "recipe_id": "md_h2o_weighted_ladder_285_seed1",
+      "label": "H2O MD weighted temperature ladder 285 seed 1",
+      "seed": 1001,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Weighted 300-1000 K ladder: broad thermal coverage with less dominance of the 950-1000 K tail.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T300_n28",
+          "label": "MD 300 K, 28 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 28
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T350_n26",
+          "label": "MD 350 K, 26 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 26
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T400_n24",
+          "label": "MD 400 K, 24 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 24
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T450_n22",
+          "label": "MD 450 K, 22 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 22
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T500_n22",
+          "label": "MD 500 K, 22 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 22
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T550_n20",
+          "label": "MD 550 K, 20 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 20
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T600_n20",
+          "label": "MD 600 K, 20 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 20
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T650_n18",
+          "label": "MD 650 K, 18 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 18
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T700_n18",
+          "label": "MD 700 K, 18 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 18
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T750_n16",
+          "label": "MD 750 K, 16 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 16
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T800_n16",
+          "label": "MD 800 K, 16 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 16
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T850_n15",
+          "label": "MD 850 K, 15 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 15
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T900_n14",
+          "label": "MD 900 K, 14 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 14
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T950_n13",
+          "label": "MD 950 K, 13 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 13
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed1_T1000_n13",
+          "label": "MD 1000 K, 13 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 13
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_285_seed2",
+      "label": "H2O MD weighted temperature ladder 285 seed 2",
+      "seed": 1002,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Weighted 300-1000 K ladder: broad thermal coverage with less dominance of the 950-1000 K tail.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T300_n26",
+          "label": "MD 300 K, 26 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 26
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T350_n25",
+          "label": "MD 350 K, 25 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 25
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T400_n24",
+          "label": "MD 400 K, 24 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 24
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T450_n23",
+          "label": "MD 450 K, 23 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 23
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T500_n22",
+          "label": "MD 500 K, 22 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 22
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T550_n21",
+          "label": "MD 550 K, 21 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 21
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T600_n20",
+          "label": "MD 600 K, 20 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 20
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T650_n19",
+          "label": "MD 650 K, 19 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 19
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T700_n18",
+          "label": "MD 700 K, 18 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 18
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T750_n17",
+          "label": "MD 750 K, 17 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 17
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T800_n16",
+          "label": "MD 800 K, 16 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 16
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T850_n15",
+          "label": "MD 850 K, 15 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 15
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T900_n14",
+          "label": "MD 900 K, 14 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 14
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T950_n13",
+          "label": "MD 950 K, 13 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 13
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed2_T1000_n12",
+          "label": "MD 1000 K, 12 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 12
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_285_seed3",
+      "label": "H2O MD weighted temperature ladder 285 seed 3",
+      "seed": 1003,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Weighted 300-1000 K ladder: broad thermal coverage with less dominance of the 950-1000 K tail.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T300_n24",
+          "label": "MD 300 K, 24 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 24
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T350_n24",
+          "label": "MD 350 K, 24 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 24
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T400_n23",
+          "label": "MD 400 K, 23 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 23
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T450_n23",
+          "label": "MD 450 K, 23 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 23
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T500_n22",
+          "label": "MD 500 K, 22 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 22
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T550_n22",
+          "label": "MD 550 K, 22 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 22
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T600_n21",
+          "label": "MD 600 K, 21 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 21
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T650_n20",
+          "label": "MD 650 K, 20 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 20
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T700_n19",
+          "label": "MD 700 K, 19 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 19
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T750_n18",
+          "label": "MD 750 K, 18 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 18
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T800_n17",
+          "label": "MD 800 K, 17 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 17
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T850_n16",
+          "label": "MD 850 K, 16 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 16
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T900_n15",
+          "label": "MD 900 K, 15 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 15
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T950_n11",
+          "label": "MD 950 K, 11 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 11
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_285_seed3_T1000_n10",
+          "label": "MD 1000 K, 10 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 10
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_750_seed1",
+      "label": "H2O MD weighted temperature ladder 750 seed 1",
+      "seed": 1101,
+      "comparison_role": "medium_scale_MD_vs_RC",
+      "scientific_note": "Medium learning-curve point for MD vs RC with three seeds; not an equal-N comparison against compact FC-285.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T300_n75",
+          "label": "MD 300 K, 75 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 75
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T350_n70",
+          "label": "MD 350 K, 70 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 70
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T400_n65",
+          "label": "MD 400 K, 65 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 65
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T450_n60",
+          "label": "MD 450 K, 60 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 60
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T500_n55",
+          "label": "MD 500 K, 55 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 55
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T550_n55",
+          "label": "MD 550 K, 55 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 55
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T600_n55",
+          "label": "MD 600 K, 55 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 55
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T650_n50",
+          "label": "MD 650 K, 50 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 50
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T700_n45",
+          "label": "MD 700 K, 45 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 45
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T750_n45",
+          "label": "MD 750 K, 45 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 45
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T800_n40",
+          "label": "MD 800 K, 40 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 40
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T850_n40",
+          "label": "MD 850 K, 40 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 40
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T900_n35",
+          "label": "MD 900 K, 35 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 35
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T950_n30",
+          "label": "MD 950 K, 30 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 30
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed1_T1000_n30",
+          "label": "MD 1000 K, 30 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 30
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_750_seed2",
+      "label": "H2O MD weighted temperature ladder 750 seed 2",
+      "seed": 1102,
+      "comparison_role": "medium_scale_MD_vs_RC",
+      "scientific_note": "Medium learning-curve point for MD vs RC with three seeds; not an equal-N comparison against compact FC-285.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T300_n70",
+          "label": "MD 300 K, 70 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 70
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T350_n68",
+          "label": "MD 350 K, 68 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 68
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T400_n65",
+          "label": "MD 400 K, 65 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 65
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T450_n62",
+          "label": "MD 450 K, 62 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 62
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T500_n58",
+          "label": "MD 500 K, 58 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 58
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T550_n55",
+          "label": "MD 550 K, 55 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 55
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T600_n53",
+          "label": "MD 600 K, 53 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 53
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T650_n50",
+          "label": "MD 650 K, 50 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 50
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T700_n48",
+          "label": "MD 700 K, 48 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 48
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T750_n45",
+          "label": "MD 750 K, 45 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 45
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T800_n42",
+          "label": "MD 800 K, 42 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 42
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T850_n40",
+          "label": "MD 850 K, 40 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 40
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T900_n37",
+          "label": "MD 900 K, 37 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 37
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T950_n30",
+          "label": "MD 950 K, 30 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 30
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed2_T1000_n27",
+          "label": "MD 1000 K, 27 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 27
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_750_seed3",
+      "label": "H2O MD weighted temperature ladder 750 seed 3",
+      "seed": 1103,
+      "comparison_role": "medium_scale_MD_vs_RC",
+      "scientific_note": "Medium learning-curve point for MD vs RC with three seeds; not an equal-N comparison against compact FC-285.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T300_n68",
+          "label": "MD 300 K, 68 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 68
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T350_n66",
+          "label": "MD 350 K, 66 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 66
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T400_n64",
+          "label": "MD 400 K, 64 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 64
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T450_n62",
+          "label": "MD 450 K, 62 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 62
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T500_n60",
+          "label": "MD 500 K, 60 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 60
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T550_n58",
+          "label": "MD 550 K, 58 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 58
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T600_n55",
+          "label": "MD 600 K, 55 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 55
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T650_n52",
+          "label": "MD 650 K, 52 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 52
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T700_n49",
+          "label": "MD 700 K, 49 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 49
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T750_n46",
+          "label": "MD 750 K, 46 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 46
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T800_n43",
+          "label": "MD 800 K, 43 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 43
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T850_n40",
+          "label": "MD 850 K, 40 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 40
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T900_n37",
+          "label": "MD 900 K, 37 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 37
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T950_n25",
+          "label": "MD 950 K, 25 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 25
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_750_seed3_T1000_n25",
+          "label": "MD 1000 K, 25 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 25
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_1500_seed1",
+      "label": "H2O MD weighted temperature ladder 1500 seed 1",
+      "seed": 1201,
+      "comparison_role": "large_scale_MD_vs_RC",
+      "scientific_note": "Large learning-curve point for MD vs RC with three seeds; run only after checking whether 750 is still improving.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T300_n145",
+          "label": "MD 300 K, 145 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 145
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T350_n135",
+          "label": "MD 350 K, 135 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 135
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T400_n130",
+          "label": "MD 400 K, 130 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 130
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T450_n120",
+          "label": "MD 450 K, 120 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 120
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T500_n115",
+          "label": "MD 500 K, 115 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 115
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T550_n110",
+          "label": "MD 550 K, 110 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 110
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T600_n105",
+          "label": "MD 600 K, 105 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 105
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T650_n100",
+          "label": "MD 650 K, 100 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 100
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T700_n95",
+          "label": "MD 700 K, 95 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 95
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T750_n90",
+          "label": "MD 750 K, 90 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 90
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T800_n85",
+          "label": "MD 800 K, 85 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 85
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T850_n80",
+          "label": "MD 850 K, 80 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 80
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T900_n75",
+          "label": "MD 900 K, 75 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 75
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T950_n65",
+          "label": "MD 950 K, 65 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 65
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed1_T1000_n50",
+          "label": "MD 1000 K, 50 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 50
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_1500_seed2",
+      "label": "H2O MD weighted temperature ladder 1500 seed 2",
+      "seed": 1202,
+      "comparison_role": "large_scale_MD_vs_RC",
+      "scientific_note": "Large learning-curve point for MD vs RC with three seeds; run only after checking whether 750 is still improving.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T300_n140",
+          "label": "MD 300 K, 140 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 140
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T350_n136",
+          "label": "MD 350 K, 136 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 136
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T400_n130",
+          "label": "MD 400 K, 130 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 130
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T450_n124",
+          "label": "MD 450 K, 124 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 124
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T500_n116",
+          "label": "MD 500 K, 116 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 116
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T550_n110",
+          "label": "MD 550 K, 110 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 110
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T600_n106",
+          "label": "MD 600 K, 106 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 106
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T650_n100",
+          "label": "MD 650 K, 100 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 100
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T700_n96",
+          "label": "MD 700 K, 96 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 96
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T750_n90",
+          "label": "MD 750 K, 90 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 90
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T800_n84",
+          "label": "MD 800 K, 84 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 84
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T850_n80",
+          "label": "MD 850 K, 80 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 80
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T900_n74",
+          "label": "MD 900 K, 74 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 74
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T950_n60",
+          "label": "MD 950 K, 60 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 60
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed2_T1000_n54",
+          "label": "MD 1000 K, 54 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 54
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_h2o_weighted_ladder_1500_seed3",
+      "label": "H2O MD weighted temperature ladder 1500 seed 3",
+      "seed": 1203,
+      "comparison_role": "large_scale_MD_vs_RC",
+      "scientific_note": "Large learning-curve point for MD vs RC with three seeds; run only after checking whether 750 is still improving.",
+      "blocks": [
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T300_n136",
+          "label": "MD 300 K, 136 snapshots",
+          "temperature_K": 300,
+          "n_snapshots": 136
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T350_n132",
+          "label": "MD 350 K, 132 snapshots",
+          "temperature_K": 350,
+          "n_snapshots": 132
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T400_n128",
+          "label": "MD 400 K, 128 snapshots",
+          "temperature_K": 400,
+          "n_snapshots": 128
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T450_n124",
+          "label": "MD 450 K, 124 snapshots",
+          "temperature_K": 450,
+          "n_snapshots": 124
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T500_n120",
+          "label": "MD 500 K, 120 snapshots",
+          "temperature_K": 500,
+          "n_snapshots": 120
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T550_n116",
+          "label": "MD 550 K, 116 snapshots",
+          "temperature_K": 550,
+          "n_snapshots": 116
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T600_n110",
+          "label": "MD 600 K, 110 snapshots",
+          "temperature_K": 600,
+          "n_snapshots": 110
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T650_n104",
+          "label": "MD 650 K, 104 snapshots",
+          "temperature_K": 650,
+          "n_snapshots": 104
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T700_n98",
+          "label": "MD 700 K, 98 snapshots",
+          "temperature_K": 700,
+          "n_snapshots": 98
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T750_n92",
+          "label": "MD 750 K, 92 snapshots",
+          "temperature_K": 750,
+          "n_snapshots": 92
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T800_n86",
+          "label": "MD 800 K, 86 snapshots",
+          "temperature_K": 800,
+          "n_snapshots": 86
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T850_n80",
+          "label": "MD 850 K, 80 snapshots",
+          "temperature_K": 850,
+          "n_snapshots": 80
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T900_n74",
+          "label": "MD 900 K, 74 snapshots",
+          "temperature_K": 900,
+          "n_snapshots": 74
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T950_n50",
+          "label": "MD 950 K, 50 snapshots",
+          "temperature_K": 950,
+          "n_snapshots": 50
+        },
+        {
+          "block_id": "md_h2o_weighted_ladder_1500_seed3_T1000_n50",
+          "label": "MD 1000 K, 50 snapshots",
+          "temperature_K": 1000,
+          "n_snapshots": 50
+        }
+      ]
+    }
+  ],
+  "siesta_fc_cartesian": [
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_125_seed1",
+      "label": "H2O FC low-amplitude subsampled ladder 125 seed 1",
+      "seed": 2126,
+      "comparison_role": "budget_curve_FC_125",
+      "scientific_note": "Budget-curve FC point with 25 low-amplitude displacements x 5 selected FC steps. Counts stay below the high-count regime that can select the zero-reference geometry.",
+      "blocks": [
+        {
+          "block_id": "fc_125_s1_A0p005_n5",
+          "label": "FC 0.005 Ang, 5 selected structures",
+          "displacement": "0.005 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p008_n5",
+          "label": "FC 0.008 Ang, 5 selected structures",
+          "displacement": "0.008 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p01_n5",
+          "label": "FC 0.010 Ang, 5 selected structures",
+          "displacement": "0.010 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p012_n5",
+          "label": "FC 0.012 Ang, 5 selected structures",
+          "displacement": "0.012 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p015_n5",
+          "label": "FC 0.015 Ang, 5 selected structures",
+          "displacement": "0.015 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p018_n5",
+          "label": "FC 0.018 Ang, 5 selected structures",
+          "displacement": "0.018 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p02_n5",
+          "label": "FC 0.020 Ang, 5 selected structures",
+          "displacement": "0.020 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p022_n5",
+          "label": "FC 0.022 Ang, 5 selected structures",
+          "displacement": "0.022 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p025_n5",
+          "label": "FC 0.025 Ang, 5 selected structures",
+          "displacement": "0.025 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p028_n5",
+          "label": "FC 0.028 Ang, 5 selected structures",
+          "displacement": "0.028 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p03_n5",
+          "label": "FC 0.030 Ang, 5 selected structures",
+          "displacement": "0.030 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p032_n5",
+          "label": "FC 0.032 Ang, 5 selected structures",
+          "displacement": "0.032 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p035_n5",
+          "label": "FC 0.035 Ang, 5 selected structures",
+          "displacement": "0.035 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p038_n5",
+          "label": "FC 0.038 Ang, 5 selected structures",
+          "displacement": "0.038 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p04_n5",
+          "label": "FC 0.040 Ang, 5 selected structures",
+          "displacement": "0.040 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p042_n5",
+          "label": "FC 0.042 Ang, 5 selected structures",
+          "displacement": "0.042 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p045_n5",
+          "label": "FC 0.045 Ang, 5 selected structures",
+          "displacement": "0.045 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p048_n5",
+          "label": "FC 0.048 Ang, 5 selected structures",
+          "displacement": "0.048 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p05_n5",
+          "label": "FC 0.050 Ang, 5 selected structures",
+          "displacement": "0.050 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p055_n5",
+          "label": "FC 0.055 Ang, 5 selected structures",
+          "displacement": "0.055 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p06_n5",
+          "label": "FC 0.060 Ang, 5 selected structures",
+          "displacement": "0.060 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p065_n5",
+          "label": "FC 0.065 Ang, 5 selected structures",
+          "displacement": "0.065 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p07_n5",
+          "label": "FC 0.070 Ang, 5 selected structures",
+          "displacement": "0.070 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p075_n5",
+          "label": "FC 0.075 Ang, 5 selected structures",
+          "displacement": "0.075 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s1_A0p08_n5",
+          "label": "FC 0.080 Ang, 5 selected structures",
+          "displacement": "0.080 Ang",
+          "n_structures": 5
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_125_seed2",
+      "label": "H2O FC low-amplitude subsampled ladder 125 seed 2",
+      "seed": 2127,
+      "comparison_role": "budget_curve_FC_125",
+      "scientific_note": "Budget-curve FC point with 25 low-amplitude displacements x 5 selected FC steps. Counts stay below the high-count regime that can select the zero-reference geometry.",
+      "blocks": [
+        {
+          "block_id": "fc_125_s2_A0p006_n5",
+          "label": "FC 0.006 Ang, 5 selected structures",
+          "displacement": "0.006 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p009_n5",
+          "label": "FC 0.009 Ang, 5 selected structures",
+          "displacement": "0.009 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p011_n5",
+          "label": "FC 0.011 Ang, 5 selected structures",
+          "displacement": "0.011 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p014_n5",
+          "label": "FC 0.014 Ang, 5 selected structures",
+          "displacement": "0.014 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p017_n5",
+          "label": "FC 0.017 Ang, 5 selected structures",
+          "displacement": "0.017 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p019_n5",
+          "label": "FC 0.019 Ang, 5 selected structures",
+          "displacement": "0.019 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p021_n5",
+          "label": "FC 0.021 Ang, 5 selected structures",
+          "displacement": "0.021 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p024_n5",
+          "label": "FC 0.024 Ang, 5 selected structures",
+          "displacement": "0.024 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p027_n5",
+          "label": "FC 0.027 Ang, 5 selected structures",
+          "displacement": "0.027 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p029_n5",
+          "label": "FC 0.029 Ang, 5 selected structures",
+          "displacement": "0.029 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p031_n5",
+          "label": "FC 0.031 Ang, 5 selected structures",
+          "displacement": "0.031 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p034_n5",
+          "label": "FC 0.034 Ang, 5 selected structures",
+          "displacement": "0.034 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p037_n5",
+          "label": "FC 0.037 Ang, 5 selected structures",
+          "displacement": "0.037 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p039_n5",
+          "label": "FC 0.039 Ang, 5 selected structures",
+          "displacement": "0.039 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p041_n5",
+          "label": "FC 0.041 Ang, 5 selected structures",
+          "displacement": "0.041 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p044_n5",
+          "label": "FC 0.044 Ang, 5 selected structures",
+          "displacement": "0.044 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p047_n5",
+          "label": "FC 0.047 Ang, 5 selected structures",
+          "displacement": "0.047 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p049_n5",
+          "label": "FC 0.049 Ang, 5 selected structures",
+          "displacement": "0.049 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p052_n5",
+          "label": "FC 0.052 Ang, 5 selected structures",
+          "displacement": "0.052 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p057_n5",
+          "label": "FC 0.057 Ang, 5 selected structures",
+          "displacement": "0.057 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p062_n5",
+          "label": "FC 0.062 Ang, 5 selected structures",
+          "displacement": "0.062 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p067_n5",
+          "label": "FC 0.067 Ang, 5 selected structures",
+          "displacement": "0.067 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p072_n5",
+          "label": "FC 0.072 Ang, 5 selected structures",
+          "displacement": "0.072 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p077_n5",
+          "label": "FC 0.077 Ang, 5 selected structures",
+          "displacement": "0.077 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s2_A0p082_n5",
+          "label": "FC 0.082 Ang, 5 selected structures",
+          "displacement": "0.082 Ang",
+          "n_structures": 5
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_125_seed3",
+      "label": "H2O FC low-amplitude subsampled ladder 125 seed 3",
+      "seed": 2128,
+      "comparison_role": "budget_curve_FC_125",
+      "scientific_note": "Budget-curve FC point with 25 low-amplitude displacements x 5 selected FC steps. Counts stay below the high-count regime that can select the zero-reference geometry.",
+      "blocks": [
+        {
+          "block_id": "fc_125_s3_A0p004_n5",
+          "label": "FC 0.004 Ang, 5 selected structures",
+          "displacement": "0.004 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p007_n5",
+          "label": "FC 0.007 Ang, 5 selected structures",
+          "displacement": "0.007 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p009_n5",
+          "label": "FC 0.009 Ang, 5 selected structures",
+          "displacement": "0.009 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p013_n5",
+          "label": "FC 0.013 Ang, 5 selected structures",
+          "displacement": "0.013 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p016_n5",
+          "label": "FC 0.016 Ang, 5 selected structures",
+          "displacement": "0.016 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p018_n5",
+          "label": "FC 0.018 Ang, 5 selected structures",
+          "displacement": "0.018 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p021_n5",
+          "label": "FC 0.021 Ang, 5 selected structures",
+          "displacement": "0.021 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p023_n5",
+          "label": "FC 0.023 Ang, 5 selected structures",
+          "displacement": "0.023 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p026_n5",
+          "label": "FC 0.026 Ang, 5 selected structures",
+          "displacement": "0.026 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p029_n5",
+          "label": "FC 0.029 Ang, 5 selected structures",
+          "displacement": "0.029 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p031_n5",
+          "label": "FC 0.031 Ang, 5 selected structures",
+          "displacement": "0.031 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p033_n5",
+          "label": "FC 0.033 Ang, 5 selected structures",
+          "displacement": "0.033 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p036_n5",
+          "label": "FC 0.036 Ang, 5 selected structures",
+          "displacement": "0.036 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p039_n5",
+          "label": "FC 0.039 Ang, 5 selected structures",
+          "displacement": "0.039 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p041_n5",
+          "label": "FC 0.041 Ang, 5 selected structures",
+          "displacement": "0.041 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p043_n5",
+          "label": "FC 0.043 Ang, 5 selected structures",
+          "displacement": "0.043 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p046_n5",
+          "label": "FC 0.046 Ang, 5 selected structures",
+          "displacement": "0.046 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p049_n5",
+          "label": "FC 0.049 Ang, 5 selected structures",
+          "displacement": "0.049 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p052_n5",
+          "label": "FC 0.052 Ang, 5 selected structures",
+          "displacement": "0.052 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p056_n5",
+          "label": "FC 0.056 Ang, 5 selected structures",
+          "displacement": "0.056 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p061_n5",
+          "label": "FC 0.061 Ang, 5 selected structures",
+          "displacement": "0.061 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p066_n5",
+          "label": "FC 0.066 Ang, 5 selected structures",
+          "displacement": "0.066 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p071_n5",
+          "label": "FC 0.071 Ang, 5 selected structures",
+          "displacement": "0.071 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p076_n5",
+          "label": "FC 0.076 Ang, 5 selected structures",
+          "displacement": "0.076 Ang",
+          "n_structures": 5
+        },
+        {
+          "block_id": "fc_125_s3_A0p081_n5",
+          "label": "FC 0.081 Ang, 5 selected structures",
+          "displacement": "0.081 Ang",
+          "n_structures": 5
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_200_seed1",
+      "label": "H2O FC low-amplitude subsampled ladder 200 seed 1",
+      "seed": 2201,
+      "comparison_role": "budget_curve_FC_200",
+      "scientific_note": "Budget-curve FC point with 25 low-amplitude displacements x 8 selected FC steps. Counts stay below the high-count regime that can select the zero-reference geometry.",
+      "blocks": [
+        {
+          "block_id": "fc_200_s1_A0p005_n8",
+          "label": "FC 0.005 Ang, 8 selected structures",
+          "displacement": "0.005 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p008_n8",
+          "label": "FC 0.008 Ang, 8 selected structures",
+          "displacement": "0.008 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p01_n8",
+          "label": "FC 0.010 Ang, 8 selected structures",
+          "displacement": "0.010 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p012_n8",
+          "label": "FC 0.012 Ang, 8 selected structures",
+          "displacement": "0.012 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p015_n8",
+          "label": "FC 0.015 Ang, 8 selected structures",
+          "displacement": "0.015 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p018_n8",
+          "label": "FC 0.018 Ang, 8 selected structures",
+          "displacement": "0.018 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p02_n8",
+          "label": "FC 0.020 Ang, 8 selected structures",
+          "displacement": "0.020 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p022_n8",
+          "label": "FC 0.022 Ang, 8 selected structures",
+          "displacement": "0.022 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p025_n8",
+          "label": "FC 0.025 Ang, 8 selected structures",
+          "displacement": "0.025 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p028_n8",
+          "label": "FC 0.028 Ang, 8 selected structures",
+          "displacement": "0.028 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p03_n8",
+          "label": "FC 0.030 Ang, 8 selected structures",
+          "displacement": "0.030 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p032_n8",
+          "label": "FC 0.032 Ang, 8 selected structures",
+          "displacement": "0.032 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p035_n8",
+          "label": "FC 0.035 Ang, 8 selected structures",
+          "displacement": "0.035 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p038_n8",
+          "label": "FC 0.038 Ang, 8 selected structures",
+          "displacement": "0.038 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p04_n8",
+          "label": "FC 0.040 Ang, 8 selected structures",
+          "displacement": "0.040 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p042_n8",
+          "label": "FC 0.042 Ang, 8 selected structures",
+          "displacement": "0.042 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p045_n8",
+          "label": "FC 0.045 Ang, 8 selected structures",
+          "displacement": "0.045 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p048_n8",
+          "label": "FC 0.048 Ang, 8 selected structures",
+          "displacement": "0.048 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p05_n8",
+          "label": "FC 0.050 Ang, 8 selected structures",
+          "displacement": "0.050 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p055_n8",
+          "label": "FC 0.055 Ang, 8 selected structures",
+          "displacement": "0.055 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p06_n8",
+          "label": "FC 0.060 Ang, 8 selected structures",
+          "displacement": "0.060 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p065_n8",
+          "label": "FC 0.065 Ang, 8 selected structures",
+          "displacement": "0.065 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p07_n8",
+          "label": "FC 0.070 Ang, 8 selected structures",
+          "displacement": "0.070 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p075_n8",
+          "label": "FC 0.075 Ang, 8 selected structures",
+          "displacement": "0.075 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s1_A0p08_n8",
+          "label": "FC 0.080 Ang, 8 selected structures",
+          "displacement": "0.080 Ang",
+          "n_structures": 8
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_200_seed2",
+      "label": "H2O FC low-amplitude subsampled ladder 200 seed 2",
+      "seed": 2202,
+      "comparison_role": "budget_curve_FC_200",
+      "scientific_note": "Budget-curve FC point with 25 low-amplitude displacements x 8 selected FC steps. Counts stay below the high-count regime that can select the zero-reference geometry.",
+      "blocks": [
+        {
+          "block_id": "fc_200_s2_A0p006_n8",
+          "label": "FC 0.006 Ang, 8 selected structures",
+          "displacement": "0.006 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p009_n8",
+          "label": "FC 0.009 Ang, 8 selected structures",
+          "displacement": "0.009 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p011_n8",
+          "label": "FC 0.011 Ang, 8 selected structures",
+          "displacement": "0.011 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p014_n8",
+          "label": "FC 0.014 Ang, 8 selected structures",
+          "displacement": "0.014 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p017_n8",
+          "label": "FC 0.017 Ang, 8 selected structures",
+          "displacement": "0.017 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p019_n8",
+          "label": "FC 0.019 Ang, 8 selected structures",
+          "displacement": "0.019 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p021_n8",
+          "label": "FC 0.021 Ang, 8 selected structures",
+          "displacement": "0.021 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p024_n8",
+          "label": "FC 0.024 Ang, 8 selected structures",
+          "displacement": "0.024 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p027_n8",
+          "label": "FC 0.027 Ang, 8 selected structures",
+          "displacement": "0.027 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p029_n8",
+          "label": "FC 0.029 Ang, 8 selected structures",
+          "displacement": "0.029 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p031_n8",
+          "label": "FC 0.031 Ang, 8 selected structures",
+          "displacement": "0.031 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p034_n8",
+          "label": "FC 0.034 Ang, 8 selected structures",
+          "displacement": "0.034 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p037_n8",
+          "label": "FC 0.037 Ang, 8 selected structures",
+          "displacement": "0.037 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p039_n8",
+          "label": "FC 0.039 Ang, 8 selected structures",
+          "displacement": "0.039 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p041_n8",
+          "label": "FC 0.041 Ang, 8 selected structures",
+          "displacement": "0.041 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p044_n8",
+          "label": "FC 0.044 Ang, 8 selected structures",
+          "displacement": "0.044 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p047_n8",
+          "label": "FC 0.047 Ang, 8 selected structures",
+          "displacement": "0.047 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p049_n8",
+          "label": "FC 0.049 Ang, 8 selected structures",
+          "displacement": "0.049 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p052_n8",
+          "label": "FC 0.052 Ang, 8 selected structures",
+          "displacement": "0.052 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p057_n8",
+          "label": "FC 0.057 Ang, 8 selected structures",
+          "displacement": "0.057 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p062_n8",
+          "label": "FC 0.062 Ang, 8 selected structures",
+          "displacement": "0.062 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p067_n8",
+          "label": "FC 0.067 Ang, 8 selected structures",
+          "displacement": "0.067 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p072_n8",
+          "label": "FC 0.072 Ang, 8 selected structures",
+          "displacement": "0.072 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p077_n8",
+          "label": "FC 0.077 Ang, 8 selected structures",
+          "displacement": "0.077 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s2_A0p082_n8",
+          "label": "FC 0.082 Ang, 8 selected structures",
+          "displacement": "0.082 Ang",
+          "n_structures": 8
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_200_seed3",
+      "label": "H2O FC low-amplitude subsampled ladder 200 seed 3",
+      "seed": 2203,
+      "comparison_role": "budget_curve_FC_200",
+      "scientific_note": "Budget-curve FC point with 25 low-amplitude displacements x 8 selected FC steps. Counts stay below the high-count regime that can select the zero-reference geometry.",
+      "blocks": [
+        {
+          "block_id": "fc_200_s3_A0p004_n8",
+          "label": "FC 0.004 Ang, 8 selected structures",
+          "displacement": "0.004 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p007_n8",
+          "label": "FC 0.007 Ang, 8 selected structures",
+          "displacement": "0.007 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p009_n8",
+          "label": "FC 0.009 Ang, 8 selected structures",
+          "displacement": "0.009 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p013_n8",
+          "label": "FC 0.013 Ang, 8 selected structures",
+          "displacement": "0.013 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p016_n8",
+          "label": "FC 0.016 Ang, 8 selected structures",
+          "displacement": "0.016 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p018_n8",
+          "label": "FC 0.018 Ang, 8 selected structures",
+          "displacement": "0.018 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p021_n8",
+          "label": "FC 0.021 Ang, 8 selected structures",
+          "displacement": "0.021 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p023_n8",
+          "label": "FC 0.023 Ang, 8 selected structures",
+          "displacement": "0.023 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p026_n8",
+          "label": "FC 0.026 Ang, 8 selected structures",
+          "displacement": "0.026 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p029_n8",
+          "label": "FC 0.029 Ang, 8 selected structures",
+          "displacement": "0.029 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p031_n8",
+          "label": "FC 0.031 Ang, 8 selected structures",
+          "displacement": "0.031 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p033_n8",
+          "label": "FC 0.033 Ang, 8 selected structures",
+          "displacement": "0.033 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p036_n8",
+          "label": "FC 0.036 Ang, 8 selected structures",
+          "displacement": "0.036 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p039_n8",
+          "label": "FC 0.039 Ang, 8 selected structures",
+          "displacement": "0.039 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p041_n8",
+          "label": "FC 0.041 Ang, 8 selected structures",
+          "displacement": "0.041 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p043_n8",
+          "label": "FC 0.043 Ang, 8 selected structures",
+          "displacement": "0.043 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p046_n8",
+          "label": "FC 0.046 Ang, 8 selected structures",
+          "displacement": "0.046 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p049_n8",
+          "label": "FC 0.049 Ang, 8 selected structures",
+          "displacement": "0.049 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p052_n8",
+          "label": "FC 0.052 Ang, 8 selected structures",
+          "displacement": "0.052 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p056_n8",
+          "label": "FC 0.056 Ang, 8 selected structures",
+          "displacement": "0.056 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p061_n8",
+          "label": "FC 0.061 Ang, 8 selected structures",
+          "displacement": "0.061 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p066_n8",
+          "label": "FC 0.066 Ang, 8 selected structures",
+          "displacement": "0.066 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p071_n8",
+          "label": "FC 0.071 Ang, 8 selected structures",
+          "displacement": "0.071 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p076_n8",
+          "label": "FC 0.076 Ang, 8 selected structures",
+          "displacement": "0.076 Ang",
+          "n_structures": 8
+        },
+        {
+          "block_id": "fc_200_s3_A0p081_n8",
+          "label": "FC 0.081 Ang, 8 selected structures",
+          "displacement": "0.081 Ang",
+          "n_structures": 8
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_285_seed1",
+      "label": "H2O FC low-amplitude subsampled ladder 285 seed 1",
+      "seed": 2001,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Uses more amplitudes with fewer FC steps per amplitude because zero-reference FC geometries are invisible in this repo's benchmark splits.",
+      "blocks": [
+        {
+          "block_id": "fc_s1_A0p005_n9",
+          "label": "FC 0.005 Ang, 9 selected structures",
+          "displacement": "0.005 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p008_n9",
+          "label": "FC 0.008 Ang, 9 selected structures",
+          "displacement": "0.008 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p01_n9",
+          "label": "FC 0.010 Ang, 9 selected structures",
+          "displacement": "0.010 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p012_n9",
+          "label": "FC 0.012 Ang, 9 selected structures",
+          "displacement": "0.012 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p015_n9",
+          "label": "FC 0.015 Ang, 9 selected structures",
+          "displacement": "0.015 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p018_n9",
+          "label": "FC 0.018 Ang, 9 selected structures",
+          "displacement": "0.018 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p02_n9",
+          "label": "FC 0.020 Ang, 9 selected structures",
+          "displacement": "0.020 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p022_n9",
+          "label": "FC 0.022 Ang, 9 selected structures",
+          "displacement": "0.022 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p025_n9",
+          "label": "FC 0.025 Ang, 9 selected structures",
+          "displacement": "0.025 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p028_n9",
+          "label": "FC 0.028 Ang, 9 selected structures",
+          "displacement": "0.028 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p03_n9",
+          "label": "FC 0.030 Ang, 9 selected structures",
+          "displacement": "0.030 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p032_n9",
+          "label": "FC 0.032 Ang, 9 selected structures",
+          "displacement": "0.032 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p035_n9",
+          "label": "FC 0.035 Ang, 9 selected structures",
+          "displacement": "0.035 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p038_n9",
+          "label": "FC 0.038 Ang, 9 selected structures",
+          "displacement": "0.038 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p04_n9",
+          "label": "FC 0.040 Ang, 9 selected structures",
+          "displacement": "0.040 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p042_n9",
+          "label": "FC 0.042 Ang, 9 selected structures",
+          "displacement": "0.042 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p045_n9",
+          "label": "FC 0.045 Ang, 9 selected structures",
+          "displacement": "0.045 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p048_n9",
+          "label": "FC 0.048 Ang, 9 selected structures",
+          "displacement": "0.048 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p05_n9",
+          "label": "FC 0.050 Ang, 9 selected structures",
+          "displacement": "0.050 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p055_n9",
+          "label": "FC 0.055 Ang, 9 selected structures",
+          "displacement": "0.055 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p06_n9",
+          "label": "FC 0.060 Ang, 9 selected structures",
+          "displacement": "0.060 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p065_n9",
+          "label": "FC 0.065 Ang, 9 selected structures",
+          "displacement": "0.065 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p07_n9",
+          "label": "FC 0.070 Ang, 9 selected structures",
+          "displacement": "0.070 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p075_n9",
+          "label": "FC 0.075 Ang, 9 selected structures",
+          "displacement": "0.075 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p08_n9",
+          "label": "FC 0.080 Ang, 9 selected structures",
+          "displacement": "0.080 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p085_n9",
+          "label": "FC 0.085 Ang, 9 selected structures",
+          "displacement": "0.085 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p09_n9",
+          "label": "FC 0.090 Ang, 9 selected structures",
+          "displacement": "0.090 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p095_n9",
+          "label": "FC 0.095 Ang, 9 selected structures",
+          "displacement": "0.095 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p1_n9",
+          "label": "FC 0.100 Ang, 9 selected structures",
+          "displacement": "0.100 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p105_n9",
+          "label": "FC 0.105 Ang, 9 selected structures",
+          "displacement": "0.105 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p112_n9",
+          "label": "FC 0.112 Ang, 9 selected structures",
+          "displacement": "0.112 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s1_A0p12_n6",
+          "label": "FC 0.120 Ang, 6 selected structures",
+          "displacement": "0.120 Ang",
+          "n_structures": 6
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_285_seed2",
+      "label": "H2O FC low-amplitude subsampled ladder 285 seed 2",
+      "seed": 2002,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Uses more amplitudes with fewer FC steps per amplitude because zero-reference FC geometries are invisible in this repo's benchmark splits.",
+      "blocks": [
+        {
+          "block_id": "fc_s2_A0p006_n9",
+          "label": "FC 0.006 Ang, 9 selected structures",
+          "displacement": "0.006 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p009_n9",
+          "label": "FC 0.009 Ang, 9 selected structures",
+          "displacement": "0.009 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p011_n9",
+          "label": "FC 0.011 Ang, 9 selected structures",
+          "displacement": "0.011 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p014_n9",
+          "label": "FC 0.014 Ang, 9 selected structures",
+          "displacement": "0.014 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p017_n9",
+          "label": "FC 0.017 Ang, 9 selected structures",
+          "displacement": "0.017 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p019_n9",
+          "label": "FC 0.019 Ang, 9 selected structures",
+          "displacement": "0.019 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p021_n9",
+          "label": "FC 0.021 Ang, 9 selected structures",
+          "displacement": "0.021 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p024_n9",
+          "label": "FC 0.024 Ang, 9 selected structures",
+          "displacement": "0.024 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p027_n9",
+          "label": "FC 0.027 Ang, 9 selected structures",
+          "displacement": "0.027 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p029_n9",
+          "label": "FC 0.029 Ang, 9 selected structures",
+          "displacement": "0.029 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p031_n9",
+          "label": "FC 0.031 Ang, 9 selected structures",
+          "displacement": "0.031 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p034_n9",
+          "label": "FC 0.034 Ang, 9 selected structures",
+          "displacement": "0.034 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p037_n9",
+          "label": "FC 0.037 Ang, 9 selected structures",
+          "displacement": "0.037 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p039_n9",
+          "label": "FC 0.039 Ang, 9 selected structures",
+          "displacement": "0.039 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p041_n9",
+          "label": "FC 0.041 Ang, 9 selected structures",
+          "displacement": "0.041 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p044_n9",
+          "label": "FC 0.044 Ang, 9 selected structures",
+          "displacement": "0.044 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p047_n9",
+          "label": "FC 0.047 Ang, 9 selected structures",
+          "displacement": "0.047 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p049_n9",
+          "label": "FC 0.049 Ang, 9 selected structures",
+          "displacement": "0.049 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p052_n9",
+          "label": "FC 0.052 Ang, 9 selected structures",
+          "displacement": "0.052 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p057_n9",
+          "label": "FC 0.057 Ang, 9 selected structures",
+          "displacement": "0.057 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p062_n9",
+          "label": "FC 0.062 Ang, 9 selected structures",
+          "displacement": "0.062 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p067_n9",
+          "label": "FC 0.067 Ang, 9 selected structures",
+          "displacement": "0.067 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p072_n9",
+          "label": "FC 0.072 Ang, 9 selected structures",
+          "displacement": "0.072 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p077_n9",
+          "label": "FC 0.077 Ang, 9 selected structures",
+          "displacement": "0.077 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p082_n9",
+          "label": "FC 0.082 Ang, 9 selected structures",
+          "displacement": "0.082 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p087_n9",
+          "label": "FC 0.087 Ang, 9 selected structures",
+          "displacement": "0.087 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p092_n9",
+          "label": "FC 0.092 Ang, 9 selected structures",
+          "displacement": "0.092 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p097_n9",
+          "label": "FC 0.097 Ang, 9 selected structures",
+          "displacement": "0.097 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p102_n9",
+          "label": "FC 0.102 Ang, 9 selected structures",
+          "displacement": "0.102 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p108_n9",
+          "label": "FC 0.108 Ang, 9 selected structures",
+          "displacement": "0.108 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p116_n9",
+          "label": "FC 0.116 Ang, 9 selected structures",
+          "displacement": "0.116 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s2_A0p125_n6",
+          "label": "FC 0.125 Ang, 6 selected structures",
+          "displacement": "0.125 Ang",
+          "n_structures": 6
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_h2o_low_amp_subsampled_285_seed3",
+      "label": "H2O FC low-amplitude subsampled ladder 285 seed 3",
+      "seed": 2003,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Uses more amplitudes with fewer FC steps per amplitude because zero-reference FC geometries are invisible in this repo's benchmark splits.",
+      "blocks": [
+        {
+          "block_id": "fc_s3_A0p004_n9",
+          "label": "FC 0.004 Ang, 9 selected structures",
+          "displacement": "0.004 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p007_n9",
+          "label": "FC 0.007 Ang, 9 selected structures",
+          "displacement": "0.007 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p009_n9",
+          "label": "FC 0.009 Ang, 9 selected structures",
+          "displacement": "0.009 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p013_n9",
+          "label": "FC 0.013 Ang, 9 selected structures",
+          "displacement": "0.013 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p016_n9",
+          "label": "FC 0.016 Ang, 9 selected structures",
+          "displacement": "0.016 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p018_n9",
+          "label": "FC 0.018 Ang, 9 selected structures",
+          "displacement": "0.018 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p021_n9",
+          "label": "FC 0.021 Ang, 9 selected structures",
+          "displacement": "0.021 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p023_n9",
+          "label": "FC 0.023 Ang, 9 selected structures",
+          "displacement": "0.023 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p026_n9",
+          "label": "FC 0.026 Ang, 9 selected structures",
+          "displacement": "0.026 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p029_n9",
+          "label": "FC 0.029 Ang, 9 selected structures",
+          "displacement": "0.029 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p031_n9",
+          "label": "FC 0.031 Ang, 9 selected structures",
+          "displacement": "0.031 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p033_n9",
+          "label": "FC 0.033 Ang, 9 selected structures",
+          "displacement": "0.033 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p036_n9",
+          "label": "FC 0.036 Ang, 9 selected structures",
+          "displacement": "0.036 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p039_n9",
+          "label": "FC 0.039 Ang, 9 selected structures",
+          "displacement": "0.039 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p041_n9",
+          "label": "FC 0.041 Ang, 9 selected structures",
+          "displacement": "0.041 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p043_n9",
+          "label": "FC 0.043 Ang, 9 selected structures",
+          "displacement": "0.043 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p046_n9",
+          "label": "FC 0.046 Ang, 9 selected structures",
+          "displacement": "0.046 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p049_n9",
+          "label": "FC 0.049 Ang, 9 selected structures",
+          "displacement": "0.049 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p052_n9",
+          "label": "FC 0.052 Ang, 9 selected structures",
+          "displacement": "0.052 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p056_n9",
+          "label": "FC 0.056 Ang, 9 selected structures",
+          "displacement": "0.056 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p061_n9",
+          "label": "FC 0.061 Ang, 9 selected structures",
+          "displacement": "0.061 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p066_n9",
+          "label": "FC 0.066 Ang, 9 selected structures",
+          "displacement": "0.066 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p071_n9",
+          "label": "FC 0.071 Ang, 9 selected structures",
+          "displacement": "0.071 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p076_n9",
+          "label": "FC 0.076 Ang, 9 selected structures",
+          "displacement": "0.076 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p081_n9",
+          "label": "FC 0.081 Ang, 9 selected structures",
+          "displacement": "0.081 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p086_n9",
+          "label": "FC 0.086 Ang, 9 selected structures",
+          "displacement": "0.086 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p091_n9",
+          "label": "FC 0.091 Ang, 9 selected structures",
+          "displacement": "0.091 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p096_n9",
+          "label": "FC 0.096 Ang, 9 selected structures",
+          "displacement": "0.096 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p101_n9",
+          "label": "FC 0.101 Ang, 9 selected structures",
+          "displacement": "0.101 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p107_n9",
+          "label": "FC 0.107 Ang, 9 selected structures",
+          "displacement": "0.107 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p114_n9",
+          "label": "FC 0.114 Ang, 9 selected structures",
+          "displacement": "0.114 Ang",
+          "n_structures": 9
+        },
+        {
+          "block_id": "fc_s3_A0p122_n6",
+          "label": "FC 0.122 Ang, 6 selected structures",
+          "displacement": "0.122 Ang",
+          "n_structures": 6
+        }
+      ]
+    }
+  ],
+  "random_cartesian": [
+    {
+      "recipe_id": "rc_h2o_multisigma_285_seed1",
+      "label": "H2O Random Cartesian multisigma 285 seed 1",
+      "seed": 3001,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Multi-sigma low-amplitude RC around equilibrium; avoids a single arbitrary sigma.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_285_seed1_sigma0p005_n45",
+          "label": "RC gaussian sigma 0.005 Ang, 45 structures",
+          "n_structures": 45,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed1_sigma0p01_n65",
+          "label": "RC gaussian sigma 0.010 Ang, 65 structures",
+          "n_structures": 65,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed1_sigma0p02_n70",
+          "label": "RC gaussian sigma 0.020 Ang, 70 structures",
+          "n_structures": 70,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed1_sigma0p035_n60",
+          "label": "RC gaussian sigma 0.035 Ang, 60 structures",
+          "n_structures": 60,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed1_sigma0p05_n45",
+          "label": "RC gaussian sigma 0.050 Ang, 45 structures",
+          "n_structures": 45,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_285_seed2",
+      "label": "H2O Random Cartesian multisigma 285 seed 2",
+      "seed": 3002,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Multi-sigma low-amplitude RC around equilibrium; avoids a single arbitrary sigma.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_285_seed2_sigma0p005_n50",
+          "label": "RC gaussian sigma 0.005 Ang, 50 structures",
+          "n_structures": 50,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed2_sigma0p01_n60",
+          "label": "RC gaussian sigma 0.010 Ang, 60 structures",
+          "n_structures": 60,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed2_sigma0p02_n70",
+          "label": "RC gaussian sigma 0.020 Ang, 70 structures",
+          "n_structures": 70,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed2_sigma0p035_n60",
+          "label": "RC gaussian sigma 0.035 Ang, 60 structures",
+          "n_structures": 60,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed2_sigma0p05_n45",
+          "label": "RC gaussian sigma 0.050 Ang, 45 structures",
+          "n_structures": 45,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_285_seed3",
+      "label": "H2O Random Cartesian multisigma 285 seed 3",
+      "seed": 3003,
+      "comparison_role": "primary_equal_N_285",
+      "scientific_note": "Multi-sigma low-amplitude RC around equilibrium; avoids a single arbitrary sigma.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_285_seed3_sigma0p005_n40",
+          "label": "RC gaussian sigma 0.005 Ang, 40 structures",
+          "n_structures": 40,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed3_sigma0p01_n70",
+          "label": "RC gaussian sigma 0.010 Ang, 70 structures",
+          "n_structures": 70,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed3_sigma0p02_n70",
+          "label": "RC gaussian sigma 0.020 Ang, 70 structures",
+          "n_structures": 70,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed3_sigma0p035_n60",
+          "label": "RC gaussian sigma 0.035 Ang, 60 structures",
+          "n_structures": 60,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_285_seed3_sigma0p05_n45",
+          "label": "RC gaussian sigma 0.050 Ang, 45 structures",
+          "n_structures": 45,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_750_seed1",
+      "label": "H2O Random Cartesian multisigma 750 seed 1",
+      "seed": 3101,
+      "comparison_role": "medium_scale_MD_vs_RC",
+      "scientific_note": "Medium RC learning-curve point matched to MD-750, with three seeds.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_750_seed1_sigma0p005_n100",
+          "label": "RC gaussian sigma 0.005 Ang, 100 structures",
+          "n_structures": 100,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed1_sigma0p01_n175",
+          "label": "RC gaussian sigma 0.010 Ang, 175 structures",
+          "n_structures": 175,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed1_sigma0p02_n200",
+          "label": "RC gaussian sigma 0.020 Ang, 200 structures",
+          "n_structures": 200,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed1_sigma0p035_n175",
+          "label": "RC gaussian sigma 0.035 Ang, 175 structures",
+          "n_structures": 175,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed1_sigma0p05_n100",
+          "label": "RC gaussian sigma 0.050 Ang, 100 structures",
+          "n_structures": 100,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_750_seed2",
+      "label": "H2O Random Cartesian multisigma 750 seed 2",
+      "seed": 3102,
+      "comparison_role": "medium_scale_MD_vs_RC",
+      "scientific_note": "Medium RC learning-curve point matched to MD-750, with three seeds.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_750_seed2_sigma0p005_n110",
+          "label": "RC gaussian sigma 0.005 Ang, 110 structures",
+          "n_structures": 110,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed2_sigma0p01_n170",
+          "label": "RC gaussian sigma 0.010 Ang, 170 structures",
+          "n_structures": 170,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed2_sigma0p02_n190",
+          "label": "RC gaussian sigma 0.020 Ang, 190 structures",
+          "n_structures": 190,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed2_sigma0p035_n180",
+          "label": "RC gaussian sigma 0.035 Ang, 180 structures",
+          "n_structures": 180,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed2_sigma0p05_n100",
+          "label": "RC gaussian sigma 0.050 Ang, 100 structures",
+          "n_structures": 100,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_750_seed3",
+      "label": "H2O Random Cartesian multisigma 750 seed 3",
+      "seed": 3103,
+      "comparison_role": "medium_scale_MD_vs_RC",
+      "scientific_note": "Medium RC learning-curve point matched to MD-750, with three seeds.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_750_seed3_sigma0p005_n90",
+          "label": "RC gaussian sigma 0.005 Ang, 90 structures",
+          "n_structures": 90,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed3_sigma0p01_n185",
+          "label": "RC gaussian sigma 0.010 Ang, 185 structures",
+          "n_structures": 185,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed3_sigma0p02_n205",
+          "label": "RC gaussian sigma 0.020 Ang, 205 structures",
+          "n_structures": 205,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed3_sigma0p035_n170",
+          "label": "RC gaussian sigma 0.035 Ang, 170 structures",
+          "n_structures": 170,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_750_seed3_sigma0p05_n100",
+          "label": "RC gaussian sigma 0.050 Ang, 100 structures",
+          "n_structures": 100,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_1500_seed1",
+      "label": "H2O Random Cartesian multisigma 1500 seed 1",
+      "seed": 3201,
+      "comparison_role": "large_scale_MD_vs_RC",
+      "scientific_note": "Large RC learning-curve point matched to MD-1500, with three seeds.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed1_sigma0p005_n200",
+          "label": "RC gaussian sigma 0.005 Ang, 200 structures",
+          "n_structures": 200,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed1_sigma0p01_n350",
+          "label": "RC gaussian sigma 0.010 Ang, 350 structures",
+          "n_structures": 350,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed1_sigma0p02_n400",
+          "label": "RC gaussian sigma 0.020 Ang, 400 structures",
+          "n_structures": 400,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed1_sigma0p035_n350",
+          "label": "RC gaussian sigma 0.035 Ang, 350 structures",
+          "n_structures": 350,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed1_sigma0p05_n200",
+          "label": "RC gaussian sigma 0.050 Ang, 200 structures",
+          "n_structures": 200,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_1500_seed2",
+      "label": "H2O Random Cartesian multisigma 1500 seed 2",
+      "seed": 3202,
+      "comparison_role": "large_scale_MD_vs_RC",
+      "scientific_note": "Large RC learning-curve point matched to MD-1500, with three seeds.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed2_sigma0p005_n220",
+          "label": "RC gaussian sigma 0.005 Ang, 220 structures",
+          "n_structures": 220,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed2_sigma0p01_n340",
+          "label": "RC gaussian sigma 0.010 Ang, 340 structures",
+          "n_structures": 340,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed2_sigma0p02_n380",
+          "label": "RC gaussian sigma 0.020 Ang, 380 structures",
+          "n_structures": 380,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed2_sigma0p035_n360",
+          "label": "RC gaussian sigma 0.035 Ang, 360 structures",
+          "n_structures": 360,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed2_sigma0p05_n200",
+          "label": "RC gaussian sigma 0.050 Ang, 200 structures",
+          "n_structures": 200,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_h2o_multisigma_1500_seed3",
+      "label": "H2O Random Cartesian multisigma 1500 seed 3",
+      "seed": 3203,
+      "comparison_role": "large_scale_MD_vs_RC",
+      "scientific_note": "Large RC learning-curve point matched to MD-1500, with three seeds.",
+      "blocks": [
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed3_sigma0p005_n180",
+          "label": "RC gaussian sigma 0.005 Ang, 180 structures",
+          "n_structures": 180,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed3_sigma0p01_n370",
+          "label": "RC gaussian sigma 0.010 Ang, 370 structures",
+          "n_structures": 370,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed3_sigma0p02_n410",
+          "label": "RC gaussian sigma 0.020 Ang, 410 structures",
+          "n_structures": 410,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed3_sigma0p035_n340",
+          "label": "RC gaussian sigma 0.035 Ang, 340 structures",
+          "n_structures": 340,
+          "distribution": "gaussian",
+          "sigma_ang": 0.035,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_h2o_multisigma_1500_seed3_sigma0p05_n200",
+          "label": "RC gaussian sigma 0.050 Ang, 200 structures",
+          "n_structures": 200,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "min_distance_ang": 0.65,
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    }
+  ]
+}

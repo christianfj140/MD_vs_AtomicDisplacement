@@ -18,6 +18,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from method_registry import normalize_method_id, normalize_method_mapping, normalize_test_set_id
+
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
@@ -44,8 +46,34 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def json_text(value: Any) -> str:
     if isinstance(value, str):
-        return value
-    return json.dumps(value if value is not None else {}, sort_keys=True, ensure_ascii=False)
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return json.dumps(normalize_method_mapping(parsed), sort_keys=True, ensure_ascii=False)
+    return json.dumps(normalize_method_mapping(value if value is not None else {}), sort_keys=True, ensure_ascii=False)
+
+
+def canonical_manifest_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(manifest)
+    if normalized.get("train_method") not in (None, ""):
+        normalized["train_method"] = normalize_method_id(normalized.get("train_method"), allow_unknown=True)
+    if normalized.get("test_method") not in (None, ""):
+        normalized["test_method"] = normalize_method_id(normalized.get("test_method"), allow_unknown=True)
+    if normalized.get("test_set") not in (None, ""):
+        normalized["test_set"] = normalize_test_set_id(normalized.get("test_set"))
+        if normalized.get("test_method") in (None, ""):
+            suffix = str(normalized["test_set"]).removeprefix("test_")
+            normalized["test_method"] = normalize_method_id(suffix, allow_unknown=True)
+    for key in (
+        "dataset_size_by_method",
+        "dataset_label_by_method",
+        "recipe_id_by_method",
+        "recipe_label_by_method",
+        "recipe_set_hash_by_method",
+    ):
+        normalized[key] = normalize_method_mapping(normalized.get(key))
+    return normalized
 
 
 def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -61,6 +89,132 @@ def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def cell_id(train_method: Any, test_set: Any) -> str:
+    method = normalize_method_id(train_method, allow_unknown=True)
+    test = normalize_test_set_id(test_set)
+    return f"{method} on {test}"
+
+
+def cell_sort_key(value: str) -> tuple[str, str]:
+    if " on " not in value:
+        return value, ""
+    train_method, test_set = value.split(" on ", 1)
+    return train_method, test_set
+
+
+def expected_cells_from_grid(grid: dict[str, Any]) -> set[str]:
+    cells: set[str] = set()
+    raw_cells = grid.get("expected_cells")
+    if isinstance(raw_cells, list):
+        for item in raw_cells:
+            if isinstance(item, dict):
+                method = item.get("train_method")
+                test_set = item.get("test_set")
+                if method not in (None, "") and test_set not in (None, ""):
+                    cells.add(cell_id(method, test_set))
+            elif isinstance(item, str) and " on " in item:
+                method, test_set = item.split(" on ", 1)
+                cells.add(cell_id(method, test_set))
+    if cells:
+        return cells
+
+    methods = grid.get("selected_methods") or grid.get("train_methods") or []
+    test_sets = (
+        grid.get("selected_frozen_test_sets")
+        or grid.get("selected_test_sets")
+        or grid.get("test_sets")
+        or []
+    )
+    return {
+        cell_id(method, test_set)
+        for method in methods
+        for test_set in test_sets
+        if method not in (None, "") and test_set not in (None, "")
+    }
+
+
+def load_expected_grid(path: Path | None, output_dir: Path) -> tuple[dict[str, Any], str, Path | None]:
+    grid_path = path or output_dir / "cross_evaluation_expected_grid.json"
+    if grid_path.exists():
+        return read_json(grid_path), "artifact", grid_path
+    return {}, "observed_rows_legacy", None
+
+
+def observed_expected_cells(rows: list[dict[str, Any]]) -> set[str]:
+    methods = sorted({str(row.get("train_method")) for row in rows if row.get("train_method") not in (None, "")})
+    test_sets = sorted({str(row.get("test_set")) for row in rows if row.get("test_set") not in (None, "")})
+    return {cell_id(method, test_set) for method in methods for test_set in test_sets}
+
+
+def build_completeness_report(
+    *,
+    experiment_id: str,
+    rows: list[dict[str, Any]],
+    expected_grid: dict[str, Any],
+    expected_grid_source: str,
+    expected_grid_path: Path | None,
+    primary_metric: str | None = None,
+) -> dict[str, Any]:
+    expected_cells = expected_cells_from_grid(expected_grid) if expected_grid else observed_expected_cells(rows)
+    actual_cells = {
+        cell_id(row.get("train_method"), row.get("test_set"))
+        for row in rows
+        if row.get("train_method") not in (None, "") and row.get("test_set") not in (None, "")
+    }
+    missing_cells = sorted(expected_cells - actual_cells, key=cell_sort_key)
+    extra_cells = sorted(actual_cells - expected_cells, key=cell_sort_key)
+    missing_primary_metric_cells: list[str] = []
+    metric_name = str(primary_metric or "").strip()
+    if metric_name:
+        cells_with_primary_metric = {
+            cell_id(row.get("train_method"), row.get("test_set"))
+            for row in rows
+            if row.get("train_method") not in (None, "")
+            and row.get("test_set") not in (None, "")
+            and finite(row.get(metric_name))
+        }
+        missing_primary_metric_cells = sorted(expected_cells - cells_with_primary_metric, key=cell_sort_key)
+    complete = not missing_cells and not extra_cells and not missing_primary_metric_cells
+    report = {
+        "experiment_id": experiment_id,
+        "expected_grid": str(expected_grid_path) if expected_grid_path else None,
+        "expected_grid_source": expected_grid_source,
+        "primary_metric": metric_name or None,
+        "expected_cell_count": len(expected_cells),
+        "actual_cell_count": len(actual_cells),
+        "actual_row_count": len(rows),
+        "expected_cells": sorted(expected_cells, key=cell_sort_key),
+        "actual_cells": sorted(actual_cells, key=cell_sort_key),
+        "missing_cells": missing_cells,
+        "extra_unexpected_cells": extra_cells,
+        "extra_cells": extra_cells,
+        "unexpected_cells": extra_cells,
+        "missing_primary_metric_cells": missing_primary_metric_cells,
+        "complete": complete,
+        "scientific_status": "valid_grid" if complete else "invalid_incomplete_grid",
+    }
+    if expected_grid_source != "artifact":
+        report["warning"] = "No cross_evaluation_expected_grid.json was provided; expected cells were inferred from observed methods and test sets."
+    return report
+
+
+def write_completeness_csv(path: Path, report: dict[str, Any]) -> None:
+    issue_rows = []
+    for key, issue_type in (
+        ("missing_cells", "missing_cell"),
+        ("extra_unexpected_cells", "unexpected_cell"),
+        ("missing_primary_metric_cells", "missing_primary_metric"),
+    ):
+        for cell in report.get(key, []) or []:
+            train_method, test_set = cell.split(" on ", 1) if " on " in cell else (cell, "")
+            issue_rows.append({"issue": issue_type, "train_method": train_method, "test_set": test_set, "cell_id": cell})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["issue", "train_method", "test_set", "cell_id"])
+        writer.writeheader()
+        writer.writerows(issue_rows)
 
 
 def join_by_sample(*groups: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -115,6 +269,7 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
     if not manifest:
         train_method, test_set = infer_metadata(result_dir)
         manifest = {"train_method": train_method, "test_set": test_set}
+    manifest = canonical_manifest_metadata(manifest)
     prediction_summary = read_json(result_dir / "prediction_summary.json")
     evaluation_manifest = read_json(metrics_root / "manifest.json")
     joined, duplicate_errors = join_by_sample(sparse, spectral, dos)
@@ -135,6 +290,7 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
         warnings = [
             manifest.get("budget_mismatch_warning"),
             manifest.get("leakage_warning"),
+            " | ".join(str(item) for item in manifest.get("leakage_severe_warnings", []) or []),
             manifest.get("frozen_test_warning"),
             manifest.get("siesta_settings_warning"),
             manifest.get("model_config_warning"),
@@ -178,6 +334,8 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "budget_ratio": manifest.get("budget_ratio"),
                 "budget_mismatch_warning": manifest.get("budget_mismatch_warning"),
                 "leakage_warning": manifest.get("leakage_warning"),
+                "leakage_scientific_status": manifest.get("leakage_scientific_status"),
+                "leakage_severe_warnings": json_text(manifest.get("leakage_severe_warnings")),
                 "frozen_test_warning": manifest.get("frozen_test_warning"),
                 "frozen_test_hash": manifest.get("frozen_test_hash"),
                 "frozen_test_manifest": manifest.get("frozen_test_manifest"),
@@ -227,6 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--cross-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--expected-grid", type=Path, default=None)
+    parser.add_argument("--primary-metric", default="")
     return parser
 
 
@@ -238,10 +398,29 @@ def main() -> int:
             rows.extend(aggregate_one(result_dir, args.experiment_id))
     output = args.output_dir / "cross_evaluation_metrics.csv"
     write_rows(output, rows)
+    expected_grid, expected_grid_source, expected_grid_path = load_expected_grid(args.expected_grid, args.output_dir)
+    completeness = build_completeness_report(
+        experiment_id=args.experiment_id,
+        rows=rows,
+        expected_grid=expected_grid,
+        expected_grid_source=expected_grid_source,
+        expected_grid_path=expected_grid_path,
+        primary_metric=args.primary_metric,
+    )
+    completeness_path = args.output_dir / "cross_evaluation_completeness.json"
+    completeness_path.write_text(
+        json.dumps(completeness, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    write_completeness_csv(args.output_dir / "missing_cross_evaluation_cells.csv", completeness)
     summary = {
-        "ok": bool(rows),
+        "ok": bool(rows) and bool(completeness["complete"]),
+        "rows_ok": bool(rows),
         "rows": len(rows),
         "output": str(output),
+        "completeness": str(completeness_path),
+        "complete": completeness["complete"],
+        "scientific_status": completeness["scientific_status"],
         "train_methods": sorted({str(row.get("train_method")) for row in rows}),
         "test_sets": sorted({str(row.get("test_set")) for row in rows}),
     }

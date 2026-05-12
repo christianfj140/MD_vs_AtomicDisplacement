@@ -2,7 +2,7 @@ const pipelines = [
   { key: "md", label: "MD", logId: "md-log", dotId: "md-status-dot", textId: "md-status-text" },
   {
     key: "atom_displacement",
-    label: "AtomDisplacement",
+    label: "FC Cartesian",
     logId: "atom-displacement-log",
     dotId: "atom-displacement-status-dot",
     textId: "atom-displacement-status-text",
@@ -11,11 +11,75 @@ const pipelines = [
 
 const resultPipelines = [
   { key: "md", label: "MD", resultsDir: "results_md" },
-  { key: "atom_displacement", label: "AtomDisplacement", resultsDir: "results_atomdisp" },
+  { key: "atom_displacement", label: "FC Cartesian", resultsDir: "results_atomdisp" },
   { key: "random_cartesian", label: "Random Cartesian", resultsDir: "results_random_cartesian" },
 ];
 
+const METHOD_ID_ALIASES = {
+  md: "md",
+  siesta_fc_cartesian: "siesta_fc_cartesian",
+  atom_displacement: "siesta_fc_cartesian",
+  atomdisp: "siesta_fc_cartesian",
+  random_cartesian: "random_cartesian",
+};
+
+const TEST_SET_ALIASES = {
+  test_atomdisp: "test_siesta_fc_cartesian",
+};
+
+const METHOD_DISPLAY_LABELS = {
+  md: "MD",
+  siesta_fc_cartesian: "FC Cartesian",
+  random_cartesian: "Random Cartesian",
+};
+
+const TEST_SET_DISPLAY_LABELS = {
+  test_md: "MD test (test_md)",
+  test_siesta_fc_cartesian: "FC Cartesian test (test_siesta_fc_cartesian)",
+  test_random_cartesian: "Random Cartesian test (test_random_cartesian)",
+  test_mixed: "Mixed test (test_mixed)",
+};
+
+function normalizeMethodId(value) {
+  const text = String(value || "").trim();
+  return METHOD_ID_ALIASES[text] || text;
+}
+
+function normalizeTestSetId(value) {
+  const text = String(value || "").trim();
+  if (TEST_SET_ALIASES[text]) return TEST_SET_ALIASES[text];
+  if (!text.startsWith("test_")) return text;
+  const suffix = text.slice("test_".length);
+  if (suffix === "mixed") return "test_mixed";
+  return `test_${normalizeMethodId(suffix)}`;
+}
+
+function methodDisplayLabel(value) {
+  const methodId = normalizeMethodId(value);
+  return METHOD_DISPLAY_LABELS[methodId] || String(value || methodId || "unknown");
+}
+
+function testSetDisplayLabel(value) {
+  const testSetId = normalizeTestSetId(value);
+  return TEST_SET_DISPLAY_LABELS[testSetId] || testSetId;
+}
+
+function canonicalDisplayText(value) {
+  return String(value || "")
+    .replace(/\btest_atomdisp\b/g, "FC Cartesian legacy alias (test_atomdisp)")
+    .replace(/\btest_siesta_fc_cartesian\b/g, TEST_SET_DISPLAY_LABELS.test_siesta_fc_cartesian)
+    .replace(/\btest_random_cartesian\b/g, TEST_SET_DISPLAY_LABELS.test_random_cartesian)
+    .replace(/\btest_md\b/g, TEST_SET_DISPLAY_LABELS.test_md)
+    .replace(/\bAtomDisplacement\b/g, "FC Cartesian")
+    .replace(/\batom_displacement\b/g, "FC Cartesian")
+    .replace(/\batomdisp\b/gi, "FC Cartesian")
+    .replace(/\bAD\b/g, "FC Cartesian")
+    .replace(/\bsiesta_fc_cartesian\b/g, "FC Cartesian")
+    .replace(/\brandom_cartesian\b/g, "Random Cartesian");
+}
+
 const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
+const PRIMARY_METRIC_DEFAULT = "low_energy_rmse_eV";
 const CROSS_PLOT_METRIC_DEFAULT = "low_energy_rmse_eV";
 
 const state = {
@@ -177,7 +241,7 @@ async function runAll() {
   if (payload.errors && Object.keys(payload.errors).length) {
     showToast(Object.values(payload.errors).join(" | "));
   } else {
-    showToast("Both pipelines started");
+    showToast("Pipelines started");
   }
 }
 
@@ -604,6 +668,7 @@ function numericPrefix(value, label) {
 
 const datasetEditorConfigs = {
   md: {
+    label: "MD",
     containerId: "md-dataset-editor",
     sourceId: "md-dataset-table",
     addDatasetId: "md-add-dataset",
@@ -613,6 +678,7 @@ const datasetEditorConfigs = {
     defaultValue: "300",
   },
   fc: {
+    label: "FC Cartesian",
     containerId: "fc-dataset-editor",
     sourceId: "fc-displacement-options",
     addDatasetId: "fc-add-dataset",
@@ -622,6 +688,7 @@ const datasetEditorConfigs = {
     defaultValue: "0.02",
   },
   random_cartesian: {
+    label: "Random Cartesian",
     containerId: "random-dataset-editor",
     sourceId: "random-cartesian-dataset-table",
     addDatasetId: "random-add-dataset",
@@ -670,6 +737,37 @@ function defaultEditorBlocks(kind) {
   return [{ count: config.defaultCount, value: config.defaultValue }];
 }
 
+function datasetSeedPatch(spec) {
+  return spec?.seed == null ? {} : { seed: spec.seed };
+}
+
+function datasetSeedValue(card) {
+  return String(card?.querySelector('[data-field="dataset-seed"]')?.value || "").trim();
+}
+
+function parseDatasetSeed(rawValue, label) {
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${label}: seed debe ser un entero >= 0.`);
+  }
+  return value;
+}
+
+function applyDatasetSeeds(kind, specs) {
+  const container = datasetEditorContainer(kind);
+  if (!container || !Array.isArray(specs) || !specs.length) return specs;
+  const cards = Array.from(container.querySelectorAll(".dataset-card"));
+  const methodLabel = datasetEditorConfig(kind)?.label || kind;
+  return specs.map((spec, index) => {
+    const card = cards[index];
+    if (!card) return spec;
+    const seed = parseDatasetSeed(datasetSeedValue(card), `${methodLabel} dataset ${index + 1}`);
+    return seed == null ? spec : { ...spec, seed };
+  });
+}
+
 function specsForEditor(kind) {
   try {
     if (kind === "md") return parseMdDatasetTableSpecsFromText(sourceTextForKind(kind));
@@ -712,7 +810,8 @@ function updateDatasetEditorTotals(kind) {
     }
     const totalNode = card.querySelector(".dataset-card-total");
     if (totalNode) {
-      totalNode.textContent = `${total || 0} estructuras · ${rows.length} bloques`;
+      const seed = datasetSeedValue(card);
+      totalNode.textContent = `${total || 0} estructuras · ${rows.length} bloques${seed ? ` · seed ${seed}` : ""}`;
     }
     rows.forEach((row) => {
       const remove = row.querySelector('[data-action="remove-component"]');
@@ -723,7 +822,7 @@ function updateDatasetEditorTotals(kind) {
   }
 }
 
-function createDatasetCard(kind, blocks) {
+function createDatasetCard(kind, blocks, seed = "") {
   const card = document.createElement("div");
   card.className = "dataset-card";
   card.innerHTML = `
@@ -732,7 +831,13 @@ function createDatasetCard(kind, blocks) {
         <span class="dataset-card-name">Dataset</span>
         <span class="dataset-card-total">0 estructuras · 0 bloques</span>
       </div>
-      <button class="mini-button danger" type="button" data-action="remove-dataset">Remove dataset</button>
+      <div class="dataset-card-meta">
+        <label class="dataset-seed-field" title="Seed opcional para este dataset. Si queda vacia se usa la seed global o el comportamiento por defecto.">
+          <span>Seed</span>
+          <input type="number" min="0" step="1" data-field="dataset-seed" placeholder="global" value="${String(seed ?? "")}" />
+        </label>
+        <button class="mini-button danger" type="button" data-action="remove-dataset">Remove dataset</button>
+      </div>
     </div>
     <div class="dataset-components"></div>
     <div class="button-row">
@@ -750,12 +855,12 @@ function renderDatasetEditor(kind) {
   const container = datasetEditorContainer(kind);
   if (!container) return;
   const specs = specsForEditor(kind);
-  const blockGroups = specs.length
-    ? specs.map((spec) => blocksForEditorSpec(kind, spec))
-    : [defaultEditorBlocks(kind)];
+  const datasetGroups = specs.length
+    ? specs.map((spec) => ({ blocks: blocksForEditorSpec(kind, spec), seed: spec.seed ?? "" }))
+    : [{ blocks: defaultEditorBlocks(kind), seed: "" }];
   container.innerHTML = "";
-  for (const blocks of blockGroups) {
-    container.appendChild(createDatasetCard(kind, blocks));
+  for (const group of datasetGroups) {
+    container.appendChild(createDatasetCard(kind, group.blocks, group.seed));
   }
   bindDatasetEditor(kind);
   syncDatasetEditorText(kind);
@@ -860,7 +965,12 @@ function selectedMethods() {
 }
 
 function pipelineLabel(key) {
-  return resultPipelines.find((item) => item.key === key)?.label || key;
+  return resultPipelines.find((item) => item.key === key)?.label || methodDisplayLabel(key);
+}
+
+function runDisplayLabel(run) {
+  const detail = run?.dataset_label || run?.recipe_id || run?.run_id || "";
+  return `${pipelineLabel(run?.pipeline || run?.label)} ${run?.dataset_size ?? ""}${detail ? ` · ${detail}` : ""}`;
 }
 
 function slugPart(value) {
@@ -956,7 +1066,10 @@ function parseMdDatasetTableSpecsFromText(rawText) {
 
 function parseMdDatasetTableSpecs() {
   syncDatasetEditorText("md");
-  return parseMdDatasetTableSpecsFromText(document.getElementById("md-dataset-table")?.value || "");
+  return applyDatasetSeeds(
+    "md",
+    parseMdDatasetTableSpecsFromText(document.getElementById("md-dataset-table")?.value || ""),
+  );
 }
 
 function parseMdTemperatureBlocks() {
@@ -972,15 +1085,15 @@ function parseFcDatasetTableSpecsFromText(rawText) {
     const displacements = group.map((row, rowIndex) => {
       const parts = splitDatasetTableRow(row);
       if (parts.length < 2) {
-        throw new Error(`FC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "snapshots | desplazamiento".`);
+        throw new Error(`FC Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "snapshots | desplazamiento".`);
       }
       const count = Number(parts[0]);
       const displacement = normalizeDisplacement(parts[1]);
       if (!Number.isInteger(count) || count <= 0) {
-        throw new Error(`FC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: snapshots debe ser entero positivo.`);
+        throw new Error(`FC Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: snapshots debe ser entero positivo.`);
       }
       if (!displacement) {
-        throw new Error(`FC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: desplazamiento vacio.`);
+        throw new Error(`FC Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: desplazamiento vacio.`);
       }
       return { value: displacement, n_structures: count };
     });
@@ -995,7 +1108,8 @@ function parseFcDatasetTableSpecsFromText(rawText) {
 
 function parseFcDatasetTableSpecs() {
   syncDatasetEditorText("fc");
-  return parseFcDatasetTableSpecsFromText(document.getElementById("fc-displacement-options")?.value || "");
+  const specs = parseFcDatasetTableSpecsFromText(document.getElementById("fc-displacement-options")?.value || "");
+  return specs ? applyDatasetSeeds("fc", specs) : specs;
 }
 
 function parseRandomCartesianDatasetTableSpecsFromText(rawText) {
@@ -1005,15 +1119,15 @@ function parseRandomCartesianDatasetTableSpecsFromText(rawText) {
     const blocks = group.map((row, rowIndex) => {
       const parts = splitDatasetTableRow(row);
       if (parts.length < 2) {
-        throw new Error(`RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "estructuras | amplitud".`);
+        throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "estructuras | amplitud".`);
       }
       const count = Number(parts[0]);
-      const amplitude = numericPrefix(parts[1], `RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}`);
+      const amplitude = numericPrefix(parts[1], `Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}`);
       if (!Number.isInteger(count) || count <= 0) {
-        throw new Error(`RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: estructuras debe ser entero positivo.`);
+        throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: estructuras debe ser entero positivo.`);
       }
       if (!Number.isFinite(amplitude) || amplitude < 0) {
-        throw new Error(`RC dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: amplitud debe ser >= 0 Ang.`);
+        throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: amplitud debe ser >= 0 Ang.`);
       }
       return {
         block_id: `rc_d${datasetIndex + 1}_a${slugPart(amplitude)}_${rowIndex + 1}_${count}`,
@@ -1033,8 +1147,11 @@ function parseRandomCartesianDatasetTableSpecsFromText(rawText) {
 
 function parseRandomCartesianDatasetTableSpecs() {
   syncDatasetEditorText("random_cartesian");
-  return parseRandomCartesianDatasetTableSpecsFromText(
-    document.getElementById("random-cartesian-dataset-table")?.value || "",
+  return applyDatasetSeeds(
+    "random_cartesian",
+    parseRandomCartesianDatasetTableSpecsFromText(
+      document.getElementById("random-cartesian-dataset-table")?.value || "",
+    ),
   );
 }
 
@@ -1093,6 +1210,7 @@ function builderDatasetRecipes(
       recipes.md = mdDatasetSpecs.map((spec, index) => ({
         recipe_id: `md_table_${index + 1}_${spec.size}`,
         label: `MD dataset ${index + 1}: ${spec.size} snapshots`,
+        ...datasetSeedPatch(spec),
         blocks: spec.blocks,
       }));
     } else {
@@ -1113,10 +1231,11 @@ function builderDatasetRecipes(
     }
   }
   if (methods.includes("siesta_fc_cartesian")) {
+    const globalFcSeed = optionalNumberInput("fc-random-seed", "FC Cartesian random seed", { integer: true }) ?? 42;
     recipes.siesta_fc_cartesian = fcSpecs.map((spec) => ({
       recipe_id: `fc_${spec.index + 1}_${spec.size}`,
-      label: `FC ${spec.size} structures`,
-      seed: optionalNumberInput("fc-random-seed", "FC random seed", { integer: true }) ?? 42,
+      label: `FC Cartesian ${spec.size} structures`,
+      seed: spec.seed ?? globalFcSeed,
       blocks: spec.displacements.map((entry) => ({
         block_id: `fc_${slugPart(entry.value)}_${entry.n_structures}`,
         label: `${entry.value}: ${entry.n_structures}`,
@@ -1127,11 +1246,14 @@ function builderDatasetRecipes(
   }
   if (methods.includes("random_cartesian")) {
     const base = { ...randomCartesianOptions };
+    const globalRandomSeed = base.seed;
     delete base.n_structures;
+    delete base.seed;
     if (randomCartesianDatasetSpecs.length) {
       recipes.random_cartesian = randomCartesianDatasetSpecs.map((spec, index) => ({
         recipe_id: `rc_table_${index + 1}_${spec.size}`,
         label: `Random Cartesian dataset ${index + 1}: ${spec.size} structures`,
+        seed: spec.seed ?? globalRandomSeed,
         blocks: spec.blocks.map((block) => ({ ...base, ...block })),
       }));
       return recipes;
@@ -1147,6 +1269,7 @@ function builderDatasetRecipes(
     recipes.random_cartesian = sizes.map((size, index) => ({
       recipe_id: `rc_${amplitude}_${size}`,
       label: `Random Cartesian ${size}`,
+      seed: globalRandomSeed,
       blocks: [
         {
           ...base,
@@ -1273,7 +1396,7 @@ function validateFcPreviewSpecs(specs) {
       for (const entry of spec.displacements) {
         if (entry.n_structures > state.fcMaxPerDisplacement) {
           throw new Error(
-            `${entry.value} requests ${entry.n_structures} structures, above the FC limit ${state.fcMaxPerDisplacement}.`,
+            `${entry.value} requests ${entry.n_structures} structures, above the FC Cartesian limit ${state.fcMaxPerDisplacement}.`,
           );
         }
       }
@@ -1355,7 +1478,7 @@ function updateDatasetPreview() {
       : "sin datasets";
     setPreviewText("random-preview-summary", label, false);
   } catch (error) {
-    setPreviewText("random-preview-summary", "Random invalido", true);
+    setPreviewText("random-preview-summary", "Random Cartesian invalido", true);
   }
   updateMethodCardStates();
 }
@@ -1417,7 +1540,7 @@ function updateExperimentStatus(status) {
     const elapsed = formatDuration(status.current.elapsed_seconds);
     const eta = formatDuration(status.current.eta_seconds);
     const label = status.current.dataset_label || `dataset_${status.current.size}`;
-    text.textContent = `${status.current.pipeline} ${label} · ${elapsed} · ETA ${eta}`;
+    text.textContent = `${pipelineLabel(status.current.pipeline)} ${label} · ${elapsed} · ETA ${eta}`;
   } else if (status.running) {
     text.textContent = "Running";
   } else if (status.returncode == null || status.returncode === 0) {
@@ -1440,7 +1563,7 @@ function renderExperimentResults(results) {
     item.className = "result-pill";
     const label = result.dataset_label || `dataset_${result.dataset_size}`;
     item.innerHTML = `
-      <strong>${result.pipeline} ${label}</strong>
+      <strong>${pipelineLabel(result.pipeline)} ${label}</strong>
       <span>${result.predicted_hamiltonians} predicted Hamiltonians</span>
       <span>${result.siesta_hamiltonians} SIESTA Hamiltonians</span>
       <code>${result.result_dir}</code>
@@ -1464,7 +1587,7 @@ async function runExperiment() {
     specs = fcDatasetSpecs();
     fcDisplacementOptions = parseFcDisplacementOptionsText();
     if (!specs.length) {
-      throw new Error("Define al menos una tabla FC con desplazamientos.");
+      throw new Error("Define al menos una tabla FC Cartesian con desplazamientos.");
     }
     validateFcPreviewSpecs(specs);
     const badDatasets = specs
@@ -1488,7 +1611,7 @@ async function runExperiment() {
       .filter((size) => !Number.isInteger(size) || size < 3);
     if (badRandomDatasets.length) {
       throw new Error(
-        `Con train/validation/test se requieren datasets RC >= 3. Tamaños invalidos: ${badRandomDatasets.join(", ")}.`,
+        `Con train/validation/test se requieren datasets Random Cartesian >= 3. Tamaños invalidos: ${badRandomDatasets.join(", ")}.`,
       );
     }
   }
@@ -1709,11 +1832,81 @@ function emptyPlotAnnotation(message) {
   };
 }
 
+function topPlotAnnotation(message, y = 1.12, color = "#9f5b00") {
+  return {
+    text: message,
+    xref: "paper",
+    yref: "paper",
+    x: 0,
+    y,
+    xanchor: "left",
+    yanchor: "bottom",
+    showarrow: false,
+    font: { size: 12, color },
+  };
+}
+
+function renderEmptyPlot(id, title, message, yTitle = "") {
+  Plotly.react(
+    id,
+    [],
+    plotLayout(title, yTitle, { annotations: [emptyPlotAnnotation(message)] }),
+    { responsive: true, displaylogo: false },
+  );
+}
+
+function metricAvailabilityByPipeline(runs, group, metric) {
+  return Array.from(groupedRuns(runs)).map(([pipeline, items]) => {
+    const total = items.reduce((sum, run) => sum + (run.samples?.[group] || []).length, 0);
+    const finite = items.reduce((sum, run) => sum + sampleMetricValues(run, group, metric).length, 0);
+    return {
+      pipeline,
+      label: pipelineLabel(pipeline),
+      runs: items.length,
+      total,
+      finite,
+      missing: Math.max(0, total - finite),
+    };
+  });
+}
+
+function metricGapAnnotation(runs, group, metric) {
+  const availability = metricAvailabilityByPipeline(runs, group, metric)
+    .filter((item) => item.total > 0 && item.missing > 0);
+  if (!availability.length) return null;
+  const missingAll = availability
+    .filter((item) => item.finite === 0)
+    .map((item) => `${item.label}: 0/${item.total} finitos`);
+  const partial = availability
+    .filter((item) => item.finite > 0)
+    .map((item) => `${item.label}: ${item.finite}/${item.total} finitos`);
+  const pieces = missingAll.concat(partial).slice(0, 5);
+  return topPlotAnnotation(`Disponibilidad ${metric}: ${pieces.join(" | ")}`);
+}
+
+function formatMetricDisplay(value, suffix = "") {
+  if (value == null || !Number.isFinite(Number(value))) return "No metric";
+  const number = Number(value);
+  const text = Math.abs(number) >= 1000 || Math.abs(number) < 0.001
+    ? number.toExponential(2)
+    : number.toPrecision(4);
+  return `${text}${suffix}`;
+}
+
 function renderLinePlot(id, runs, group, metrics, title, yTitle) {
   const traces = lineTraces(runs, group, metrics);
   const layout = plotLayout(title, yTitle);
+  const annotations = [];
+  if (metrics.length === 1) {
+    const availabilityAnnotation = metricGapAnnotation(runs, group, metrics[0].key);
+    if (availabilityAnnotation) annotations.push(availabilityAnnotation);
+  }
   if (!traces.length) {
-    layout.annotations = [emptyPlotAnnotation("No hay valores finitos para esta metrica.")];
+    annotations.push(emptyPlotAnnotation("No hay valores finitos para esta metrica."));
+  }
+  if (annotations.length) {
+    layout.annotations = annotations;
+    layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 74) };
   }
   Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
@@ -1721,22 +1914,43 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
 function renderBoxPlot(id, runs) {
   const traces = [];
   const availability = [];
+  const fallbackRuns = [];
   for (const run of runs) {
     const spectral = sampleMetricValues(run, "spectral", "fermi_window_rmse_eV");
+    const frontier = sampleMetricValues(run, "spectral", "frontier_window_rmse_eV");
     const fermiAvailability = run.metric_availability?.spectral?.fermi_window_rmse_eV ||
       run.diagnostics?.metric_availability?.spectral?.fermi_window_rmse_eV ||
       {};
     const total = finiteNumber(fermiAvailability.n_total) ?? (run.samples?.spectral || []).length;
     const finite = finiteNumber(fermiAvailability.n_finite) ?? spectral.length;
     availability.push({
-      label: `${run.label} ${run.dataset_size}`,
+      label: runDisplayLabel(run),
       finite,
       total,
     });
+    if (!spectral.length && frontier.length) {
+      fallbackRuns.push({
+        label: runDisplayLabel(run),
+        frontier: frontier.length,
+        total,
+      });
+      traces.push({
+        type: "box",
+        name: `${runDisplayLabel(run)} · Frontier fallback`,
+        y: frontier,
+        boxpoints: "all",
+        jitter: 0.35,
+        pointpos: 0,
+        marker: { color: "#d7a021" },
+        line: { color: "#9f5b00" },
+        hovertemplate: "%{y:.4g} eV<br>Frontier RMSE (HOMO/LUMO fallback)<extra>%{fullData.name}</extra>",
+      });
+      continue;
+    }
     if (!spectral.length) continue;
     traces.push({
       type: "box",
-      name: `${run.label} ${run.dataset_size}`,
+      name: runDisplayLabel(run),
       y: spectral,
       boxpoints: "all",
       jitter: 0.35,
@@ -1747,7 +1961,7 @@ function renderBoxPlot(id, runs) {
   const layout = plotLayout("Distribucion por muestra: Fermi-window RMSE", "RMSE eV", {
     xaxis: { title: "", tickangle: -25 },
     showlegend: false,
-    margin: { l: 56, r: 18, t: 82, b: 64 },
+    margin: { l: 56, r: 18, t: 136, b: 64 },
   });
   const summaries = availability
     .filter((item) => item.total > 0 || item.finite > 0)
@@ -1770,6 +1984,28 @@ function renderBoxPlot(id, runs) {
       showarrow: false,
       font: { size: 11, color: "#56616f" },
     });
+  }
+  const pipelineAvailability = metricAvailabilityByPipeline(runs, "spectral", "fermi_window_rmse_eV")
+    .filter((item) => item.total > 0 && item.finite === 0)
+    .map((item) => {
+      const fallbackCount = fallbackRuns
+        .filter((run) => run.label.startsWith(item.label))
+        .reduce((sum, run) => sum + run.frontier, 0);
+      return fallbackCount
+        ? `${item.label}: 0/${item.total} Fermi; box naranja = Frontier RMSE`
+        : `${item.label}: 0/${item.total} finitos; no se dibuja box`;
+    });
+  if (pipelineAvailability.length) {
+    annotations.push(topPlotAnnotation(pipelineAvailability.join(" | "), 1.32));
+  }
+  if (fallbackRuns.length) {
+    annotations.push(
+      topPlotAnnotation(
+        "Fallback explicito: cuando la ventana ±2 eV de Fermi esta vacia, se muestra Frontier RMSE (HOMO/LUMO) en naranja; no se reescribe Fermi-window RMSE.",
+        1.42,
+        "#9f5b00",
+      ),
+    );
   }
   if (zeroFinite.length) {
     annotations.push({
@@ -1876,23 +2112,67 @@ function renderScatterPlot(id, runs) {
 
 function renderHeatmap(id, runs) {
   const metrics = [
-    ["sparse", "mae_ref_eV", "MAE ref"],
-    ["sparse", "relative_frobenius_union", "Frobenius rel."],
-    ["sparse", "support_f1", "Support F1"],
-    ["spectral", "low_energy_rmse_eV", "Low-energy RMSE"],
-    ["spectral", "fermi_window_rmse_eV", "Fermi RMSE"],
-    ["spectral", "frontier_window_rmse_eV", "Frontier RMSE"],
-    ["spectral", "gap_abs_error_eV", "Gap error"],
-    ["dos", "dos_wasserstein_eV", "DOS W1"],
-    ["run", "pipeline_elapsed_seconds", "Time s"],
+    { group: "sparse", key: "mae_ref_eV", label: "MAE ref", better: "lower" },
+    { group: "sparse", key: "relative_frobenius_union", label: "Frobenius rel.", better: "lower" },
+    { group: "sparse", key: "support_f1", label: "Support F1", better: "higher" },
+    { group: "spectral", key: "low_energy_rmse_eV", label: "Low-energy RMSE", better: "lower" },
+    { group: "spectral", key: "fermi_window_rmse_eV", label: "Fermi RMSE", better: "lower" },
+    { group: "spectral", key: "frontier_window_rmse_eV", label: "Frontier RMSE", better: "lower" },
+    { group: "spectral", key: "gap_abs_error_eV", label: "Gap error", better: "lower" },
+    { group: "dos", key: "dos_wasserstein_eV", label: "DOS W1", better: "lower" },
+    {
+      group: "run",
+      key: "pipeline_elapsed_seconds",
+      label: "Time s",
+      better: "lower",
+      transform: "log10_positive",
+      note: "color uses log10(seconds), normalized within this metric",
+      suffix: " s",
+    },
   ];
   const rows = runs
-    .filter((run) => metrics.some(([group, metric]) => metricValue(run, group, metric) != null))
+    .filter((run) => metrics.some((metric) => metricValue(run, metric.group, metric.key) != null))
     .sort((a, b) => a.pipeline.localeCompare(b.pipeline) || a.dataset_size - b.dataset_size);
+  if (!rows.length) {
+    renderEmptyPlot(id, "Resumen compacto de metricas", "No hay metricas archivadas para resumir.", "");
+    return;
+  }
+  const transformedColumns = metrics.map((metric) =>
+    rows
+      .map((run) => metricValue(run, metric.group, metric.key))
+      .filter((value) => value != null)
+      .map((value) => metric.transform === "log10_positive" ? Math.log10(Math.max(value, 1e-12)) : value),
+  );
+  const ranges = transformedColumns.map((values) => {
+    if (!values.length) return { min: null, max: null };
+    return { min: Math.min(...values), max: Math.max(...values) };
+  });
   const z = rows.map((run) =>
-    metrics.map(([group, metric]) => {
-      const value = metricValue(run, group, metric);
-      return value == null ? null : value;
+    metrics.map((metric, columnIndex) => {
+      const value = metricValue(run, metric.group, metric.key);
+      if (value == null) return null;
+      const transformed = metric.transform === "log10_positive" ? Math.log10(Math.max(value, 1e-12)) : value;
+      const range = ranges[columnIndex];
+      if (range.min == null || range.max == null) return null;
+      if (Math.abs(range.max - range.min) < 1e-15) return 0;
+      const scaled = (transformed - range.min) / (range.max - range.min);
+      return metric.better === "higher" ? 1 - scaled : scaled;
+    }),
+  );
+  const text = rows.map((run) =>
+    metrics.map((metric) => {
+      const value = metricValue(run, metric.group, metric.key);
+      return value == null ? "" : formatMetricDisplay(value, metric.suffix || "");
+    }),
+  );
+  const customdata = rows.map((run) =>
+    metrics.map((metric) => {
+      const value = metricValue(run, metric.group, metric.key);
+      return {
+        raw: formatMetricDisplay(value, metric.suffix || ""),
+        note: metric.note || "color normalized within this metric",
+        direction: metric.better === "higher" ? "higher is better" : "lower is better",
+      };
     }),
   );
   Plotly.react(
@@ -1901,19 +2181,43 @@ function renderHeatmap(id, runs) {
       {
         type: "heatmap",
         z,
-        x: metrics.map((item) => item[2]),
-        y: rows.map((run) => `${run.label} ${run.dataset_size}`),
-        colorscale: "Viridis",
+        text,
+        texttemplate: "%{text}",
+        textfont: { size: 10 },
+        customdata,
+        x: metrics.map((item) => item.label),
+        y: rows.map((run) => runDisplayLabel(run)),
+        zmin: 0,
+        zmax: 1,
+        colorscale: [
+          [0, "#1f9e89"],
+          [0.5, "#f1c453"],
+          [1, "#c73e3a"],
+        ],
+        colorbar: {
+          title: { text: "normalizado<br>por metrica" },
+          tickvals: [0, 0.5, 1],
+          ticktext: ["mejor", "medio", "peor"],
+        },
         hoverongaps: false,
-        hovertemplate: "%{y}<br>%{x}: %{z:.4g}<extra></extra>",
+        hovertemplate:
+          "%{y}<br>%{x}: %{customdata.raw}<br>" +
+          "normalizado: %{z:.3f}<br>%{customdata.direction}<br>%{customdata.note}<extra></extra>",
       },
     ],
     {
       title: { text: "Resumen compacto de metricas", x: 0.02, xanchor: "left", font: { size: 15 } },
-      margin: { l: 120, r: 18, t: 46, b: 72 },
+      margin: { l: 120, r: 18, t: 74, b: 72 },
       paper_bgcolor: "#ffffff",
       plot_bgcolor: "#ffffff",
       font: { family: "Inter, sans-serif", color: "#17202a" },
+      annotations: [
+        topPlotAnnotation(
+          "Color = valor normalizado por metrica; el tiempo usa log10(segundos). Los valores de las celdas son los valores fisicos.",
+          1.08,
+          "#56616f",
+        ),
+      ],
     },
     { responsive: true, displaylogo: false },
   );
@@ -2043,12 +2347,31 @@ function primaryCrossMetric(experiment) {
   return (
     experiment?.recommendation?.primary_metric ||
     experiment?.manifest?.selected_metrics?.primary_metric ||
-    "fermi_window_rmse_eV"
+    PRIMARY_METRIC_DEFAULT
   );
 }
 
 function selectedCrossMetric() {
   return document.getElementById("plot-cross-metric")?.value || CROSS_PLOT_METRIC_DEFAULT;
+}
+
+function crossMethodLabel(method) {
+  return methodDisplayLabel(method);
+}
+
+function crossUnavailableMessage(payload) {
+  const diagnostics = payload?.plot_diagnostics?.cross || [];
+  if (!diagnostics.length) {
+    return "No hay summary/cross_evaluation_metrics.csv. Ejecuta un experimento full con al menos dos metodos hasta completar cross-evaluation.";
+  }
+  const latest = diagnostics[diagnostics.length - 1];
+  const warning = Array.isArray(latest.warnings) && latest.warnings.length
+    ? ` Detalle: ${canonicalDisplayText(latest.warnings[0])}`
+    : "";
+  const counts = latest.archived_runs
+    ? ` Runs archivados detectados: ${latest.archived_runs}.`
+    : "";
+  return `${canonicalDisplayText(latest.message || "Faltan datos de cross-evaluation.")}${counts}${warning}`;
 }
 
 function missingPrimaryMetricAnnotation(metric) {
@@ -2061,20 +2384,22 @@ function missingPlotMetricAnnotation(metric) {
 
 function crossTrainMethods(experiment) {
   const rows = experiment?.metrics || [];
-  const methods = Array.from(new Set(rows.map((row) => row.train_method).filter(Boolean))).sort();
-  return methods.length ? methods : ["md", "atom_displacement"];
+  const methods = Array.from(new Set(rows.map((row) => normalizeMethodId(row.train_method)).filter(Boolean))).sort();
+  return methods.length ? methods : ["md", "siesta_fc_cartesian", "random_cartesian"];
 }
 
 function crossTestSets(experiment) {
   const rows = experiment?.metrics || [];
-  const sets = Array.from(new Set(rows.map((row) => row.test_set).filter(Boolean))).sort();
-  return sets.length ? sets : ["test_md", "test_siesta_fc_cartesian", "test_mixed"];
+  const sets = Array.from(new Set(rows.map((row) => normalizeTestSetId(row.test_set)).filter(Boolean))).sort();
+  return sets.length ? sets : ["test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed"];
 }
 
 function groupedCrossMetrics(rows, metric) {
   const groups = new Map();
   for (const row of rows || []) {
     const value = finiteNumber(row[metric]);
+    const trainMethod = normalizeMethodId(row.train_method);
+    const testSet = normalizeTestSetId(row.test_set);
     const mdDatasetSize = finiteNumber(row.md_dataset_size ?? row.dataset_size);
     const atomDatasetSize = finiteNumber(row.atom_dataset_size ?? row.dataset_size);
     const randomDatasetSize = finiteNumber(row.random_dataset_size);
@@ -2089,8 +2414,8 @@ function groupedCrossMetrics(rows, metric) {
       atomDatasetSize,
       randomDatasetSize,
       trainDatasetSize,
-      row.train_method,
-      row.test_set,
+      trainMethod,
+      testSet,
     ].join("||");
     if (!groups.has(key)) {
       groups.set(key, {
@@ -2100,12 +2425,12 @@ function groupedCrossMetrics(rows, metric) {
         md_dataset_size: mdDatasetSize,
         atom_dataset_size: atomDatasetSize,
         random_dataset_size: randomDatasetSize,
-        train_dataset_label: row.train_dataset_label || row.train_method,
+        train_dataset_label: row.train_dataset_label || trainMethod,
         md_dataset_label: row.md_dataset_label,
         atom_dataset_label: row.atom_dataset_label,
         random_dataset_label: row.random_dataset_label,
-        train_method: row.train_method,
-        test_set: row.test_set,
+        train_method: trainMethod,
+        test_set: testSet,
         values: [],
         times: [],
         n_total: 0,
@@ -2149,14 +2474,14 @@ function groupedCrossMetrics(rows, metric) {
 function crossDatasetComboLabel(row) {
   return [
     row.md_dataset_size != null ? `MD ${row.md_dataset_size}` : "",
-    row.atom_dataset_size != null ? `AD ${row.atom_dataset_size}` : "",
-    row.random_dataset_size != null ? `RC ${row.random_dataset_size}` : "",
+    row.atom_dataset_size != null ? `FC Cartesian ${row.atom_dataset_size}` : "",
+    row.random_dataset_size != null ? `Random Cartesian ${row.random_dataset_size}` : "",
     row.recipe_set_hash || "",
   ].filter(Boolean).join(" / ") || `dataset ${row.dataset_size ?? "unknown"}`;
 }
 
 function crossSizeLabel(row) {
-  return `${row.test_set || "test"} · ${crossDatasetComboLabel(row)}`;
+  return `${testSetDisplayLabel(row.test_set || "test")} · ${crossDatasetComboLabel(row)}`;
 }
 
 function metricAvailabilityLabel(row) {
@@ -2179,8 +2504,17 @@ function crossMissingGroupsAnnotation(groups, metric) {
   };
 }
 
-function renderCrossHeatmap(id, experiment) {
+function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  if (!experiment || !(experiment.metrics || []).length) {
+    renderEmptyPlot(
+      id,
+      `Cross-evaluation heatmap (${metric})`,
+      unavailableMessage || "No hay tabla cross_evaluation_metrics.csv completa.",
+      metric,
+    );
+    return;
+  }
   const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const trainMethods = crossTrainMethods(experiment);
   const sizeLabels = Array.from(
@@ -2206,15 +2540,16 @@ function renderCrossHeatmap(id, experiment) {
       return row.metric_available ? "" : "No metric";
     }),
   );
+  const trainMethodLabels = trainMethods.map(crossMethodLabel);
   const customdata = sizeLabels.map((label) =>
     trainMethods.map((method) => {
       const row = means.find((item) => crossSizeLabel(item) === label && item.train_method === method);
       if (!row) {
-        return { label, method, valueText: "No row", availability: "0/0" };
+        return { label, method: crossMethodLabel(method), valueText: "No row", availability: "0/0" };
       }
       return {
         label,
-        method,
+        method: crossMethodLabel(method),
         valueText: row.metric_available ? row.mean.toPrecision(4) : "No metric",
         availability: metricAvailabilityLabel(row),
       };
@@ -2229,7 +2564,7 @@ function renderCrossHeatmap(id, experiment) {
     row.forEach((label, colIndex) => {
       if (!label) return;
       annotations.push({
-        x: trainMethods[colIndex],
+        x: trainMethodLabels[colIndex],
         y: sizeLabels[rowIndex],
         text: label,
         showarrow: false,
@@ -2251,7 +2586,7 @@ function renderCrossHeatmap(id, experiment) {
       z,
       text,
       customdata,
-      x: trainMethods,
+      x: trainMethodLabels,
       y: sizeLabels,
       colorscale: "Viridis",
       hoverongaps: false,
@@ -2265,8 +2600,17 @@ function renderCrossHeatmap(id, experiment) {
   );
 }
 
-function renderCrossLearning(id, experiment) {
+function renderCrossLearning(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  if (!experiment || !(experiment.metrics || []).length) {
+    renderEmptyPlot(
+      id,
+      `Learning curves (${metric})`,
+      unavailableMessage || "No hay cross_evaluation_metrics.csv para construir curvas de aprendizaje.",
+      metric,
+    );
+    return;
+  }
   const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const traces = [];
   for (const method of crossTrainMethods(experiment)) {
@@ -2279,7 +2623,7 @@ function renderCrossLearning(id, experiment) {
       traces.push({
         type: "scatter",
         mode: "markers",
-        name: `${method} on ${testSet}`,
+        name: `${crossMethodLabel(method)} on ${testSetDisplayLabel(testSet)}`,
         x: points.map((row) => row.dataset_size),
         y: points.map((row) => row.mean),
         text: points.map((row) => `${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
@@ -2298,9 +2642,28 @@ function renderCrossLearning(id, experiment) {
   Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
-function renderCrossCompute(id, experiment) {
+function renderCrossCompute(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
-  const means = groupedCrossMetrics(experiment?.metrics || [], metric).filter((row) => row.time != null);
+  if (!experiment || !(experiment.metrics || []).length) {
+    renderEmptyPlot(
+      id,
+      `Metric vs total compute time (${metric})`,
+      unavailableMessage || "No hay cross_evaluation_metrics.csv para leer total_time_seconds.",
+      metric,
+    );
+    return;
+  }
+  const allMeans = groupedCrossMetrics(experiment?.metrics || [], metric);
+  const means = allMeans.filter((row) => row.time != null);
+  if (!means.length) {
+    renderEmptyPlot(
+      id,
+      `Metric vs total compute time (${metric})`,
+      "Falta total_time_seconds finito en cross_evaluation_metrics.csv; no se puede comparar metrica frente a coste total.",
+      metric,
+    );
+    return;
+  }
   const traces = [];
   for (const method of crossTrainMethods(experiment)) {
     const points = means
@@ -2310,10 +2673,10 @@ function renderCrossCompute(id, experiment) {
     traces.push({
       type: "scatter",
       mode: "markers",
-      name: method,
+      name: crossMethodLabel(method),
       x: points.map((row) => row.time),
       y: points.map((row) => row.mean),
-      text: points.map((row) => `${row.test_set}, ${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
+      text: points.map((row) => `${testSetDisplayLabel(row.test_set)}, ${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
       hovertemplate: "%{text}<br>%{x:.2f}s<br>%{y:.4g}<extra>%{fullData.name}</extra>",
     });
   }
@@ -2329,17 +2692,21 @@ function renderCrossCompute(id, experiment) {
   Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
-function renderWinnerMap(id, experiment) {
+function renderWinnerMap(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  if (!experiment || !(experiment.metrics || []).length) {
+    renderEmptyPlot(
+      id,
+      `Winner map (${metric})`,
+      unavailableMessage || "No hay celdas cross comparables porque falta cross_evaluation_metrics.csv.",
+      "Winner",
+    );
+    return;
+  }
   const scientificStatus = experiment?.recommendation?.scientific_status;
   const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const methods = crossTrainMethods(experiment);
-  const methodLabel = (method) => ({
-    md: "MD",
-    siesta_fc_cartesian: "FC",
-    atom_displacement: "FC",
-    random_cartesian: "RC",
-  }[method] || method);
+  const methodLabel = crossMethodLabel;
   const comboLabels = Array.from(new Set(means.map(crossDatasetComboLabel))).sort();
   const testSets = crossTestSets(experiment);
   const tieIndex = methods.length;
@@ -2356,7 +2723,7 @@ function renderWinnerMap(id, experiment) {
     const index = methods.indexOf(winners[0].train_method);
     return index >= 0 ? index : null;
   }));
-  const yLabels = testSets;
+  const yLabels = testSets.map(testSetDisplayLabel);
   const text = z.map((row) => row.map((value) => (value == null ? "No metric" : labels.get(value))));
   const customdata = testSets.map((testSet, rowIndex) => comboLabels.map((combo, colIndex) => {
     const candidates = means.filter((row) => row.test_set === testSet && crossDatasetComboLabel(row) === combo);
@@ -2367,7 +2734,7 @@ function renderWinnerMap(id, experiment) {
     );
     return {
       winner: z[rowIndex][colIndex] == null ? "No metric" : labels.get(z[rowIndex][colIndex]),
-      testSet,
+      testSet: testSetDisplayLabel(testSet),
       combo,
       values: values.join("; "),
     };
@@ -2453,7 +2820,116 @@ function recommendationBlockers(recommendation) {
   addWarning("checkpoint fallback", "checkpoint");
   addWarning("reproducibility warning", "absolute");
   addWarning("reproducibility warning", "reproducibility");
-  return Array.from(new Set(blockers.concat(warnings.map((warning) => String(warning)))));
+  return Array.from(new Set(blockers.concat(warnings.map(canonicalDisplayText))));
+}
+
+function plotWarningStatusLabel(status) {
+  return ({
+    exploratory_only: "exploratory_only",
+    scientifically_inconclusive: "scientifically_inconclusive",
+    invalid_incomplete_grid: "invalid_incomplete_grid",
+    invalid_leakage: "invalid_leakage",
+    not_scientifically_valid: "not_scientifically_valid",
+  }[status] || status || "diagnostic");
+}
+
+function plotWarningDetailText(details) {
+  if (details == null || details === "") return "";
+  if (Array.isArray(details)) return details.map(canonicalDisplayText).join(", ");
+  if (typeof details === "object") {
+    try {
+      return canonicalDisplayText(JSON.stringify(details));
+    } catch {
+      return canonicalDisplayText(String(details));
+    }
+  }
+  return canonicalDisplayText(details);
+}
+
+function warningKey(warning) {
+  return [
+    warning?.experiment_id || "",
+    warning?.code || "",
+    warning?.scientific_status || "",
+    warning?.message || "",
+    plotWarningDetailText(warning?.details || ""),
+  ].join("||");
+}
+
+function plotWarningEntriesForPayload(payload, crossExperiment) {
+  const warnings = [];
+  const seen = new Set();
+  const addWarning = (warning, experimentId = "") => {
+    if (!warning) return;
+    const entry = {
+      experiment_id: warning.experiment_id || experimentId,
+      severity: warning.severity || "warning",
+      code: warning.code || "plot_warning",
+      scientific_status: warning.scientific_status || crossExperiment?.plot_scientific_status || "",
+      message: canonicalDisplayText(warning.message || ""),
+      details: warning.details,
+    };
+    const key = warningKey(entry);
+    if (seen.has(key)) return;
+    seen.add(key);
+    warnings.push(entry);
+  };
+  if (crossExperiment) {
+    for (const warning of crossExperiment.plot_warnings || []) {
+      addWarning(warning, crossExperiment.experiment_id);
+    }
+    const status = crossExperiment.plot_scientific_status || crossExperiment.recommendation?.scientific_status;
+    if (status && status !== "robust_comparison") {
+      addWarning(
+        {
+          severity: status.startsWith("invalid") ? "error" : "warning",
+          code: "selected_plot_status",
+          scientific_status: status,
+          message: `Selected plot set is ${plotWarningStatusLabel(status)}; plots remain diagnostic.`,
+        },
+        crossExperiment.experiment_id,
+      );
+    }
+  }
+  for (const warning of payload?.plot_warnings || []) {
+    if (!crossExperiment || warning.experiment_id === crossExperiment.experiment_id || warning.code === "visualization_compatibility") {
+      addWarning(warning);
+    }
+  }
+  return warnings;
+}
+
+function renderPlotWarnings(payload, crossExperiment) {
+  const banner = document.getElementById("plot-warnings");
+  if (!banner) return;
+  const warnings = plotWarningEntriesForPayload(payload, crossExperiment);
+  banner.replaceChildren();
+  banner.classList.toggle("hidden", warnings.length === 0);
+  if (!warnings.length) return;
+
+  const title = document.createElement("strong");
+  const status = crossExperiment?.plot_scientific_status || warnings[0]?.scientific_status || "diagnostic";
+  title.textContent = `Scientific plot status: ${plotWarningStatusLabel(status)}`;
+  banner.appendChild(title);
+
+  const list = document.createElement("ul");
+  for (const warning of warnings.slice(0, 8)) {
+    const item = document.createElement("li");
+    const pieces = [
+      warning.experiment_id ? `${warning.experiment_id}:` : "",
+      warning.message,
+      warning.scientific_status ? `[${plotWarningStatusLabel(warning.scientific_status)}]` : "",
+      plotWarningDetailText(warning.details),
+    ].filter(Boolean);
+    item.textContent = pieces.join(" ");
+    list.appendChild(item);
+  }
+  if (warnings.length > 8) {
+    const item = document.createElement("li");
+    item.textContent = `${warnings.length - 8} additional plot warning(s) omitted from this banner.`;
+    list.appendChild(item);
+  }
+  banner.appendChild(list);
 }
 
 function renderPlots(payload) {
@@ -2462,10 +2938,12 @@ function renderPlots(payload) {
   panel.classList.toggle("hidden", !state.plotsEnabled);
   if (!state.plotsEnabled) {
     status.textContent = "Plots disabled";
+    renderPlotWarnings(null, null);
     return;
   }
   if (!window.Plotly) {
     status.textContent = "Plotly no esta disponible";
+    renderPlotWarnings(payload, null);
     return;
   }
   const runs = payload?.runs || [];
@@ -2473,12 +2951,17 @@ function renderPlots(payload) {
   const crossMetric = selectedCrossMetric(crossExperiment);
   const primaryMetric = primaryCrossMetric(crossExperiment);
   const recommendation = crossExperiment?.recommendation;
+  renderPlotWarnings(payload, crossExperiment);
   const crossRows = crossExperiment?.metrics?.length || 0;
   const crossSources = crossExperiment?.source_experiments?.length || 0;
-  const isolationText = crossExperiment?.isolation_warning ? ` | ${crossExperiment.isolation_warning}` : "";
+  const isolationText = crossExperiment?.isolation_warning ? ` | ${canonicalDisplayText(crossExperiment.isolation_warning)}` : "";
   const blockerText = recommendation ? recommendationBlockers(recommendation).slice(0, 6).join(" | ") : "";
+  const crossMissingText = !crossExperiment ? crossUnavailableMessage(payload) : "";
+  const plotScientificStatus = crossExperiment?.plot_scientific_status || recommendation?.scientific_status || "unknown";
   const crossText = recommendation?.status
-    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${recommendation.scientific_status || "unknown"} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${recommendation.reason || ""}${isolationText}`
+    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${plotScientificStatus} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${canonicalDisplayText(recommendation.reason || "")}${isolationText}`
+    : crossMissingText
+      ? ` | cross: ${crossMissingText}`
     : "";
   status.textContent = runs.length
     ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
@@ -2504,16 +2987,31 @@ function renderPlots(payload) {
   renderLinePlot("plot-frontier", runs, "spectral", [{ key: "frontier_window_rmse_eV", label: "Frontier RMSE" }], "Frontier window", "RMSE eV");
   renderLinePlot("plot-aligned", runs, "spectral", [{ key: "align_global_rmse_eV", label: "Aligned global RMSE" }], "Spectral aligned RMSE", "RMSE eV");
   renderSensitivitySweeps("plot-sweeps", runs);
-  renderCrossHeatmap("plot-cross-heatmap", crossExperiment);
-  renderCrossLearning("plot-learning", crossExperiment);
-  renderCrossCompute("plot-compute", crossExperiment);
-  renderWinnerMap("plot-winner", crossExperiment);
+  renderCrossHeatmap("plot-cross-heatmap", crossExperiment, crossMissingText);
+  renderCrossLearning("plot-learning", crossExperiment, crossMissingText);
+  renderCrossCompute("plot-compute", crossExperiment, crossMissingText);
+  renderWinnerMap("plot-winner", crossExperiment, crossMissingText);
 }
 
 async function loadPlots() {
   const payload = await request("/api/plots");
   state.plotData = payload;
   renderPlots(payload);
+}
+
+async function clearGeneratedDatasets() {
+  const confirmed = window.confirm(
+    "Borrar datasets generados, workspaces y resultados archivados? Se conservaran codigo, configs y pseudopotenciales.",
+  );
+  if (!confirmed) return;
+  const payload = await request("/api/datasets/clear", {
+    method: "POST",
+    body: JSON.stringify({ dry_run: false }),
+  });
+  state.plotData = null;
+  await loadResults();
+  const removed = Array.isArray(payload.removed) ? payload.removed.length : 0;
+  showToast(`Datasets borrados: ${removed}`);
 }
 
 function setupTabs() {
@@ -2540,6 +3038,9 @@ function setupEvents() {
   });
   document.getElementById("refresh-results").addEventListener("click", () => {
     loadResults().then(() => showToast("Results refreshed")).catch((error) => showToast(error.message));
+  });
+  document.getElementById("clear-datasets")?.addEventListener("click", () => {
+    clearGeneratedDatasets().catch((error) => showToast(error.message));
   });
   document.getElementById("show-plots").addEventListener("change", (event) => {
     state.plotsEnabled = event.target.checked;

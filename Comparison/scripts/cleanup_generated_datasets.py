@@ -14,10 +14,26 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KEEP_DATASET_FILENAMES = {".gitkeep"}
 KEEP_DATASET_SUFFIXES = {".psf", ".psml"}
+GENERATED_RESULTS_GROUPS = ("results_md", "results_atomdisp", "results_random_cartesian")
 
 
 def _is_generated_results_dir(path: Path) -> bool:
-    return path.is_dir() and path.name.startswith("dataset_")
+    return path.is_dir() and not path.name.startswith(".")
+
+
+def _is_generated_experiment_dir(path: Path) -> bool:
+    if not path.is_dir() or path.name.startswith(".") or path.name in GENERATED_RESULTS_GROUPS:
+        return False
+    if path.name[:8].isdigit():
+        return True
+    generated_markers = (
+        "experiment_manifest.yaml",
+        "summary",
+        "cross_evaluations",
+        "cross_predictions",
+        "common_tests",
+    )
+    return any((path / marker).exists() for marker in generated_markers)
 
 
 def generated_dataset_targets(repo_root: Path = REPO_ROOT) -> list[Path]:
@@ -35,7 +51,7 @@ def generated_dataset_targets(repo_root: Path = REPO_ROOT) -> list[Path]:
         targets.append(workspaces)
 
     results = comparison / "results"
-    for group in ("results_md", "results_atomdisp", "results_random_cartesian"):
+    for group in GENERATED_RESULTS_GROUPS:
         root = results / group
         if root.exists():
             targets.extend(child for child in root.iterdir() if _is_generated_results_dir(child))
@@ -43,7 +59,7 @@ def generated_dataset_targets(repo_root: Path = REPO_ROOT) -> list[Path]:
         targets.extend(
             child
             for child in results.iterdir()
-            if child.is_dir() and child.name[:8].isdigit() and (child / "experiment_manifest.yaml").exists()
+            if _is_generated_experiment_dir(child)
         )
     return sorted(set(targets), key=lambda path: path.as_posix())
 

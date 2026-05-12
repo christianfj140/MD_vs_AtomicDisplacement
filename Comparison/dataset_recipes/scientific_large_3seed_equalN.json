@@ -1,0 +1,3497 @@
+{
+  "md": [
+    {
+      "recipe_id": "md_ladder_285_seed101",
+      "label": "MD ladder 285 (balanced 15-temperature ladder, 19 snapshots per temperature), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "md_T300_n19",
+          "label": "19 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 19,
+          "seed": 101001
+        },
+        {
+          "block_id": "md_T350_n19",
+          "label": "19 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 19,
+          "seed": 101002
+        },
+        {
+          "block_id": "md_T400_n19",
+          "label": "19 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 19,
+          "seed": 101003
+        },
+        {
+          "block_id": "md_T450_n19",
+          "label": "19 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 19,
+          "seed": 101004
+        },
+        {
+          "block_id": "md_T500_n19",
+          "label": "19 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 19,
+          "seed": 101005
+        },
+        {
+          "block_id": "md_T550_n19",
+          "label": "19 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 19,
+          "seed": 101006
+        },
+        {
+          "block_id": "md_T600_n19",
+          "label": "19 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 19,
+          "seed": 101007
+        },
+        {
+          "block_id": "md_T650_n19",
+          "label": "19 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 19,
+          "seed": 101008
+        },
+        {
+          "block_id": "md_T700_n19",
+          "label": "19 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 19,
+          "seed": 101009
+        },
+        {
+          "block_id": "md_T750_n19",
+          "label": "19 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 19,
+          "seed": 101010
+        },
+        {
+          "block_id": "md_T800_n19",
+          "label": "19 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 19,
+          "seed": 101011
+        },
+        {
+          "block_id": "md_T850_n19",
+          "label": "19 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 19,
+          "seed": 101012
+        },
+        {
+          "block_id": "md_T900_n19",
+          "label": "19 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 19,
+          "seed": 101013
+        },
+        {
+          "block_id": "md_T950_n19",
+          "label": "19 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 19,
+          "seed": 101014
+        },
+        {
+          "block_id": "md_T1000_n19",
+          "label": "19 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 19,
+          "seed": 101015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_285_seed202",
+      "label": "MD ladder 285 (balanced 15-temperature ladder, 19 snapshots per temperature), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "md_T300_n19",
+          "label": "19 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 19,
+          "seed": 202001
+        },
+        {
+          "block_id": "md_T350_n19",
+          "label": "19 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 19,
+          "seed": 202002
+        },
+        {
+          "block_id": "md_T400_n19",
+          "label": "19 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 19,
+          "seed": 202003
+        },
+        {
+          "block_id": "md_T450_n19",
+          "label": "19 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 19,
+          "seed": 202004
+        },
+        {
+          "block_id": "md_T500_n19",
+          "label": "19 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 19,
+          "seed": 202005
+        },
+        {
+          "block_id": "md_T550_n19",
+          "label": "19 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 19,
+          "seed": 202006
+        },
+        {
+          "block_id": "md_T600_n19",
+          "label": "19 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 19,
+          "seed": 202007
+        },
+        {
+          "block_id": "md_T650_n19",
+          "label": "19 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 19,
+          "seed": 202008
+        },
+        {
+          "block_id": "md_T700_n19",
+          "label": "19 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 19,
+          "seed": 202009
+        },
+        {
+          "block_id": "md_T750_n19",
+          "label": "19 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 19,
+          "seed": 202010
+        },
+        {
+          "block_id": "md_T800_n19",
+          "label": "19 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 19,
+          "seed": 202011
+        },
+        {
+          "block_id": "md_T850_n19",
+          "label": "19 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 19,
+          "seed": 202012
+        },
+        {
+          "block_id": "md_T900_n19",
+          "label": "19 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 19,
+          "seed": 202013
+        },
+        {
+          "block_id": "md_T950_n19",
+          "label": "19 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 19,
+          "seed": 202014
+        },
+        {
+          "block_id": "md_T1000_n19",
+          "label": "19 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 19,
+          "seed": 202015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_285_seed303",
+      "label": "MD ladder 285 (balanced 15-temperature ladder, 19 snapshots per temperature), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "md_T300_n19",
+          "label": "19 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 19,
+          "seed": 303001
+        },
+        {
+          "block_id": "md_T350_n19",
+          "label": "19 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 19,
+          "seed": 303002
+        },
+        {
+          "block_id": "md_T400_n19",
+          "label": "19 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 19,
+          "seed": 303003
+        },
+        {
+          "block_id": "md_T450_n19",
+          "label": "19 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 19,
+          "seed": 303004
+        },
+        {
+          "block_id": "md_T500_n19",
+          "label": "19 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 19,
+          "seed": 303005
+        },
+        {
+          "block_id": "md_T550_n19",
+          "label": "19 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 19,
+          "seed": 303006
+        },
+        {
+          "block_id": "md_T600_n19",
+          "label": "19 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 19,
+          "seed": 303007
+        },
+        {
+          "block_id": "md_T650_n19",
+          "label": "19 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 19,
+          "seed": 303008
+        },
+        {
+          "block_id": "md_T700_n19",
+          "label": "19 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 19,
+          "seed": 303009
+        },
+        {
+          "block_id": "md_T750_n19",
+          "label": "19 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 19,
+          "seed": 303010
+        },
+        {
+          "block_id": "md_T800_n19",
+          "label": "19 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 19,
+          "seed": 303011
+        },
+        {
+          "block_id": "md_T850_n19",
+          "label": "19 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 19,
+          "seed": 303012
+        },
+        {
+          "block_id": "md_T900_n19",
+          "label": "19 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 19,
+          "seed": 303013
+        },
+        {
+          "block_id": "md_T950_n19",
+          "label": "19 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 19,
+          "seed": 303014
+        },
+        {
+          "block_id": "md_T1000_n19",
+          "label": "19 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 19,
+          "seed": 303015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_570_seed101",
+      "label": "MD ladder 570 (balanced 15-temperature ladder, 38 snapshots per temperature), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "md_T300_n38",
+          "label": "38 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 38,
+          "seed": 101001
+        },
+        {
+          "block_id": "md_T350_n38",
+          "label": "38 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 38,
+          "seed": 101002
+        },
+        {
+          "block_id": "md_T400_n38",
+          "label": "38 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 38,
+          "seed": 101003
+        },
+        {
+          "block_id": "md_T450_n38",
+          "label": "38 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 38,
+          "seed": 101004
+        },
+        {
+          "block_id": "md_T500_n38",
+          "label": "38 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 38,
+          "seed": 101005
+        },
+        {
+          "block_id": "md_T550_n38",
+          "label": "38 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 38,
+          "seed": 101006
+        },
+        {
+          "block_id": "md_T600_n38",
+          "label": "38 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 38,
+          "seed": 101007
+        },
+        {
+          "block_id": "md_T650_n38",
+          "label": "38 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 38,
+          "seed": 101008
+        },
+        {
+          "block_id": "md_T700_n38",
+          "label": "38 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 38,
+          "seed": 101009
+        },
+        {
+          "block_id": "md_T750_n38",
+          "label": "38 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 38,
+          "seed": 101010
+        },
+        {
+          "block_id": "md_T800_n38",
+          "label": "38 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 38,
+          "seed": 101011
+        },
+        {
+          "block_id": "md_T850_n38",
+          "label": "38 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 38,
+          "seed": 101012
+        },
+        {
+          "block_id": "md_T900_n38",
+          "label": "38 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 38,
+          "seed": 101013
+        },
+        {
+          "block_id": "md_T950_n38",
+          "label": "38 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 38,
+          "seed": 101014
+        },
+        {
+          "block_id": "md_T1000_n38",
+          "label": "38 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 38,
+          "seed": 101015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_570_seed202",
+      "label": "MD ladder 570 (balanced 15-temperature ladder, 38 snapshots per temperature), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "md_T300_n38",
+          "label": "38 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 38,
+          "seed": 202001
+        },
+        {
+          "block_id": "md_T350_n38",
+          "label": "38 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 38,
+          "seed": 202002
+        },
+        {
+          "block_id": "md_T400_n38",
+          "label": "38 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 38,
+          "seed": 202003
+        },
+        {
+          "block_id": "md_T450_n38",
+          "label": "38 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 38,
+          "seed": 202004
+        },
+        {
+          "block_id": "md_T500_n38",
+          "label": "38 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 38,
+          "seed": 202005
+        },
+        {
+          "block_id": "md_T550_n38",
+          "label": "38 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 38,
+          "seed": 202006
+        },
+        {
+          "block_id": "md_T600_n38",
+          "label": "38 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 38,
+          "seed": 202007
+        },
+        {
+          "block_id": "md_T650_n38",
+          "label": "38 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 38,
+          "seed": 202008
+        },
+        {
+          "block_id": "md_T700_n38",
+          "label": "38 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 38,
+          "seed": 202009
+        },
+        {
+          "block_id": "md_T750_n38",
+          "label": "38 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 38,
+          "seed": 202010
+        },
+        {
+          "block_id": "md_T800_n38",
+          "label": "38 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 38,
+          "seed": 202011
+        },
+        {
+          "block_id": "md_T850_n38",
+          "label": "38 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 38,
+          "seed": 202012
+        },
+        {
+          "block_id": "md_T900_n38",
+          "label": "38 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 38,
+          "seed": 202013
+        },
+        {
+          "block_id": "md_T950_n38",
+          "label": "38 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 38,
+          "seed": 202014
+        },
+        {
+          "block_id": "md_T1000_n38",
+          "label": "38 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 38,
+          "seed": 202015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_570_seed303",
+      "label": "MD ladder 570 (balanced 15-temperature ladder, 38 snapshots per temperature), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "md_T300_n38",
+          "label": "38 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 38,
+          "seed": 303001
+        },
+        {
+          "block_id": "md_T350_n38",
+          "label": "38 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 38,
+          "seed": 303002
+        },
+        {
+          "block_id": "md_T400_n38",
+          "label": "38 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 38,
+          "seed": 303003
+        },
+        {
+          "block_id": "md_T450_n38",
+          "label": "38 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 38,
+          "seed": 303004
+        },
+        {
+          "block_id": "md_T500_n38",
+          "label": "38 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 38,
+          "seed": 303005
+        },
+        {
+          "block_id": "md_T550_n38",
+          "label": "38 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 38,
+          "seed": 303006
+        },
+        {
+          "block_id": "md_T600_n38",
+          "label": "38 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 38,
+          "seed": 303007
+        },
+        {
+          "block_id": "md_T650_n38",
+          "label": "38 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 38,
+          "seed": 303008
+        },
+        {
+          "block_id": "md_T700_n38",
+          "label": "38 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 38,
+          "seed": 303009
+        },
+        {
+          "block_id": "md_T750_n38",
+          "label": "38 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 38,
+          "seed": 303010
+        },
+        {
+          "block_id": "md_T800_n38",
+          "label": "38 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 38,
+          "seed": 303011
+        },
+        {
+          "block_id": "md_T850_n38",
+          "label": "38 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 38,
+          "seed": 303012
+        },
+        {
+          "block_id": "md_T900_n38",
+          "label": "38 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 38,
+          "seed": 303013
+        },
+        {
+          "block_id": "md_T950_n38",
+          "label": "38 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 38,
+          "seed": 303014
+        },
+        {
+          "block_id": "md_T1000_n38",
+          "label": "38 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 38,
+          "seed": 303015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_760_seed101",
+      "label": "MD ladder 760 (strong 15-temperature ladder, 50-51 snapshots per temperature), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "md_T300_n51",
+          "label": "51 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 51,
+          "seed": 101001
+        },
+        {
+          "block_id": "md_T350_n51",
+          "label": "51 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 51,
+          "seed": 101002
+        },
+        {
+          "block_id": "md_T400_n51",
+          "label": "51 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 51,
+          "seed": 101003
+        },
+        {
+          "block_id": "md_T450_n51",
+          "label": "51 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 51,
+          "seed": 101004
+        },
+        {
+          "block_id": "md_T500_n51",
+          "label": "51 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 51,
+          "seed": 101005
+        },
+        {
+          "block_id": "md_T550_n51",
+          "label": "51 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 51,
+          "seed": 101006
+        },
+        {
+          "block_id": "md_T600_n51",
+          "label": "51 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 51,
+          "seed": 101007
+        },
+        {
+          "block_id": "md_T650_n51",
+          "label": "51 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 51,
+          "seed": 101008
+        },
+        {
+          "block_id": "md_T700_n51",
+          "label": "51 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 51,
+          "seed": 101009
+        },
+        {
+          "block_id": "md_T750_n51",
+          "label": "51 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 51,
+          "seed": 101010
+        },
+        {
+          "block_id": "md_T800_n50",
+          "label": "50 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 50,
+          "seed": 101011
+        },
+        {
+          "block_id": "md_T850_n50",
+          "label": "50 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 50,
+          "seed": 101012
+        },
+        {
+          "block_id": "md_T900_n50",
+          "label": "50 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 50,
+          "seed": 101013
+        },
+        {
+          "block_id": "md_T950_n50",
+          "label": "50 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 50,
+          "seed": 101014
+        },
+        {
+          "block_id": "md_T1000_n50",
+          "label": "50 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 50,
+          "seed": 101015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_760_seed202",
+      "label": "MD ladder 760 (strong 15-temperature ladder, 50-51 snapshots per temperature), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "md_T300_n51",
+          "label": "51 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 51,
+          "seed": 202001
+        },
+        {
+          "block_id": "md_T350_n51",
+          "label": "51 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 51,
+          "seed": 202002
+        },
+        {
+          "block_id": "md_T400_n51",
+          "label": "51 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 51,
+          "seed": 202003
+        },
+        {
+          "block_id": "md_T450_n51",
+          "label": "51 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 51,
+          "seed": 202004
+        },
+        {
+          "block_id": "md_T500_n51",
+          "label": "51 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 51,
+          "seed": 202005
+        },
+        {
+          "block_id": "md_T550_n51",
+          "label": "51 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 51,
+          "seed": 202006
+        },
+        {
+          "block_id": "md_T600_n51",
+          "label": "51 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 51,
+          "seed": 202007
+        },
+        {
+          "block_id": "md_T650_n51",
+          "label": "51 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 51,
+          "seed": 202008
+        },
+        {
+          "block_id": "md_T700_n51",
+          "label": "51 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 51,
+          "seed": 202009
+        },
+        {
+          "block_id": "md_T750_n51",
+          "label": "51 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 51,
+          "seed": 202010
+        },
+        {
+          "block_id": "md_T800_n50",
+          "label": "50 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 50,
+          "seed": 202011
+        },
+        {
+          "block_id": "md_T850_n50",
+          "label": "50 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 50,
+          "seed": 202012
+        },
+        {
+          "block_id": "md_T900_n50",
+          "label": "50 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 50,
+          "seed": 202013
+        },
+        {
+          "block_id": "md_T950_n50",
+          "label": "50 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 50,
+          "seed": 202014
+        },
+        {
+          "block_id": "md_T1000_n50",
+          "label": "50 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 50,
+          "seed": 202015
+        }
+      ]
+    },
+    {
+      "recipe_id": "md_ladder_760_seed303",
+      "label": "MD ladder 760 (strong 15-temperature ladder, 50-51 snapshots per temperature), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "md_T300_n51",
+          "label": "51 snapshots @ 300 K",
+          "temperature_K": 300,
+          "n_snapshots": 51,
+          "seed": 303001
+        },
+        {
+          "block_id": "md_T350_n51",
+          "label": "51 snapshots @ 350 K",
+          "temperature_K": 350,
+          "n_snapshots": 51,
+          "seed": 303002
+        },
+        {
+          "block_id": "md_T400_n51",
+          "label": "51 snapshots @ 400 K",
+          "temperature_K": 400,
+          "n_snapshots": 51,
+          "seed": 303003
+        },
+        {
+          "block_id": "md_T450_n51",
+          "label": "51 snapshots @ 450 K",
+          "temperature_K": 450,
+          "n_snapshots": 51,
+          "seed": 303004
+        },
+        {
+          "block_id": "md_T500_n51",
+          "label": "51 snapshots @ 500 K",
+          "temperature_K": 500,
+          "n_snapshots": 51,
+          "seed": 303005
+        },
+        {
+          "block_id": "md_T550_n51",
+          "label": "51 snapshots @ 550 K",
+          "temperature_K": 550,
+          "n_snapshots": 51,
+          "seed": 303006
+        },
+        {
+          "block_id": "md_T600_n51",
+          "label": "51 snapshots @ 600 K",
+          "temperature_K": 600,
+          "n_snapshots": 51,
+          "seed": 303007
+        },
+        {
+          "block_id": "md_T650_n51",
+          "label": "51 snapshots @ 650 K",
+          "temperature_K": 650,
+          "n_snapshots": 51,
+          "seed": 303008
+        },
+        {
+          "block_id": "md_T700_n51",
+          "label": "51 snapshots @ 700 K",
+          "temperature_K": 700,
+          "n_snapshots": 51,
+          "seed": 303009
+        },
+        {
+          "block_id": "md_T750_n51",
+          "label": "51 snapshots @ 750 K",
+          "temperature_K": 750,
+          "n_snapshots": 51,
+          "seed": 303010
+        },
+        {
+          "block_id": "md_T800_n50",
+          "label": "50 snapshots @ 800 K",
+          "temperature_K": 800,
+          "n_snapshots": 50,
+          "seed": 303011
+        },
+        {
+          "block_id": "md_T850_n50",
+          "label": "50 snapshots @ 850 K",
+          "temperature_K": 850,
+          "n_snapshots": 50,
+          "seed": 303012
+        },
+        {
+          "block_id": "md_T900_n50",
+          "label": "50 snapshots @ 900 K",
+          "temperature_K": 900,
+          "n_snapshots": 50,
+          "seed": 303013
+        },
+        {
+          "block_id": "md_T950_n50",
+          "label": "50 snapshots @ 950 K",
+          "temperature_K": 950,
+          "n_snapshots": 50,
+          "seed": 303014
+        },
+        {
+          "block_id": "md_T1000_n50",
+          "label": "50 snapshots @ 1000 K",
+          "temperature_K": 1000,
+          "n_snapshots": 50,
+          "seed": 303015
+        }
+      ]
+    }
+  ],
+  "siesta_fc_cartesian": [
+    {
+      "recipe_id": "fc_multiamp_285_seed101",
+      "label": "FC multi-amplitude 285 (15 amplitudes), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_285_seed202",
+      "label": "FC multi-amplitude 285 (15 amplitudes), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_285_seed303",
+      "label": "FC multi-amplitude 285 (15 amplitudes), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_570_seed101",
+      "label": "FC multi-amplitude 570 (30 amplitudes), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "fc_d0p005_n19",
+          "label": "19 structures @ 0.005 Ang",
+          "displacement": "0.005 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p015_n19",
+          "label": "19 structures @ 0.015 Ang",
+          "displacement": "0.015 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p025_n19",
+          "label": "19 structures @ 0.025 Ang",
+          "displacement": "0.025 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p035_n19",
+          "label": "19 structures @ 0.035 Ang",
+          "displacement": "0.035 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p045_n19",
+          "label": "19 structures @ 0.045 Ang",
+          "displacement": "0.045 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p055_n19",
+          "label": "19 structures @ 0.055 Ang",
+          "displacement": "0.055 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p065_n19",
+          "label": "19 structures @ 0.065 Ang",
+          "displacement": "0.065 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p075_n19",
+          "label": "19 structures @ 0.075 Ang",
+          "displacement": "0.075 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p085_n19",
+          "label": "19 structures @ 0.085 Ang",
+          "displacement": "0.085 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p095_n19",
+          "label": "19 structures @ 0.095 Ang",
+          "displacement": "0.095 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p105_n19",
+          "label": "19 structures @ 0.105 Ang",
+          "displacement": "0.105 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p115_n19",
+          "label": "19 structures @ 0.115 Ang",
+          "displacement": "0.115 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p125_n19",
+          "label": "19 structures @ 0.125 Ang",
+          "displacement": "0.125 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p135_n19",
+          "label": "19 structures @ 0.135 Ang",
+          "displacement": "0.135 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p145_n19",
+          "label": "19 structures @ 0.145 Ang",
+          "displacement": "0.145 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_570_seed202",
+      "label": "FC multi-amplitude 570 (30 amplitudes), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "fc_d0p005_n19",
+          "label": "19 structures @ 0.005 Ang",
+          "displacement": "0.005 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p015_n19",
+          "label": "19 structures @ 0.015 Ang",
+          "displacement": "0.015 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p025_n19",
+          "label": "19 structures @ 0.025 Ang",
+          "displacement": "0.025 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p035_n19",
+          "label": "19 structures @ 0.035 Ang",
+          "displacement": "0.035 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p045_n19",
+          "label": "19 structures @ 0.045 Ang",
+          "displacement": "0.045 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p055_n19",
+          "label": "19 structures @ 0.055 Ang",
+          "displacement": "0.055 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p065_n19",
+          "label": "19 structures @ 0.065 Ang",
+          "displacement": "0.065 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p075_n19",
+          "label": "19 structures @ 0.075 Ang",
+          "displacement": "0.075 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p085_n19",
+          "label": "19 structures @ 0.085 Ang",
+          "displacement": "0.085 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p095_n19",
+          "label": "19 structures @ 0.095 Ang",
+          "displacement": "0.095 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p105_n19",
+          "label": "19 structures @ 0.105 Ang",
+          "displacement": "0.105 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p115_n19",
+          "label": "19 structures @ 0.115 Ang",
+          "displacement": "0.115 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p125_n19",
+          "label": "19 structures @ 0.125 Ang",
+          "displacement": "0.125 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p135_n19",
+          "label": "19 structures @ 0.135 Ang",
+          "displacement": "0.135 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p145_n19",
+          "label": "19 structures @ 0.145 Ang",
+          "displacement": "0.145 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_570_seed303",
+      "label": "FC multi-amplitude 570 (30 amplitudes), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "fc_d0p005_n19",
+          "label": "19 structures @ 0.005 Ang",
+          "displacement": "0.005 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p015_n19",
+          "label": "19 structures @ 0.015 Ang",
+          "displacement": "0.015 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p025_n19",
+          "label": "19 structures @ 0.025 Ang",
+          "displacement": "0.025 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p035_n19",
+          "label": "19 structures @ 0.035 Ang",
+          "displacement": "0.035 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p045_n19",
+          "label": "19 structures @ 0.045 Ang",
+          "displacement": "0.045 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p055_n19",
+          "label": "19 structures @ 0.055 Ang",
+          "displacement": "0.055 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p065_n19",
+          "label": "19 structures @ 0.065 Ang",
+          "displacement": "0.065 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p075_n19",
+          "label": "19 structures @ 0.075 Ang",
+          "displacement": "0.075 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p085_n19",
+          "label": "19 structures @ 0.085 Ang",
+          "displacement": "0.085 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p095_n19",
+          "label": "19 structures @ 0.095 Ang",
+          "displacement": "0.095 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p105_n19",
+          "label": "19 structures @ 0.105 Ang",
+          "displacement": "0.105 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p115_n19",
+          "label": "19 structures @ 0.115 Ang",
+          "displacement": "0.115 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p125_n19",
+          "label": "19 structures @ 0.125 Ang",
+          "displacement": "0.125 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p135_n19",
+          "label": "19 structures @ 0.135 Ang",
+          "displacement": "0.135 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p145_n19",
+          "label": "19 structures @ 0.145 Ang",
+          "displacement": "0.145 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_760_seed101",
+      "label": "FC multi-amplitude 760 (40 amplitudes), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "fc_d0p005_n19",
+          "label": "19 structures @ 0.005 Ang",
+          "displacement": "0.005 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p015_n19",
+          "label": "19 structures @ 0.015 Ang",
+          "displacement": "0.015 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p025_n19",
+          "label": "19 structures @ 0.025 Ang",
+          "displacement": "0.025 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p035_n19",
+          "label": "19 structures @ 0.035 Ang",
+          "displacement": "0.035 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p045_n19",
+          "label": "19 structures @ 0.045 Ang",
+          "displacement": "0.045 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p055_n19",
+          "label": "19 structures @ 0.055 Ang",
+          "displacement": "0.055 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p065_n19",
+          "label": "19 structures @ 0.065 Ang",
+          "displacement": "0.065 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p075_n19",
+          "label": "19 structures @ 0.075 Ang",
+          "displacement": "0.075 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p085_n19",
+          "label": "19 structures @ 0.085 Ang",
+          "displacement": "0.085 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p095_n19",
+          "label": "19 structures @ 0.095 Ang",
+          "displacement": "0.095 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p105_n19",
+          "label": "19 structures @ 0.105 Ang",
+          "displacement": "0.105 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p115_n19",
+          "label": "19 structures @ 0.115 Ang",
+          "displacement": "0.115 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p125_n19",
+          "label": "19 structures @ 0.125 Ang",
+          "displacement": "0.125 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p135_n19",
+          "label": "19 structures @ 0.135 Ang",
+          "displacement": "0.135 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p145_n19",
+          "label": "19 structures @ 0.145 Ang",
+          "displacement": "0.145 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p155_n19",
+          "label": "19 structures @ 0.155 Ang",
+          "displacement": "0.155 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p160_n19",
+          "label": "19 structures @ 0.160 Ang",
+          "displacement": "0.160 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p165_n19",
+          "label": "19 structures @ 0.165 Ang",
+          "displacement": "0.165 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p170_n19",
+          "label": "19 structures @ 0.170 Ang",
+          "displacement": "0.170 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p175_n19",
+          "label": "19 structures @ 0.175 Ang",
+          "displacement": "0.175 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p180_n19",
+          "label": "19 structures @ 0.180 Ang",
+          "displacement": "0.180 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p185_n19",
+          "label": "19 structures @ 0.185 Ang",
+          "displacement": "0.185 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p190_n19",
+          "label": "19 structures @ 0.190 Ang",
+          "displacement": "0.190 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p195_n19",
+          "label": "19 structures @ 0.195 Ang",
+          "displacement": "0.195 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p200_n19",
+          "label": "19 structures @ 0.200 Ang",
+          "displacement": "0.200 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_760_seed202",
+      "label": "FC multi-amplitude 760 (40 amplitudes), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "fc_d0p005_n19",
+          "label": "19 structures @ 0.005 Ang",
+          "displacement": "0.005 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p015_n19",
+          "label": "19 structures @ 0.015 Ang",
+          "displacement": "0.015 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p025_n19",
+          "label": "19 structures @ 0.025 Ang",
+          "displacement": "0.025 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p035_n19",
+          "label": "19 structures @ 0.035 Ang",
+          "displacement": "0.035 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p045_n19",
+          "label": "19 structures @ 0.045 Ang",
+          "displacement": "0.045 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p055_n19",
+          "label": "19 structures @ 0.055 Ang",
+          "displacement": "0.055 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p065_n19",
+          "label": "19 structures @ 0.065 Ang",
+          "displacement": "0.065 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p075_n19",
+          "label": "19 structures @ 0.075 Ang",
+          "displacement": "0.075 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p085_n19",
+          "label": "19 structures @ 0.085 Ang",
+          "displacement": "0.085 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p095_n19",
+          "label": "19 structures @ 0.095 Ang",
+          "displacement": "0.095 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p105_n19",
+          "label": "19 structures @ 0.105 Ang",
+          "displacement": "0.105 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p115_n19",
+          "label": "19 structures @ 0.115 Ang",
+          "displacement": "0.115 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p125_n19",
+          "label": "19 structures @ 0.125 Ang",
+          "displacement": "0.125 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p135_n19",
+          "label": "19 structures @ 0.135 Ang",
+          "displacement": "0.135 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p145_n19",
+          "label": "19 structures @ 0.145 Ang",
+          "displacement": "0.145 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p155_n19",
+          "label": "19 structures @ 0.155 Ang",
+          "displacement": "0.155 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p160_n19",
+          "label": "19 structures @ 0.160 Ang",
+          "displacement": "0.160 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p165_n19",
+          "label": "19 structures @ 0.165 Ang",
+          "displacement": "0.165 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p170_n19",
+          "label": "19 structures @ 0.170 Ang",
+          "displacement": "0.170 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p175_n19",
+          "label": "19 structures @ 0.175 Ang",
+          "displacement": "0.175 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p180_n19",
+          "label": "19 structures @ 0.180 Ang",
+          "displacement": "0.180 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p185_n19",
+          "label": "19 structures @ 0.185 Ang",
+          "displacement": "0.185 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p190_n19",
+          "label": "19 structures @ 0.190 Ang",
+          "displacement": "0.190 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p195_n19",
+          "label": "19 structures @ 0.195 Ang",
+          "displacement": "0.195 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p200_n19",
+          "label": "19 structures @ 0.200 Ang",
+          "displacement": "0.200 Ang",
+          "n_structures": 19
+        }
+      ]
+    },
+    {
+      "recipe_id": "fc_multiamp_760_seed303",
+      "label": "FC multi-amplitude 760 (40 amplitudes), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "fc_d0p005_n19",
+          "label": "19 structures @ 0.005 Ang",
+          "displacement": "0.005 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p010_n19",
+          "label": "19 structures @ 0.010 Ang",
+          "displacement": "0.010 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p015_n19",
+          "label": "19 structures @ 0.015 Ang",
+          "displacement": "0.015 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p020_n19",
+          "label": "19 structures @ 0.020 Ang",
+          "displacement": "0.020 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p025_n19",
+          "label": "19 structures @ 0.025 Ang",
+          "displacement": "0.025 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p030_n19",
+          "label": "19 structures @ 0.030 Ang",
+          "displacement": "0.030 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p035_n19",
+          "label": "19 structures @ 0.035 Ang",
+          "displacement": "0.035 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p040_n19",
+          "label": "19 structures @ 0.040 Ang",
+          "displacement": "0.040 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p045_n19",
+          "label": "19 structures @ 0.045 Ang",
+          "displacement": "0.045 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p050_n19",
+          "label": "19 structures @ 0.050 Ang",
+          "displacement": "0.050 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p055_n19",
+          "label": "19 structures @ 0.055 Ang",
+          "displacement": "0.055 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p060_n19",
+          "label": "19 structures @ 0.060 Ang",
+          "displacement": "0.060 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p065_n19",
+          "label": "19 structures @ 0.065 Ang",
+          "displacement": "0.065 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p070_n19",
+          "label": "19 structures @ 0.070 Ang",
+          "displacement": "0.070 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p075_n19",
+          "label": "19 structures @ 0.075 Ang",
+          "displacement": "0.075 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p080_n19",
+          "label": "19 structures @ 0.080 Ang",
+          "displacement": "0.080 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p085_n19",
+          "label": "19 structures @ 0.085 Ang",
+          "displacement": "0.085 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p090_n19",
+          "label": "19 structures @ 0.090 Ang",
+          "displacement": "0.090 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p095_n19",
+          "label": "19 structures @ 0.095 Ang",
+          "displacement": "0.095 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p100_n19",
+          "label": "19 structures @ 0.100 Ang",
+          "displacement": "0.100 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p105_n19",
+          "label": "19 structures @ 0.105 Ang",
+          "displacement": "0.105 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p110_n19",
+          "label": "19 structures @ 0.110 Ang",
+          "displacement": "0.110 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p115_n19",
+          "label": "19 structures @ 0.115 Ang",
+          "displacement": "0.115 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p120_n19",
+          "label": "19 structures @ 0.120 Ang",
+          "displacement": "0.120 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p125_n19",
+          "label": "19 structures @ 0.125 Ang",
+          "displacement": "0.125 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p130_n19",
+          "label": "19 structures @ 0.130 Ang",
+          "displacement": "0.130 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p135_n19",
+          "label": "19 structures @ 0.135 Ang",
+          "displacement": "0.135 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p140_n19",
+          "label": "19 structures @ 0.140 Ang",
+          "displacement": "0.140 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p145_n19",
+          "label": "19 structures @ 0.145 Ang",
+          "displacement": "0.145 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p150_n19",
+          "label": "19 structures @ 0.150 Ang",
+          "displacement": "0.150 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p155_n19",
+          "label": "19 structures @ 0.155 Ang",
+          "displacement": "0.155 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p160_n19",
+          "label": "19 structures @ 0.160 Ang",
+          "displacement": "0.160 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p165_n19",
+          "label": "19 structures @ 0.165 Ang",
+          "displacement": "0.165 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p170_n19",
+          "label": "19 structures @ 0.170 Ang",
+          "displacement": "0.170 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p175_n19",
+          "label": "19 structures @ 0.175 Ang",
+          "displacement": "0.175 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p180_n19",
+          "label": "19 structures @ 0.180 Ang",
+          "displacement": "0.180 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p185_n19",
+          "label": "19 structures @ 0.185 Ang",
+          "displacement": "0.185 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p190_n19",
+          "label": "19 structures @ 0.190 Ang",
+          "displacement": "0.190 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p195_n19",
+          "label": "19 structures @ 0.195 Ang",
+          "displacement": "0.195 Ang",
+          "n_structures": 19
+        },
+        {
+          "block_id": "fc_d0p200_n19",
+          "label": "19 structures @ 0.200 Ang",
+          "displacement": "0.200 Ang",
+          "n_structures": 19
+        }
+      ]
+    }
+  ],
+  "random_cartesian": [
+    {
+      "recipe_id": "rc_multisigma_285_seed101",
+      "label": "Random Cartesian multisigma 285 (5 sigmas), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p010_n57",
+          "label": "57 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 101001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n57",
+          "label": "57 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 101002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n57",
+          "label": "57 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 101003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p050_n57",
+          "label": "57 gaussian structures @ sigma 0.050 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "seed": 101004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p080_n57",
+          "label": "57 gaussian structures @ sigma 0.080 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.08,
+          "seed": 101005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_285_seed202",
+      "label": "Random Cartesian multisigma 285 (5 sigmas), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p010_n57",
+          "label": "57 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 202001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n57",
+          "label": "57 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 202002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n57",
+          "label": "57 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 202003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p050_n57",
+          "label": "57 gaussian structures @ sigma 0.050 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "seed": 202004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p080_n57",
+          "label": "57 gaussian structures @ sigma 0.080 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.08,
+          "seed": 202005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_285_seed303",
+      "label": "Random Cartesian multisigma 285 (5 sigmas), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p010_n57",
+          "label": "57 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 303001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n57",
+          "label": "57 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 303002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n57",
+          "label": "57 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 303003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p050_n57",
+          "label": "57 gaussian structures @ sigma 0.050 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "seed": 303004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p080_n57",
+          "label": "57 gaussian structures @ sigma 0.080 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.08,
+          "seed": 303005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_570_seed101",
+      "label": "Random Cartesian multisigma 570 (10 sigmas), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p005_n57",
+          "label": "57 gaussian structures @ sigma 0.005 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "seed": 101001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p010_n57",
+          "label": "57 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 101002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p015_n57",
+          "label": "57 gaussian structures @ sigma 0.015 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.015,
+          "seed": 101003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n57",
+          "label": "57 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 101004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n57",
+          "label": "57 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 101005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p040_n57",
+          "label": "57 gaussian structures @ sigma 0.040 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.04,
+          "seed": 101006,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p050_n57",
+          "label": "57 gaussian structures @ sigma 0.050 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "seed": 101007,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p065_n57",
+          "label": "57 gaussian structures @ sigma 0.065 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.065,
+          "seed": 101008,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p080_n57",
+          "label": "57 gaussian structures @ sigma 0.080 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.08,
+          "seed": 101009,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p100_n57",
+          "label": "57 gaussian structures @ sigma 0.100 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.1,
+          "seed": 101010,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_570_seed202",
+      "label": "Random Cartesian multisigma 570 (10 sigmas), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p005_n57",
+          "label": "57 gaussian structures @ sigma 0.005 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "seed": 202001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p010_n57",
+          "label": "57 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 202002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p015_n57",
+          "label": "57 gaussian structures @ sigma 0.015 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.015,
+          "seed": 202003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n57",
+          "label": "57 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 202004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n57",
+          "label": "57 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 202005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p040_n57",
+          "label": "57 gaussian structures @ sigma 0.040 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.04,
+          "seed": 202006,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p050_n57",
+          "label": "57 gaussian structures @ sigma 0.050 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "seed": 202007,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p065_n57",
+          "label": "57 gaussian structures @ sigma 0.065 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.065,
+          "seed": 202008,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p080_n57",
+          "label": "57 gaussian structures @ sigma 0.080 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.08,
+          "seed": 202009,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p100_n57",
+          "label": "57 gaussian structures @ sigma 0.100 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.1,
+          "seed": 202010,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_570_seed303",
+      "label": "Random Cartesian multisigma 570 (10 sigmas), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p005_n57",
+          "label": "57 gaussian structures @ sigma 0.005 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "seed": 303001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p010_n57",
+          "label": "57 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 303002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p015_n57",
+          "label": "57 gaussian structures @ sigma 0.015 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.015,
+          "seed": 303003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n57",
+          "label": "57 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 303004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n57",
+          "label": "57 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 303005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p040_n57",
+          "label": "57 gaussian structures @ sigma 0.040 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.04,
+          "seed": 303006,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p050_n57",
+          "label": "57 gaussian structures @ sigma 0.050 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.05,
+          "seed": 303007,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p065_n57",
+          "label": "57 gaussian structures @ sigma 0.065 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.065,
+          "seed": 303008,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p080_n57",
+          "label": "57 gaussian structures @ sigma 0.080 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.08,
+          "seed": 303009,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p100_n57",
+          "label": "57 gaussian structures @ sigma 0.100 Ang",
+          "n_structures": 57,
+          "distribution": "gaussian",
+          "sigma_ang": 0.1,
+          "seed": 303010,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_760_seed101",
+      "label": "Random Cartesian multisigma 760 (10 sigmas), seed 101",
+      "seed": 101,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p005_n76",
+          "label": "76 gaussian structures @ sigma 0.005 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "seed": 101001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p010_n76",
+          "label": "76 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 101002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p015_n76",
+          "label": "76 gaussian structures @ sigma 0.015 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.015,
+          "seed": 101003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n76",
+          "label": "76 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 101004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n76",
+          "label": "76 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 101005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p040_n76",
+          "label": "76 gaussian structures @ sigma 0.040 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.04,
+          "seed": 101006,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p055_n76",
+          "label": "76 gaussian structures @ sigma 0.055 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.055,
+          "seed": 101007,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p075_n76",
+          "label": "76 gaussian structures @ sigma 0.075 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.075,
+          "seed": 101008,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p100_n76",
+          "label": "76 gaussian structures @ sigma 0.100 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.1,
+          "seed": 101009,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p130_n76",
+          "label": "76 gaussian structures @ sigma 0.130 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.13,
+          "seed": 101010,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_760_seed202",
+      "label": "Random Cartesian multisigma 760 (10 sigmas), seed 202",
+      "seed": 202,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p005_n76",
+          "label": "76 gaussian structures @ sigma 0.005 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "seed": 202001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p010_n76",
+          "label": "76 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 202002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p015_n76",
+          "label": "76 gaussian structures @ sigma 0.015 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.015,
+          "seed": 202003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n76",
+          "label": "76 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 202004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n76",
+          "label": "76 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 202005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p040_n76",
+          "label": "76 gaussian structures @ sigma 0.040 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.04,
+          "seed": 202006,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p055_n76",
+          "label": "76 gaussian structures @ sigma 0.055 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.055,
+          "seed": 202007,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p075_n76",
+          "label": "76 gaussian structures @ sigma 0.075 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.075,
+          "seed": 202008,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p100_n76",
+          "label": "76 gaussian structures @ sigma 0.100 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.1,
+          "seed": 202009,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p130_n76",
+          "label": "76 gaussian structures @ sigma 0.130 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.13,
+          "seed": 202010,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    },
+    {
+      "recipe_id": "rc_multisigma_760_seed303",
+      "label": "Random Cartesian multisigma 760 (10 sigmas), seed 303",
+      "seed": 303,
+      "blocks": [
+        {
+          "block_id": "rc_sigma_0p005_n76",
+          "label": "76 gaussian structures @ sigma 0.005 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.005,
+          "seed": 303001,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p010_n76",
+          "label": "76 gaussian structures @ sigma 0.010 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.01,
+          "seed": 303002,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p015_n76",
+          "label": "76 gaussian structures @ sigma 0.015 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.015,
+          "seed": 303003,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p020_n76",
+          "label": "76 gaussian structures @ sigma 0.020 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.02,
+          "seed": 303004,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p030_n76",
+          "label": "76 gaussian structures @ sigma 0.030 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.03,
+          "seed": 303005,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p040_n76",
+          "label": "76 gaussian structures @ sigma 0.040 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.04,
+          "seed": 303006,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p055_n76",
+          "label": "76 gaussian structures @ sigma 0.055 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.055,
+          "seed": 303007,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p075_n76",
+          "label": "76 gaussian structures @ sigma 0.075 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.075,
+          "seed": 303008,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p100_n76",
+          "label": "76 gaussian structures @ sigma 0.100 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.1,
+          "seed": 303009,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        },
+        {
+          "block_id": "rc_sigma_0p130_n76",
+          "label": "76 gaussian structures @ sigma 0.130 Ang",
+          "n_structures": 76,
+          "distribution": "gaussian",
+          "sigma_ang": 0.13,
+          "seed": 303010,
+          "min_distance_ang": 0.65,
+          "move_atoms": "all",
+          "remove_center_of_mass_translation": true
+        }
+      ]
+    }
+  ]
+}

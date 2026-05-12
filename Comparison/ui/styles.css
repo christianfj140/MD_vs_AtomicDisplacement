@@ -566,6 +566,46 @@ pre {
   font-weight: 750;
 }
 
+.dataset-card-meta {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dataset-seed-field {
+  display: grid;
+  gap: 4px;
+  min-width: 96px;
+}
+
+.dataset-seed-field span {
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.dataset-seed-field input {
+  width: 100%;
+  height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--ink-strong);
+  font: inherit;
+  font-size: 13px;
+}
+
+.dataset-seed-field input:focus {
+  outline: none;
+  border-color: rgba(13, 148, 136, 0.62);
+  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.14);
+}
+
 .dataset-components {
   display: grid;
   gap: 8px;

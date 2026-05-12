@@ -32,10 +32,16 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import yaml
-from siesta_settings import DEFAULT_SHARED, compare_settings, file_digest
-from model_settings import compare_model_settings
+from siesta_settings import DEFAULT_SHARED, compare_method_settings, file_digest
+from model_settings import compare_method_model_settings
 from reference_selection import choose_reference_matrix as strict_choose_reference_matrix
 from reference_selection import reference_candidates
+from cleanup_generated_datasets import cleanup_generated_datasets
+from method_registry import (
+    METHOD_REGISTRY as SCIENTIFIC_METHOD_REGISTRY,
+    normalize_method_id,
+    normalize_test_set_id,
+)
 
 try:
     import pty
@@ -143,36 +149,30 @@ class MethodSpec:
 METHOD_REGISTRY: dict[str, MethodSpec] = {
     "md": MethodSpec(
         method_id="md",
-        display_name="MD",
+        display_name=SCIENTIFIC_METHOD_REGISTRY["md"].display_name,
         pipeline_key="md",
         dataset_root=PIPELINES["md"].root / "dataset",
         training_root=PIPELINES["md"].root / "training",
-        results_root=RESULTS_ROOT / "results_md",
+        results_root=RESULTS_ROOT / SCIENTIFIC_METHOD_REGISTRY["md"].results_dir,
     ),
     "siesta_fc_cartesian": MethodSpec(
         method_id="siesta_fc_cartesian",
-        display_name="SIESTA FC Cartesian",
+        display_name=SCIENTIFIC_METHOD_REGISTRY["siesta_fc_cartesian"].display_name,
         pipeline_key="atom_displacement",
         dataset_root=PIPELINES["atom_displacement"].root / "dataset" / "FC_steps",
         training_root=PIPELINES["atom_displacement"].root / "training",
-        results_root=RESULTS_ROOT / "results_atomdisp",
-        legacy_aliases=("atom_displacement", "atomdisp"),
+        results_root=RESULTS_ROOT / SCIENTIFIC_METHOD_REGISTRY["siesta_fc_cartesian"].results_dir,
+        legacy_aliases=SCIENTIFIC_METHOD_REGISTRY["siesta_fc_cartesian"].legacy_aliases,
     ),
     "random_cartesian": MethodSpec(
         method_id="random_cartesian",
-        display_name="Random Cartesian",
+        display_name=SCIENTIFIC_METHOD_REGISTRY["random_cartesian"].display_name,
         pipeline_key=None,
         dataset_root=PIPELINES["atom_displacement"].root / "dataset" / "RandomCartesian_steps",
         training_root=PIPELINES["atom_displacement"].root / "training",
-        results_root=RESULTS_ROOT / "results_random_cartesian",
+        results_root=RESULTS_ROOT / SCIENTIFIC_METHOD_REGISTRY["random_cartesian"].results_dir,
         available=True,
     ),
-}
-
-METHOD_ALIASES = {
-    alias: spec.method_id
-    for spec in METHOD_REGISTRY.values()
-    for alias in (spec.method_id, *spec.legacy_aliases)
 }
 
 RUN_MODES = {"dataset_only", "full_strict_pipeline"}
@@ -214,8 +214,9 @@ def normalize_selected_methods(value: Any, *, default_legacy: bool = True) -> li
     for raw in raw_methods:
         if not raw:
             continue
-        method_id = METHOD_ALIASES.get(raw)
-        if method_id is None:
+        try:
+            method_id = normalize_method_id(raw)
+        except ValueError:
             unknown.append(raw)
             continue
         if method_id not in selected:
@@ -314,6 +315,44 @@ def recipe_set_hash(recipes: dict[str, Any] | list[Any] | None) -> str:
     return stable_payload_hash(recipes or {}, length=16)
 
 
+def _optional_seed(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        raise RuntimeError("seed debe ser un entero >= 0.")
+    seed = int(value)
+    if seed < 0:
+        raise RuntimeError("seed debe ser un entero >= 0.")
+    return seed
+
+
+def dataset_recipe_seed_values(recipes: dict[str, Any] | list[Any] | None) -> list[int]:
+    values: list[int] = []
+
+    def add(value: Any) -> None:
+        seed = _optional_seed(value)
+        if seed is not None and seed not in values:
+            values.append(seed)
+
+    if isinstance(recipes, dict):
+        recipe_items: list[Any] = []
+        for method_recipes in recipes.values():
+            if isinstance(method_recipes, list):
+                recipe_items.extend(method_recipes)
+        for recipe in recipe_items:
+            if not isinstance(recipe, dict):
+                continue
+            add(recipe.get("seed"))
+            for block in recipe.get("blocks") or []:
+                if isinstance(block, dict):
+                    add(block.get("seed"))
+    elif isinstance(recipes, list):
+        for recipe in recipes:
+            if isinstance(recipe, dict):
+                add(recipe.get("seed"))
+    return values
+
+
 MAX_DATASET_LABEL_LENGTH = 96
 DATASET_ID_LENGTH = 6
 DATASET_ID_ALPHABET = string.ascii_letters + string.digits
@@ -392,12 +431,12 @@ def register_dataset_label(label: Any, used_ids: set[str], used_labels: set[str]
 
 
 def method_slug_for_cross(method: Any) -> str:
-    method_id = str(method or "").strip().lower()
+    method_id = normalize_method_id(method, allow_unknown=True)
     return METHOD_LABEL_SLUGS.get(method_id, slugify_label(method_id, "method"))
 
 
 def test_set_slug_for_cross(test_set: Any) -> str:
-    value = str(test_set or "").strip().lower()
+    value = normalize_test_set_id(test_set)
     return TEST_SET_LABEL_SLUGS.get(value, slugify_label(value, "test"))
 
 
@@ -418,23 +457,348 @@ def cross_pair_id(combo_by_method: dict[str, dict[str, Any]], methods: list[str]
     return f"cross_{stable_payload_hash(payload, length=CROSS_ID_LENGTH)}"
 
 
+def _existing_split_manifests_for_result(result: dict[str, Any]) -> dict[str, str]:
+    result_dir_value = str(result.get("result_dir") or "").strip()
+    if not result_dir_value:
+        return {}
+    result_dir = Path(result_dir_value)
+    split_root = result_dir / "splits"
+    split_manifests: dict[str, str] = {}
+    for split_name in ("train", "validation", "test"):
+        for file_name in (f"{split_name}_valid_manifest.csv", f"{split_name}_manifest.csv"):
+            candidate = split_root / file_name
+            if candidate.exists():
+                split_manifests[split_name] = str(candidate)
+                break
+    return split_manifests
+
+
+def _method_mismatch_messages(
+    manifest: dict[str, Any],
+    method: str,
+    key: str,
+    *,
+    severe_only: bool,
+) -> list[str]:
+    messages: list[str] = []
+    for mismatch in manifest.get(key, []) or []:
+        if not isinstance(mismatch, dict):
+            continue
+        methods = [normalize_method_id(item, allow_unknown=True) for item in mismatch.get("methods", []) or []]
+        if method not in methods:
+            continue
+        severity = str(mismatch.get("severity") or "warning")
+        if severe_only and severity != "severe":
+            continue
+        if not severe_only and severity == "severe":
+            continue
+        section = mismatch.get("section")
+        mismatch_key = mismatch.get("key", "unknown")
+        label = f"{section}.{mismatch_key}" if section else str(mismatch_key)
+        messages.append(f"{severity}: {label} differs across {', '.join(methods)}")
+    return messages
+
+
+def _checkpoint_warnings_for_run(method: str, run: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    checkpoint_path = run.get("model_checkpoint")
+    checkpoint_hash = run.get("model_checkpoint_sha256") or (
+        (run.get("model_checkpoint_metadata") or {}).get("sha256")
+        if isinstance(run.get("model_checkpoint_metadata"), dict)
+        else None
+    )
+    checkpoint_selection_warning = str(run.get("checkpoint_selection_warning") or "").strip()
+    if checkpoint_selection_warning:
+        warnings.append(checkpoint_selection_warning)
+    if checkpoint_path and not checkpoint_hash:
+        warnings.append(f"Missing checkpoint hash for {method} {run.get('dataset_label', '')}.")
+    if not checkpoint_path:
+        warnings.append(f"Missing checkpoint path for {method} {run.get('dataset_label', '')}.")
+    return [warning for warning in warnings if warning]
+
+
+def _provenance_entry_for_run(run: dict[str, Any]) -> dict[str, Any]:
+    artifact_hashes = run.get("artifact_hashes") if isinstance(run.get("artifact_hashes"), dict) else {}
+    checkpoint_metadata = run.get("model_checkpoint_metadata")
+    if not isinstance(checkpoint_metadata, dict):
+        checkpoint_metadata = {}
+    checkpoint_hash = run.get("model_checkpoint_sha256") or checkpoint_metadata.get("sha256")
+    recipe_hash = run.get("recipe_hash") or run.get("recipe_set_hash")
+    return {
+        "dataset_size": run.get("dataset_size"),
+        "effective_dataset_size": run.get("effective_dataset_size"),
+        "dataset_label": run.get("dataset_label"),
+        "recipe_id": run.get("recipe_id"),
+        "recipe_label": run.get("recipe_label"),
+        "recipe_hash": recipe_hash,
+        "recipe_set_hash": run.get("recipe_set_hash"),
+        "result_directory": run.get("result_dir"),
+        "split_manifests": _existing_split_manifests_for_result(run),
+        "checkpoint_path": run.get("model_checkpoint"),
+        "checkpoint_hash": checkpoint_hash,
+        "checkpoint_manifest": run.get("checkpoint_manifest"),
+        "checkpoint_selection_warning": run.get("checkpoint_selection_warning", ""),
+        "basis_hash": artifact_hashes.get("basis"),
+        "pseudopotential_hash": artifact_hashes.get("pseudopotentials"),
+        "pipeline": run.get("pipeline"),
+        "method_id": normalize_method_id(run.get("method_id") or run.get("pipeline") or "", allow_unknown=True),
+        "seed": run.get("seed"),
+        "warnings": _checkpoint_warnings_for_run(
+            normalize_method_id(run.get("method_id") or run.get("pipeline") or "", allow_unknown=True),
+            run,
+        ),
+    }
+
+
+def _frozen_test_manifests_from_cross_evaluations(manifest: dict[str, Any]) -> dict[str, str]:
+    cross_evaluation = manifest.get("cross_evaluation") if isinstance(manifest.get("cross_evaluation"), dict) else {}
+    frozen: dict[str, str] = {}
+    for item in cross_evaluation.get("cross_evaluations", []) or []:
+        if not isinstance(item, dict):
+            continue
+        test_set = str(item.get("test_set") or "").strip()
+        frozen_manifest = str(item.get("frozen_test_manifest") or "").strip()
+        if test_set and frozen_manifest:
+            frozen[test_set] = frozen_manifest
+    return frozen
+
+
+def build_method_provenance(
+    manifest: dict[str, Any],
+    *,
+    selected_methods: list[str] | None = None,
+    runs: list[dict[str, Any]] | None = None,
+    frozen_test_manifests_by_test_set: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    runs = runs if runs is not None else list(manifest.get("runs", []) or [])
+    selected_methods = selected_methods or [
+        normalize_method_id(method)
+        for method in (manifest.get("selected_methods") or [])
+    ]
+    if not selected_methods:
+        selected_methods = sorted(
+            {
+                normalize_method_id(run.get("method_id") or run.get("pipeline") or "", allow_unknown=True)
+                for run in runs
+                if run.get("method_id") or run.get("pipeline")
+            }
+        )
+    frozen_test_manifests_by_test_set = (
+        frozen_test_manifests_by_test_set
+        if frozen_test_manifests_by_test_set is not None
+        else _frozen_test_manifests_from_cross_evaluations(manifest)
+    )
+    runs_by_method: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for run in runs:
+        method_id = normalize_method_id(run.get("method_id") or run.get("pipeline") or "", allow_unknown=True)
+        if method_id:
+            runs_by_method[method_id].append(run)
+
+    siesta_hash_by_method = manifest.get("siesta_settings_hash_by_method") or {}
+    model_hash_by_method = manifest.get("model_config_hash_by_method") or {}
+    basis_hash_by_method = manifest.get("basis_hash_by_method") or {}
+    pseudo_hash_by_method = manifest.get("pseudopotential_hash_by_method") or {}
+    provenance: dict[str, Any] = {}
+    for method in selected_methods:
+        method_id = normalize_method_id(method, allow_unknown=True)
+        method_runs = sorted(
+            runs_by_method.get(method_id, []),
+            key=lambda run: (
+                int(run.get("dataset_size") or 0),
+                str(run.get("dataset_label") or ""),
+                str(run.get("result_dir") or ""),
+            ),
+        )
+        run_entries = [_provenance_entry_for_run(run) for run in method_runs]
+        warnings: list[str] = []
+        severe_warnings: list[str] = []
+        if not method_runs:
+            warnings.append(f"Missing successful run provenance for selected method {method_id}.")
+        if not siesta_hash_by_method.get(method_id):
+            warnings.append(f"Missing SIESTA settings hash for {method_id}.")
+        if not model_hash_by_method.get(method_id):
+            warnings.append(f"Missing model settings hash for {method_id}.")
+        if not basis_hash_by_method.get(method_id):
+            warnings.append(f"Missing basis hash for {method_id}.")
+        if not pseudo_hash_by_method.get(method_id):
+            warnings.append(f"Missing pseudopotential hash for {method_id}.")
+        for run_entry in run_entries:
+            warnings.extend(str(item) for item in run_entry.get("warnings", []) or [] if item)
+        warnings.extend(_method_mismatch_messages(manifest, method_id, "siesta_settings_mismatches", severe_only=False))
+        warnings.extend(_method_mismatch_messages(manifest, method_id, "model_config_mismatches", severe_only=False))
+        severe_warnings.extend(
+            _method_mismatch_messages(manifest, method_id, "siesta_settings_severe_mismatches", severe_only=True)
+        )
+        severe_warnings.extend(
+            _method_mismatch_messages(manifest, method_id, "model_config_severe_mismatches", severe_only=True)
+        )
+        owned_test_set = (
+            SCIENTIFIC_METHOD_REGISTRY[method_id].frozen_test_set
+            if method_id in SCIENTIFIC_METHOD_REGISTRY
+            else f"test_{method_id}"
+        )
+        frozen_for_method = {
+            test_set: path
+            for test_set, path in sorted((frozen_test_manifests_by_test_set or {}).items())
+            if test_set in {owned_test_set, "test_mixed"} or frozen_test_manifests_by_test_set is not None
+        }
+        first_run = run_entries[0] if len(run_entries) == 1 else {}
+        entry = {
+            "method_id": method_id,
+            "display_name": (
+                SCIENTIFIC_METHOD_REGISTRY[method_id].display_name
+                if method_id in SCIENTIFIC_METHOD_REGISTRY
+                else method_id
+            ),
+            "dataset_size": first_run.get("dataset_size"),
+            "dataset_label": first_run.get("dataset_label"),
+            "dataset_sizes": [run.get("dataset_size") for run in run_entries if run.get("dataset_size") is not None],
+            "dataset_labels": [run.get("dataset_label") for run in run_entries if run.get("dataset_label")],
+            "recipe_id": first_run.get("recipe_id"),
+            "recipe_ids": sorted({str(run.get("recipe_id")) for run in run_entries if run.get("recipe_id")}),
+            "recipe_hash": first_run.get("recipe_hash"),
+            "recipe_hashes": sorted({str(run.get("recipe_hash")) for run in run_entries if run.get("recipe_hash")}),
+            "result_directory": first_run.get("result_directory"),
+            "result_directories": [run.get("result_directory") for run in run_entries if run.get("result_directory")],
+            "split_manifest": first_run.get("split_manifests"),
+            "split_manifests_by_dataset_label": {
+                str(run.get("dataset_label")): run.get("split_manifests", {})
+                for run in run_entries
+                if run.get("dataset_label")
+            },
+            "frozen_test_manifest": frozen_for_method.get(owned_test_set),
+            "frozen_test_manifests": frozen_for_method,
+            "siesta_settings_hash": siesta_hash_by_method.get(method_id),
+            "model_settings_hash": model_hash_by_method.get(method_id),
+            "basis_hash": basis_hash_by_method.get(method_id) or first_run.get("basis_hash"),
+            "pseudopotential_hash": pseudo_hash_by_method.get(method_id) or first_run.get("pseudopotential_hash"),
+            "checkpoint_path": first_run.get("checkpoint_path"),
+            "checkpoint_hash": first_run.get("checkpoint_hash"),
+            "checkpoint_manifest": first_run.get("checkpoint_manifest"),
+            "runs": run_entries,
+            "warnings": sorted(dict.fromkeys(warnings)),
+            "severe_warnings": sorted(dict.fromkeys(severe_warnings)),
+        }
+        provenance[method_id] = entry
+    return provenance
+
+
+def refresh_method_provenance(
+    manifest: dict[str, Any],
+    *,
+    selected_methods: list[str] | None = None,
+    runs: list[dict[str, Any]] | None = None,
+    frozen_test_manifests_by_test_set: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    provenance = build_method_provenance(
+        manifest,
+        selected_methods=selected_methods,
+        runs=runs,
+        frozen_test_manifests_by_test_set=frozen_test_manifests_by_test_set,
+    )
+    manifest["method_provenance"] = provenance
+    method_warnings = []
+    severe_warnings = []
+    for method, entry in provenance.items():
+        for warning in entry.get("warnings", []) or []:
+            method_warnings.append(f"{method}: {warning}")
+        for warning in entry.get("severe_warnings", []) or []:
+            severe_warnings.append(f"{method}: {warning}")
+    manifest["method_provenance_warnings"] = sorted(dict.fromkeys(method_warnings))
+    manifest["method_provenance_severe_warnings"] = sorted(dict.fromkeys(severe_warnings))
+    return manifest
+
+
+def geometry_leakage_diagnostic_fields(
+    *,
+    pair_id: str,
+    test_set: str,
+    leakage_dir: Path,
+    summary_path: Path,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            summary = {"scientific_status": "geometry_leakage_summary_unreadable", "parser_errors": [str(exc)]}
+    status = str(summary.get("scientific_status") or "geometry_leakage_detected")
+    count_fields = (
+        "exact_duplicates",
+        "near_duplicates",
+        "aligned_near_duplicates",
+        "internal_distance_near_duplicates",
+        "md_neighbor_warnings",
+        "atom_displacement_family_warnings",
+        "random_cartesian_family_warnings",
+    )
+    counts = {
+        key: int(summary.get(key) or 0)
+        for key in count_fields
+        if int(summary.get(key) or 0) > 0
+    }
+    details = ", ".join(f"{key}={value}" for key, value in counts.items())
+    warning = f"Geometry leakage detected for {pair_id} {test_set}; scientific_status={status}"
+    if details:
+        warning += f"; {details}"
+    warning += f"; see {leakage_dir}."
+    return {
+        "warning": warning,
+        "scientific_status": status,
+        "summary": summary,
+        "severe_warnings": summary.get("severe_warnings", []) if isinstance(summary.get("severe_warnings"), list) else [],
+        "warning_messages": summary.get("warning_messages", []) if isinstance(summary.get("warning_messages"), list) else [],
+    }
+
+
 def cross_result_name(pair_id: str, train_method: Any, test_set: Any) -> str:
     return f"{pair_id}__{method_slug_for_cross(train_method)}__on__{test_set_slug_for_cross(test_set)}"
 
 
 def deduplicate_common_test_sets(test_sets: Any) -> list[str]:
-    requested = [str(item).strip() for item in (test_sets or []) if str(item).strip()]
-    has_canonical_fc = "test_siesta_fc_cartesian" in requested
+    requested = [normalize_test_set_id(item) for item in (test_sets or []) if str(item).strip()]
     selected: list[str] = []
     seen: set[str] = set()
     for test_set in requested:
-        if has_canonical_fc and test_set == "test_atomdisp":
-            continue
         if test_set in seen:
             continue
         seen.add(test_set)
         selected.append(test_set)
     return selected
+
+
+def build_cross_evaluation_expected_grid(
+    selected_methods: Any,
+    frozen_test_sets: Any,
+    *,
+    experiment_id: str | None = None,
+) -> dict[str, Any]:
+    methods = []
+    seen_methods: set[str] = set()
+    for item in selected_methods or []:
+        method_id = normalize_method_id(item)
+        if method_id in seen_methods:
+            continue
+        seen_methods.add(method_id)
+        methods.append(method_id)
+    test_sets = deduplicate_common_test_sets(frozen_test_sets)
+    expected_cells = [
+        {
+            "train_method": method,
+            "test_set": test_set,
+            "cell_id": f"{method} on {test_set}",
+        }
+        for method in methods
+        for test_set in test_sets
+    ]
+    return {
+        "experiment_id": experiment_id,
+        "canonical_method_ids": list(SCIENTIFIC_METHOD_REGISTRY),
+        "selected_methods": methods,
+        "selected_frozen_test_sets": test_sets,
+        "expected_cell_count": len(expected_cells),
+        "expected_cells": expected_cells,
+    }
 
 
 def _recipe_metadata(
@@ -470,7 +834,7 @@ def _recipe_metadata(
             sort_keys=True,
             ensure_ascii=False,
         ),
-        "seed": block.get("seed", recipe.get("seed")),
+        "seed": _optional_seed(block.get("seed", recipe.get("seed"))),
     }
 
 
@@ -636,7 +1000,7 @@ def dataset_recipes_to_execution_specs(
                         "label": metadata["block_label"],
                         "n_snapshots": size,
                         "temperature_K": temperature,
-                        "seed": block.get("seed", recipe.get("seed")),
+                        "seed": metadata["seed"],
                         **(
                             {"timestep_fs": float(timestep)}
                             if timestep not in (None, "")
@@ -671,7 +1035,7 @@ def dataset_recipes_to_execution_specs(
                     sort_keys=True,
                     ensure_ascii=False,
                 ),
-                "seed": recipe.get("seed"),
+                "seed": _optional_seed(recipe.get("seed")),
             }
             md_specs.append(
                 {
@@ -739,7 +1103,7 @@ def dataset_recipes_to_execution_specs(
                     sort_keys=True,
                     ensure_ascii=False,
                 ),
-                "seed": recipe.get("seed"),
+                "seed": _optional_seed(recipe.get("seed")),
             }
             atom_specs.append(
                 {
@@ -763,6 +1127,7 @@ def dataset_recipes_to_execution_specs(
         for recipe_index, recipe in enumerate(rc_recipes):
             block_metadata: list[dict[str, Any]] = []
             random_blocks: list[dict[str, Any]] = []
+            recipe_seed = _optional_seed(recipe.get("seed"))
             for block_index, block in enumerate(recipe["blocks"]):
                 if not isinstance(block, dict):
                     raise RuntimeError("Cada bloque Random Cartesian debe ser un objeto.")
@@ -777,7 +1142,20 @@ def dataset_recipes_to_execution_specs(
                     recipe_index=recipe_index,
                     block_index=block_index,
                 )
-                block_options = {**random_cartesian_defaults, **block, "n_structures": size}
+                block_defaults = {
+                    key: value
+                    for key, value in random_cartesian_defaults.items()
+                    if key != "seed"
+                }
+                block_options = {**block_defaults, **block, "n_structures": size}
+                if "seed" in block:
+                    block_seed = _optional_seed(block.get("seed"))
+                    if block_seed is None:
+                        block_options.pop("seed", None)
+                    else:
+                        block_options["seed"] = block_seed
+                else:
+                    block_options.pop("seed", None)
                 block_options["block_id"] = metadata["block_id"]
                 block_options["label"] = metadata["block_label"]
                 block_metadata.append(metadata)
@@ -798,7 +1176,7 @@ def dataset_recipes_to_execution_specs(
                     sort_keys=True,
                     ensure_ascii=False,
                 ),
-                "seed": recipe.get("seed"),
+                "seed": recipe_seed,
             }
             first_block_defaults = {
                 key: value
@@ -807,6 +1185,7 @@ def dataset_recipes_to_execution_specs(
             }
             options = {
                 **random_cartesian_defaults,
+                **({"seed": recipe_seed} if recipe_seed is not None else {}),
                 **first_block_defaults,
                 "n_structures": total_size,
                 "blocks": random_blocks,
@@ -1380,8 +1759,8 @@ def copy_selected_reference_files(source_root: Path, destination_root: Path) -> 
 
 
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
-DEFAULT_COMMON_TEST_SETS = ["test_md", "test_atomdisp", "test_mixed"]
-DEFAULT_PRIMARY_METRIC = "fermi_window_rmse_eV"
+DEFAULT_COMMON_TEST_SETS = ["test_md", "test_siesta_fc_cartesian", "test_mixed"]
+DEFAULT_PRIMARY_METRIC = "low_energy_rmse_eV"
 MINIMUM_ROBUST_SEEDS = 3
 STRICT_COMPARISON_MODE = True
 SPLIT_MANIFEST_FIELDS = [
@@ -1407,6 +1786,16 @@ SPLIT_MANIFEST_FIELDS = [
     "split_group_id",
     "split_group_fields",
     "split_strategy",
+    "random_cartesian_family_id",
+    "base_geometry_hash",
+    "distribution",
+    "sigma_ang",
+    "uniform_range_ang",
+    "seed_family",
+    "move_atoms",
+    "species_filter",
+    "recipe_id",
+    "block_id",
     "seed",
     "status",
     "sample_dir",
@@ -1659,7 +2048,7 @@ def parse_test_sets(value: Any) -> list[str]:
         raw_items = [str(item).strip() for item in value]
     else:
         raise RuntimeError("test_sets debe ser lista o texto separado por comas.")
-    selected = [item for item in raw_items if item]
+    selected = [normalize_test_set_id(item) for item in raw_items if item]
     allowed = set(DEFAULT_COMMON_TEST_SETS) | {
         "test_siesta_fc_cartesian",
         "test_random_cartesian",
@@ -3164,6 +3553,7 @@ def write_atom_split_manifests(
             hamiltonian_path, valid, validation_reason = validated_reference_for_sample(copied_dir)
             displacement = metadata.get("displacement_ang", "")
             group_id = atom_split_group_id(copied_dir)
+            block_config = metadata.get("block_config") if isinstance(metadata.get("block_config"), dict) else {}
             rows.append(
                 {
                     "sample_id": f"{sample_prefix}_{sample_dir.name}",
@@ -3188,8 +3578,41 @@ def write_atom_split_manifests(
                     "split_group_id": group_id,
                     "split_group_fields": ",".join(ATOM_SPLIT_GROUP_FIELDS)
                     if method_id != "random_cartesian"
-                    else "base_geometry_hash,distribution,amplitude,seed_family,split_group_id",
+                    else (
+                        "base_geometry_hash,distribution,sigma_ang,uniform_range_ang,"
+                        "seed_family,move_atoms,species_filter,recipe_id,block_id"
+                    ),
                     "split_strategy": split_strategy,
+                    "random_cartesian_family_id": metadata.get("random_cartesian_family_id", group_id)
+                    if method_id == "random_cartesian"
+                    else "",
+                    "base_geometry_hash": metadata.get("base_geometry_hash", "")
+                    if method_id == "random_cartesian"
+                    else "",
+                    "distribution": metadata.get("distribution", "")
+                    if method_id == "random_cartesian"
+                    else "",
+                    "sigma_ang": metadata.get("sigma_ang", "")
+                    if method_id == "random_cartesian"
+                    else "",
+                    "uniform_range_ang": metadata.get("uniform_range_ang", "")
+                    if method_id == "random_cartesian"
+                    else "",
+                    "seed_family": metadata.get("seed_family", metadata.get("seed", ""))
+                    if method_id == "random_cartesian"
+                    else "",
+                    "move_atoms": json.dumps(metadata.get("move_atoms", block_config.get("move_atoms", "all")), sort_keys=True)
+                    if method_id == "random_cartesian"
+                    else "",
+                    "species_filter": json.dumps(metadata.get("species_filter", block_config.get("species_filter", [])), sort_keys=True)
+                    if method_id == "random_cartesian"
+                    else "",
+                    "recipe_id": metadata.get("recipe_id", "")
+                    if method_id == "random_cartesian"
+                    else metadata.get("recipe_id", ""),
+                    "block_id": metadata.get("block_id", "")
+                    if method_id == "random_cartesian"
+                    else metadata.get("block_id", ""),
                     "seed": metadata.get("seed", metadata.get("subsampling", {}).get("seed", "")),
                     "status": "completed" if valid else "incomplete",
                     "sample_dir": str(copied_dir),
@@ -3601,6 +4024,65 @@ def metric_availability_for_rows(
     return availability
 
 
+def append_unique_text(items: list[str], value: Any) -> None:
+    if value in (None, "", False):
+        return
+    if isinstance(value, list):
+        for item in value:
+            append_unique_text(items, item)
+        return
+    if isinstance(value, dict):
+        text = json.dumps(json_safe(value), sort_keys=True, ensure_ascii=False)
+    else:
+        text = str(value)
+    if text and text not in items:
+        items.append(text)
+
+
+def run_metric_gap_diagnostics(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    diagnostics = []
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for run in runs:
+        grouped[str(run.get("pipeline") or "unknown")].append(run)
+    for pipeline, items in sorted(grouped.items()):
+        label = PIPELINES[pipeline].label if pipeline in PIPELINES else "Random Cartesian" if pipeline == "random_cartesian" else pipeline
+        metric_groups = [
+            ("spectral", "fermi_window_rmse_eV"),
+            ("spectral", "low_energy_rmse_eV"),
+            ("spectral", "frontier_window_rmse_eV"),
+            ("sparse", "relative_frobenius_union"),
+            ("dos", "dos_wasserstein_eV"),
+        ]
+        metrics = []
+        for group, metric in metric_groups:
+            total = 0
+            finite = 0
+            for run in items:
+                rows = run.get("samples", {}).get(group, []) or []
+                total += len(rows)
+                finite += finite_metric_count(rows, metric)
+            if total > 0:
+                metrics.append(
+                    {
+                        "group": group,
+                        "metric": metric,
+                        "n_total": total,
+                        "n_finite": finite,
+                        "missing_count": max(0, total - finite),
+                        "metric_available": finite > 0,
+                    }
+                )
+        diagnostics.append(
+            {
+                "pipeline": pipeline,
+                "label": label,
+                "runs": len(items),
+                "metrics": metrics,
+            }
+        )
+    return diagnostics
+
+
 def availability_size_value(value: str) -> Any:
     if value == "":
         return ""
@@ -3652,6 +4134,417 @@ def cross_metric_availability(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             }
         )
     return availability
+
+
+def cross_plot_diagnostics(
+    *,
+    cross_experiments: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    existing_cross_ids = {str(experiment.get("experiment_id") or "") for experiment in cross_experiments}
+    archived_by_run_id: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"total": 0, "by_method": defaultdict(int)}
+    )
+    for run in runs:
+        run_id = str(run.get("run_id") or "")
+        if not run_id:
+            continue
+        bucket = archived_by_run_id[run_id]
+        bucket["total"] += 1
+        method = str(run.get("method_id") or run.get("pipeline") or "unknown")
+        bucket["by_method"][method] += 1
+
+    diagnostics = []
+    for manifest_path in sorted(RESULTS_ROOT.glob("*/experiment_manifest.yaml")):
+        experiment_id = manifest_path.parent.name
+        if experiment_id in existing_cross_ids:
+            continue
+        try:
+            manifest = load_config(manifest_path)
+        except Exception as exc:
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "severity": "warning",
+                    "reason": "experiment_manifest_unreadable",
+                    "message": f"No se pudo leer {manifest_path}: {exc}",
+                    "expected_csv": str(manifest_path.parent / "summary" / "cross_evaluation_metrics.csv"),
+                }
+            )
+            continue
+        run_mode = manifest.get("run_mode")
+        cross_evaluation = manifest.get("cross_evaluation") if isinstance(manifest.get("cross_evaluation"), dict) else {}
+        manifest_runs = manifest.get("runs") if isinstance(manifest.get("runs"), list) else []
+        archived = archived_by_run_id.get(experiment_id, {"total": 0, "by_method": {}})
+        warnings: list[str] = []
+        append_unique_text(warnings, cross_evaluation.get("warnings"))
+        append_unique_text(warnings, cross_evaluation.get("missing_cells"))
+        append_unique_text(warnings, manifest.get("warnings"))
+        skipped = bool(cross_evaluation.get("skipped"))
+        if run_mode == "dataset_only" or skipped:
+            reason = str(cross_evaluation.get("reason") or run_mode or "cross_evaluation_skipped")
+            severity = "info"
+            message = f"Cross-evaluation omitida para {experiment_id}: {reason}."
+        elif archived.get("total", 0) or manifest_runs:
+            reason = "cross_evaluation_metrics_missing"
+            severity = "warning"
+            message = (
+                f"Falta summary/cross_evaluation_metrics.csv para {experiment_id}; "
+                "los plots cross, learning, compute y winner no pueden generarse."
+            )
+            if not manifest_runs and archived.get("total", 0):
+                message += (
+                    " Hay runs archivados con ese run_id, pero el experiment_manifest no "
+                    "contiene runs registrados; probablemente la ejecucion se interrumpio antes de la agregacion cross."
+                )
+        else:
+            reason = "no_completed_runs_for_cross"
+            severity = "info"
+            message = f"No hay runs completos registrados para generar cross-evaluation en {experiment_id}."
+        diagnostics.append(
+            {
+                "experiment_id": experiment_id,
+                "severity": severity,
+                "reason": reason,
+                "message": message,
+                "expected_csv": str(manifest_path.parent / "summary" / "cross_evaluation_metrics.csv"),
+                "manifest_runs": len(manifest_runs),
+                "archived_runs": int(archived.get("total", 0) or 0),
+                "archived_runs_by_method": dict(archived.get("by_method", {})),
+                "warnings": warnings[:12],
+            }
+        )
+    diagnostics.sort(key=lambda item: str(item.get("experiment_id") or ""))
+    return diagnostics[-8:]
+
+
+def normalized_method_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        try:
+            method = normalize_method_id(value)
+        except ValueError:
+            method = str(value or "").strip()
+        if method and method not in normalized:
+            normalized.append(method)
+    return normalized
+
+
+def normalized_test_set_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        try:
+            test_set = normalize_test_set_id(value)
+        except ValueError:
+            test_set = str(value or "").strip()
+        if test_set and test_set not in normalized:
+            normalized.append(test_set)
+    return normalized
+
+
+def observed_cross_methods(rows: list[dict[str, Any]]) -> list[str]:
+    methods: list[str] = []
+    for row in rows:
+        raw_method = row.get("train_method")
+        if raw_method in (None, ""):
+            continue
+        try:
+            method = normalize_method_id(raw_method)
+        except ValueError:
+            method = str(raw_method)
+        if method not in methods:
+            methods.append(method)
+    return sorted(methods)
+
+
+def observed_cross_test_sets(rows: list[dict[str, Any]]) -> list[str]:
+    test_sets: list[str] = []
+    for row in rows:
+        raw_test_set = row.get("test_set")
+        if raw_test_set in (None, ""):
+            continue
+        try:
+            test_set = normalize_test_set_id(raw_test_set)
+        except ValueError:
+            test_set = str(raw_test_set)
+        if test_set not in test_sets:
+            test_sets.append(test_set)
+    return sorted(test_sets)
+
+
+def scientific_plot_status(recommendation: dict[str, Any]) -> str:
+    status = str(recommendation.get("status") or "")
+    scientific_status = str(recommendation.get("scientific_status") or "")
+    if status in {"invalid_incomplete_grid", "invalid_leakage"}:
+        return status
+    if status.startswith("invalid_incomplete"):
+        return "invalid_incomplete_grid"
+    if status.startswith("invalid_leakage") or ("leakage" in status and "invalid" in status):
+        return "invalid_leakage"
+    if status in {"insufficient_seeds", "metric_policy_exploratory_only", "leakage_exploratory_only"}:
+        return "exploratory_only"
+    if status in {
+        "insufficient_primary_metric",
+        "unstable_seed_winner",
+        "scientifically_inconclusive_leakage",
+        "fairness_provenance_mismatch",
+        "no_general_robust_winner",
+    }:
+        return "scientifically_inconclusive"
+    if scientific_status in {"exploratory", "exploratory_only"}:
+        return "exploratory_only"
+    if scientific_status in {"scientifically_inconclusive", "inconclusive"}:
+        return "scientifically_inconclusive"
+    if scientific_status == "not_scientifically_valid":
+        return "scientifically_inconclusive"
+    return scientific_status or status or "unknown"
+
+
+def warning_entry(
+    warnings: list[dict[str, Any]],
+    *,
+    code: str,
+    message: str,
+    severity: str = "warning",
+    status: str = "",
+    details: Any = None,
+) -> None:
+    if not message:
+        return
+    entry = {
+        "code": code,
+        "severity": severity,
+        "message": message,
+    }
+    if status:
+        entry["scientific_status"] = status
+    if details not in (None, "", [], {}):
+        entry["details"] = details
+    if entry not in warnings:
+        warnings.append(entry)
+
+
+def warning_text_blob(recommendation: dict[str, Any]) -> str:
+    pieces: list[str] = []
+    for key in (
+        "reason",
+        "severe_warnings",
+        "fairness_provenance_warnings",
+        "method_provenance_warnings",
+        "warnings",
+    ):
+        append_unique_text(pieces, recommendation.get(key))
+    return " | ".join(pieces).lower()
+
+
+def cross_experiment_plot_warnings(
+    *,
+    rows: list[dict[str, Any]],
+    recommendation: dict[str, Any],
+    manifest: dict[str, Any],
+    outputs: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    plot_status = scientific_plot_status(recommendation)
+    status = str(recommendation.get("status") or "")
+    text_blob = warning_text_blob(recommendation)
+    observed_methods = observed_cross_methods(rows)
+    observed_test_sets = observed_cross_test_sets(rows)
+    selected_methods = normalized_method_list(
+        manifest.get("selected_methods")
+        or recommendation.get("selected_methods")
+        or ([*observed_methods] if observed_methods else [])
+    )
+    selected_test_sets = normalized_test_set_list(
+        manifest.get("test_sets")
+        or recommendation.get("test_sets_seen")
+        or ([*observed_test_sets] if observed_test_sets else [])
+    )
+    missing_methods = sorted(set(selected_methods) - set(observed_methods))
+    missing_test_sets = sorted(set(selected_test_sets) - set(observed_test_sets))
+    missing_cells = (
+        recommendation.get("missing_cells")
+        or recommendation.get("missing_required_cells")
+        or []
+    )
+    missing_primary = recommendation.get("missing_primary_metric_cells") or []
+
+    if status == "invalid_incomplete_grid" or missing_cells:
+        warning_entry(
+            warnings,
+            code="incomplete_grid",
+            severity="error",
+            status="invalid_incomplete_grid",
+            message="Cross-evaluation grid is incomplete; plots are diagnostic only.",
+            details=missing_cells,
+        )
+    if missing_primary or status == "insufficient_primary_metric":
+        warning_entry(
+            warnings,
+            code="missing_primary_metric",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Primary metric is missing in required cells; no winner should be inferred from plots.",
+            details=missing_primary,
+        )
+    if missing_methods:
+        warning_entry(
+            warnings,
+            code="missing_method",
+            severity="warning",
+            status=plot_status,
+            message="Selected method(s) are missing from cross-evaluation rows.",
+            details=missing_methods,
+        )
+    if missing_test_sets:
+        warning_entry(
+            warnings,
+            code="missing_test_set",
+            severity="warning",
+            status=plot_status,
+            message="Selected frozen test set(s) are missing from cross-evaluation rows.",
+            details=missing_test_sets,
+        )
+    if recommendation.get("single_seed_warning") or (
+        recommendation.get("valid_seed_count") not in (None, "")
+        and isinstance(recommendation.get("valid_seed_count"), (int, float))
+        and int(recommendation.get("valid_seed_count") or 0) < 3
+    ):
+        warning_entry(
+            warnings,
+            code="single_seed_or_insufficient_seeds",
+            severity="warning",
+            status="exploratory_only",
+            message="Seed count is below the robust threshold; plots are exploratory.",
+            details={"n_seeds": recommendation.get("n_seeds"), "valid_seed_count": recommendation.get("valid_seed_count")},
+        )
+    seed_stability = recommendation.get("seed_stability")
+    unstable_seed_status = (
+        isinstance(seed_stability, dict)
+        and (
+            seed_stability.get("status") == "unstable"
+            or bool(seed_stability.get("unstable_groups"))
+        )
+    )
+    if status == "unstable_seed_winner" or "unstable" in text_blob or unstable_seed_status:
+        warning_entry(
+            warnings,
+            code="unstable_winner",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Winner changes across seeds; plot winners are not robust.",
+        )
+    leakage_diagnostics = recommendation.get("leakage_diagnostics")
+    leakage_problem = (
+        status in {"invalid_leakage", "leakage_exploratory_only", "scientifically_inconclusive_leakage"}
+        or "leakage" in text_blob
+        or "duplicate_geometry" in text_blob
+        or "random_cartesian_family" in text_blob
+    )
+    if isinstance(leakage_diagnostics, dict):
+        leakage_problem = leakage_problem or any(
+            bool(leakage_diagnostics.get(key))
+            for key in ("invalid", "inconclusive", "exploratory_only")
+        )
+    if leakage_problem:
+        warning_entry(
+            warnings,
+            code="severe_leakage",
+            severity="error",
+            status=("invalid_leakage" if status == "invalid_leakage" else "scientifically_inconclusive"),
+            message="Leakage diagnostics affect scientific validity; plots must not be read as robust.",
+            details=leakage_diagnostics,
+        )
+    if status == "fairness_provenance_mismatch" or "mismatch" in text_blob or "provenance" in text_blob:
+        warning_entry(
+            warnings,
+            code="fairness_provenance_mismatch",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Fairness/provenance warnings are present; plot comparisons are not robust.",
+            details=recommendation.get("fairness_provenance_warnings") or recommendation.get("severe_warnings"),
+        )
+    method_provenance = manifest.get("method_provenance")
+    if "random_cartesian" in selected_methods and (
+        not isinstance(method_provenance, dict)
+        or not isinstance(method_provenance.get("random_cartesian"), dict)
+        or "missing random_cartesian provenance" in text_blob
+    ):
+        warning_entry(
+            warnings,
+            code="missing_random_cartesian_provenance",
+            severity="warning",
+            status="scientifically_inconclusive",
+            message="Random Cartesian was selected but explicit method provenance is missing or incomplete.",
+        )
+
+    timing_fields = ("total_time_seconds", "siesta_time_seconds", "training_time_seconds", "prediction_time_seconds", "evaluation_time_seconds")
+    has_timing = any(
+        finite_number(row.get(field)) is not None
+        for row in rows
+        for field in timing_fields
+    )
+    compute_summary: dict[str, Any] = {}
+    compute_summary_path = outputs.get("compute_budget_thresholds_vs_md")
+    if compute_summary_path:
+        path = Path(str(compute_summary_path))
+        if path.exists():
+            try:
+                compute_summary = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                compute_summary = {}
+    compute_unavailable = (
+        not has_timing
+        or compute_summary.get("compute_threshold_unavailable")
+        or any(
+            threshold.get("reason") == "compute_threshold_unavailable: missing reliable timing fields"
+            for threshold in compute_summary.get("thresholds", [])
+            if isinstance(threshold, dict)
+        )
+    )
+    if compute_unavailable:
+        warning_entry(
+            warnings,
+            code="missing_compute_timings",
+            severity="info",
+            status=plot_status,
+            message="Reliable compute timings are missing; compute-budget plots or thresholds are unavailable.",
+        )
+
+    status_warning_needed = plot_status in {
+        "exploratory_only",
+        "scientifically_inconclusive",
+        "invalid_incomplete_grid",
+        "invalid_leakage",
+    }
+    if status_warning_needed:
+        warning_entry(
+            warnings,
+            code="plot_scientific_status",
+            severity=("error" if plot_status.startswith("invalid") else "warning"),
+            status=plot_status,
+            message=f"Final recommendation status is {plot_status}; plots are diagnostic, not a robust recommendation.",
+        )
+
+    methods_payload = {
+        "selected": selected_methods,
+        "observed": observed_methods,
+        "missing": missing_methods,
+    }
+    test_sets_payload = {
+        "selected": selected_test_sets,
+        "observed": observed_test_sets,
+        "missing": missing_test_sets,
+    }
+    return warnings, {
+        "scientific_status": plot_status,
+        "methods": methods_payload,
+        "test_sets": test_sets_payload,
+    }
 
 
 def metric_diagnostics(
@@ -3745,6 +4638,10 @@ def plot_data_summary() -> dict[str, Any]:
             runs.append(
                 {
                     "pipeline": key,
+                    "method_id": manifest.get(
+                        "method_id",
+                        "siesta_fc_cartesian" if key == "atom_displacement" else key,
+                    ),
                     "label": PIPELINES[key].label if key in PIPELINES else "Random Cartesian",
                     "dataset_size": int(
                         manifest.get(
@@ -3799,7 +4696,7 @@ def plot_data_summary() -> dict[str, Any]:
                         spectral_rows,
                         relationship_rows,
                         errors,
-                            warnings,
+                        warnings,
                     ),
                     "metric_availability": {
                         "spectral": metric_availability_for_rows(
@@ -3839,6 +4736,21 @@ def plot_data_summary() -> dict[str, Any]:
             "selected_methods": manifest.get("selected_methods"),
         }
         compatibility_group_id = stable_payload_hash(compatibility, length=16)
+        outputs = {
+            "cross_evaluation_metrics": str(metrics_path),
+            "winner_summary": str(experiment_dir / "summary" / "winner_summary.csv"),
+            "winner_by_dataset_size": str(experiment_dir / "summary" / "winner_by_dataset_size.csv"),
+            "winner_by_compute_budget": str(experiment_dir / "summary" / "winner_by_compute_budget.csv"),
+            "dataset_size_thresholds_vs_md": str(experiment_dir / "summary" / "dataset_size_thresholds_vs_md.json"),
+            "compute_budget_thresholds_vs_md": str(experiment_dir / "summary" / "compute_budget_thresholds_vs_md.json"),
+            "recommendation": str(recommendation_path),
+        }
+        plot_warnings, plot_validity = cross_experiment_plot_warnings(
+            rows=rows,
+            recommendation=recommendation,
+            manifest=manifest,
+            outputs=outputs,
+        )
         cross_experiments.append(
             {
                 "experiment_id": experiment_dir.name,
@@ -3848,12 +4760,11 @@ def plot_data_summary() -> dict[str, Any]:
                 "manifest": manifest,
                 "compatibility": compatibility,
                 "compatibility_group_id": compatibility_group_id,
-                "outputs": {
-                    "cross_evaluation_metrics": str(metrics_path),
-                    "winner_summary": str(experiment_dir / "summary" / "winner_summary.csv"),
-                    "winner_by_dataset_size": str(experiment_dir / "summary" / "winner_by_dataset_size.csv"),
-                    "winner_by_compute_budget": str(experiment_dir / "summary" / "winner_by_compute_budget.csv"),
-                },
+                "methods": plot_validity["methods"],
+                "test_sets": plot_validity["test_sets"],
+                "plot_scientific_status": plot_validity["scientific_status"],
+                "plot_warnings": plot_warnings,
+                "outputs": outputs,
             }
         )
     groups_by_id: dict[str, dict[str, Any]] = {}
@@ -3885,11 +4796,44 @@ def plot_data_summary() -> dict[str, Any]:
         visualization_warnings.append(
             "All experiments are shown by default for visualization; compatibility or metric_version groups differ."
         )
+    plot_diagnostics = {
+        "run_metric_gaps": run_metric_gap_diagnostics(runs),
+        "cross": cross_plot_diagnostics(cross_experiments=cross_experiments, runs=runs),
+    }
+    plot_warnings: list[dict[str, Any]] = []
+    for experiment in cross_experiments:
+        for warning in experiment.get("plot_warnings") or []:
+            entry = {"experiment_id": experiment.get("experiment_id"), **warning}
+            if entry not in plot_warnings:
+                plot_warnings.append(entry)
+    for warning in visualization_warnings:
+        plot_warnings.append(
+            {
+                "severity": "warning",
+                "code": "visualization_compatibility",
+                "message": warning,
+                "scientific_status": "exploratory_only",
+            }
+        )
+    for diagnostic in plot_diagnostics["cross"]:
+        if diagnostic.get("severity") == "warning":
+            plot_warnings.append(
+                {
+                    "experiment_id": diagnostic.get("experiment_id"),
+                    "severity": "warning",
+                    "code": str(diagnostic.get("reason") or "cross_plot_warning"),
+                    "message": str(diagnostic.get("message") or ""),
+                    "scientific_status": "scientifically_inconclusive",
+                    "details": diagnostic.get("warnings") or [],
+                }
+            )
     return {
         "runs": runs,
         "cross_experiments": cross_experiments,
         "compatible_experiment_groups": compatible_groups,
         "visualization_warnings": visualization_warnings,
+        "plot_warnings": plot_warnings,
+        "plot_diagnostics": plot_diagnostics,
         "default_plot_selection": {
             "mode": "all",
             "group_id": latest_group.get("group_id") if latest_group else None,
@@ -4153,8 +5097,15 @@ class ExperimentRunner:
             apply_performance_to_config(config, performance_settings)
             apply_training_settings_to_config(config, training_settings)
         shared_settings = load_config(DEFAULT_SHARED) if DEFAULT_SHARED.exists() else {}
-        siesta_report = compare_settings(md_config, atom_config, shared_settings)
-        model_report = compare_model_settings(md_config, atom_config)
+        configs_by_method = {
+            "md": md_config,
+            "siesta_fc_cartesian": atom_config,
+            "random_cartesian": atom_config,
+        }
+        model_report = compare_method_model_settings(
+            configs_by_method,
+            selected_methods=list(selected_methods),
+        )
         files_to_hash = [
             PIPELINES["md"].config_path,
             PIPELINES["atom_displacement"].config_path,
@@ -4170,20 +5121,35 @@ class ExperimentRunner:
             or sorted((PIPELINES["atom_displacement"].root / "dataset" / "AtDis_steps" / "basis").glob("*.ion.xml"))
             or sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml"))
         )
+        random_cartesian_basis_files = (
+            sorted((PIPELINES["atom_displacement"].root / "dataset" / "RandomCartesian_steps" / "basis").glob("*.ion.xml"))
+            or sorted((PIPELINES["atom_displacement"].root / "relaxed").glob("*.ion.xml"))
+        )
         md_pseudo_files = sorted((PIPELINES["md"].root / "dataset").glob("*.psf"))
         atom_pseudo_files = sorted((PIPELINES["atom_displacement"].root / "base").glob("*.psf"))
-        md_basis_content_hash = files_content_digest(md_basis_files)
-        atom_basis_content_hash = files_content_digest(atom_basis_files)
-        md_pseudo_content_hash = files_content_digest(md_pseudo_files)
-        atom_pseudo_content_hash = files_content_digest(atom_pseudo_files)
-        basis_pseudopotential_warning = ""
-        if md_basis_content_hash and atom_basis_content_hash and md_basis_content_hash != atom_basis_content_hash:
-            basis_pseudopotential_warning = "MD and AtomDisplacement basis .ion.xml content hashes differ."
-        if md_pseudo_content_hash and atom_pseudo_content_hash and md_pseudo_content_hash != atom_pseudo_content_hash:
-            suffix = "MD and AtomDisplacement pseudopotential .psf content hashes differ."
-            basis_pseudopotential_warning = (
-                f"{basis_pseudopotential_warning} | {suffix}" if basis_pseudopotential_warning else suffix
-            )
+        method_artifact_paths = {
+            "md": {"basis_files": md_basis_files, "pseudopotential_files": md_pseudo_files},
+            "siesta_fc_cartesian": {"basis_files": atom_basis_files, "pseudopotential_files": atom_pseudo_files},
+            "random_cartesian": {
+                "basis_files": random_cartesian_basis_files,
+                "pseudopotential_files": atom_pseudo_files,
+            },
+        }
+        artifact_hashes_by_method = {
+            method: {
+                "basis_hash": files_content_digest(paths["basis_files"]),
+                "pseudopotential_hash": files_content_digest(paths["pseudopotential_files"]),
+            }
+            for method, paths in method_artifact_paths.items()
+            if method in selected_methods
+        }
+        siesta_report = compare_method_settings(
+            configs_by_method,
+            shared_settings,
+            artifact_hashes_by_method=artifact_hashes_by_method,
+            selected_methods=list(selected_methods),
+        )
+        basis_pseudopotential_warning = siesta_report.get("basis_pseudopotential_warning", "")
         basis_and_pseudos = [
             {
                 "path": str(path),
@@ -4210,8 +5176,12 @@ class ExperimentRunner:
             "configs": files_digest([PIPELINES["md"].config_path, PIPELINES["atom_displacement"].config_path]),
             "md_pseudopotentials": files_content_digest(md_pseudo_files),
             "atom_displacement_pseudopotentials": files_content_digest(atom_pseudo_files),
+            "siesta_fc_cartesian_pseudopotentials": files_content_digest(atom_pseudo_files),
+            "random_cartesian_pseudopotentials": files_content_digest(atom_pseudo_files),
             "md_basis": files_content_digest(md_basis_files),
             "atom_displacement_basis": files_content_digest(atom_basis_files),
+            "siesta_fc_cartesian_basis": files_content_digest(atom_basis_files),
+            "random_cartesian_basis": files_content_digest(random_cartesian_basis_files),
             "rendered_inputs": file_digest([
                 PIPELINES["md"].root / "dataset" / "RUN.fdf",
                 PIPELINES["atom_displacement"].root / "base" / "RUN.fdf",
@@ -4220,6 +5190,9 @@ class ExperimentRunner:
         dataset_recipes_info = dataset_recipes_info or {}
         normalized_recipes = dataset_recipes_info.get("recipes") or {}
         normalized_recipe_hash = dataset_recipes_info.get("recipe_set_hash") or recipe_set_hash(normalized_recipes)
+        dataset_seeds = dataset_recipe_seed_values(normalized_recipes)
+        if random_seed is not None and random_seed not in dataset_seeds:
+            dataset_seeds.append(random_seed)
         return {
             "experiment_id": run_id,
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -4234,18 +5207,44 @@ class ExperimentRunner:
             "molecule_system_name": system_name,
             "config_hash": files_digest([PIPELINES["md"].config_path, PIPELINES["atom_displacement"].config_path]),
             "siesta_settings_hash": siesta_report["siesta_settings_hash"],
-            "md_siesta_settings_hash": siesta_report["md_siesta_settings_hash"],
-            "atom_displacement_siesta_settings_hash": siesta_report["atom_displacement_siesta_settings_hash"],
+            "md_siesta_settings_hash": siesta_report.get("md_siesta_settings_hash"),
+            "atom_displacement_siesta_settings_hash": siesta_report.get("atom_displacement_siesta_settings_hash"),
+            "siesta_fc_cartesian_siesta_settings_hash": siesta_report.get("siesta_fc_cartesian_siesta_settings_hash"),
+            "random_cartesian_siesta_settings_hash": siesta_report.get("random_cartesian_siesta_settings_hash"),
+            "siesta_settings_hash_by_method": siesta_report.get("siesta_settings_hash_by_method", {}),
+            "method_siesta_settings": siesta_report.get("method_siesta_settings", {}),
             "shared_siesta_settings_hash": siesta_report["shared_siesta_settings_hash"],
-            "siesta_settings_warning": siesta_report["warning"],
-            "siesta_settings_mismatches": siesta_report["mismatches"],
+            "siesta_settings_warning": siesta_report.get("severe_warning", ""),
+            "siesta_settings_nonsevere_warning": (
+                siesta_report.get("warning", "") if not siesta_report.get("severe_warning") else ""
+            ),
+            "siesta_settings_severe_warning": siesta_report.get("severe_warning", ""),
+            "siesta_settings_mismatches": siesta_report.get("pairwise_mismatch_report", []),
+            "siesta_settings_pairwise_mismatch_report": siesta_report.get("pairwise_mismatch_report", []),
+            "siesta_settings_severe_mismatches": siesta_report.get("severe_mismatches", []),
             "model_config_hash": model_report["model_config_hash"],
-            "md_model_config_hash": model_report["md_model_config_hash"],
-            "atom_displacement_model_config_hash": model_report["atom_displacement_model_config_hash"],
-            "model_config_warning": model_report["warning"],
-            "model_config_mismatches": model_report["mismatches"],
-            "basis_hash": files_content_digest([*md_basis_files, *atom_basis_files]),
+            "md_model_config_hash": model_report.get("md_model_config_hash"),
+            "atom_displacement_model_config_hash": model_report.get("atom_displacement_model_config_hash"),
+            "siesta_fc_cartesian_model_config_hash": model_report.get("siesta_fc_cartesian_model_config_hash"),
+            "random_cartesian_model_config_hash": model_report.get("random_cartesian_model_config_hash"),
+            "model_config_hash_by_method": model_report.get("model_config_hash_by_method", {}),
+            "method_model_settings": model_report.get("method_model_settings", {}),
+            "model_config_warning": model_report.get("severe_warning", ""),
+            "model_config_nonsevere_warning": (
+                model_report.get("warning", "") if not model_report.get("severe_warning") else ""
+            ),
+            "model_config_severe_warning": model_report.get("severe_warning", ""),
+            "model_config_mismatches": model_report.get("pairwise_mismatch_report", []),
+            "model_config_pairwise_mismatch_report": model_report.get("pairwise_mismatch_report", []),
+            "model_config_severe_mismatches": model_report.get("severe_mismatches", []),
+            "basis_hash": files_content_digest([
+                *md_basis_files,
+                *atom_basis_files,
+                *random_cartesian_basis_files,
+            ]),
             "pseudopotential_hash": files_content_digest([*md_pseudo_files, *atom_pseudo_files]),
+            "basis_hash_by_method": siesta_report.get("basis_hash_by_method", {}),
+            "pseudopotential_hash_by_method": siesta_report.get("pseudopotential_hash_by_method", {}),
             "basis_pseudopotential_info": basis_and_pseudos,
             "run_mode": run_mode,
             "scientific_status": "dataset_only" if run_mode == "dataset_only" else (
@@ -4273,7 +5272,7 @@ class ExperimentRunner:
             },
             "random_cartesian_options": random_cartesian_options or {},
             "atom_displacement_dataset_specs": atom_dataset_specs or [],
-            "seeds": [random_seed] if random_seed is not None else [],
+            "seeds": dataset_seeds,
             "split_ratios": split_ratios,
             "split_mode": split_mode,
             "minimum_robust_seeds": MINIMUM_ROBUST_SEEDS,
@@ -4281,6 +5280,8 @@ class ExperimentRunner:
             "training_hyperparameters": {
                 "md": md_config.get("training", {}),
                 "atom_displacement": atom_config.get("training", {}),
+                "siesta_fc_cartesian": atom_config.get("training", {}),
+                "random_cartesian": atom_config.get("training", {}) if "random_cartesian" in selected_methods else {},
             },
             "selected_metrics": {
                 "sparse": True,
@@ -4336,6 +5337,7 @@ class ExperimentRunner:
     def _write_experiment_manifest(self, manifest: dict[str, Any]) -> None:
         path = experiment_manifest_path(str(manifest["experiment_id"]))
         path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_method_provenance(manifest)
         write_yaml(path, json_safe(manifest))
 
     def _write_performance_report(self, manifest: dict[str, Any]) -> None:
@@ -4663,7 +5665,7 @@ class ExperimentRunner:
                 )
             if STRICT_COMPARISON_MODE and manifest.get("model_config_warning"):
                 raise RuntimeError(
-                    "Strict comparison aborted: MD y AtomDisplacement tienen hiperparametros Graph2Mat distintos. "
+                    "Strict comparison aborted: los metodos seleccionados tienen hiperparametros Graph2Mat distintos. "
                     "Revisa experiment_manifest.yaml: model_config_mismatches."
                 )
             if atom_dataset_specs:
@@ -4751,7 +5753,7 @@ class ExperimentRunner:
                         venv_activate_path=venv_activate_path,
                     ),
                 ))
-            atom_runs = atom_dataset_specs or [
+            atom_runs = dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [
                 {
                     "label": fallback_dataset_label("fc", index),
                     "size": size,
@@ -4760,9 +5762,11 @@ class ExperimentRunner:
                 for index, size in enumerate(atom_sizes)
             ]
             for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
+                atom_recipe_seed = (atom_spec.get("recipe_metadata") or {}).get("seed")
+                atom_random_seed = atom_recipe_seed if atom_recipe_seed not in (None, "") else random_seed
                 dataset_tasks.append((
                     f"atom_displacement {atom_spec['label']}",
-                    lambda atom_spec=atom_spec: self._run_one(
+                    lambda atom_spec=atom_spec, atom_random_seed=atom_random_seed: self._run_one(
                         "atom_displacement",
                         int(atom_spec["size"]),
                         run_id,
@@ -4770,7 +5774,7 @@ class ExperimentRunner:
                         fc_displacements=atom_spec.get("displacements"),
                         recipe_metadata=atom_spec.get("recipe_metadata"),
                         split_ratios=split_ratios,
-                        random_seed=random_seed,
+                        random_seed=atom_random_seed,
                         split_mode=split_mode,
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
@@ -4780,7 +5784,7 @@ class ExperimentRunner:
                     ),
                 ))
             if "random_cartesian" in selected_methods:
-                random_specs = random_cartesian_options.get("_dataset_specs") or [
+                random_specs = dataset_recipes_info.get("random_cartesian_dataset_specs") or random_cartesian_options.get("_dataset_specs") or [
                     {
                         "label": fallback_dataset_label("rc", index),
                         "size": random_size,
@@ -4980,6 +5984,8 @@ class ExperimentRunner:
         with self._lock:
             log_start = len(self._logs)
         prepare_metadata: dict[str, Any] = {}
+        if recipe_metadata and recipe_metadata.get("seed") not in (None, ""):
+            prepare_metadata["seed"] = recipe_metadata.get("seed")
         if key == "md":
             self._prepare_md_config(
                 config,
@@ -6082,6 +7088,9 @@ class ExperimentRunner:
                 sample_id = str(row.get("sample_id") or row.get("sample") or "")
                 if sample_id:
                     dataset_sample_ids.append(sample_id)
+        manifest_seed = prepare_metadata.get("seed")
+        if manifest_seed in (None, ""):
+            manifest_seed = recipe_metadata.get("seed")
         manifest = {
             "pipeline": key,
             "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
@@ -6104,7 +7113,7 @@ class ExperimentRunner:
             "artifact_hashes": run_artifact_hashes,
             "dataset_sample_ids": sorted(set(dataset_sample_ids)),
             "dataset_sample_hash": sample_set_hash(dataset_sample_ids),
-            "seed": prepare_metadata.get("seed"),
+            "seed": manifest_seed,
             "dataset_recipe": recipe_metadata,
             "recipe_id": recipe_metadata.get("recipe_id"),
             "recipe_label": recipe_metadata.get("recipe_label"),
@@ -6334,6 +7343,7 @@ class ExperimentRunner:
         summary: dict[str, Any] = {
             "ok": False,
             "warnings": [],
+            "missing_cells": [],
             "common_tests": [],
             "cross_evaluations": [],
             "outputs": {},
@@ -6348,6 +7358,17 @@ class ExperimentRunner:
         prediction_root = experiment_root(run_id) / "cross_predictions"
         summary_root = experiment_root(run_id) / "summary"
         test_sets = deduplicate_common_test_sets(manifest.get("test_sets") or DEFAULT_COMMON_TEST_SETS)
+        summary_root.mkdir(parents=True, exist_ok=True)
+        expected_grid = build_cross_evaluation_expected_grid(
+            ["md", "siesta_fc_cartesian"],
+            test_sets,
+            experiment_id=run_id,
+        )
+        expected_grid_path = summary_root / "cross_evaluation_expected_grid.json"
+        expected_grid_path.write_text(
+            json.dumps(json_safe(expected_grid), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
         common_root.mkdir(parents=True, exist_ok=True)
         cross_root.mkdir(parents=True, exist_ok=True)
         prediction_root.mkdir(parents=True, exist_ok=True)
@@ -6393,6 +7414,8 @@ class ExperimentRunner:
                 ]
                 leakage_warnings_by_test_set: dict[str, str] = {}
                 leakage_summary_by_test_set: dict[str, str] = {}
+                leakage_scientific_status_by_test_set: dict[str, str] = {}
+                leakage_severe_warnings_by_test_set: dict[str, list[str]] = {}
                 for test_set in test_sets:
                     test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                     if not test_manifest.exists():
@@ -6415,10 +7438,26 @@ class ExperimentRunner:
                         label=f"Chequeando leakage geometrico {pair_id} {test_set}",
                     )
                     leakage_summary_path = leakage_dir / "geometry_leakage_summary.json"
+                    leakage_diagnostics: dict[str, Any] = {}
                     if leakage_summary_path.exists():
                         leakage_summary_by_test_set[test_set] = str(leakage_summary_path)
+                        leakage_diagnostics = geometry_leakage_diagnostic_fields(
+                            pair_id=pair_id,
+                            test_set=test_set,
+                            leakage_dir=leakage_dir,
+                            summary_path=leakage_summary_path,
+                        )
+                        leakage_scientific_status_by_test_set[test_set] = str(
+                            leakage_diagnostics.get("scientific_status", "")
+                        )
+                        leakage_severe_warnings_by_test_set[test_set] = [
+                            str(item) for item in leakage_diagnostics.get("severe_warnings", []) or []
+                        ]
                     if leakage_result.returncode != 0:
-                        warning = f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
+                        warning = str(
+                            leakage_diagnostics.get("warning")
+                            or f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
+                        )
                         summary["warnings"].append(warning)
                         leakage_warnings_by_test_set[test_set] = warning
                         if STRICT_COMPARISON_MODE:
@@ -6523,6 +7562,8 @@ class ExperimentRunner:
                             "budget_mismatch_warning": mismatch_warning,
                             "leakage_warning": leakage_warnings_by_test_set.get(test_set, ""),
                             "leakage_summary": leakage_summary_by_test_set.get(test_set, ""),
+                            "leakage_scientific_status": leakage_scientific_status_by_test_set.get(test_set, ""),
+                            "leakage_severe_warnings": leakage_severe_warnings_by_test_set.get(test_set, []),
                             "frozen_test_warning": frozen_test_warning,
                             "frozen_test_hash": frozen_test_hash,
                             "frozen_test_manifest": str(frozen_manifest_path) if frozen_manifest_path.exists() else "",
@@ -6570,6 +7611,10 @@ class ExperimentRunner:
             str(cross_root),
             "--output-dir",
             str(summary_root),
+            "--expected-grid",
+            str(expected_grid_path),
+            "--primary-metric",
+            str((manifest.get("selected_metrics") or {}).get("primary_metric", DEFAULT_PRIMARY_METRIC)),
         ]
         aggregate_result = self._run_local_script(
             aggregate_command,
@@ -6578,6 +7623,48 @@ class ExperimentRunner:
         )
         if aggregate_result.returncode != 0:
             raise RuntimeError("Cross metric aggregation failed.")
+
+        completeness_path = summary_root / "cross_evaluation_completeness.json"
+        completeness = {}
+        if completeness_path.exists():
+            completeness = json.loads(completeness_path.read_text(encoding="utf-8"))
+        if completeness.get("scientific_status") == "invalid_incomplete_grid":
+            missing_cells = sorted(
+                dict.fromkeys(
+                    [
+                        *(str(cell) for cell in completeness.get("missing_cells", []) or []),
+                        *(str(cell) for cell in completeness.get("missing_primary_metric_cells", []) or []),
+                    ]
+                )
+            )
+            invalid_recommendation = {
+                "status": "invalid_incomplete_grid",
+                "scientific_status": "invalid_incomplete_grid",
+                "winner": None,
+                "reason": "Incomplete cross-evaluation grid",
+                "missing_cells": missing_cells,
+                "missing_required_cells": completeness.get("missing_cells", []),
+                "extra_unexpected_cells": completeness.get("extra_unexpected_cells", []),
+                "missing_primary_metric_cells": completeness.get("missing_primary_metric_cells", []),
+                "completeness_report": str(completeness_path),
+            }
+            (summary_root / "recommendation.json").write_text(
+                json.dumps(invalid_recommendation, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            summary["missing_cells"].extend(completeness.get("missing_cells", []))
+            summary["missing_cells"].extend(completeness.get("missing_primary_metric_cells", []))
+            summary["warnings"].append("Incomplete cross-evaluation grid; winner analysis skipped.")
+            summary["ok"] = False
+            summary["outputs"] = {
+                "common_tests": str(common_root),
+                "cross_evaluations": str(cross_root),
+                "cross_evaluation_metrics": str(summary_root / "cross_evaluation_metrics.csv"),
+                "cross_evaluation_expected_grid": str(expected_grid_path),
+                "cross_evaluation_completeness": str(completeness_path),
+                "recommendation": str(summary_root / "recommendation.json"),
+            }
+            return summary
 
         winner_command = [
             sys.executable,
@@ -6611,14 +7698,24 @@ class ExperimentRunner:
 
     def _run_cross_evaluation(self, run_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
         runs = [run for run in manifest.get("runs", []) if run.get("returncode") == 0]
-        selected_methods = [str(item) for item in manifest.get("selected_methods") or []]
+        selected_methods = [
+            normalize_method_id(item)
+            for item in manifest.get("selected_methods") or []
+        ]
         if not selected_methods:
-            selected_methods = sorted({str(run.get("method_id") or run.get("pipeline")) for run in runs})
+            selected_methods = sorted(
+                {
+                    normalize_method_id(run.get("method_id") or run.get("pipeline"))
+                    for run in runs
+                    if run.get("method_id") or run.get("pipeline")
+                }
+            )
         runs_by_method: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for run in runs:
-            method_id = str(run.get("method_id") or run.get("pipeline") or "")
-            if method_id == "atom_displacement":
-                method_id = "siesta_fc_cartesian"
+            method_id = normalize_method_id(
+                run.get("method_id") or run.get("pipeline") or "",
+                allow_unknown=True,
+            )
             if method_id:
                 runs_by_method[method_id].append(run)
 
@@ -6630,6 +7727,26 @@ class ExperimentRunner:
             "cross_evaluations": [],
             "outputs": {},
         }
+        common_root = experiment_root(run_id) / "common_tests"
+        cross_root = experiment_root(run_id) / "cross_evaluations"
+        prediction_root = experiment_root(run_id) / "cross_predictions"
+        summary_root = experiment_root(run_id) / "summary"
+        test_sets = deduplicate_common_test_sets(
+            manifest.get("test_sets") or [f"test_{method}" for method in selected_methods] + ["test_mixed"]
+        )
+        summary_root.mkdir(parents=True, exist_ok=True)
+        expected_grid = build_cross_evaluation_expected_grid(
+            selected_methods,
+            test_sets,
+            experiment_id=run_id,
+        )
+        expected_grid_path = summary_root / "cross_evaluation_expected_grid.json"
+        expected_grid_path.write_text(
+            json.dumps(json_safe(expected_grid), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        summary["outputs"]["cross_evaluation_expected_grid"] = str(expected_grid_path)
+
         missing_methods = [method for method in selected_methods if not runs_by_method.get(method)]
         if missing_methods:
             warning = f"Missing successful runs for selected methods: {missing_methods}."
@@ -6641,13 +7758,6 @@ class ExperimentRunner:
             summary["warnings"].append("At least two selected methods are required for cross evaluation.")
             return summary
 
-        common_root = experiment_root(run_id) / "common_tests"
-        cross_root = experiment_root(run_id) / "cross_evaluations"
-        prediction_root = experiment_root(run_id) / "cross_predictions"
-        summary_root = experiment_root(run_id) / "summary"
-        test_sets = deduplicate_common_test_sets(
-            manifest.get("test_sets") or [f"test_{method}" for method in selected_methods] + ["test_mixed"]
-        )
         common_root.mkdir(parents=True, exist_ok=True)
         cross_root.mkdir(parents=True, exist_ok=True)
         prediction_root.mkdir(parents=True, exist_ok=True)
@@ -6658,11 +7768,9 @@ class ExperimentRunner:
         ]
         for combo in itertools.product(*method_run_lists):
             combo_by_method = {
-                str(run.get("method_id") or run.get("pipeline")): run
+                normalize_method_id(run.get("method_id") or run.get("pipeline"), allow_unknown=True): run
                 for run in combo
             }
-            if "atom_displacement" in combo_by_method:
-                combo_by_method["siesta_fc_cartesian"] = combo_by_method.pop("atom_displacement")
             dataset_size_by_method = {
                 method: int(combo_by_method[method].get("dataset_size", 0))
                 for method in selected_methods
@@ -6717,6 +7825,8 @@ class ExperimentRunner:
 
             leakage_warnings_by_test_set: dict[str, str] = {}
             leakage_summary_by_test_set: dict[str, str] = {}
+            leakage_scientific_status_by_test_set: dict[str, str] = {}
+            leakage_severe_warnings_by_test_set: dict[str, list[str]] = {}
             for test_set in test_sets:
                 test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                 if not test_manifest.exists():
@@ -6738,10 +7848,26 @@ class ExperimentRunner:
                     label=f"Chequeando leakage geometrico {pair_id} {test_set}",
                 )
                 leakage_summary_path = leakage_dir / "geometry_leakage_summary.json"
+                leakage_diagnostics: dict[str, Any] = {}
                 if leakage_summary_path.exists():
                     leakage_summary_by_test_set[test_set] = str(leakage_summary_path)
+                    leakage_diagnostics = geometry_leakage_diagnostic_fields(
+                        pair_id=pair_id,
+                        test_set=test_set,
+                        leakage_dir=leakage_dir,
+                        summary_path=leakage_summary_path,
+                    )
+                    leakage_scientific_status_by_test_set[test_set] = str(
+                        leakage_diagnostics.get("scientific_status", "")
+                    )
+                    leakage_severe_warnings_by_test_set[test_set] = [
+                        str(item) for item in leakage_diagnostics.get("severe_warnings", []) or []
+                    ]
                 if leakage_result.returncode != 0:
-                    warning = f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
+                    warning = str(
+                        leakage_diagnostics.get("warning")
+                        or f"Geometry leakage detected for {pair_id} {test_set}; see {leakage_dir}."
+                    )
                     summary["warnings"].append(warning)
                     leakage_warnings_by_test_set[test_set] = warning
                     if STRICT_COMPARISON_MODE:
@@ -6777,8 +7903,7 @@ class ExperimentRunner:
                 for test_set in test_sets:
                     test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                     test_method = test_set.removeprefix("test_")
-                    if test_method == "atomdisp":
-                        test_method = "siesta_fc_cartesian"
+                    test_method = normalize_method_id(test_method, allow_unknown=True)
                     if test_method == "mixed":
                         test_method = "mixed"
                     required_cell = f"{train_method} on {test_set}"
@@ -6939,6 +8064,8 @@ class ExperimentRunner:
                         "compute_budget_mode": manifest.get("compute_budget_mode", "both"),
                         "leakage_warning": leakage_warnings_by_test_set.get(test_set, ""),
                         "leakage_summary": leakage_summary_by_test_set.get(test_set, ""),
+                        "leakage_scientific_status": leakage_scientific_status_by_test_set.get(test_set, ""),
+                        "leakage_severe_warnings": leakage_severe_warnings_by_test_set.get(test_set, []),
                         "frozen_test_warning": payload["frozen_test_warning"],
                         "frozen_test_hash": payload["frozen_test_hash"],
                         "frozen_test_manifest": str(payload["frozen_manifest_path"]) if Path(payload["frozen_manifest_path"]).exists() else "",
@@ -6967,6 +8094,30 @@ class ExperimentRunner:
                         "structures": copy_counts["structures"],
                         "evaluation": evaluation_summary,
                     }
+                    cross_manifest["method_provenance"] = build_method_provenance(
+                        manifest,
+                        selected_methods=selected_methods,
+                        runs=[combo_by_method[method] for method in selected_methods],
+                        frozen_test_manifests_by_test_set={
+                            test_set: str(payload["frozen_manifest_path"])
+                            if Path(payload["frozen_manifest_path"]).exists()
+                            else ""
+                        },
+                    )
+                    cross_manifest["method_provenance_warnings"] = sorted(
+                        dict.fromkeys(
+                            f"{method}: {warning}"
+                            for method, provenance in cross_manifest["method_provenance"].items()
+                            for warning in provenance.get("warnings", []) or []
+                        )
+                    )
+                    cross_manifest["method_provenance_severe_warnings"] = sorted(
+                        dict.fromkeys(
+                            f"{method}: {warning}"
+                            for method, provenance in cross_manifest["method_provenance"].items()
+                            for warning in provenance.get("severe_warnings", []) or []
+                        )
+                    )
                     (cross_result_dir / "cross_evaluation_manifest.json").write_text(
                         json.dumps(json_safe(cross_manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
                         encoding="utf-8",
@@ -6986,6 +8137,7 @@ class ExperimentRunner:
                 summary["missing_cells"].extend(evaluation_failures)
             summary["cross_evaluations"].extend(evaluation_results)
 
+        primary_metric = str((manifest.get("selected_metrics") or {}).get("primary_metric", DEFAULT_PRIMARY_METRIC))
         aggregate_command = [
             sys.executable,
             str(COMPARISON_ROOT / "scripts" / "aggregate_cross_metrics.py"),
@@ -6995,6 +8147,10 @@ class ExperimentRunner:
             str(cross_root),
             "--output-dir",
             str(summary_root),
+            "--expected-grid",
+            str(expected_grid_path),
+            "--primary-metric",
+            primary_metric,
         ]
         aggregate_result = self._run_local_script(
             aggregate_command,
@@ -7004,6 +8160,48 @@ class ExperimentRunner:
         if aggregate_result.returncode != 0:
             raise RuntimeError("Cross metric aggregation failed.")
 
+        completeness_path = summary_root / "cross_evaluation_completeness.json"
+        completeness = {}
+        if completeness_path.exists():
+            completeness = json.loads(completeness_path.read_text(encoding="utf-8"))
+        if completeness.get("scientific_status") == "invalid_incomplete_grid":
+            missing_cells = sorted(
+                dict.fromkeys(
+                    [
+                        *(str(cell) for cell in completeness.get("missing_cells", []) or []),
+                        *(str(cell) for cell in completeness.get("missing_primary_metric_cells", []) or []),
+                    ]
+                )
+            )
+            invalid_recommendation = {
+                "status": "invalid_incomplete_grid",
+                "scientific_status": "invalid_incomplete_grid",
+                "winner": None,
+                "reason": "Incomplete cross-evaluation grid",
+                "missing_cells": missing_cells,
+                "missing_required_cells": completeness.get("missing_cells", []),
+                "extra_unexpected_cells": completeness.get("extra_unexpected_cells", []),
+                "missing_primary_metric_cells": completeness.get("missing_primary_metric_cells", []),
+                "completeness_report": str(completeness_path),
+            }
+            (summary_root / "recommendation.json").write_text(
+                json.dumps(invalid_recommendation, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            summary["missing_cells"].extend(completeness.get("missing_cells", []))
+            summary["missing_cells"].extend(completeness.get("missing_primary_metric_cells", []))
+            summary["warnings"].append("Incomplete cross-evaluation grid; winner analysis skipped.")
+            summary["ok"] = False
+            summary["outputs"] = {
+                "common_tests": str(common_root),
+                "cross_evaluations": str(cross_root),
+                "cross_evaluation_metrics": str(summary_root / "cross_evaluation_metrics.csv"),
+                "cross_evaluation_expected_grid": str(expected_grid_path),
+                "cross_evaluation_completeness": str(completeness_path),
+                "recommendation": str(summary_root / "recommendation.json"),
+            }
+            return summary
+
         winner_command = [
             sys.executable,
             str(COMPARISON_ROOT / "scripts" / "analyze_winners.py"),
@@ -7012,7 +8210,7 @@ class ExperimentRunner:
             "--output-dir",
             str(summary_root),
             "--primary-metric",
-            str((manifest.get("selected_metrics") or {}).get("primary_metric", DEFAULT_PRIMARY_METRIC)),
+            primary_metric,
             "--minimum-robust-seeds",
             str(manifest.get("minimum_robust_seeds", MINIMUM_ROBUST_SEEDS)),
         ]
@@ -7024,21 +8222,13 @@ class ExperimentRunner:
         if winner_result.returncode != 0:
             raise RuntimeError("Winner analysis failed.")
 
-        expected_cells = {
-            f"{train_method} on {test_set}"
-            for train_method in selected_methods
-            for test_set in test_sets
-        }
-        actual_cells = {
-            f"{item.get('train_method')} on {item.get('test_set')}"
-            for item in summary["cross_evaluations"]
-        }
-        summary["missing_cells"].extend(sorted(expected_cells - actual_cells))
-        summary["ok"] = not summary["missing_cells"]
+        summary["ok"] = bool(completeness.get("complete", True))
         summary["outputs"] = {
             "common_tests": str(common_root),
             "cross_evaluations": str(cross_root),
             "cross_evaluation_metrics": str(summary_root / "cross_evaluation_metrics.csv"),
+            "cross_evaluation_expected_grid": str(expected_grid_path),
+            "cross_evaluation_completeness": str(completeness_path),
             "winner_summary": str(summary_root / "winner_summary.csv"),
             "recommendation": str(summary_root / "recommendation.json"),
         }
@@ -7054,6 +8244,12 @@ def all_status() -> dict[str, Any]:
         "running": any(status["running"] for status in statuses.values()),
         "pipelines": statuses,
     }
+
+
+def clear_generated_dataset_outputs(*, dry_run: bool = False) -> dict[str, Any]:
+    if all_status().get("running") or EXPERIMENT_RUNNER.status().get("running"):
+        raise RuntimeError("No se pueden borrar datasets mientras hay pipelines o experimentos en ejecucion.")
+    return cleanup_generated_datasets(REPO_ROOT, dry_run=dry_run)
 
 
 def run_all(*, venv_activate_command: str | None = None) -> dict[str, Any]:
@@ -7235,6 +8431,13 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/run/stop":
                 json_response(self, stop_all(), status=HTTPStatus.ACCEPTED)
+            elif path == "/api/datasets/clear":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    clear_generated_dataset_outputs(dry_run=parse_bool(payload.get("dry_run"), False)),
+                    status=HTTPStatus.ACCEPTED,
+                )
             elif path == "/api/experiment":
                 payload = read_json_body(self)
                 selected_methods = normalize_selected_methods(payload.get("selected_methods"))

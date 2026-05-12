@@ -204,34 +204,90 @@ def family_key(row: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(row.get(key, "")) for key in keys)
 
 
-def random_family_key(row: dict[str, Any]) -> tuple[str, ...]:
-    metadata_path = row.get("metadata_path")
+def _row_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    metadata_path = row.get("metadata_path") or row.get("metadata")
     metadata: dict[str, Any] = {}
     if metadata_path:
         try:
             path = Path(str(metadata_path))
+            if not path.is_absolute() and row.get("manifest_path"):
+                path = Path(str(row["manifest_path"])).parent / path
             if path.exists():
                 metadata = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             metadata = {}
-    sample_token = (
-        row.get("sample_index")
-        or metadata.get("sample_index")
-        or metadata.get("id")
-        or row.get("sample_id")
-    )
-    if sample_token in (None, ""):
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _canonical_family_value(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, float):
+        return f"{value:.12g}"
+    if isinstance(value, (int, bool)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return json.dumps(list(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, (list, dict)):
+        return _canonical_family_value(parsed)
+    try:
+        return f"{float(text):.12g}"
+    except ValueError:
+        return text
+
+
+def _metadata_value(row: dict[str, Any], metadata: dict[str, Any], *keys: str) -> Any:
+    block_config = metadata.get("block_config") if isinstance(metadata.get("block_config"), dict) else {}
+    family = metadata.get("random_cartesian_family") if isinstance(metadata.get("random_cartesian_family"), dict) else {}
+    for key in keys:
+        for source in (row, metadata, family, block_config):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value not in (None, ""):
+                return value
+    return ""
+
+
+def random_family_key(row: dict[str, Any]) -> tuple[str, ...]:
+    metadata = _row_metadata(row)
+    family_id = _metadata_value(row, metadata, "random_cartesian_family_id", "split_group_id")
+    distribution = str(_metadata_value(row, metadata, "distribution")).strip().lower()
+    sigma = _metadata_value(row, metadata, "sigma_ang")
+    uniform_range = _metadata_value(row, metadata, "uniform_range_ang")
+    key_values = {
+        "base_geometry_hash": _metadata_value(row, metadata, "base_geometry_hash"),
+        "distribution": distribution,
+        "sigma_ang": sigma if distribution != "uniform" else "",
+        "uniform_range_ang": uniform_range if distribution == "uniform" else "",
+        "seed_family": _metadata_value(row, metadata, "seed_family", "seed"),
+        "move_atoms": _metadata_value(row, metadata, "move_atoms"),
+        "species_filter": _metadata_value(row, metadata, "species_filter"),
+        "recipe_id": _metadata_value(row, metadata, "recipe_id"),
+        "block_id": _metadata_value(row, metadata, "block_id"),
+    }
+    key = tuple(_canonical_family_value(value) for value in key_values.values())
+    if any(key):
+        return key
+    if family_id not in (None, ""):
+        return ("split_group_id", str(family_id))
+    return ()
+
+
+def random_sample_identity_key(row: dict[str, Any]) -> tuple[str, ...]:
+    metadata = _row_metadata(row)
+    family = random_family_key(row)
+    sample_token = _metadata_value(row, metadata, "sample_index", "id", "sample_id")
+    if not family or sample_token in (None, ""):
         return ()
-    keys = [
-        "base_geometry_hash",
-        "distribution",
-        "sigma_ang",
-        "uniform_range_ang",
-        "seed",
-    ]
-    return tuple(str(row.get(key, metadata.get(key, ""))) for key in keys) + (
-        str(sample_token),
-    )
+    return family + (_canonical_family_value(sample_token),)
 
 
 def analyze(
@@ -314,6 +370,9 @@ def analyze(
                 if any(key) and key == random_family_key(test):
                     reasons.append("random_cartesian_same_family_cross_split")
                     random_family += 1
+                sample_key = random_sample_identity_key(train)
+                if any(sample_key) and sample_key == random_sample_identity_key(test):
+                    reasons.append("random_cartesian_same_sample_identity_cross_split")
 
             if reasons:
                 report.append(
@@ -329,11 +388,51 @@ def analyze(
                         "aligned_rmsd": aligned_shape_rmsd if aligned_shape_rmsd is not None else "",
                         "internal_distance_max_diff": distance_max_diff if distance_max_diff is not None else "",
                         "reasons": ";".join(sorted(set(reasons))),
+                        "random_cartesian_family_key": "|".join(random_family_key(train))
+                        if train_method == "random_cartesian" and test_method == "random_cartesian"
+                        else "",
                     }
                 )
 
+    warnings: list[str] = []
+    severe_warnings: list[str] = []
+    if exact:
+        severe_warnings.append(f"exact_duplicate_geometry_cross_split: {exact} pair(s)")
+    if near:
+        warnings.append(f"near_duplicate_geometry_cross_split: {near} pair(s)")
+    if aligned_near:
+        warnings.append(f"aligned_near_duplicate_geometry_cross_split: {aligned_near} pair(s)")
+    if distance_near:
+        warnings.append(f"internal_distance_near_duplicate_geometry_cross_split: {distance_near} pair(s)")
+    if md_neighbors:
+        warnings.append(f"md_neighboring_frames_cross_split: {md_neighbors} pair(s)")
+    if atom_family:
+        warnings.append(f"atom_displacement_same_family_cross_split: {atom_family} pair(s)")
+    if random_family:
+        warnings.append(
+            "random_cartesian_same_family_cross_split: "
+            f"{random_family} pair(s); random_cartesian splits are scientifically non-independent"
+        )
+    leakage_status_detail = "valid_independent_splits"
+    if exact:
+        scientific_status = "invalid_leakage"
+        leakage_status_detail = "invalid_exact_geometry_leakage"
+    elif near or aligned_near or distance_near:
+        scientific_status = "scientifically_inconclusive"
+        leakage_status_detail = "potential_geometry_leakage"
+    elif atom_family or md_neighbors:
+        scientific_status = "scientifically_inconclusive"
+        leakage_status_detail = "scientifically_non_independent_splits"
+    elif random_family:
+        scientific_status = "exploratory_only"
+        leakage_status_detail = "random_cartesian_same_family_cross_split"
+    else:
+        scientific_status = "valid_independent_splits"
     summary = {
         "ok": not report,
+        "scientific_status": scientific_status,
+        "leakage_status_detail": leakage_status_detail,
+        "scientifically_independent": not report,
         "train_samples": len(train_rows),
         "test_samples": len(test_rows),
         "pairs_checked": len(train_rows) * len(test_rows),
@@ -345,6 +444,8 @@ def analyze(
         "md_neighbor_warnings": md_neighbors,
         "atom_displacement_family_warnings": atom_family,
         "random_cartesian_family_warnings": random_family,
+        "warning_messages": warnings,
+        "severe_warnings": severe_warnings,
         "parser_errors": parser_errors,
         "rmsd_threshold": rmsd_threshold,
         "max_diff_threshold": max_diff_threshold,

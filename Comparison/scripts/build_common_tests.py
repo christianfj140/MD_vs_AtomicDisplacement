@@ -24,17 +24,14 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from method_registry import normalize_method_id
+
 
 REQUIRED_COLUMNS = {"sample_id", "method", "structure_path", "hamiltonian_path", "status"}
-LEGACY_METHOD_ALIASES = {
-    "atom_displacement": "siesta_fc_cartesian",
-    "atomdisp": "siesta_fc_cartesian",
-}
 
 
 def canonical_method(value: str) -> str:
-    text = str(value or "").strip()
-    return LEGACY_METHOD_ALIASES.get(text, text)
+    return normalize_method_id(value, allow_unknown=True)
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:

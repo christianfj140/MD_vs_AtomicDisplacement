@@ -11,7 +11,7 @@
     <div class="app-shell">
       <aside class="sidebar">
         <div>
-          <p class="eyebrow">MD vs AtomDisplacement</p>
+          <p class="eyebrow">MD / FC Cartesian / Random Cartesian</p>
           <h1>Comparison</h1>
         </div>
         <nav class="tabs" aria-label="Views">
@@ -32,10 +32,10 @@
           <header class="content-header">
             <div>
               <p class="eyebrow">Execution</p>
-              <h2>Run both pipelines</h2>
+              <h2>Run pipelines</h2>
             </div>
             <div class="button-row">
-              <button id="run-all" class="button primary">Run both</button>
+              <button id="run-all" class="button primary">Run pipelines</button>
               <button id="stop-all" class="button danger">Stop</button>
             </div>
           </header>
@@ -59,7 +59,7 @@
               <div class="panel-heading">
                 <div>
                   <p class="eyebrow">Pipeline</p>
-                  <h3>AtomDisplacement</h3>
+                  <h3>FC Cartesian</h3>
                 </div>
                 <span class="inline-status">
                   <span id="atom-displacement-status-dot" class="status-dot"></span>
@@ -112,7 +112,7 @@
                 <select id="primary-metric">
                   <option value="fermi_window_rmse_eV">Fermi-window RMSE</option>
                   <option value="frontier_window_rmse_eV">Frontier HOMO/LUMO RMSE</option>
-                  <option value="low_energy_rmse_eV">Low-energy eigenvalue RMSE</option>
+                  <option value="low_energy_rmse_eV" selected>Low-energy eigenvalue RMSE</option>
                   <option value="global_rmse_eV">Global spectral RMSE</option>
                   <option value="relative_frobenius_union">Relative Frobenius</option>
                   <option value="mae_ref_eV">Sparse MAE on SIESTA support</option>
@@ -131,11 +131,11 @@
               <label class="field">
                 <span>Common test sets</span>
                 <select id="test-sets" multiple size="3">
-                  <option value="test_md" selected>MD test</option>
-                  <option value="test_siesta_fc_cartesian" selected>SIESTA FC Cartesian test</option>
-                  <option value="test_random_cartesian" selected>Random Cartesian test</option>
-                  <option value="test_atomdisp">AtomDisplacement legacy test</option>
-                  <option value="test_mixed" selected>Mixed test</option>
+                  <option value="test_md" selected>MD test (test_md)</option>
+                  <option value="test_siesta_fc_cartesian" selected>FC Cartesian test (test_siesta_fc_cartesian)</option>
+                  <option value="test_random_cartesian" selected>Random Cartesian test (test_random_cartesian)</option>
+                  <option value="test_atomdisp">FC Cartesian legacy alias (test_atomdisp)</option>
+                  <option value="test_mixed" selected>Mixed test (test_mixed)</option>
                 </select>
               </label>
               <label class="field">
@@ -230,7 +230,7 @@
                   <span id="md-preview-summary" class="method-summary">3 datasets</span>
                 </div>
                 <p class="field-help">
-                  Cada tarjeta es un dataset independiente. Usa + dentro de una tarjeta para añadir bloques temperatura/snapshots al mismo dataset.
+                  Cada tarjeta es un dataset independiente. Usa + para añadir bloques temperatura/snapshots y Seed para fijar la semilla de esa tarjeta.
                 </p>
                 <div id="md-dataset-editor" class="dataset-editor" data-kind="md"></div>
                 <div class="button-row">
@@ -247,7 +247,7 @@
                 <input id="md-sizes" type="hidden" value="10, 20, 30" />
                 <label class="toggle-field inline-toggle">
                   <input id="sync-md-sizes" type="checkbox" />
-                  <span>Usar los tamaños generados por FC</span>
+                  <span>Usar los tamaños generados por FC Cartesian</span>
                 </label>
                 <div class="method-note">
                   MD usa capas SIESTA verificadas: Verlet/NVE con MD.InitialTemperature, o Nose/NVT si el bloque declara thermostat nose.
@@ -258,17 +258,17 @@
                 <div class="method-card-header">
                   <label class="method-toggle">
                     <input class="method-checkbox" type="checkbox" value="siesta_fc_cartesian" checked />
-                    <span>SIESTA FC</span>
+                    <span>FC Cartesian</span>
                   </label>
                   <span id="fc-limit" class="method-summary">Max per displacement: -</span>
                 </div>
-                <p class="field-help">Cada tarjeta es un dataset FC independiente. Varias filas dentro de una tarjeta forman un dataset compuesto.</p>
+                <p class="field-help">Cada tarjeta es un dataset FC Cartesian independiente. Varias filas forman un dataset compuesto y Seed controla el submuestreo de esa tarjeta.</p>
                 <div id="fc-dataset-editor" class="dataset-editor" data-kind="fc"></div>
                 <div class="button-row">
                   <button id="fc-add-dataset" class="button secondary" type="button">+ Add dataset</button>
                 </div>
                 <label class="field fc-options-field dataset-source-field">
-                  <span>Datasets FC: snapshots | desplazamiento (Ang)</span>
+                  <span>Datasets FC Cartesian: snapshots | desplazamiento (Ang)</span>
                   <small>También se acepta el formato legacy: 0.02 Ang: 5, 7, 9.</small>
                   <textarea id="fc-displacement-options" rows="10">5 | 0.02
 4 | 0.03
@@ -329,14 +329,14 @@
                   <span id="random-preview-summary" class="method-summary">1 dataset</span>
                 </div>
                 <p class="field-help">
-                  Cada tarjeta es un dataset RC independiente. La amplitud de cada fila se aplica como sigma gaussian o rango uniforme segun la distribucion global.
+                  Cada tarjeta es un dataset Random Cartesian independiente. La amplitud de cada fila se aplica como sigma/rango global y Seed fija la familia aleatoria del dataset.
                 </p>
                 <div id="random-dataset-editor" class="dataset-editor" data-kind="random_cartesian"></div>
                 <div class="button-row">
                   <button id="random-add-dataset" class="button secondary" type="button">+ Add dataset</button>
                 </div>
                 <label class="field dataset-source-field">
-                  <span>Datasets RC: estructuras | amplitud max/sigma (Ang)</span>
+                  <span>Datasets Random Cartesian: estructuras | amplitud max/sigma (Ang)</span>
                   <textarea id="random-cartesian-dataset-table" rows="5">100 | 0.03</textarea>
                 </label>
                 <input id="random-cartesian-n-structures" type="hidden" value="100" />
@@ -452,7 +452,7 @@
 	              <label class="field">
 	                <span>Max parallel SIESTA jobs</span>
 	                <input id="performance-max-parallel-siesta-jobs" type="number" step="1" min="1" value="4" />
-	                <small>Only independent AtomDisplacement / Random Cartesian samples. MD trajectories stay sequential.</small>
+	                <small>Only independent FC Cartesian / Random Cartesian samples. MD trajectories stay sequential.</small>
 	              </label>
 	              <label class="field">
 	                <span>Max dataset jobs</span>
@@ -568,6 +568,7 @@
                 <span>Show plots</span>
               </label>
               <button id="refresh-results" class="button secondary">Refresh</button>
+              <button id="clear-datasets" class="button danger" type="button">Clear datasets</button>
             </div>
           </header>
           <div id="results-grid" class="grid two"></div>
@@ -600,6 +601,7 @@
                 <span id="plots-status" class="muted-text">Plots disabled</span>
               </div>
             </div>
+            <div id="plot-warnings" class="performance-warning hidden" role="status" aria-live="polite"></div>
             <div class="plot-grid">
               <div id="plot-fermi" class="plot-card"></div>
               <div id="plot-low-energy" class="plot-card"></div>
@@ -636,6 +638,7 @@
             <code>GET /api/run/logs?pipeline=atom_displacement&amp;since=0</code>
             <code>GET /api/results</code>
             <code>GET /api/plots</code>
+            <code>POST /api/datasets/clear</code>
             <code>GET /api/atom-fc-config</code>
             <code>POST /api/experiment</code>
             <code>POST /api/experiment/stop</code>

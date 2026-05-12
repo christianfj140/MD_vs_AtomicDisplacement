@@ -96,6 +96,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def load_method_registry_module(self):
+        return self.load_module_from_path(
+            "method_registry_test",
+            REPO_ROOT / "Comparison" / "scripts" / "method_registry.py",
+        )
+
     def load_module_from_path(self, name: str, path: Path):
         spec = importlib.util.spec_from_file_location(name, path)
         assert spec and spec.loader
@@ -111,11 +117,316 @@ class ComparisonWorkflowTests(unittest.TestCase):
             REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py",
         )
 
+    def load_model_settings_module(self, name: str = "model_settings_test"):
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        return self.load_module_from_path(
+            name,
+            REPO_ROOT / "Comparison" / "scripts" / "model_settings.py",
+        )
+
+    def write_expected_cross_grid(self, path: Path, methods: tuple[str, ...], test_sets: tuple[str, ...]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        expected_cells = [
+            {"train_method": method, "test_set": test_set, "cell_id": f"{method} on {test_set}"}
+            for method in methods
+            for test_set in test_sets
+        ]
+        path.write_text(
+            json.dumps(
+                {
+                    "experiment_id": "exp_grid",
+                    "canonical_method_ids": ["md", "siesta_fc_cartesian", "random_cartesian"],
+                    "selected_methods": list(methods),
+                    "selected_frozen_test_sets": list(test_sets),
+                    "expected_cell_count": len(expected_cells),
+                    "expected_cells": expected_cells,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def write_completeness_report(
+        self,
+        path: Path,
+        methods: tuple[str, ...],
+        test_sets: tuple[str, ...],
+        *,
+        primary_metric: str = "global_rmse_eV",
+        missing_cells: tuple[str, ...] = (),
+        missing_primary_metric_cells: tuple[str, ...] = (),
+        extra_unexpected_cells: tuple[str, ...] = (),
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        expected_cells = [f"{method} on {test_set}" for method in methods for test_set in test_sets]
+        missing = set(missing_cells)
+        extras = set(extra_unexpected_cells)
+        actual_cells = sorted((set(expected_cells) - missing) | extras)
+        complete = not missing_cells and not missing_primary_metric_cells and not extra_unexpected_cells
+        path.write_text(
+            json.dumps(
+                {
+                    "experiment_id": "exp_grid",
+                    "primary_metric": primary_metric,
+                    "expected_cell_count": len(expected_cells),
+                    "actual_cell_count": len(actual_cells),
+                    "expected_cells": expected_cells,
+                    "actual_cells": actual_cells,
+                    "missing_cells": list(missing_cells),
+                    "extra_unexpected_cells": list(extra_unexpected_cells),
+                    "missing_primary_metric_cells": list(missing_primary_metric_cells),
+                    "complete": complete,
+                    "scientific_status": "valid_grid" if complete else "invalid_incomplete_grid",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def write_cross_metric_cell(
+        self,
+        cross_root: Path,
+        method: str,
+        test_set: str,
+        *,
+        primary_metric: str = "low_energy_rmse_eV",
+        primary_value: str | None = "0.2",
+    ) -> None:
+        result_dir = cross_root / f"{method}__on__{test_set}"
+        (result_dir / "metrics").mkdir(parents=True)
+        write_csv(
+            result_dir / "metrics" / "sparse_metrics.csv",
+            [{"sample": "sample_1", "relative_frobenius_union": "1.0"}],
+        )
+        spectral_row = {
+            "sample": "sample_1",
+            "low_energy_n_states": "3",
+            "low_energy_mae_eV": "0.1",
+            "low_energy_max_abs_error_eV": "0.3",
+        }
+        if primary_value is not None:
+            spectral_row[primary_metric] = primary_value
+        write_csv(result_dir / "metrics" / "spectral_metrics.csv", [spectral_row])
+        (result_dir / "cross_evaluation_manifest.json").write_text(
+            json.dumps(
+                {
+                    "train_method": method,
+                    "test_set": test_set,
+                    "dataset_size": 3,
+                    "seed": 42,
+                    "model_checkpoint": f"{method}.ckpt",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def write_final_recommendation_metric_grid(
+        self,
+        path: Path,
+        *,
+        methods: tuple[str, ...] = ("md", "siesta_fc_cartesian", "random_cartesian"),
+        test_sets: tuple[str, ...] = (
+            "test_md",
+            "test_siesta_fc_cartesian",
+            "test_random_cartesian",
+            "test_mixed",
+        ),
+        seeds: tuple[str, ...] = ("1", "2", "3"),
+        primary_metric: str = "low_energy_rmse_eV",
+        value_for=None,
+        dataset_sizes: dict[str, int] | None = None,
+        extra_for=None,
+        skip_cell=None,
+    ) -> list[dict[str, str]]:
+        dataset_sizes = dataset_sizes or {
+            "md": 1000,
+            "siesta_fc_cartesian": 750,
+            "random_cartesian": 3500,
+        }
+        rows = []
+        for seed in seeds:
+            for method in methods:
+                for test_set in test_sets:
+                    if skip_cell and skip_cell(method, test_set, seed):
+                        continue
+                    row = {
+                        "experiment_id": "exp_final_recommendation",
+                        "train_method": method,
+                        "test_set": test_set,
+                        "dataset_size_by_method": json.dumps(dataset_sizes),
+                        "dataset_label_by_method": json.dumps(
+                            {item: f"{item}_{size}" for item, size in dataset_sizes.items()}
+                        ),
+                        "recipe_hash_by_method": json.dumps(
+                            {item: f"{item}_hash_{size}" for item, size in dataset_sizes.items()}
+                        ),
+                        "seed": seed,
+                        "model_checkpoint": f"{method}_{seed}.ckpt",
+                    }
+                    if value_for:
+                        value = value_for(method, test_set, seed)
+                    else:
+                        value = "0.5" if method == "md" else "1.0"
+                    if value is not None:
+                        row[primary_metric] = str(value)
+                    if extra_for:
+                        row.update(extra_for(method, test_set, seed) or {})
+                    rows.append(row)
+        write_csv(path, rows)
+        return rows
+
+    def siesta_settings_fixture(self) -> tuple[dict, dict, dict]:
+        shared = {"MeshCutoff": "200 Ry"}
+        md = {
+            "md": {
+                "lattice_constant": 15,
+                "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
+                "basis_type": "split",
+                "basis_size": "DZP",
+                "energy_shift": "0.03 eV",
+                "mesh_cutoff": "200 Ry",
+                "xc_functional": "GGA",
+                "xc_authors": "PBE",
+                "max_scf_iterations": 200,
+                "solution_method": "diagon",
+                "dm_mixing_weight": 0.02,
+                "dm_number_pulay": 3,
+                "dm_tolerance": "1.d-5",
+                "dm_require_energy_convergence": "T",
+                "dm_energy_tolerance": "1.e-5 eV",
+                "spin_polarized": "F",
+                "fix_spin": "F",
+                "non_collinear_spin": "F",
+                "force_aux_cell": False,
+                "save_hs_file": True,
+                "save_hs": True,
+                "save_de": True,
+                "xml_write": True,
+            }
+        }
+        atom = {
+            "structure": {
+                "lattice_constant": 15,
+                "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
+                "force_constants": {"save_tshs": True, "save_tsde": True},
+                "siesta": {
+                    "ForceAuxCell": "F",
+                    "Save.HS": "T",
+                    "MeshCutoff": "200 Ry",
+                    "PAO.BasisType": "split",
+                    "PAO.BasisSize": "DZP",
+                    "PAO.EnergyShift": "0.03 eV",
+                    "XC.functional": "GGA",
+                    "XC.authors": "PBE",
+                    "MaxSCFIterations": 200,
+                    "SolutionMethod": "diagon",
+                    "DM.MixingWeight": 0.02,
+                    "DM.NumberPulay": 3,
+                    "DM.Tolerance": "1.d-5",
+                    "DM.Require.Energy.Convergence": "T",
+                    "DM.Energy.Tolerance": "1.e-5 eV",
+                    "SpinPolarized": "F",
+                    "FixSpin": "F",
+                    "NonCollinearSpin": "F",
+                    "XML.Write": "T",
+                },
+            }
+        }
+        return shared, md, atom
+
+    def model_settings_fixture(self) -> tuple[dict, dict, dict]:
+        base_training = {
+            "torch_float32_matmul_precision": "high",
+            "data": {
+                "out_matrix": "hamiltonian",
+                "symmetric_matrix": True,
+                "sub_point_matrix": False,
+                "n_matrix_components": 2,
+                "basis_files": "../dataset/basis/*.ion.xml",
+                "train_runs": "../dataset/train/*/RUN.fdf",
+                "batch_size": 8,
+                "store_in_memory": True,
+            },
+            "model": {
+                "num_interactions": 1,
+                "correlation": 1,
+                "max_ell": 2,
+                "hidden_irreps": "10x0e + 10x1o + 10x2e",
+                "loss": "graph2mat.metrics.block_type_mae",
+                "optim_lr": 0.005,
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "logger": {
+                    "class_path": "TensorBoardLogger",
+                    "init_args": {"name": "method_model", "save_dir": "lightning_logs"},
+                },
+                "max_epochs": 100,
+            },
+        }
+        md = {"training": copy.deepcopy(base_training)}
+        fc = {"training": copy.deepcopy(base_training)}
+        rc = {"training": copy.deepcopy(base_training)}
+        fc["training"]["data"]["basis_files"] = "../fc/basis/*.ion.xml"
+        fc["training"]["data"]["runs_json"] = "../fc/runs.json"
+        fc["training"]["trainer"]["logger"]["init_args"]["name"] = "fc_model"
+        rc["training"]["data"]["basis_files"] = "../rc/basis/*.ion.xml"
+        rc["training"]["data"]["train_runs"] = "../rc/train/*/RUN.fdf"
+        rc["training"]["trainer"]["logger"]["init_args"]["name"] = "rc_model"
+        return md, fc, rc
+
+    def provenance_run_fixture(
+        self,
+        root: Path,
+        method: str,
+        *,
+        size: int = 3,
+        label: str | None = None,
+        checkpoint_hash: str | None = "checkpoint_hash",
+        legacy_pipeline_only: bool = False,
+    ) -> dict:
+        method_id = "siesta_fc_cartesian" if method in {"atom_displacement", "atomdisp"} else method
+        pipeline = "atom_displacement" if method_id == "siesta_fc_cartesian" else method_id
+        label = label or f"{method_id}_dataset"
+        result_dir = root / method_id / label
+        split_dir = result_dir / "splits"
+        split_dir.mkdir(parents=True)
+        for split in ("train", "validation", "test"):
+            write_csv(split_dir / f"{split}_manifest.csv", [{"sample_id": f"{split}_1"}])
+        checkpoint_path = result_dir / "training" / "best.ckpt"
+        checkpoint_path.parent.mkdir(parents=True)
+        checkpoint_path.write_bytes(b"checkpoint")
+        run = {
+            "pipeline": pipeline,
+            "dataset_label": label,
+            "dataset_size": size,
+            "effective_dataset_size": size,
+            "result_dir": str(result_dir),
+            "model_checkpoint": str(checkpoint_path),
+            "model_checkpoint_sha256": checkpoint_hash,
+            "checkpoint_manifest": str(result_dir / "training" / "checkpoint_manifest.json"),
+            "checkpoint_selection_warning": "",
+            "artifact_hashes": {
+                "basis": f"{method_id}_basis_hash",
+                "pseudopotentials": f"{method_id}_pseudo_hash",
+            },
+            "recipe_id": f"{method_id}_recipe",
+            "recipe_label": f"{method_id} recipe",
+            "recipe_set_hash": f"{method_id}_recipe_hash",
+            "returncode": 0,
+            "seed": 42,
+        }
+        if not legacy_pipeline_only:
+            run["method_id"] = method_id
+        return run
+
     def test_method_selection_normalization_and_validation(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
             module.normalize_selected_methods(["md", "atom_displacement"]),
             ["md", "siesta_fc_cartesian"],
+        )
+        self.assertEqual(
+            module.normalize_selected_methods(["atomdisp", "siesta_fc_cartesian", "random_cartesian"]),
+            ["siesta_fc_cartesian", "random_cartesian"],
         )
         self.assertEqual(module.normalize_selected_methods(None), ["md", "siesta_fc_cartesian"])
         with self.assertRaisesRegex(RuntimeError, "Selecciona al menos un metodo"):
@@ -123,6 +434,23 @@ class ComparisonWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no soportados"):
             module.normalize_selected_methods(["md", "bogus"])
         self.assertEqual(module.normalize_selected_methods(["random_cartesian"]), ["random_cartesian"])
+
+    def test_method_registry_canonical_ids_and_aliases(self) -> None:
+        module = self.load_method_registry_module()
+        self.assertEqual(
+            tuple(module.METHOD_REGISTRY),
+            ("md", "siesta_fc_cartesian", "random_cartesian"),
+        )
+        self.assertTrue(module.METHOD_REGISTRY["md"].is_baseline)
+        self.assertFalse(module.METHOD_REGISTRY["random_cartesian"].is_baseline)
+        self.assertEqual(module.METHOD_REGISTRY["siesta_fc_cartesian"].results_dir, "results_atomdisp")
+        self.assertEqual(module.normalize_method_id("atom_displacement"), "siesta_fc_cartesian")
+        self.assertEqual(module.normalize_method_id("atomdisp"), "siesta_fc_cartesian")
+        self.assertEqual(module.get_method("atomdisp").method_id, "siesta_fc_cartesian")
+        self.assertEqual(module.get_method("random_cartesian").frozen_test_set, "test_random_cartesian")
+        self.assertEqual(module.normalize_test_set_id("test_atomdisp"), "test_siesta_fc_cartesian")
+        with self.assertRaisesRegex(ValueError, "Unknown scientific method"):
+            module.normalize_method_id("bogus")
 
     def test_run_mode_validation(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -468,6 +796,108 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertRegex(labels[2], r"^FC_dataset1_[A-Za-z0-9]{6}$")
         self.assertRegex(labels[3], r"^RC_dataset1_[A-Za-z0-9]{6}$")
 
+    def test_dataset_recipe_seeds_propagate_per_dataset_for_all_methods(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.atom_fc_sample_limit = lambda _config: 100
+        recipes = {
+            "md": [
+                {
+                    "recipe_id": "md_seeded",
+                    "seed": 101,
+                    "blocks": [{"n_snapshots": 3, "temperature_K": 300}],
+                }
+            ],
+            "siesta_fc_cartesian": [
+                {
+                    "recipe_id": "fc_seeded",
+                    "seed": 202,
+                    "blocks": [{"n_structures": 3, "displacement": "0.02 Ang"}],
+                }
+            ],
+            "random_cartesian": [
+                {
+                    "recipe_id": "rc_seeded",
+                    "seed": 303,
+                    "blocks": [{"n_structures": 3, "sigma_ang": 0.03}],
+                }
+            ],
+        }
+        info = module.dataset_recipes_to_execution_specs(
+            recipes,
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+            split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            random_cartesian_defaults={"distribution": "gaussian", "sigma_ang": 0.01, "seed": 999},
+        )
+        self.assertEqual(info["md_dataset_specs"][0]["recipe_metadata"]["seed"], 101)
+        self.assertEqual(info["md_dataset_specs"][0]["temperature_blocks"][0]["seed"], 101)
+        self.assertEqual(info["atom_dataset_specs"][0]["recipe_metadata"]["seed"], 202)
+        rc_spec = info["random_cartesian_dataset_specs"][0]
+        self.assertEqual(rc_spec["recipe_metadata"]["seed"], 303)
+        self.assertEqual(rc_spec["options"]["seed"], 303)
+        self.assertNotIn("seed", rc_spec["options"]["blocks"][0])
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            runner = module.ExperimentRunner()
+            calls: dict[str, list] = {"run_one": [], "random": []}
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                calls["run_one"].append((key, kwargs))
+                return {
+                    "pipeline": key,
+                    "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
+                    "dataset_label": kwargs.get("dataset_label") or f"dataset_{size}",
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake" / key / f"dataset_{size}"),
+                    "dataset_sample_ids": [f"{key}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 0.1,
+                    "siesta_counts": {"launched": 0, "skipped_or_reused": 0, "failed": 0},
+                    "seed": (kwargs.get("recipe_metadata") or {}).get("seed"),
+                }
+
+            def fake_run_random(size, run_id, **kwargs):
+                calls["random"].append((size, kwargs))
+                return {
+                    "pipeline": "random_cartesian",
+                    "method_id": "random_cartesian",
+                    "dataset_label": kwargs.get("dataset_label") or f"dataset_{size}",
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake" / "random_cartesian" / f"dataset_{size}"),
+                    "dataset_sample_ids": [f"rc-{size}"],
+                    "dataset_sample_hash": f"hash-rc-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 0.1,
+                    "siesta_counts": {"launched": 0, "skipped_or_reused": 0, "failed": 0},
+                    "seed": (kwargs.get("recipe_metadata") or {}).get("seed"),
+                }
+
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._run_random_cartesian = fake_run_random  # type: ignore[method-assign]
+            runner._run(
+                [3],
+                [3],
+                "seeded_case",
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+                run_mode="dataset_only",
+                random_seed=42,
+                random_cartesian_options={"distribution": "gaussian", "sigma_ang": 0.01, "seed": 999},
+                dataset_recipes_info=info,
+            )
+            md_call = next(kwargs for key, kwargs in calls["run_one"] if key == "md")
+            fc_call = next(kwargs for key, kwargs in calls["run_one"] if key == "atom_displacement")
+            self.assertEqual(md_call["md_temperature_blocks"][0]["seed"], 101)
+            self.assertEqual(fc_call["random_seed"], 202)
+            self.assertEqual(calls["random"][0][1]["random_cartesian_options"]["seed"], 303)
+            manifest = module.load_config(root / "results" / "seeded_case" / "experiment_manifest.yaml")
+            self.assertEqual(manifest["seeds"], [101, 202, 303, 42])
+
     def test_fc_dataset_labels_are_compact_for_many_displacements(self) -> None:
         module = self.load_pipeline_ui_module()
         module.atom_fc_sample_limit = lambda _config: 100
@@ -542,9 +972,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "test_mixed",
             )
         }
-        self.assertEqual(len(test_set_names), 5)
+        self.assertEqual(len(test_set_names), 4)
         self.assertIn(f"{pair_id}__md__on__test_fc", test_set_names)
-        self.assertIn(f"{pair_id}__md__on__test_ad", test_set_names)
+        self.assertNotIn(f"{pair_id}__md__on__test_ad", test_set_names)
 
     def test_common_test_set_aliases_are_deduplicated(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -556,8 +986,158 @@ class ComparisonWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             module.deduplicate_common_test_sets(["test_md", "test_atomdisp", "test_mixed"]),
-            ["test_md", "test_atomdisp", "test_mixed"],
+            ["test_md", "test_siesta_fc_cartesian", "test_mixed"],
         )
+
+    def test_expected_cross_grid_for_two_methods_with_and_without_mixed(self) -> None:
+        module = self.load_pipeline_ui_module()
+        grid = module.build_cross_evaluation_expected_grid(
+            ["md", "atomdisp"],
+            ["test_md", "test_atomdisp"],
+            experiment_id="exp_two",
+        )
+        self.assertEqual(grid["experiment_id"], "exp_two")
+        self.assertEqual(grid["canonical_method_ids"], ["md", "siesta_fc_cartesian", "random_cartesian"])
+        self.assertEqual(grid["selected_methods"], ["md", "siesta_fc_cartesian"])
+        self.assertEqual(grid["selected_frozen_test_sets"], ["test_md", "test_siesta_fc_cartesian"])
+        self.assertEqual(grid["expected_cell_count"], 4)
+        self.assertEqual(
+            {(cell["train_method"], cell["test_set"]) for cell in grid["expected_cells"]},
+            {
+                ("md", "test_md"),
+                ("md", "test_siesta_fc_cartesian"),
+                ("siesta_fc_cartesian", "test_md"),
+                ("siesta_fc_cartesian", "test_siesta_fc_cartesian"),
+            },
+        )
+
+        mixed_grid = module.build_cross_evaluation_expected_grid(
+            ["md", "siesta_fc_cartesian"],
+            ["test_md", "test_siesta_fc_cartesian", "test_mixed"],
+        )
+        self.assertEqual(mixed_grid["expected_cell_count"], 6)
+        self.assertIn(
+            {"train_method": "siesta_fc_cartesian", "test_set": "test_mixed", "cell_id": "siesta_fc_cartesian on test_mixed"},
+            mixed_grid["expected_cells"],
+        )
+
+    def test_expected_cross_grid_for_three_methods_with_and_without_mixed(self) -> None:
+        module = self.load_pipeline_ui_module()
+        methods = ["md", "siesta_fc_cartesian", "random_cartesian"]
+        base_tests = ["test_md", "test_siesta_fc_cartesian", "test_random_cartesian"]
+        grid = module.build_cross_evaluation_expected_grid(methods, base_tests)
+        self.assertEqual(grid["selected_methods"], methods)
+        self.assertEqual(grid["selected_frozen_test_sets"], base_tests)
+        self.assertEqual(grid["expected_cell_count"], 9)
+        self.assertEqual(
+            {(cell["train_method"], cell["test_set"]) for cell in grid["expected_cells"]},
+            {
+                (method, test_set)
+                for method in methods
+                for test_set in base_tests
+            },
+        )
+
+        mixed_grid = module.build_cross_evaluation_expected_grid(methods, [*base_tests, "test_mixed"])
+        self.assertEqual(mixed_grid["expected_cell_count"], 12)
+        for method in methods:
+            self.assertIn(
+                {"train_method": method, "test_set": "test_mixed", "cell_id": f"{method} on test_mixed"},
+                mixed_grid["expected_cells"],
+            )
+
+    def test_cross_evaluation_writes_expected_grid_before_missing_runs(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            runner = module.ExperimentRunner()
+            summary = runner._run_cross_evaluation(
+                "exp_missing_grid",
+                {
+                    "selected_methods": ["md", "siesta_fc_cartesian", "random_cartesian"],
+                    "test_sets": ["test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed"],
+                    "runs": [
+                        {
+                            "pipeline": "md",
+                            "method_id": "md",
+                            "returncode": 0,
+                            "dataset_size": 3,
+                            "dataset_label": "md_3",
+                        }
+                    ],
+                },
+            )
+            self.assertFalse(summary["ok"])
+            grid_path = root / "results" / "exp_missing_grid" / "summary" / "cross_evaluation_expected_grid.json"
+            self.assertEqual(summary["outputs"]["cross_evaluation_expected_grid"], str(grid_path))
+            grid = json.loads(grid_path.read_text(encoding="utf-8"))
+            self.assertEqual(grid["expected_cell_count"], 12)
+            self.assertIn(
+                {"train_method": "random_cartesian", "test_set": "test_random_cartesian", "cell_id": "random_cartesian on test_random_cartesian"},
+                grid["expected_cells"],
+            )
+
+    def test_cross_evaluation_skips_winner_when_completeness_invalid(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            runner = module.ExperimentRunner()
+            calls = {"winner": 0}
+            runner._split_manifest_for_result = lambda _result, split: root / f"{split}.csv"  # type: ignore[method-assign]
+
+            def fake_run_local_script(command, label="", env=None):
+                if "Agregando metricas cruzadas" in label:
+                    output_dir = Path(command[command.index("--output-dir") + 1])
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    (output_dir / "cross_evaluation_metrics.csv").write_text(
+                        "experiment_id,train_method,test_set,sample_id\n",
+                        encoding="utf-8",
+                    )
+                    (output_dir / "cross_evaluation_completeness.json").write_text(
+                        json.dumps(
+                            {
+                                "complete": False,
+                                "scientific_status": "invalid_incomplete_grid",
+                                "missing_cells": ["random_cartesian on test_md"],
+                                "extra_unexpected_cells": [],
+                                "missing_primary_metric_cells": [],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                if "Analizando winners" in label:
+                    calls["winner"] += 1
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            runner._run_local_script = fake_run_local_script  # type: ignore[method-assign]
+            summary = runner._run_cross_evaluation(
+                "exp_incomplete_guard",
+                {
+                    "selected_methods": ["md", "random_cartesian"],
+                    "test_sets": ["test_md", "test_random_cartesian"],
+                    "runs": [
+                        {"pipeline": "md", "method_id": "md", "returncode": 0, "dataset_size": 3, "dataset_label": "md_3", "result_dir": str(root / "md")},
+                        {
+                            "pipeline": "random_cartesian",
+                            "method_id": "random_cartesian",
+                            "returncode": 0,
+                            "dataset_size": 3,
+                            "dataset_label": "rc_3",
+                            "result_dir": str(root / "rc"),
+                        },
+                    ],
+                },
+            )
+            self.assertFalse(summary["ok"])
+            self.assertEqual(calls["winner"], 0)
+            recommendation = json.loads(
+                (root / "results" / "exp_incomplete_guard" / "summary" / "recommendation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(recommendation["scientific_status"], "invalid_incomplete_grid")
+            self.assertIsNone(recommendation["winner"])
+            self.assertIn("random_cartesian on test_md", recommendation["missing_cells"])
 
     def test_prepare_cross_result_dir_resets_existing_nonempty_output(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -686,12 +1266,20 @@ class ComparisonWorkflowTests(unittest.TestCase):
             (root / "AtomDisplacement" / "pipeline_config.yaml").write_text("config: keep\n", encoding="utf-8")
             (root / "Comparison" / "workspaces" / "run" / "md" / "dataset_3").mkdir(parents=True)
             (root / "Comparison" / "results" / "results_md" / "dataset_3").mkdir(parents=True)
+            (root / "Comparison" / "results" / "results_md" / "MD_dataset1_ABC123").mkdir(parents=True)
+            (root / "Comparison" / "results" / "results_atomdisp" / "FC_dataset1_DEF456").mkdir(parents=True)
+            (root / "Comparison" / "results" / "results_random_cartesian" / "RC_dataset1_GHI789").mkdir(parents=True)
+            (root / "Comparison" / "results" / "20260101_000001" / "summary").mkdir(parents=True)
             manifest = cleanup.cleanup_generated_datasets(root)
             self.assertIn(str(root / "MD" / "dataset" / "MD_steps"), manifest["removed"])
             self.assertFalse((root / "MD" / "dataset" / "MD_steps").exists())
             self.assertFalse((root / "AtomDisplacement" / "dataset" / "FC_steps").exists())
             self.assertFalse((root / "Comparison" / "workspaces").exists())
             self.assertFalse((root / "Comparison" / "results" / "results_md" / "dataset_3").exists())
+            self.assertFalse((root / "Comparison" / "results" / "results_md" / "MD_dataset1_ABC123").exists())
+            self.assertFalse((root / "Comparison" / "results" / "results_atomdisp" / "FC_dataset1_DEF456").exists())
+            self.assertFalse((root / "Comparison" / "results" / "results_random_cartesian" / "RC_dataset1_GHI789").exists())
+            self.assertFalse((root / "Comparison" / "results" / "20260101_000001").exists())
             self.assertTrue((root / "MD" / "scripts" / "keep.py").exists())
             self.assertTrue((root / "MD" / "pipeline_config.yaml").exists())
             self.assertTrue((root / "AtomDisplacement" / "pipeline_config.yaml").exists())
@@ -946,7 +1534,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="random-add-dataset"', index_html)
         self.assertIn('id="random-cartesian-dataset-table"', index_html)
         self.assertIn("Datasets MD: snapshots | temperatura", index_html)
-        self.assertIn("Datasets FC: snapshots | desplazamiento", index_html)
+        self.assertIn("Datasets FC Cartesian: snapshots | desplazamiento", index_html)
         self.assertIn('id="dataset-recipes-json"', index_html)
         self.assertIn('id="use-dataset-recipes-json"', index_html)
         self.assertIn('id="export-dataset-recipes"', index_html)
@@ -960,6 +1548,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("parseMdTemperatureBlocks()", app_js)
         self.assertIn("parseFcDatasetTableSpecs()", app_js)
         self.assertIn("parseRandomCartesianDatasetTableSpecs()", app_js)
+        self.assertIn('data-field="dataset-seed"', app_js)
+        self.assertIn("applyDatasetSeeds", app_js)
+        self.assertIn("datasetSeedPatch", app_js)
         self.assertIn("syncMdTableFromSizes", app_js)
         self.assertIn("builderDatasetRecipes", app_js)
         self.assertIn("exportCurrentDatasetRecipes", app_js)
@@ -983,12 +1574,18 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="plot-cross-metric"', index_html)
         self.assertIn('<option value="all" selected>All experiments</option>', index_html)
         self.assertIn('<option value="low_energy_rmse_eV" selected>', index_html)
+        self.assertIn('<option value="low_energy_rmse_eV" selected>Low-energy eigenvalue RMSE</option>', index_html)
+        self.assertIn('id="clear-datasets"', index_html)
+        self.assertIn("clearGeneratedDatasets()", app_js)
+        self.assertIn("/api/datasets/clear", app_js)
         self.assertIn("selectedCrossExperimentSet(payload)", app_js)
         self.assertIn("selectedCrossMetric", app_js)
         self.assertIn("groupedCrossMetrics", app_js)
         self.assertIn("No metric", app_js)
         self.assertIn("n_finite", app_js)
         self.assertIn("sin bandas dentro de ±2 eV de Fermi", app_js)
+        self.assertIn("Frontier fallback", app_js)
+        self.assertIn("no se reescribe Fermi-window RMSE", app_js)
         self.assertNotIn("function groupedCrossMeans", app_js)
         self.assertNotIn("function latestCrossExperiment", app_js)
         self.assertNotIn("sync_md_sizes: true", app_js)
@@ -1017,6 +1614,15 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertNotIn("mode: 'lines+markers'", app_js)
         self.assertNotIn('mode: "lines"', app_js)
         self.assertNotIn("mode: 'lines'", app_js)
+
+    def test_ui_and_backend_default_primary_metric_is_low_energy(self) -> None:
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
+        self.assertIn('DEFAULT_PRIMARY_METRIC = "low_energy_rmse_eV"', script)
+        self.assertIn('const PRIMARY_METRIC_DEFAULT = "low_energy_rmse_eV"', app_js)
+        self.assertIn('<option value="low_energy_rmse_eV" selected>Low-energy eigenvalue RMSE</option>', index_html)
+        self.assertIn("POST /api/datasets/clear", index_html)
 
     def test_cross_prediction_command_uses_training_accelerator(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
@@ -1069,6 +1675,66 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 results["random_cartesian"]["prediction_glob"],
                 "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
             )
+
+    def test_plot_summary_reports_missing_cross_csv_and_metric_gaps(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            experiment_id = "20260101_120000"
+            result_dir = module.RESULTS_ROOT / "results_atomdisp" / "dataset_5" / f"run_{experiment_id}"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "spectral_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "fermi_window_rmse_eV": "nan",
+                        "low_energy_rmse_eV": "0.2",
+                        "frontier_window_rmse_eV": "0.3",
+                    }
+                ],
+            )
+            (result_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": experiment_id,
+                        "result_dir": str(result_dir),
+                        "dataset_size": 5,
+                        "requested_dataset_size": 5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            experiment_dir = module.RESULTS_ROOT / experiment_id
+            experiment_dir.mkdir(parents=True)
+            module.write_yaml(
+                experiment_dir / "experiment_manifest.yaml",
+                {
+                    "run_mode": "full_strict_pipeline",
+                    "selected_methods": ["md", "siesta_fc_cartesian"],
+                    "runs": [],
+                    "cross_evaluation": {},
+                },
+            )
+
+            plots = module.plot_data_summary()
+            cross_diagnostic = plots["plot_diagnostics"]["cross"][0]
+            self.assertEqual(cross_diagnostic["reason"], "cross_evaluation_metrics_missing")
+            self.assertEqual(cross_diagnostic["archived_runs"], 1)
+            atom_gap = next(
+                item
+                for item in plots["plot_diagnostics"]["run_metric_gaps"]
+                if item["pipeline"] == "atom_displacement"
+            )
+            fermi_gap = next(
+                item
+                for item in atom_gap["metrics"]
+                if item["metric"] == "fermi_window_rmse_eV"
+            )
+            self.assertEqual(fermi_gap["n_total"], 1)
+            self.assertEqual(fermi_gap["n_finite"], 0)
 
     def test_plot_summary_discovers_recipe_named_archived_runs(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -1238,6 +1904,156 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(atom_availability["train_dataset_size"], 30)
             self.assertEqual(atom_availability["metrics"]["low_energy_rmse_eV"]["n_total"], 1)
             self.assertEqual(atom_availability["metrics"]["low_energy_rmse_eV"]["n_finite"], 0)
+
+    def test_plot_payload_contains_scientific_warnings_for_incomplete_three_method_experiment(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            experiment_id = "20260101_plot_warnings"
+            summary_dir = module.RESULTS_ROOT / experiment_id / "summary"
+            summary_dir.mkdir(parents=True)
+            write_csv(
+                summary_dir / "cross_evaluation_metrics.csv",
+                [
+                    {
+                        "experiment_id": experiment_id,
+                        "sample_id": "s1",
+                        "seed": "1",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "train_dataset_size": "190",
+                        "low_energy_rmse_eV": "0.5",
+                    }
+                    for method in ("md", "siesta_fc_cartesian", "random_cartesian")
+                ],
+            )
+            (summary_dir / "recommendation.json").write_text(
+                json.dumps(
+                    {
+                        "status": "invalid_incomplete_grid",
+                        "scientific_status": "not_scientifically_valid",
+                        "reason": "Incomplete 3-method cross-evaluation grid",
+                        "missing_cells": ["random_cartesian on test_random_cartesian"],
+                        "missing_required_cells": ["random_cartesian on test_random_cartesian"],
+                        "missing_primary_metric_cells": ["siesta_fc_cartesian on test_md"],
+                        "single_seed_warning": True,
+                        "n_seeds": 1,
+                        "valid_seed_count": 1,
+                        "seed_stability": {
+                            "status": "unstable",
+                            "unstable_groups": ["low_energy_rmse_eV/test_md"],
+                        },
+                        "severe_warnings": [
+                            "exact_duplicate_geometry leakage detected",
+                            "model config mismatch",
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            module.write_yaml(
+                module.RESULTS_ROOT / experiment_id / "experiment_manifest.yaml",
+                {
+                    "metric_version": "test_metric",
+                    "molecule_system_name": "water",
+                    "selected_methods": ["md", "siesta_fc_cartesian", "random_cartesian"],
+                    "test_sets": ["test_md", "test_siesta_fc_cartesian", "test_random_cartesian"],
+                    "method_provenance": {"md": {}, "siesta_fc_cartesian": {}},
+                },
+            )
+
+            plots = module.plot_data_summary()
+            self.assertEqual(len(plots["cross_experiments"]), 1)
+            experiment = plots["cross_experiments"][0]
+            self.assertEqual(experiment["plot_scientific_status"], "invalid_incomplete_grid")
+            self.assertEqual(
+                set(experiment["methods"]["selected"]),
+                {"md", "siesta_fc_cartesian", "random_cartesian"},
+            )
+            self.assertEqual(
+                set(experiment["methods"]["observed"]),
+                {"md", "siesta_fc_cartesian", "random_cartesian"},
+            )
+            self.assertEqual(
+                set(experiment["test_sets"]["missing"]),
+                {"test_siesta_fc_cartesian", "test_random_cartesian"},
+            )
+            codes = {warning["code"] for warning in experiment["plot_warnings"]}
+            self.assertTrue(
+                {
+                    "incomplete_grid",
+                    "missing_primary_metric",
+                    "missing_test_set",
+                    "single_seed_or_insufficient_seeds",
+                    "unstable_winner",
+                    "severe_leakage",
+                    "fairness_provenance_mismatch",
+                    "missing_random_cartesian_provenance",
+                    "missing_compute_timings",
+                    "plot_scientific_status",
+                }.issubset(codes)
+            )
+            top_level_codes = {warning["code"] for warning in plots["plot_warnings"]}
+            self.assertIn("incomplete_grid", top_level_codes)
+            self.assertIn("missing_compute_timings", top_level_codes)
+
+    def test_plot_payload_reports_missing_selected_method(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            experiment_id = "20260101_missing_method"
+            summary_dir = module.RESULTS_ROOT / experiment_id / "summary"
+            summary_dir.mkdir(parents=True)
+            write_csv(
+                summary_dir / "cross_evaluation_metrics.csv",
+                [
+                    {
+                        "experiment_id": experiment_id,
+                        "sample_id": f"s_{method}",
+                        "seed": "1",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "train_dataset_size": "190",
+                        "low_energy_rmse_eV": "0.5",
+                    }
+                    for method in ("md", "siesta_fc_cartesian")
+                ],
+            )
+            (summary_dir / "recommendation.json").write_text(
+                json.dumps({"status": "ok", "scientific_status": "exploratory_only"}),
+                encoding="utf-8",
+            )
+            module.write_yaml(
+                module.RESULTS_ROOT / experiment_id / "experiment_manifest.yaml",
+                {
+                    "metric_version": "test_metric",
+                    "molecule_system_name": "water",
+                    "selected_methods": ["md", "siesta_fc_cartesian", "random_cartesian"],
+                    "test_sets": ["test_md"],
+                    "method_provenance": {
+                        "md": {},
+                        "siesta_fc_cartesian": {},
+                        "random_cartesian": {},
+                    },
+                },
+            )
+
+            plots = module.plot_data_summary()
+            experiment = plots["cross_experiments"][0]
+            codes = {warning["code"] for warning in experiment["plot_warnings"]}
+            self.assertIn("missing_method", codes)
+            self.assertEqual(experiment["methods"]["missing"], ["random_cartesian"])
+
+    def test_ui_renders_plot_warning_banner(self) -> None:
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="plot-warnings"', index_html)
+        self.assertIn("function renderPlotWarnings", app_js)
+        self.assertIn("plot_scientific_status", app_js)
+        self.assertIn("plot_warnings", app_js)
+        self.assertIn("invalid_incomplete_grid", app_js)
 
     def test_repo_local_paths_do_not_raise_reproducibility_warning(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -2067,11 +2883,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 cells,
                 {
                     ("md", "test_md"),
-                    ("md", "test_atomdisp"),
+                    ("md", "test_siesta_fc_cartesian"),
                     ("md", "test_mixed"),
-                    ("atom_displacement", "test_md"),
-                    ("atom_displacement", "test_atomdisp"),
-                    ("atom_displacement", "test_mixed"),
+                    ("siesta_fc_cartesian", "test_md"),
+                    ("siesta_fc_cartesian", "test_siesta_fc_cartesian"),
+                    ("siesta_fc_cartesian", "test_mixed"),
                 },
             )
 
@@ -2207,6 +3023,183 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(json.loads(random_row["dataset_size_by_method"]), dataset_sizes)
             self.assertEqual(float(random_row["low_energy_n_states"]), 3.0)
             self.assertEqual(random_row["low_energy_rmse_eV"], "0.2")
+
+    def test_cross_aggregation_completeness_complete_three_method_grid_passes(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian")
+            cross_root = root / "cross"
+            for method in methods:
+                for test_set in test_sets:
+                    self.write_cross_metric_cell(cross_root, method, test_set)
+            expected_grid = root / "summary" / "cross_evaluation_expected_grid.json"
+            self.write_expected_cross_grid(expected_grid, methods, test_sets)
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_complete",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary"),
+                "--expected-grid",
+                str(expected_grid),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads((root / "summary" / "cross_evaluation_completeness.json").read_text(encoding="utf-8"))
+            self.assertTrue(report["complete"])
+            self.assertEqual(report["scientific_status"], "valid_grid")
+            self.assertEqual(report["expected_cell_count"], 9)
+            self.assertEqual(report["actual_cell_count"], 9)
+            self.assertEqual(report["missing_cells"], [])
+            self.assertEqual(report["extra_unexpected_cells"], [])
+            self.assertEqual(report["missing_primary_metric_cells"], [])
+
+    def test_cross_aggregation_completeness_missing_random_on_test_md_fails(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian")
+            cross_root = root / "cross"
+            for method in methods:
+                for test_set in test_sets:
+                    if method == "random_cartesian" and test_set == "test_md":
+                        continue
+                    self.write_cross_metric_cell(cross_root, method, test_set)
+            expected_grid = root / "summary" / "cross_evaluation_expected_grid.json"
+            self.write_expected_cross_grid(expected_grid, methods, test_sets)
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_missing_rc_md",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary"),
+                "--expected-grid",
+                str(expected_grid),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads((root / "summary" / "cross_evaluation_completeness.json").read_text(encoding="utf-8"))
+            self.assertFalse(report["complete"])
+            self.assertEqual(report["scientific_status"], "invalid_incomplete_grid")
+            self.assertIn("random_cartesian on test_md", report["missing_cells"])
+            with (root / "summary" / "missing_cross_evaluation_cells.csv").open(encoding="utf-8") as handle:
+                missing_rows = list(csv.DictReader(handle))
+            self.assertIn(
+                {"cell_id": "random_cartesian on test_md", "issue": "missing_cell", "test_set": "test_md", "train_method": "random_cartesian"},
+                missing_rows,
+            )
+
+    def test_cross_aggregation_completeness_missing_md_on_test_random_fails(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian")
+            cross_root = root / "cross"
+            for method in methods:
+                for test_set in test_sets:
+                    if method == "md" and test_set == "test_random_cartesian":
+                        continue
+                    self.write_cross_metric_cell(cross_root, method, test_set)
+            expected_grid = root / "summary" / "cross_evaluation_expected_grid.json"
+            self.write_expected_cross_grid(expected_grid, methods, test_sets)
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_missing_md_rc",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary"),
+                "--expected-grid",
+                str(expected_grid),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads((root / "summary" / "cross_evaluation_completeness.json").read_text(encoding="utf-8"))
+            self.assertFalse(report["complete"])
+            self.assertEqual(report["scientific_status"], "invalid_incomplete_grid")
+            self.assertIn("md on test_random_cartesian", report["missing_cells"])
+
+    def test_cross_aggregation_completeness_missing_primary_metric_fails(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian")
+            cross_root = root / "cross"
+            for method in methods:
+                for test_set in test_sets:
+                    primary_value = None if (method == "md" and test_set == "test_random_cartesian") else "0.2"
+                    self.write_cross_metric_cell(cross_root, method, test_set, primary_value=primary_value)
+            expected_grid = root / "summary" / "cross_evaluation_expected_grid.json"
+            self.write_expected_cross_grid(expected_grid, methods, test_sets)
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_missing_primary",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary"),
+                "--expected-grid",
+                str(expected_grid),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads((root / "summary" / "cross_evaluation_completeness.json").read_text(encoding="utf-8"))
+            self.assertFalse(report["complete"])
+            self.assertEqual(report["missing_cells"], [])
+            self.assertEqual(report["scientific_status"], "invalid_incomplete_grid")
+            self.assertIn("md on test_random_cartesian", report["missing_primary_metric_cells"])
+
+    def test_cross_aggregation_normalizes_legacy_method_ids(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "cross" / "atom_displacement__on__test_atomdisp"
+            (result_dir / "metrics").mkdir(parents=True)
+            write_csv(
+                result_dir / "metrics" / "sparse_metrics.csv",
+                [{"sample": "sample_1", "relative_frobenius_union": "1.0"}],
+            )
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "train_method": "atom_displacement",
+                        "test_set": "test_atomdisp",
+                        "test_method": "atomdisp",
+                        "dataset_size": 4,
+                        "dataset_size_by_method": {"md": 3, "atom_displacement": 4},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_alias",
+                "--cross-root",
+                str(root / "cross"),
+                "--output-dir",
+                str(root / "summary"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "cross_evaluation_metrics.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["train_method"], "siesta_fc_cartesian")
+            self.assertEqual(rows[0]["test_set"], "test_siesta_fc_cartesian")
+            self.assertEqual(rows[0]["test_method"], "siesta_fc_cartesian")
+            self.assertEqual(
+                json.loads(rows[0]["dataset_size_by_method"]),
+                {"md": 3, "siesta_fc_cartesian": 4},
+            )
 
     def test_md_blocked_with_gap_separates_splits_and_excludes_gap_frames(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
@@ -2613,8 +3606,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["status"], "inconclusive")
-            self.assertIn("settings mismatch", recommendation["reason"])
+            self.assertEqual(recommendation["status"], "fairness_provenance_mismatch")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertIn("settings mismatch", " ".join(recommendation["severe_warnings"]))
 
     def test_winner_analysis_scientific_status_requires_three_seeds(self) -> None:
         with workspace_tempdir() as tmp:
@@ -2633,7 +3627,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                                 "atom_dataset_size": "10",
                                 "seed": seed,
                                 "model_checkpoint": f"{method}_{seed}.ckpt",
-                                "global_rmse_eV": value,
+                                "low_energy_rmse_eV": value,
                             }
                         )
             write_csv(metrics, rows)
@@ -2644,11 +3638,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "--output-dir",
                 str(root / "summary_two"),
                 "--primary-metric",
-                "global_rmse_eV",
+                "low_energy_rmse_eV",
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary_two" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["scientific_status"], "exploratory")
+            self.assertEqual(recommendation["scientific_status"], "exploratory_only")
+            self.assertEqual(recommendation["status"], "insufficient_seeds")
             self.assertTrue(recommendation["insufficient_robust_seeds"])
 
             for method, value in (("md", "0.5"), ("atom_displacement", "1.0")):
@@ -2662,7 +3657,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                             "atom_dataset_size": "10",
                             "seed": "3",
                             "model_checkpoint": f"{method}_3.ckpt",
-                            "global_rmse_eV": value,
+                            "low_energy_rmse_eV": value,
                         }
                     )
             write_csv(metrics, rows)
@@ -2673,20 +3668,20 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "--output-dir",
                 str(root / "summary_three"),
                 "--primary-metric",
-                "global_rmse_eV",
+                "low_energy_rmse_eV",
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary_three" / "recommendation.json").read_text(encoding="utf-8"))
             self.assertEqual(recommendation["scientific_status"], "robust_comparison")
 
-    def test_winner_analysis_treats_siesta_fc_cartesian_as_legacy_fc_alias(self) -> None:
+    def test_winner_analysis_normalizes_legacy_fc_aliases(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
             metrics = root / "cross_evaluation_metrics.csv"
             rows = []
             for seed in ("1", "2", "3"):
-                for method, value in (("md", "0.5"), ("siesta_fc_cartesian", "1.0")):
-                    for test_set in ("test_md", "test_siesta_fc_cartesian", "test_mixed"):
+                for method, value in (("md", "0.5"), ("atom_displacement", "1.0")):
+                    for test_set in ("test_md", "test_atomdisp", "test_mixed"):
                         rows.append(
                             {
                                 "experiment_id": "exp_test",
@@ -2696,7 +3691,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                                 "dataset_size_by_method": json.dumps({"md": 10, "siesta_fc_cartesian": 10}),
                                 "seed": seed,
                                 "model_checkpoint": f"{method}_{seed}.ckpt",
-                                "global_rmse_eV": value,
+                                "low_energy_rmse_eV": value,
                             }
                         )
             write_csv(metrics, rows)
@@ -2707,12 +3702,24 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "--output-dir",
                 str(root / "summary"),
                 "--primary-metric",
-                "global_rmse_eV",
+                "low_energy_rmse_eV",
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
             self.assertEqual(recommendation["scientific_status"], "robust_comparison")
             self.assertEqual(recommendation["status"], "md_conservative_win")
+            self.assertIn("siesta_fc_cartesian", recommendation["methods_seen"])
+            self.assertNotIn("atom_displacement", recommendation["methods_seen"])
+            self.assertIn("test_siesta_fc_cartesian", recommendation["test_sets_seen"])
+            self.assertNotIn("test_atomdisp", recommendation["test_sets_seen"])
+            with (root / "summary" / "winner_by_dataset_size.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            winners = {row["winner"] for row in pair_rows}
+            self.assertLessEqual(winners, {"md", "siesta_fc_cartesian", "tie"})
+            with (root / "summary" / "nway_method_summary.csv").open(encoding="utf-8") as handle:
+                method_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["method"] for row in method_rows}, {"md", "siesta_fc_cartesian"})
+            self.assertNotIn("atom_displacement", {row["method"] for row in method_rows})
 
     def test_winner_analysis_does_not_use_global_seed_count_for_underpowered_winner(self) -> None:
         with workspace_tempdir() as tmp:
@@ -2783,7 +3790,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
             self.assertEqual(recommendation["n_seeds"], 3)
-            self.assertEqual(recommendation["scientific_status"], "exploratory")
+            self.assertEqual(recommendation["scientific_status"], "exploratory_only")
             self.assertTrue(recommendation["underpowered_stable_wins"])
 
     def test_winner_analysis_inconclusive_on_checkpoint_fallback_warning(self) -> None:
@@ -2804,6 +3811,87 @@ class ComparisonWorkflowTests(unittest.TestCase):
                                 "seed": seed,
                                 "model_checkpoint": f"{method}_{seed}.ckpt",
                                 "checkpoint_selection_warning": "Checkpoint selected by latest-version fallback",
+                                "low_energy_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "fairness_provenance_mismatch")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertIn("latest-version fallback", " ".join(recommendation["severe_warnings"]))
+
+    def test_winner_analysis_inconclusive_on_random_cartesian_family_leakage(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in (("md", "0.5"), ("random_cartesian", "0.4")):
+                    for test_set in ("test_md", "test_random_cartesian"):
+                        rows.append(
+                            {
+                                "experiment_id": "exp_test",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "dataset_size_by_method": json.dumps({"md": 10, "random_cartesian": 10}),
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "leakage_warning": (
+                                    "Geometry leakage detected for md_10__rc_10 test_random_cartesian; "
+                                    "scientific_status=exploratory_only; "
+                                    "random_cartesian_family_warnings=2"
+                                ),
+                                "low_energy_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "leakage_exploratory_only")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertNotEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertIn("random_cartesian_family_warnings", " ".join(recommendation["severe_warnings"]))
+
+    def test_winner_analysis_invalid_leakage_blocks_recommendation(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in (("md", "0.4"), ("atom_displacement", "0.9")):
+                    for test_set in ("test_md", "test_atomdisp", "test_mixed"):
+                        rows.append(
+                            {
+                                "experiment_id": "exp_exact_leakage",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "md_dataset_size": "10",
+                                "atom_dataset_size": "10",
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "leakage_scientific_status": "invalid_leakage",
+                                "leakage_severe_warnings": json.dumps(
+                                    ["exact_duplicate_geometry_cross_split: 1 pair(s)"]
+                                ),
                                 "global_rmse_eV": value,
                             }
                         )
@@ -2819,9 +3907,47 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["status"], "inconclusive")
-            self.assertEqual(recommendation["scientific_status"], "scientifically_inconclusive")
-            self.assertIn("latest-version fallback", " ".join(recommendation["severe_warnings"]))
+            self.assertEqual(recommendation["status"], "invalid_leakage")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertNotEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertTrue(recommendation["leakage_diagnostics"]["invalid"])
+
+    def test_winner_analysis_clean_leakage_status_allows_robust_recommendation(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in (("md", "0.4"), ("atom_displacement", "0.9")):
+                    for test_set in ("test_md", "test_atomdisp", "test_mixed"):
+                        rows.append(
+                            {
+                                "experiment_id": "exp_clean_leakage",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "md_dataset_size": "10",
+                                "atom_dataset_size": "10",
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "leakage_scientific_status": "valid_independent_splits",
+                                "low_energy_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "md_conservative_win")
+            self.assertEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertTrue(recommendation["leakage_diagnostics"]["clean"])
 
     def test_winner_analysis_inconclusive_on_basis_pseudopotential_warning(self) -> None:
         with workspace_tempdir() as tmp:
@@ -2856,7 +3982,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["status"], "inconclusive")
+            self.assertEqual(recommendation["status"], "fairness_provenance_mismatch")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
             self.assertIn("basis", " ".join(recommendation["severe_warnings"]))
 
     def test_winner_analysis_inconclusive_when_primary_metric_missing_in_required_cell(self) -> None:
@@ -2891,7 +4018,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
             self.assertEqual(recommendation["status"], "insufficient_primary_metric")
-            self.assertIn("atom_displacement on test_mixed", recommendation["missing_primary_metric_cells"])
+            self.assertIsNone(recommendation["winner"])
+            self.assertEqual(recommendation["primary_metric_policy_status"], "missing_required_metric")
+            self.assertIn("siesta_fc_cartesian on test_mixed", recommendation["missing_primary_metric_cells"])
 
     def test_winner_analysis_low_energy_primary_missing_is_inconclusive(self) -> None:
         with workspace_tempdir() as tmp:
@@ -2924,9 +4053,367 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["scientific_status"], "scientifically_inconclusive")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
             self.assertEqual(recommendation["status"], "insufficient_primary_metric")
-            self.assertIn("atom_displacement on test_mixed", recommendation["missing_primary_metric_cells"])
+            self.assertIn("siesta_fc_cartesian on test_mixed", recommendation["missing_primary_metric_cells"])
+
+    def test_winner_analysis_missing_fermi_metric_is_explicitly_insufficient(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in (("md", "0.5"), ("atom_displacement", "1.0")):
+                    for test_set in ("test_md", "test_atomdisp", "test_mixed"):
+                        rows.append(
+                            {
+                                "experiment_id": "exp_no_fermi",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "md_dataset_size": "10",
+                                "atom_dataset_size": "10",
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "fermi_level_source": "unavailable",
+                                "global_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "fermi_window_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "insufficient_primary_metric")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertIsNone(recommendation["winner"])
+            self.assertEqual(recommendation["primary_metric_policy_status"], "missing_required_metric")
+            self.assertIn("fermi_window_rmse_eV", recommendation["metric_policy"]["primary_metric"])
+            self.assertGreater(recommendation["metric_policy"]["missing_required_cell_count"], 0)
+
+    def test_winner_analysis_global_rmse_only_rc_win_is_exploratory(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            methods = ("md", "random_cartesian")
+            test_sets = ("test_md", "test_random_cartesian", "test_mixed")
+            for seed in ("1", "2", "3"):
+                for method in methods:
+                    for test_set in test_sets:
+                        rows.append(
+                            {
+                                "experiment_id": "exp_global_only_rc",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "dataset_size_by_method": json.dumps({"md": 10, "random_cartesian": 10}),
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "global_rmse_eV": "0.4" if method == "random_cartesian" else "1.0",
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["primary_metric_policy_status"], "diagnostic_only_metric")
+            self.assertFalse(recommendation["robust_primary_metric_allowed"])
+            self.assertNotEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertIn(recommendation["scientific_status"], {"exploratory", "exploratory_only"})
+            self.assertEqual(recommendation["nway_consensus_leader"], "random_cartesian")
+
+    def test_final_recommendation_robust_random_cartesian_winner(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+
+            def values(method: str, _test_set: str, _seed: str) -> str:
+                return {"random_cartesian": "0.2", "md": "0.5", "siesta_fc_cartesian": "0.8"}[method]
+
+            self.write_final_recommendation_metric_grid(metrics, value_for=values)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertEqual(recommendation["baseline"], "md")
+            self.assertEqual(recommendation["challengers"], ["siesta_fc_cartesian", "random_cartesian"])
+            self.assertEqual(recommendation["winner"], "random_cartesian")
+            self.assertEqual(recommendation["first_dataset_size_surpassing_md"], 3500)
+            self.assertIsNone(recommendation["first_compute_budget_surpassing_md"])
+            self.assertTrue(recommendation["complete_grid"])
+
+    def test_final_recommendation_robust_fc_winner(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+
+            def values(method: str, _test_set: str, _seed: str) -> str:
+                return {"siesta_fc_cartesian": "0.2", "md": "0.5", "random_cartesian": "0.8"}[method]
+
+            self.write_final_recommendation_metric_grid(metrics, value_for=values)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertEqual(recommendation["winner"], "siesta_fc_cartesian")
+            self.assertEqual(recommendation["first_dataset_size_surpassing_md"], 750)
+
+    def test_final_recommendation_md_remains_winner(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+
+            def values(method: str, _test_set: str, _seed: str) -> str:
+                return {"md": "0.2", "siesta_fc_cartesian": "0.5", "random_cartesian": "0.8"}[method]
+
+            self.write_final_recommendation_metric_grid(metrics, value_for=values)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertEqual(recommendation["winner"], "md")
+            self.assertIsNone(recommendation["first_dataset_size_surpassing_md"])
+
+    def test_final_recommendation_blocks_incomplete_grid(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+            self.write_final_recommendation_metric_grid(
+                metrics,
+                skip_cell=lambda method, test_set, _seed: method == "random_cartesian" and test_set == "test_md",
+            )
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+                missing_cells=("random_cartesian on test_md",),
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertIsNone(recommendation["winner"])
+            self.assertEqual(recommendation["reason"], "Incomplete 3-method cross-evaluation grid")
+            self.assertIn("random_cartesian on test_md", recommendation["missing_cells"])
+
+    def test_final_recommendation_blocks_one_seed_only(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+            self.write_final_recommendation_metric_grid(
+                metrics,
+                seeds=("1",),
+                value_for=lambda method, _test_set, _seed: {"random_cartesian": "0.2", "md": "0.5", "siesta_fc_cartesian": "0.8"}[method],
+            )
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "exploratory_only")
+            self.assertEqual(recommendation["status"], "insufficient_seeds")
+            self.assertIsNone(recommendation["winner"])
+
+    def test_final_recommendation_blocks_unstable_seeds(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+
+            def values(method: str, _test_set: str, seed: str) -> str:
+                if method == "siesta_fc_cartesian":
+                    return "0.8"
+                if seed == "3":
+                    return {"md": "0.2", "random_cartesian": "0.6"}[method]
+                return {"md": "0.6", "random_cartesian": "0.2"}[method]
+
+            self.write_final_recommendation_metric_grid(metrics, value_for=values)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertEqual(recommendation["status"], "unstable_seed_winner")
+            self.assertIsNone(recommendation["winner"])
+
+    def test_final_recommendation_blocks_leakage(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+            self.write_final_recommendation_metric_grid(
+                metrics,
+                value_for=lambda method, _test_set, _seed: {"random_cartesian": "0.2", "md": "0.5", "siesta_fc_cartesian": "0.8"}[method],
+                extra_for=lambda _method, _test_set, _seed: {
+                    "leakage_scientific_status": "invalid_leakage",
+                    "leakage_severe_warnings": json.dumps(["exact_duplicate_geometry_cross_split: 1 pair(s)"]),
+                },
+            )
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertEqual(recommendation["status"], "invalid_leakage")
+            self.assertIsNone(recommendation["winner"])
+
+    def test_final_recommendation_blocks_missing_primary_metric(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+            self.write_final_recommendation_metric_grid(
+                metrics,
+                value_for=lambda method, test_set, _seed: None
+                if method == "random_cartesian" and test_set == "test_mixed"
+                else {"random_cartesian": "0.2", "md": "0.5", "siesta_fc_cartesian": "0.8"}[method],
+            )
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+                missing_primary_metric_cells=("random_cartesian on test_mixed",),
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertEqual(recommendation["status"], "insufficient_primary_metric")
+            self.assertIsNone(recommendation["winner"])
+            self.assertIn("random_cartesian on test_mixed", recommendation["missing_primary_metric_cells"])
 
     def test_winner_analysis_nway_missing_cell_is_inconclusive(self) -> None:
         with workspace_tempdir() as tmp:
@@ -2965,7 +4452,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["scientific_status"], "scientifically_inconclusive")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertEqual(recommendation["status"], "invalid_incomplete_grid")
             self.assertIn("random_cartesian on test_mixed", recommendation["missing_required_cells"])
             self.assertIn("test_random_cartesian", recommendation["rankings_by_test_set"])
 
@@ -3005,11 +4493,1234 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
-            self.assertEqual(recommendation["status"], "nway_consensus_win")
-            self.assertEqual(recommendation["scientific_status"], "exploratory")
+            self.assertEqual(recommendation["status"], "insufficient_seeds")
+            self.assertEqual(recommendation["scientific_status"], "exploratory_only")
+            self.assertEqual(recommendation["legacy_recommendation"]["status"], "nway_consensus_win")
             self.assertEqual(recommendation["nway_consensus_leader"], "md")
             self.assertEqual(set(recommendation["nway_leaders_by_test_set"].values()), {"md"})
             self.assertNotIn("legacy global-winner", recommendation["reason"])
+            with (root / "summary" / "nway_method_summary.csv").open(encoding="utf-8") as handle:
+                method_rows = list(csv.DictReader(handle))
+            method_test_cells = {(row["method"], row["test_set"]) for row in method_rows}
+            self.assertIn(("random_cartesian", "test_md"), method_test_cells)
+            self.assertIn(("random_cartesian", "test_siesta_fc_cartesian"), method_test_cells)
+            self.assertIn(("random_cartesian", "test_random_cartesian"), method_test_cells)
+            self.assertNotIn("atom_displacement", {row["method"] for row in method_rows})
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            self.assertIn("random_cartesian", {row["method"] for row in ranking_rows})
+            random_rank = next(
+                row
+                for row in ranking_rows
+                if row["method"] == "random_cartesian" and row["test_set"] == "test_md"
+            )
+            self.assertEqual(random_rank["rank"], "3")
+            self.assertEqual(random_rank["n_methods_ranked"], "3")
+
+    def test_nway_ranking_reports_stable_three_method_ranking_across_seeds(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            values = {"md": "0.2", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.6"}
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method in methods:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_nway_stable",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps(
+                                {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+                            ),
+                            "dataset_label_by_method": json.dumps(
+                                {"md": "MD_750", "siesta_fc_cartesian": "FC_750", "random_cartesian": "RC_3500"}
+                            ),
+                            "recipe_hash_by_method": json.dumps(
+                                {"md": "md_hash", "siesta_fc_cartesian": "fc_hash", "random_cartesian": "rc_hash"}
+                            ),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["ranking_stability_status"] for row in ranking_rows}, {"robust_candidate"})
+            self.assertEqual({row["ranking_status"] for row in ranking_rows}, {"robust_candidate"})
+            self.assertEqual({row["ranking_seed_count"] for row in ranking_rows}, {"3"})
+            self.assertEqual({row["ranking_valid_seed_count"] for row in ranking_rows}, {"3"})
+            self.assertEqual({row["missing_methods"] for row in ranking_rows}, {""})
+            md_rows = [row for row in ranking_rows if row["method"] == "md"]
+            self.assertEqual({row["rank"] for row in md_rows}, {"1"})
+            self.assertEqual({row["dataset_label_by_method"] for row in md_rows}, {
+                json.dumps({"md": "MD_750", "random_cartesian": "RC_3500", "siesta_fc_cartesian": "FC_750"}, sort_keys=True)
+            })
+            summary = json.loads((root / "summary" / "nway_ranking_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["scientific_status"], "nway_ranking_diagnostic_only")
+            self.assertEqual(summary["unstable_group_count"], 0)
+            self.assertEqual(summary["missing_method_cell_count"], 0)
+            self.assertEqual(summary["robust_candidate_group_count"], 1)
+
+    def test_nway_ranking_marks_unstable_rankings_across_seeds(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            values_by_seed = {
+                "1": {"md": "0.2", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.6"},
+                "2": {"md": "0.6", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.2"},
+            }
+            rows = []
+            for seed, values in values_by_seed.items():
+                for method in methods:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_nway_unstable",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps(
+                                {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+                            ),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["ranking_stability_status"] for row in ranking_rows}, {"unstable"})
+            self.assertEqual({row["ranking_valid_seed_count"] for row in ranking_rows}, {"2"})
+            self.assertEqual({row["ranking_status"] for row in ranking_rows}, {"diagnostic_only_unstable"})
+            summary = json.loads((root / "summary" / "nway_ranking_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["exploratory_group_count"], 0)
+            self.assertEqual(summary["unstable_group_count"], 1)
+
+    def test_nway_ranking_marks_unstable_rankings_across_three_seeds(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            values_by_seed = {
+                "1": {"md": "0.2", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.6"},
+                "2": {"md": "0.6", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.2"},
+                "3": {"md": "0.3", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.5"},
+            }
+            rows = []
+            for seed, values in values_by_seed.items():
+                for method in methods:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_nway_unstable_three",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps(
+                                {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+                            ),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["ranking_stability_status"] for row in ranking_rows}, {"unstable"})
+            self.assertEqual({row["ranking_status"] for row in ranking_rows}, {"diagnostic_only_unstable"})
+            summary = json.loads((root / "summary" / "nway_ranking_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["unstable_group_count"], 1)
+            self.assertEqual(summary["unstable_groups"][0]["test_set"], "test_md")
+
+    def test_nway_ranking_handles_ties(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            values = {"md": "0.3", "siesta_fc_cartesian": "0.3", "random_cartesian": "0.8"}
+            rows = []
+            for method, value in values.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_nway_tie",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps(
+                            {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+                        ),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            tied_rows = [row for row in ranking_rows if row["method"] in {"md", "siesta_fc_cartesian"}]
+            self.assertEqual({row["rank"] for row in tied_rows}, {"1"})
+            self.assertEqual({row["tie"] for row in tied_rows}, {"True"})
+            self.assertEqual({row["leader_tie"] for row in tied_rows}, {"True"})
+            self.assertEqual({row["ranking_stability_status"] for row in ranking_rows}, {"exploratory_only"})
+            summary = json.loads((root / "summary" / "nway_ranking_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["tie_group_count"], 1)
+            self.assertEqual(set(summary["tie_groups"][0]["leader_methods"]), {"md", "siesta_fc_cartesian"})
+
+    def test_nway_ranking_reports_missing_method_in_test_set(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            size_map = {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+            rows = []
+            for method, value in {"md": "0.2", "siesta_fc_cartesian": "0.4", "random_cartesian": "0.6"}.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_nway_missing",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps(size_map),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            for method, value in {"md": "0.2", "siesta_fc_cartesian": "0.4"}.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_nway_missing",
+                        "train_method": method,
+                        "test_set": "test_random_cartesian",
+                        "dataset_size_by_method": json.dumps(size_map),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}_random_test.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            missing_rows = [row for row in ranking_rows if row["test_set"] == "test_random_cartesian"]
+            self.assertEqual({row["missing_methods"] for row in missing_rows}, {"random_cartesian"})
+            self.assertEqual({row["ranking_grid_status"] for row in missing_rows}, {"missing_method"})
+            self.assertEqual({row["ranking_status"] for row in missing_rows}, {"diagnostic_only_missing_method"})
+            summary = json.loads((root / "summary" / "nway_ranking_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["missing_method_cell_count"], 1)
+            self.assertEqual(summary["missing_method_cells"][0]["missing_methods"], ["random_cartesian"])
+
+    def test_pairwise_vs_baseline_reports_random_cartesian_beats_md(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values = {"md": "1.0", "random_cartesian": "0.5"}
+            for method, value in values.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_pair_rc",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                        "dataset_label_by_method": json.dumps({"md": "MD_750", "random_cartesian": "RC_3500"}),
+                        "recipe_hash_by_method": json.dumps({"md": "md_hash", "random_cartesian": "rc_hash"}),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(pair_rows), 1)
+            row = pair_rows[0]
+            self.assertEqual(row["baseline_method"], "md")
+            self.assertEqual(row["challenger_method"], "random_cartesian")
+            self.assertEqual(row["winner"], "random_cartesian")
+            self.assertEqual(row["baseline_dataset_size"], "750")
+            self.assertEqual(row["challenger_dataset_size"], "3500")
+            self.assertEqual(row["challenger_dataset_label"], "RC_3500")
+            self.assertEqual(row["challenger_recipe_hash"], "rc_hash")
+            self.assertGreater(float(row["percent_improvement_challenger_vs_baseline"]), 0.0)
+            summary = json.loads((root / "summary" / "pairwise_vs_baseline_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["scientific_status"], "pairwise_diagnostic_only")
+            self.assertEqual(summary["wins_by_challenger"]["random_cartesian"], 1)
+
+    def test_pairwise_seed_stability_one_seed_is_exploratory_only(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for method, value in {"md": "1.0", "random_cartesian": "0.5"}.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_pair_seed_one",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["seed_stability_status"] for row in pair_rows}, {"exploratory_only"})
+            self.assertEqual({row["robust_candidate"] for row in pair_rows}, {"False"})
+            summary = json.loads((root / "summary" / "pairwise_vs_baseline_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["robust_candidate_count"], 0)
+            self.assertEqual(summary["exploratory_group_count"], 1)
+
+    def test_pairwise_seed_stability_three_seed_rc_win_is_robust_candidate(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in {"md": "1.0", "random_cartesian": "0.5"}.items():
+                    rows.append(
+                        {
+                            "experiment_id": "exp_pair_seed_robust",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": value,
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["winner"] for row in pair_rows}, {"random_cartesian"})
+            self.assertEqual({row["seed_stability_status"] for row in pair_rows}, {"robust_candidate"})
+            self.assertEqual({row["seed_stability_valid_n_seeds"] for row in pair_rows}, {"3"})
+            summary = json.loads((root / "summary" / "pairwise_vs_baseline_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["robust_candidate_count"], 1)
+            self.assertEqual(summary["robust_candidates"][0]["winner"], "random_cartesian")
+
+    def test_pairwise_seed_stability_three_seed_split_is_unstable(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values_by_seed = {
+                "1": {"md": "1.0", "random_cartesian": "0.5"},
+                "2": {"md": "1.0", "random_cartesian": "0.5"},
+                "3": {"md": "0.4", "random_cartesian": "0.8"},
+            }
+            for seed, values in values_by_seed.items():
+                for method, value in values.items():
+                    rows.append(
+                        {
+                            "experiment_id": "exp_pair_seed_unstable",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": value,
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["seed_stability_status"] for row in pair_rows}, {"unstable"})
+            self.assertEqual({row["robust_candidate"] for row in pair_rows}, {"False"})
+            summary = json.loads((root / "summary" / "pairwise_vs_baseline_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["unstable_group_count"], 1)
+            self.assertEqual(summary["robust_candidate_count"], 0)
+
+    def test_pairwise_seed_stability_missing_seed_is_exploratory_only(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for method, value in {"md": "1.0", "random_cartesian": "0.5"}.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_pair_seed_missing",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["seed"] for row in pair_rows}, {"unknown"})
+            self.assertEqual({row["seed_stability_status"] for row in pair_rows}, {"exploratory_only"})
+            self.assertEqual({row["seed_stability_valid_n_seeds"] for row in pair_rows}, {"0"})
+
+    def test_pairwise_vs_baseline_reports_fc_beats_md(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values = {"md": "1.0", "siesta_fc_cartesian": "0.25"}
+            for method, value in values.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_pair_fc",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps({"md": 750, "siesta_fc_cartesian": 750}),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(pair_rows), 1)
+            row = pair_rows[0]
+            self.assertEqual(row["challenger_method"], "siesta_fc_cartesian")
+            self.assertEqual(row["winner"], "siesta_fc_cartesian")
+            self.assertEqual(row["lower_is_better"], "True")
+            self.assertLess(float(row["absolute_difference_challenger_minus_baseline"]), 0.0)
+
+    def test_pairwise_vs_baseline_reports_md_beats_both_challengers(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values = {"md": "0.4", "siesta_fc_cartesian": "0.8", "random_cartesian": "1.2"}
+            for method, value in values.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_pair_md",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps(
+                            {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+                        ),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["challenger_method"] for row in pair_rows}, {"siesta_fc_cartesian", "random_cartesian"})
+            self.assertEqual({row["winner"] for row in pair_rows}, {"md"})
+            summary = json.loads((root / "summary" / "pairwise_vs_baseline_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["wins_by_baseline"]["siesta_fc_cartesian"], 1)
+            self.assertEqual(summary["wins_by_baseline"]["random_cartesian"], 1)
+
+    def test_pairwise_vs_baseline_marks_rc_own_distribution_win_as_specific(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values = {
+                ("md", "test_md"): "0.4",
+                ("random_cartesian", "test_md"): "0.9",
+                ("md", "test_random_cartesian"): "1.0",
+                ("random_cartesian", "test_random_cartesian"): "0.3",
+            }
+            for (method, test_set), value in values.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_pair_rc_specific",
+                        "train_method": method,
+                        "test_set": test_set,
+                        "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "pairwise_vs_baseline.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            own_distribution_row = next(row for row in pair_rows if row["test_set"] == "test_random_cartesian")
+            md_distribution_row = next(row for row in pair_rows if row["test_set"] == "test_md")
+            self.assertEqual(own_distribution_row["winner"], "random_cartesian")
+            self.assertEqual(own_distribution_row["distribution_status"], "distribution_specific")
+            self.assertEqual(own_distribution_row["win_scope_status"], "distribution_specific_only")
+            self.assertEqual(md_distribution_row["winner"], "md")
+            self.assertEqual(md_distribution_row["win_scope_status"], "distribution_specific_only")
+            summary = json.loads((root / "summary" / "pairwise_vs_baseline_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["distribution_specific_only_count"], 1)
+            self.assertEqual(summary["distribution_specific_only"][0]["challenger_method"], "random_cartesian")
+
+    def test_dataset_size_thresholds_reports_rc_threshold_at_3500(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values_by_size = {
+                1500: {"md": "0.5", "random_cartesian": "0.8"},
+                3500: {"md": "0.8", "random_cartesian": "0.4"},
+            }
+            for rc_size, values in values_by_size.items():
+                for seed in ("1", "2", "3"):
+                    for method, value in values.items():
+                        rows.append(
+                            {
+                                "experiment_id": "exp_threshold_rc",
+                                "train_method": method,
+                                "test_set": "test_md",
+                                "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": rc_size}),
+                                "dataset_label_by_method": json.dumps(
+                                    {"md": "MD_750", "random_cartesian": f"RC_{rc_size}"}
+                                ),
+                                "recipe_hash_by_method": json.dumps(
+                                    {"md": "md_hash", "random_cartesian": f"rc_hash_{rc_size}"}
+                                ),
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{rc_size}_{seed}.ckpt",
+                                "global_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            threshold_summary = json.loads(
+                (root / "summary" / "dataset_size_thresholds_vs_md.json").read_text(encoding="utf-8")
+            )
+            rc_thresholds = [
+                row
+                for row in threshold_summary["thresholds"]
+                if row["challenger_method"] == "random_cartesian"
+            ]
+            self.assertEqual(len(rc_thresholds), 1)
+            self.assertEqual(rc_thresholds[0]["first_stable_dataset_size"], 3500)
+            self.assertEqual(rc_thresholds[0]["corresponding_md_dataset_size"], 750)
+            self.assertEqual(rc_thresholds[0]["challenger_recipe_hash"], "rc_hash_3500")
+            self.assertEqual(rc_thresholds[0]["stability_status"], "robust_candidate")
+            self.assertEqual(rc_thresholds[0]["distribution_scope"], "general")
+            with (root / "summary" / "dataset_size_thresholds_vs_md.csv").open(encoding="utf-8") as handle:
+                threshold_rows = list(csv.DictReader(handle))
+            available = [row for row in threshold_rows if row["threshold_available"] == "True"]
+            self.assertEqual(len(available), 1)
+            self.assertEqual(available[0]["first_stable_dataset_size"], "3500")
+
+    def test_dataset_size_thresholds_reports_fc_threshold_at_750(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in {"md": "1.0", "siesta_fc_cartesian": "0.5"}.items():
+                    rows.append(
+                        {
+                            "experiment_id": "exp_threshold_fc",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps({"md": 750, "siesta_fc_cartesian": 750}),
+                            "dataset_label_by_method": json.dumps(
+                                {"md": "MD_750", "siesta_fc_cartesian": "FC_750"}
+                            ),
+                            "recipe_hash_by_method": json.dumps(
+                                {"md": "md_hash", "siesta_fc_cartesian": "fc_hash"}
+                            ),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": value,
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            threshold_summary = json.loads(
+                (root / "summary" / "dataset_size_thresholds_vs_md.json").read_text(encoding="utf-8")
+            )
+            fc_thresholds = [
+                row
+                for row in threshold_summary["thresholds"]
+                if row["challenger_method"] == "siesta_fc_cartesian"
+            ]
+            self.assertEqual(len(fc_thresholds), 1)
+            self.assertEqual(fc_thresholds[0]["first_stable_dataset_size"], 750)
+            self.assertEqual(fc_thresholds[0]["challenger_dataset_label"], "FC_750")
+            self.assertEqual(fc_thresholds[0]["challenger_recipe_hash"], "fc_hash")
+
+    def test_dataset_size_thresholds_rejects_rc_own_distribution_only_win(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            values = {
+                ("md", "test_md"): "0.4",
+                ("random_cartesian", "test_md"): "0.9",
+                ("md", "test_random_cartesian"): "1.0",
+                ("random_cartesian", "test_random_cartesian"): "0.3",
+            }
+            for seed in ("1", "2", "3"):
+                for (method, test_set), value in values.items():
+                    rows.append(
+                        {
+                            "experiment_id": "exp_threshold_rc_specific",
+                            "train_method": method,
+                            "test_set": test_set,
+                            "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{test_set}_{seed}.ckpt",
+                            "global_rmse_eV": value,
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            threshold_summary = json.loads(
+                (root / "summary" / "dataset_size_thresholds_vs_md.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [row for row in threshold_summary["thresholds"] if row["challenger_method"] == "random_cartesian"],
+                [],
+            )
+            own_distribution_rejections = [
+                row
+                for row in threshold_summary["unavailable_thresholds"]
+                if row["challenger_method"] == "random_cartesian"
+                and row["test_set"] == "test_random_cartesian"
+            ]
+            self.assertEqual(len(own_distribution_rejections), 1)
+            self.assertIn("distribution-specific", own_distribution_rejections[0]["reason"])
+            self.assertEqual(own_distribution_rejections[0]["distribution_scope"], "distribution_specific")
+
+    def test_dataset_size_thresholds_rejects_one_seed_win(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for method, value in {"md": "1.0", "random_cartesian": "0.5"}.items():
+                rows.append(
+                    {
+                        "experiment_id": "exp_threshold_one_seed",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            threshold_summary = json.loads(
+                (root / "summary" / "dataset_size_thresholds_vs_md.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(threshold_summary["thresholds"], [])
+            unavailable = threshold_summary["unavailable_thresholds"]
+            self.assertEqual(len(unavailable), 1)
+            self.assertEqual(unavailable[0]["challenger_method"], "random_cartesian")
+            self.assertEqual(unavailable[0]["stability_status"], "exploratory_only")
+            self.assertIn("Fewer than 3 valid seeds", unavailable[0]["reason"])
+
+    def test_compute_budget_thresholds_compute_with_reliable_total_timing(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            rows = []
+            scenarios = {
+                1500: {"values": {"md": "0.5", "random_cartesian": "0.8"}, "times": {"md": "100", "random_cartesian": "90"}},
+                3500: {"values": {"md": "0.8", "random_cartesian": "0.4"}, "times": {"md": "100", "random_cartesian": "200"}},
+            }
+            for rc_size, scenario in scenarios.items():
+                for seed in ("1", "2", "3"):
+                    for method, value in scenario["values"].items():
+                        rows.append(
+                            {
+                                "experiment_id": "exp_compute_threshold_rc",
+                                "train_method": method,
+                                "test_set": "test_md",
+                                "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": rc_size}),
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{rc_size}_{seed}.ckpt",
+                                "total_time_seconds": scenario["times"][method],
+                                "siesta_time_seconds": "40",
+                                "training_time_seconds": "50",
+                                "prediction_time_seconds": "5",
+                                "evaluation_time_seconds": "5",
+                                "global_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            self.write_completeness_report(output_dir / "cross_evaluation_completeness.json", ("md", "random_cartesian"), ("test_md",))
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            compute_summary = json.loads((output_dir / "compute_budget_thresholds_vs_md.json").read_text(encoding="utf-8"))
+            rc_thresholds = [
+                row
+                for row in compute_summary["thresholds"]
+                if row["challenger_method"] == "random_cartesian"
+            ]
+            self.assertEqual(len(rc_thresholds), 1)
+            self.assertEqual(rc_thresholds[0]["first_stable_compute_budget_seconds"], 200.0)
+            self.assertEqual(rc_thresholds[0]["challenger_compute_budget_seconds"], 200.0)
+            self.assertEqual(rc_thresholds[0]["baseline_compute_budget_seconds"], 100.0)
+            self.assertEqual(rc_thresholds[0]["compute_budget_timing_source"], "total_time_seconds")
+            self.assertEqual(rc_thresholds[0]["stability_status"], "robust_candidate")
+            with (output_dir / "compute_budget_thresholds_vs_md.csv").open(encoding="utf-8") as handle:
+                threshold_rows = list(csv.DictReader(handle))
+            available = [row for row in threshold_rows if row["compute_threshold_available"] == "True"]
+            self.assertEqual(len(available), 1)
+            self.assertEqual(available[0]["first_stable_compute_budget_seconds"], "200.0")
+
+    def test_compute_budget_thresholds_missing_timing_fields_do_not_fake_threshold(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in {"md": "1.0", "siesta_fc_cartesian": "0.4"}.items():
+                    rows.append(
+                        {
+                            "experiment_id": "exp_compute_missing_timing",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps({"md": 750, "siesta_fc_cartesian": 750}),
+                            "seed": seed,
+                            "model_checkpoint": f"{method}_{seed}.ckpt",
+                            "global_rmse_eV": value,
+                        }
+                    )
+            write_csv(metrics, rows)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                ("md", "siesta_fc_cartesian"),
+                ("test_md",),
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            compute_summary = json.loads((output_dir / "compute_budget_thresholds_vs_md.json").read_text(encoding="utf-8"))
+            self.assertEqual(compute_summary["thresholds"], [])
+            self.assertEqual(len(compute_summary["unavailable_thresholds"]), 1)
+            unavailable = compute_summary["unavailable_thresholds"][0]
+            self.assertEqual(unavailable["challenger_method"], "siesta_fc_cartesian")
+            self.assertEqual(unavailable["compute_threshold_unavailable"], "missing reliable timing fields")
+            self.assertEqual(unavailable["compute_threshold_timing_status"], "missing_reliable_timing_fields")
+
+    def test_compute_budget_thresholds_missing_rc_timing_preserves_dataset_threshold(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in {"md": "1.0", "random_cartesian": "0.4"}.items():
+                    row = {
+                        "experiment_id": "exp_compute_rc_missing_timing",
+                        "train_method": method,
+                        "test_set": "test_md",
+                        "dataset_size_by_method": json.dumps({"md": 750, "random_cartesian": 3500}),
+                        "seed": seed,
+                        "model_checkpoint": f"{method}_{seed}.ckpt",
+                        "global_rmse_eV": value,
+                    }
+                    if method == "md":
+                        row["total_time_seconds"] = "100"
+                    rows.append(row)
+            write_csv(metrics, rows)
+            self.write_completeness_report(output_dir / "cross_evaluation_completeness.json", ("md", "random_cartesian"), ("test_md",))
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            dataset_summary = json.loads((output_dir / "dataset_size_thresholds_vs_md.json").read_text(encoding="utf-8"))
+            compute_summary = json.loads((output_dir / "compute_budget_thresholds_vs_md.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(dataset_summary["thresholds"]), 1)
+            self.assertEqual(dataset_summary["thresholds"][0]["challenger_method"], "random_cartesian")
+            self.assertEqual(dataset_summary["thresholds"][0]["first_stable_dataset_size"], 3500)
+            self.assertEqual(compute_summary["thresholds"], [])
+            self.assertEqual(compute_summary["unavailable_thresholds"][0]["compute_threshold_unavailable"], "missing reliable timing fields")
+
+    def test_winner_analysis_keeps_random_cartesian_sizes_separate_in_context(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            values = {"md": "0.4", "siesta_fc_cartesian": "0.8", "random_cartesian": "1.2"}
+            for rc_size in (1500, 3500):
+                size_map = {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": rc_size}
+                label_map = {
+                    "md": "MD_750",
+                    "siesta_fc_cartesian": "FC_750",
+                    "random_cartesian": f"RC_{rc_size}",
+                }
+                for method in methods:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_rc_sizes",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps(size_map),
+                            "dataset_label_by_method": json.dumps(label_map),
+                            "seed": "1",
+                            "model_checkpoint": f"{method}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_method_summary.csv").open(encoding="utf-8") as handle:
+                method_rows = list(csv.DictReader(handle))
+            rc_rows = [row for row in method_rows if row["method"] == "random_cartesian"]
+            self.assertEqual({row["dataset_size"] for row in rc_rows}, {"1500", "3500"})
+            self.assertEqual(len({row["dataset_context_key"] for row in method_rows}), 2)
+            with (root / "summary" / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            self.assertEqual(len({row["dataset_context_key"] for row in ranking_rows}), 2)
+            self.assertEqual({row["n_methods_ranked"] for row in ranking_rows}, {"3"})
+            with (root / "summary" / "winner_by_dataset_size.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(pair_rows), 2)
+            self.assertEqual(len({row["dataset_context_key"] for row in pair_rows}), 2)
+
+    def test_winner_analysis_keeps_same_size_random_cartesian_recipe_hashes_separate(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            size_map = {"md": 750, "siesta_fc_cartesian": 750, "random_cartesian": 3500}
+            values = {"md": "0.4", "siesta_fc_cartesian": "0.8", "random_cartesian": "1.2"}
+            for rc_hash in ("rc_hash_a", "rc_hash_b"):
+                hash_map = {
+                    "md": "md_hash",
+                    "siesta_fc_cartesian": "fc_hash",
+                    "random_cartesian": rc_hash,
+                }
+                for method in methods:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_rc_hashes",
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size_by_method": json.dumps(size_map),
+                            "recipe_hash_by_method": json.dumps(hash_map),
+                            "seed": "1",
+                            "model_checkpoint": f"{method}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "nway_method_summary.csv").open(encoding="utf-8") as handle:
+                method_rows = list(csv.DictReader(handle))
+            rc_rows = [row for row in method_rows if row["method"] == "random_cartesian"]
+            self.assertEqual({row["dataset_size"] for row in rc_rows}, {"3500"})
+            self.assertEqual({row["recipe_hash"] for row in rc_rows}, {"rc_hash_a", "rc_hash_b"})
+            self.assertEqual(len({row["dataset_context_key"] for row in method_rows}), 2)
+            with (root / "summary" / "winner_by_dataset_size.csv").open(encoding="utf-8") as handle:
+                pair_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(pair_rows), 2)
+            self.assertEqual(len({row["dataset_context_key"] for row in pair_rows}), 2)
+
+    def test_winner_analysis_valid_completeness_report_allows_nway_analysis(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+            values = {"md": "0.4", "siesta_fc_cartesian": "0.8", "random_cartesian": "1.2"}
+            rows = []
+            for method in methods:
+                for test_set in test_sets:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_nway_complete",
+                            "train_method": method,
+                            "test_set": test_set,
+                            "test_method": test_set.removeprefix("test_"),
+                            "dataset_size_by_method": json.dumps(
+                                {"md": 3, "siesta_fc_cartesian": 4, "random_cartesian": 5}
+                            ),
+                            "seed": "1",
+                            "model_checkpoint": f"{method}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "insufficient_seeds")
+            self.assertEqual(recommendation["scientific_status"], "exploratory_only")
+            self.assertEqual(recommendation["legacy_recommendation"]["status"], "nway_consensus_win")
+            self.assertEqual(recommendation["nway_consensus_leader"], "md")
+
+    def test_winner_analysis_invalid_completeness_report_blocks_recommendation(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian")
+            values = {"md": "0.4", "siesta_fc_cartesian": "0.8", "random_cartesian": "1.2"}
+            rows = []
+            for method in methods:
+                for test_set in test_sets:
+                    rows.append(
+                        {
+                            "experiment_id": "exp_nway_invalid",
+                            "train_method": method,
+                            "test_set": test_set,
+                            "test_method": test_set.removeprefix("test_"),
+                            "dataset_size_by_method": json.dumps(
+                                {"md": 3, "siesta_fc_cartesian": 4, "random_cartesian": 5}
+                            ),
+                            "seed": "1",
+                            "model_checkpoint": f"{method}.ckpt",
+                            "global_rmse_eV": values[method],
+                        }
+                    )
+            write_csv(metrics, rows)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                missing_cells=("random_cartesian on test_md",),
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "invalid_incomplete_grid")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertIsNone(recommendation["winner"])
+            self.assertEqual(recommendation["reason"], "Incomplete 3-method cross-evaluation grid")
+            self.assertIn("random_cartesian on test_md", recommendation["missing_cells"])
+            self.assertNotIn(recommendation["scientific_status"], {"robust_comparison", "nway_consensus_win"})
+            threshold_summary = json.loads(
+                (output_dir / "dataset_size_thresholds_vs_md.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(threshold_summary["scientific_status"], "invalid_incomplete_grid")
+            self.assertEqual(threshold_summary["thresholds"], [])
+            compute_threshold_summary = json.loads(
+                (output_dir / "compute_budget_thresholds_vs_md.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(compute_threshold_summary["scientific_status"], "invalid_incomplete_grid")
+            self.assertEqual(compute_threshold_summary["thresholds"], [])
+
+    def test_winner_analysis_missing_primary_metric_completeness_blocks_recommendation(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian")
+            rows = []
+            for method in methods:
+                for test_set in test_sets:
+                    row = {
+                        "experiment_id": "exp_missing_metric",
+                        "train_method": method,
+                        "test_set": test_set,
+                        "test_method": test_set.removeprefix("test_"),
+                        "seed": "1",
+                        "model_checkpoint": f"{method}.ckpt",
+                    }
+                    if not (method == "md" and test_set == "test_random_cartesian"):
+                        row["global_rmse_eV"] = "0.4" if method == "md" else "0.8"
+                    rows.append(row)
+            write_csv(metrics, rows)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                missing_primary_metric_cells=("md on test_random_cartesian",),
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "global_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertEqual(recommendation["status"], "insufficient_primary_metric")
+            self.assertIsNone(recommendation["winner"])
+            self.assertIn("md on test_random_cartesian", recommendation["missing_cells"])
+            self.assertIn("md on test_random_cartesian", recommendation["missing_primary_metric_cells"])
+
+    def test_winner_analysis_two_method_complete_completeness_report_remains_compatible(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_mixed")
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method, value in (("md", "0.5"), ("siesta_fc_cartesian", "1.0")):
+                    for test_set in test_sets:
+                        rows.append(
+                            {
+                                "experiment_id": "exp_two_method",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "md_dataset_size": "10",
+                                "atom_dataset_size": "10",
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "low_energy_rmse_eV": value,
+                            }
+                        )
+            write_csv(metrics, rows)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "md_conservative_win")
+            self.assertEqual(recommendation["scientific_status"], "robust_comparison")
+            self.assertNotEqual(recommendation["status"], "invalid_incomplete_grid")
+            with (output_dir / "nway_method_summary.csv").open(encoding="utf-8") as handle:
+                method_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["method"] for row in method_rows}, {"md", "siesta_fc_cartesian"})
+            self.assertNotIn("random_cartesian", {row["method"] for row in method_rows})
+            with (output_dir / "nway_ranking.csv").open(encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["n_methods_ranked"] for row in ranking_rows}, {"2"})
 
     def test_geometry_leakage_detects_duplicates_near_duplicates_and_md_neighbors(self) -> None:
         with workspace_tempdir() as tmp:
@@ -3066,6 +5777,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertGreaterEqual(summary["exact_duplicates"], 1)
             self.assertGreaterEqual(summary["near_duplicates"], 1)
             self.assertGreaterEqual(summary["md_neighbor_warnings"], 1)
+            self.assertEqual(summary["scientific_status"], "invalid_leakage")
+            self.assertEqual(summary["leakage_status_detail"], "invalid_exact_geometry_leakage")
+            self.assertTrue(any("exact_duplicate_geometry" in warning for warning in summary["severe_warnings"]))
 
     def test_geometry_leakage_allows_different_geometries(self) -> None:
         with workspace_tempdir() as tmp:
@@ -3127,6 +5841,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
             summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
             self.assertGreaterEqual(summary["aligned_near_duplicates"], 1)
             self.assertGreaterEqual(summary["internal_distance_near_duplicates"], 1)
+            self.assertEqual(summary["scientific_status"], "scientifically_inconclusive")
+            self.assertEqual(summary["leakage_status_detail"], "potential_geometry_leakage")
+            self.assertEqual(summary["severe_warnings"], [])
 
     def test_geometry_leakage_detects_atom_displacement_family_aliases(self) -> None:
         with workspace_tempdir() as tmp:
@@ -3164,7 +5881,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
             self.assertGreaterEqual(summary["atom_displacement_family_warnings"], 1)
 
-    def test_geometry_leakage_allows_distinct_random_cartesian_samples_from_same_group(self) -> None:
+    def test_geometry_leakage_detects_same_random_cartesian_family(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
             train = make_sample(root / "samples", "train")
@@ -3217,9 +5934,61 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "--output-dir",
                 str(root / "leakage"),
             )
+            self.assertEqual(result.returncode, 2)
+            summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
+            self.assertGreaterEqual(summary["random_cartesian_family_warnings"], 1)
+            self.assertEqual(summary["scientific_status"], "exploratory_only")
+            self.assertEqual(summary["leakage_status_detail"], "random_cartesian_same_family_cross_split")
+            self.assertFalse(summary["scientifically_independent"])
+
+    def test_geometry_leakage_allows_different_random_cartesian_families(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            train = make_sample(root / "samples", "train")
+            test = make_sample(root / "samples", "test")
+            text = (test / "RUN.fdf").read_text(encoding="utf-8").replace("0.0 0.7 0.0 2", "0.0 1.5 0.0 2")
+            (test / "RUN.fdf").write_text(text, encoding="utf-8")
+            train_metadata = train / "metadata.json"
+            test_metadata = test / "metadata.json"
+            common = {
+                "base_geometry_hash": "base",
+                "distribution": "gaussian",
+                "seed_family": 1234,
+                "move_atoms": "all",
+                "species_filter": [],
+                "recipe_id": "rc_recipe",
+            }
+            train_metadata.write_text(
+                json.dumps({**common, "id": "sample_000001", "sigma_ang": 0.03, "block_id": "small"}),
+                encoding="utf-8",
+            )
+            test_metadata.write_text(
+                json.dumps({**common, "id": "sample_000002", "sigma_ang": 0.05, "block_id": "large"}),
+                encoding="utf-8",
+            )
+            train_manifest = root / "train.csv"
+            test_manifest = root / "test.csv"
+            write_csv(
+                train_manifest,
+                [{"sample_id": "train", "method": "random_cartesian", "structure_path": str(train / "RUN.fdf"), "metadata_path": str(train_metadata)}],
+            )
+            write_csv(
+                test_manifest,
+                [{"sample_id": "test", "method": "random_cartesian", "structure_path": str(test / "RUN.fdf"), "metadata_path": str(test_metadata)}],
+            )
+            result = run_script(
+                "Comparison/scripts/check_geometry_leakage.py",
+                "--train-manifest",
+                str(train_manifest),
+                "--test-manifest",
+                str(test_manifest),
+                "--output-dir",
+                str(root / "leakage"),
+            )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             summary = json.loads((root / "leakage" / "geometry_leakage_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["random_cartesian_family_warnings"], 0)
+            self.assertEqual(summary["scientific_status"], "valid_independent_splits")
 
     def test_geometry_leakage_detects_same_random_cartesian_sample_index(self) -> None:
         with workspace_tempdir() as tmp:
@@ -3321,62 +6090,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        shared = {"siesta": {"mesh_cutoff": "200 Ry"}}
-        md = {
-            "md": {
-                "lattice_constant": 15,
-                "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
-                "basis_type": "split",
-                "basis_size": "DZP",
-                "energy_shift": "0.03 eV",
-                "mesh_cutoff": "200 Ry",
-                "xc_functional": "GGA",
-                "xc_authors": "PBE",
-                "max_scf_iterations": 200,
-                "solution_method": "diagon",
-                "dm_mixing_weight": 0.02,
-                "dm_number_pulay": 3,
-                "dm_tolerance": "1.d-5",
-                "dm_require_energy_convergence": "T",
-                "dm_energy_tolerance": "1.e-5 eV",
-                "spin_polarized": "F",
-                "fix_spin": "F",
-                "non_collinear_spin": "F",
-                "force_aux_cell": False,
-                "save_hs_file": True,
-                "save_hs": True,
-                "save_de": True,
-                "xml_write": True,
-            }
-        }
-        atom = {
-            "structure": {
-                "lattice_constant": 15,
-                "lattice_vectors": [[15, 0, 0], [0, 15, 0], [0, 0, 15]],
-                "force_constants": {"save_tshs": True, "save_tsde": True},
-                "siesta": {
-                    "ForceAuxCell": "F",
-                    "Save.HS": "T",
-                    "MeshCutoff": "200 Ry",
-                    "PAO.BasisType": "split",
-                    "PAO.BasisSize": "DZP",
-                    "PAO.EnergyShift": "0.03 eV",
-                    "XC.functional": "GGA",
-                    "XC.authors": "PBE",
-                    "MaxSCFIterations": 200,
-                    "SolutionMethod": "diagon",
-                    "DM.MixingWeight": 0.02,
-                    "DM.NumberPulay": 3,
-                    "DM.Tolerance": "1.d-5",
-                    "DM.Require.Energy.Convergence": "T",
-                    "DM.Energy.Tolerance": "1.e-5 eV",
-                    "SpinPolarized": "F",
-                    "FixSpin": "F",
-                    "NonCollinearSpin": "F",
-                    "XML.Write": "T",
-                },
-            }
-        }
+        shared, md, atom = self.siesta_settings_fixture()
         ok_report = module.compare_settings(md, atom, shared)
         self.assertTrue(ok_report["ok"])
         atom_bad = json.loads(json.dumps(atom))
@@ -3384,6 +6098,135 @@ class ComparisonWorkflowTests(unittest.TestCase):
         bad_report = module.compare_settings(md, atom_bad, shared)
         self.assertFalse(bad_report["ok"])
         self.assertTrue(bad_report["warning"])
+
+    def test_siesta_settings_three_method_equivalent_settings_pass(self) -> None:
+        module = self.load_module_from_path(
+            "siesta_settings_three_method_ok",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        shared, md, atom = self.siesta_settings_fixture()
+        same_artifacts = {
+            method: {"basis_hash": "basis_same", "pseudopotential_hash": "pseudo_same"}
+            for method in ("md", "siesta_fc_cartesian", "random_cartesian")
+        }
+        report = module.compare_method_settings(
+            {"md": md, "siesta_fc_cartesian": atom, "random_cartesian": atom},
+            shared,
+            artifact_hashes_by_method=same_artifacts,
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            set(report["siesta_settings_hash_by_method"]),
+            {"md", "siesta_fc_cartesian", "random_cartesian"},
+        )
+        self.assertIn("random_cartesian", report["method_siesta_settings"])
+        self.assertEqual(report["pairwise_mismatch_report"], [])
+        self.assertFalse(report["severe_warning"])
+
+    def test_siesta_settings_random_cartesian_meshcutoff_mismatch_is_severe(self) -> None:
+        module = self.load_module_from_path(
+            "siesta_settings_rc_mesh_bad",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        shared, md, atom = self.siesta_settings_fixture()
+        random_config = copy.deepcopy(atom)
+        random_config["structure"]["random_cartesian"] = {"siesta": {"MeshCutoff": "300 Ry"}}
+        report = module.compare_method_settings(
+            {"md": md, "siesta_fc_cartesian": atom, "random_cartesian": random_config},
+            shared,
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertFalse(report["ok"])
+        severe_keys = {mismatch["key"] for mismatch in report["severe_mismatches"]}
+        self.assertIn("MeshCutoff", severe_keys)
+        self.assertTrue(
+            any("random_cartesian" in mismatch["methods"] for mismatch in report["severe_mismatches"])
+        )
+        self.assertTrue(report["severe_warning"])
+
+    def test_siesta_settings_fc_basis_mismatch_is_severe(self) -> None:
+        module = self.load_module_from_path(
+            "siesta_settings_fc_basis_bad",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        shared, md, atom = self.siesta_settings_fixture()
+        atom_bad = copy.deepcopy(atom)
+        atom_bad["structure"]["siesta"]["PAO.BasisSize"] = "SZ"
+        report = module.compare_method_settings(
+            {"md": md, "siesta_fc_cartesian": atom_bad, "random_cartesian": atom},
+            shared,
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertFalse(report["ok"])
+        severe = [
+            mismatch
+            for mismatch in report["severe_mismatches"]
+            if mismatch["key"] == "PAO.BasisSize"
+        ]
+        self.assertTrue(severe)
+        self.assertTrue(any("siesta_fc_cartesian" in mismatch["methods"] for mismatch in severe))
+
+    def test_siesta_settings_path_only_artifact_differences_are_not_severe(self) -> None:
+        module = self.load_module_from_path(
+            "siesta_settings_path_only",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        shared, md, atom = self.siesta_settings_fixture()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            artifact_hashes = {}
+            for method in ("md", "siesta_fc_cartesian", "random_cartesian"):
+                method_dir = root / method / "different" / "absolute" / "path"
+                method_dir.mkdir(parents=True)
+                basis = method_dir / "O.ion.xml"
+                pseudo = method_dir / "O.psf"
+                basis.write_text("<basis>same</basis>\n", encoding="utf-8")
+                pseudo.write_text("pseudo same\n", encoding="utf-8")
+                artifact_hashes[method] = module.artifact_hash_payload(
+                    basis_files=[basis],
+                    pseudopotential_files=[pseudo],
+                )
+            report = module.compare_method_settings(
+                {"md": md, "siesta_fc_cartesian": atom, "random_cartesian": atom},
+                shared,
+                artifact_hashes_by_method=artifact_hashes,
+                selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+            )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["severe_mismatches"], [])
+        self.assertFalse(report["basis_pseudopotential_warning"])
+
+    def test_initial_manifest_records_per_method_siesta_settings_for_three_methods(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            runner = module.ExperimentRunner()
+            manifest = runner._initial_experiment_manifest(
+                run_id="siesta_manifest_case",
+                md_sizes=[3],
+                atom_sizes=[3],
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                random_seed=42,
+                split_mode="shared",
+                atom_dataset_specs=None,
+                test_sets=["test_md", "test_siesta_fc_cartesian", "test_random_cartesian"],
+                primary_metric="global_rmse_eV",
+                compute_budget_mode="dataset_size",
+                compute_accelerator="cpu",
+                selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+                run_mode="dataset_only",
+                random_cartesian_options={"n_structures": 3},
+            )
+        self.assertEqual(
+            set(manifest["siesta_settings_hash_by_method"]),
+            {"md", "siesta_fc_cartesian", "random_cartesian"},
+        )
+        self.assertIn("random_cartesian", manifest["method_siesta_settings"])
+        self.assertIn("random_cartesian", manifest["basis_hash_by_method"])
+        self.assertIn("random_cartesian", manifest["pseudopotential_hash_by_method"])
+        self.assertIsInstance(manifest["siesta_settings_pairwise_mismatch_report"], list)
 
     def test_compute_budget_pairing_helpers(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
@@ -3404,19 +6247,252 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertTrue(module.budget_warning(10, 30))
 
     def test_model_settings_detects_hyperparameter_mismatch(self) -> None:
-        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
-        spec = importlib.util.spec_from_file_location(
-            "model_settings",
-            REPO_ROOT / "Comparison" / "scripts" / "model_settings.py",
-        )
-        assert spec and spec.loader
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = self.load_model_settings_module("model_settings_binary_mismatch")
         md = {"training": {"data": {"out_matrix": "hamiltonian", "batch_size": 8}, "model": {"optim_lr": 0.005}, "trainer": {"max_epochs": 10}}}
         atom = {"training": {"data": {"out_matrix": "hamiltonian", "batch_size": 16}, "model": {"optim_lr": 0.005}, "trainer": {"max_epochs": 10}}}
         report = module.compare_model_settings(md, atom)
         self.assertFalse(report["ok"])
         self.assertEqual(report["mismatches"][0]["section"], "data")
+
+    def test_model_settings_three_method_equivalent_settings_pass(self) -> None:
+        module = self.load_model_settings_module("model_settings_three_method_ok")
+        md, fc, rc = self.model_settings_fixture()
+        report = module.compare_method_model_settings(
+            {"md": md, "siesta_fc_cartesian": fc, "random_cartesian": rc},
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            set(report["model_config_hash_by_method"]),
+            {"md", "siesta_fc_cartesian", "random_cartesian"},
+        )
+        self.assertIn("random_cartesian", report["method_model_settings"])
+        self.assertEqual(report["pairwise_mismatch_report"], [])
+        self.assertFalse(report["severe_warning"])
+
+    def test_model_settings_random_cartesian_architecture_mismatch_is_severe(self) -> None:
+        module = self.load_model_settings_module("model_settings_rc_arch_bad")
+        md, fc, rc = self.model_settings_fixture()
+        rc["training"]["model"]["num_interactions"] = 2
+        report = module.compare_method_model_settings(
+            {"md": md, "siesta_fc_cartesian": fc, "random_cartesian": rc},
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertFalse(report["ok"])
+        severe = [
+            mismatch
+            for mismatch in report["severe_mismatches"]
+            if mismatch["section"] == "model" and mismatch["key"] == "num_interactions"
+        ]
+        self.assertTrue(severe)
+        self.assertTrue(any("random_cartesian" in mismatch["methods"] for mismatch in severe))
+        self.assertTrue(report["severe_warning"])
+
+    def test_model_settings_fc_loss_mismatch_is_severe(self) -> None:
+        module = self.load_model_settings_module("model_settings_fc_loss_bad")
+        md, fc, rc = self.model_settings_fixture()
+        fc["training"]["model"]["loss"] = "graph2mat.metrics.mse"
+        report = module.compare_method_model_settings(
+            {"md": md, "siesta_fc_cartesian": fc, "random_cartesian": rc},
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertFalse(report["ok"])
+        severe = [
+            mismatch
+            for mismatch in report["severe_mismatches"]
+            if mismatch["section"] == "model" and mismatch["key"] == "loss"
+        ]
+        self.assertTrue(severe)
+        self.assertTrue(any("siesta_fc_cartesian" in mismatch["methods"] for mismatch in severe))
+
+    def test_model_settings_path_only_differences_are_not_severe(self) -> None:
+        module = self.load_model_settings_module("model_settings_path_only")
+        md, fc, rc = self.model_settings_fixture()
+        md["training"]["data"]["dataset_path"] = "/tmp/md/dataset"
+        fc["training"]["data"]["dataset_path"] = "/tmp/fc/dataset"
+        rc["training"]["data"]["dataset_path"] = "/tmp/rc/dataset"
+        md["training"]["trainer"]["default_root_dir"] = "/tmp/md/out"
+        fc["training"]["trainer"]["default_root_dir"] = "/tmp/fc/out"
+        rc["training"]["trainer"]["default_root_dir"] = "/tmp/rc/out"
+        report = module.compare_method_model_settings(
+            {"md": md, "siesta_fc_cartesian": fc, "random_cartesian": rc},
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["severe_mismatches"], [])
+        self.assertEqual(report["pairwise_mismatch_report"], [])
+
+    def test_model_settings_hardware_accelerator_difference_is_info(self) -> None:
+        module = self.load_model_settings_module("model_settings_accelerator_info")
+        md, fc, rc = self.model_settings_fixture()
+        rc["training"]["trainer"]["accelerator"] = "gpu"
+        report = module.compare_method_model_settings(
+            {"md": md, "siesta_fc_cartesian": fc, "random_cartesian": rc},
+            selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["severe_mismatches"], [])
+        self.assertTrue(report["warning_mismatches"])
+        self.assertTrue(
+            all(mismatch["severity"] == "info" for mismatch in report["warning_mismatches"])
+        )
+
+    def test_initial_manifest_records_per_method_model_settings_for_three_methods(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            runner = module.ExperimentRunner()
+            manifest = runner._initial_experiment_manifest(
+                run_id="model_manifest_case",
+                md_sizes=[3],
+                atom_sizes=[3],
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                random_seed=42,
+                split_mode="shared",
+                atom_dataset_specs=None,
+                test_sets=["test_md", "test_siesta_fc_cartesian", "test_random_cartesian"],
+                primary_metric="global_rmse_eV",
+                compute_budget_mode="dataset_size",
+                compute_accelerator="cpu",
+                selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+                run_mode="dataset_only",
+                random_cartesian_options={"n_structures": 3},
+            )
+        self.assertEqual(
+            set(manifest["model_config_hash_by_method"]),
+            {"md", "siesta_fc_cartesian", "random_cartesian"},
+        )
+        self.assertIn("random_cartesian", manifest["method_model_settings"])
+        self.assertIn("random_cartesian", manifest["training_hyperparameters"])
+        self.assertIsInstance(manifest["model_config_pairwise_mismatch_report"], list)
+
+    def test_method_provenance_contains_three_selected_methods(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            runs = [
+                self.provenance_run_fixture(root, "md", label="md_190", size=190),
+                self.provenance_run_fixture(root, "siesta_fc_cartesian", label="fc_190", size=190),
+                self.provenance_run_fixture(root, "random_cartesian", label="rc_3500", size=3500),
+            ]
+            manifest = {
+                "experiment_id": "provenance_case",
+                "selected_methods": ["md", "siesta_fc_cartesian", "random_cartesian"],
+                "runs": runs,
+                "siesta_settings_hash_by_method": {
+                    "md": "siesta_md",
+                    "siesta_fc_cartesian": "siesta_fc",
+                    "random_cartesian": "siesta_rc",
+                },
+                "model_config_hash_by_method": {
+                    "md": "model_md",
+                    "siesta_fc_cartesian": "model_fc",
+                    "random_cartesian": "model_rc",
+                },
+                "basis_hash_by_method": {
+                    "md": "basis_md",
+                    "siesta_fc_cartesian": "basis_fc",
+                    "random_cartesian": "basis_rc",
+                },
+                "pseudopotential_hash_by_method": {
+                    "md": "pseudo_md",
+                    "siesta_fc_cartesian": "pseudo_fc",
+                    "random_cartesian": "pseudo_rc",
+                },
+            }
+            module.refresh_method_provenance(manifest)
+            frozen_manifest = root / "common_tests" / "test_random_cartesian" / "frozen_test_manifest.json"
+            frozen_manifest.parent.mkdir(parents=True)
+            frozen_manifest.write_text("{}", encoding="utf-8")
+            cross_provenance = module.build_method_provenance(
+                manifest,
+                selected_methods=["md", "siesta_fc_cartesian", "random_cartesian"],
+                runs=runs,
+                frozen_test_manifests_by_test_set={
+                    "test_random_cartesian": str(frozen_manifest),
+                },
+            )
+            runner = module.ExperimentRunner()
+            runner._write_experiment_manifest(manifest)
+            written_manifest = module.load_config(root / "results" / "provenance_case" / "experiment_manifest.yaml")
+        self.assertEqual(
+            set(manifest["method_provenance"]),
+            {"md", "siesta_fc_cartesian", "random_cartesian"},
+        )
+        self.assertEqual(set(written_manifest["method_provenance"]), set(manifest["method_provenance"]))
+        self.assertEqual(manifest["method_provenance"]["random_cartesian"]["dataset_size"], 3500)
+        self.assertEqual(manifest["method_provenance"]["random_cartesian"]["dataset_label"], "rc_3500")
+        self.assertNotIn("atom_displacement", manifest["method_provenance"])
+        self.assertIn("test", manifest["method_provenance"]["md"]["split_manifest"])
+        self.assertEqual(
+            cross_provenance["random_cartesian"]["frozen_test_manifest"],
+            str(frozen_manifest),
+        )
+
+    def test_method_provenance_missing_checkpoint_hash_warns(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            manifest = {
+                "experiment_id": "missing_checkpoint_hash",
+                "selected_methods": ["random_cartesian"],
+                "runs": [
+                    self.provenance_run_fixture(
+                        root,
+                        "random_cartesian",
+                        label="rc_no_hash",
+                        checkpoint_hash=None,
+                    )
+                ],
+                "siesta_settings_hash_by_method": {"random_cartesian": "siesta_rc"},
+                "model_config_hash_by_method": {"random_cartesian": "model_rc"},
+                "basis_hash_by_method": {"random_cartesian": "basis_rc"},
+                "pseudopotential_hash_by_method": {"random_cartesian": "pseudo_rc"},
+            }
+            module.refresh_method_provenance(manifest)
+        warnings = manifest["method_provenance"]["random_cartesian"]["warnings"]
+        self.assertTrue(any("Missing checkpoint hash" in warning for warning in warnings))
+        self.assertTrue(any("Missing checkpoint hash" in warning for warning in manifest["method_provenance_warnings"]))
+
+    def test_method_provenance_reads_legacy_two_method_runs(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            manifest = {
+                "experiment_id": "legacy_two_method",
+                "selected_methods": ["md", "atom_displacement"],
+                "runs": [
+                    self.provenance_run_fixture(root, "md", label="md_legacy", legacy_pipeline_only=True),
+                    self.provenance_run_fixture(
+                        root,
+                        "atom_displacement",
+                        label="atom_legacy",
+                        legacy_pipeline_only=True,
+                    ),
+                ],
+                "siesta_settings_hash_by_method": {
+                    "md": "siesta_md",
+                    "siesta_fc_cartesian": "siesta_fc",
+                },
+                "model_config_hash_by_method": {
+                    "md": "model_md",
+                    "siesta_fc_cartesian": "model_fc",
+                },
+                "basis_hash_by_method": {
+                    "md": "basis_md",
+                    "siesta_fc_cartesian": "basis_fc",
+                },
+                "pseudopotential_hash_by_method": {
+                    "md": "pseudo_md",
+                    "siesta_fc_cartesian": "pseudo_fc",
+                },
+            }
+            module.refresh_method_provenance(manifest)
+        self.assertEqual(set(manifest["method_provenance"]), {"md", "siesta_fc_cartesian"})
+        self.assertEqual(manifest["method_provenance"]["siesta_fc_cartesian"]["dataset_label"], "atom_legacy")
+        self.assertNotIn("random_cartesian", manifest["method_provenance"])
 
     def test_write_graph2mat_configs_uses_split_paths_by_default(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
@@ -3704,7 +6780,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(metrics["occupied_bands"], 0)
         self.assertEqual(metrics["frontier_window_bands"], 0)
+        self.assertFalse(metrics["fermi_metric_available"])
+        self.assertFalse(metrics["fermi_window_metric_available"])
         self.assertTrue(np.isnan(metrics["frontier_window_rmse_eV"]))
+        self.assertTrue(np.isnan(metrics["fermi_window_rmse_eV"]))
         self.assertTrue(np.isnan(metrics["gap_abs_error_eV"]))
 
     def test_evaluate_sample_status_records_reference_hash(self) -> None:

@@ -32,6 +32,22 @@ DOS_SIGMA_SWEEP_EV = [0.05, 0.10, 0.20, 0.40]
 DOS_POINTS = 1000
 LOW_ENERGY_N_STATES = 10
 LOW_ENERGY_ALIGNMENT = "none"
+RECOMMENDATION_PRIMARY_METRIC_PRIORITY = [
+    "low_energy_rmse_eV",
+    "frontier_window_rmse_eV",
+    "occupied_rmse_eV",
+    "relative_frobenius_union",
+    "dos_wasserstein_eV",
+]
+DIAGNOSTIC_ONLY_RECOMMENDATION_METRICS = [
+    "global_rmse_eV",
+    "global_mae_eV",
+    "support_precision",
+    "support_recall",
+    "false_zeros",
+    "false_nonzeros",
+    "hermiticity",
+]
 
 
 @dataclass
@@ -1221,15 +1237,18 @@ def eigen_error_metrics(
         "n_compared_bands": n_bands,
         "fermi_ref_eV": fermi_level,
         "fermi_level_source": fermi_level_source,
+        "fermi_metric_available": fermi_level is not None and math.isfinite(float(fermi_level)),
         "global_mae_eV": float(np.mean(np.abs(errors))) if n_bands else math.nan,
         "global_rmse_eV": float(np.sqrt(np.mean(errors**2))) if n_bands else math.nan,
         "global_max_abs_error_eV": float(np.max(np.abs(errors))) if n_bands else math.nan,
         "global_mean_signed_error_eV": float(np.mean(errors)) if n_bands else math.nan,
         "occupied_bands": int(np.count_nonzero(occupied_mask)),
+        "occupied_metric_available": bool(np.any(occupied_mask)),
         "occupied_mae_eV": masked_mae(occupied_mask),
         "occupied_rmse_eV": masked_rmse(occupied_mask),
         "fermi_window_eV": FERMI_WINDOW_EV,
         "fermi_window_bands": int(np.count_nonzero(fermi_mask)),
+        "fermi_window_metric_available": bool(np.any(fermi_mask)),
         "fermi_window_mae_eV": masked_mae(fermi_mask),
         "fermi_window_rmse_eV": masked_rmse(fermi_mask),
         "homo_index": homo_index,
@@ -1237,6 +1256,7 @@ def eigen_error_metrics(
         "homo_error_eV": float(errors[homo_index]) if homo_index is not None else math.nan,
         "lumo_error_eV": float(errors[lumo_index]) if lumo_index is not None else math.nan,
         "frontier_window_bands": int(np.count_nonzero(frontier_mask)),
+        "frontier_metric_available": bool(np.any(frontier_mask)),
         "frontier_window_mae_eV": masked_mae(frontier_mask),
         "frontier_window_rmse_eV": masked_rmse(frontier_mask),
         "align_global_shift_eV": global_shift,
@@ -1604,15 +1624,18 @@ def extract(
         "n_compared_bands",
         "fermi_ref_eV",
         "fermi_level_source",
+        "fermi_metric_available",
         "global_mae_eV",
         "global_rmse_eV",
         "global_max_abs_error_eV",
         "global_mean_signed_error_eV",
         "occupied_bands",
+        "occupied_metric_available",
         "occupied_mae_eV",
         "occupied_rmse_eV",
         "fermi_window_eV",
         "fermi_window_bands",
+        "fermi_window_metric_available",
         "fermi_window_mae_eV",
         "fermi_window_rmse_eV",
         "gap_ref_eV",
@@ -1623,6 +1646,7 @@ def extract(
         "homo_error_eV",
         "lumo_error_eV",
         "frontier_window_bands",
+        "frontier_metric_available",
         "frontier_window_mae_eV",
         "frontier_window_rmse_eV",
         "align_global_shift_eV",
@@ -1795,6 +1819,12 @@ def extract(
         "warnings": warnings,
         "errors": errors,
         "summary": summary,
+        "recommendation_metric_policy": {
+            "primary_metric_priority": RECOMMENDATION_PRIMARY_METRIC_PRIORITY,
+            "diagnostic_only_metrics": DIAGNOSTIC_ONLY_RECOMMENDATION_METRICS,
+            "missing_fermi_metrics_are_unavailable_not_zero": True,
+            "global_rmse_recommendation_role": "diagnostic_only",
+        },
         "outputs": {
             "metrics_root": str(metrics_root),
             "sparse_metrics": str(metrics_root / "sparse_metrics.csv"),
