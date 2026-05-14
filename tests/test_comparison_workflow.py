@@ -83,6 +83,124 @@ def make_sample(root: Path, name: str, *, hamiltonian: bool = True, converged: b
     return sample_dir
 
 
+def make_reusable_md_dataset(root: Path, *, n_samples: int = 3) -> Path:
+    dataset_dir = root / "dataset"
+    (dataset_dir / "MD_steps" / "basis").mkdir(parents=True)
+    (dataset_dir / "MD_steps" / "basis" / "H.ion.xml").write_text("<ion />\n", encoding="utf-8")
+    rows: list[dict[str, str]] = []
+    rows_by_split: dict[str, list[dict[str, str]]] = {"train": [], "validation": [], "test": []}
+    split_names = ["train"] * max(1, n_samples - 2) + ["validation", "test"]
+    for index, split_name in enumerate(split_names[:n_samples]):
+        raw_dir = dataset_dir / "MD_steps" / str(index)
+        raw_dir.mkdir(parents=True)
+        minimal_run_fdf(raw_dir / "RUN.fdf")
+        (raw_dir / "siesta.TSHS").write_bytes(b"matrix")
+        (raw_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        sample_dir = dataset_dir / "splits" / split_name / str(index)
+        sample_dir.mkdir(parents=True)
+        minimal_run_fdf(sample_dir / "RUN.fdf")
+        (sample_dir / "siesta.TSHS").write_bytes(b"matrix")
+        (sample_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        rows_for_split = [
+            {
+                "sample_id": f"md_{index}",
+                "method": "md",
+                "structure_path": str(sample_dir / "RUN.fdf"),
+                "hamiltonian_path": str(sample_dir / "siesta.TSHS"),
+                "run_out_path": str(dataset_dir / "RUN.out"),
+                "status": "completed",
+                "valid": "true",
+                "split": split_name,
+                "sample_dir": str(sample_dir),
+            }
+        ]
+        rows_by_split[split_name].extend(rows_for_split)
+        rows.extend(rows_for_split)
+    for split_name, split_rows in rows_by_split.items():
+        if split_rows:
+            write_csv(dataset_dir / "splits" / f"{split_name}_manifest.csv", split_rows)
+    (dataset_dir / "RUN.out").write_text("Job completed\nSCF cycle converged\n", encoding="utf-8")
+    (dataset_dir / "run_summary.json").write_text(
+        json.dumps({"samples": [{"status": "skipped_validated", "valid": True} for _row in rows]}),
+        encoding="utf-8",
+    )
+    return dataset_dir
+
+
+def make_reusable_atom_like_dataset(root: Path, *, source_root_name: str = "FC_steps") -> Path:
+    dataset_dir = root / "dataset"
+    (dataset_dir / "basis").mkdir(parents=True)
+    (dataset_dir / "basis" / "H.ion.xml").write_text("<ion />\n", encoding="utf-8")
+    (dataset_dir / source_root_name).mkdir(parents=True)
+    for split_name, index in (("train", 0), ("validation", 1), ("test", 2)):
+        sample_dir = dataset_dir / f"{split_name}_samples" / f"{index:03d}"
+        sample_dir.mkdir(parents=True)
+        minimal_run_fdf(sample_dir / "RUN.fdf")
+        (sample_dir / "siesta.TSHS").write_bytes(b"matrix")
+        (sample_dir / "metadata.json").write_text("{}", encoding="utf-8")
+        write_csv(
+            dataset_dir / "splits" / f"{split_name}_manifest.csv",
+            [
+                {
+                    "sample_id": f"sample_{index:03d}",
+                    "method": "random_cartesian" if source_root_name == "RandomCartesian_steps" else "atom_displacement",
+                    "structure_path": str(sample_dir / "RUN.fdf"),
+                    "hamiltonian_path": str(sample_dir / "siesta.TSHS"),
+                    "run_out_path": str(sample_dir / "RUN.out"),
+                    "metadata_path": str(sample_dir / "metadata.json"),
+                    "status": "completed",
+                    "valid": "true",
+                    "split": split_name,
+                    "sample_dir": str(sample_dir),
+                }
+            ],
+        )
+        (sample_dir / "RUN.out").write_text("Job completed\nSCF cycle converged\n", encoding="utf-8")
+    return dataset_dir
+
+
+def write_archived_retrainable_run(
+    results_root: Path,
+    *,
+    method_id: str,
+    dataset_label: str,
+    dataset_size: int,
+    dataset_dir: Path,
+    run_id: str = "source_experiment",
+) -> Path:
+    result_groups = {
+        "md": "results_md",
+        "siesta_fc_cartesian": "results_atomdisp",
+        "random_cartesian": "results_random_cartesian",
+    }
+    pipelines = {
+        "md": "md",
+        "siesta_fc_cartesian": "atom_displacement",
+        "random_cartesian": "random_cartesian",
+    }
+    result_dir = results_root / result_groups[method_id] / dataset_label / f"run_{run_id}"
+    result_dir.mkdir(parents=True)
+    manifest = {
+        "pipeline": pipelines[method_id],
+        "method_id": method_id,
+        "dataset_label": dataset_label,
+        "dataset_size": dataset_size,
+        "requested_dataset_size": dataset_size,
+        "effective_dataset_size": dataset_size,
+        "returncode": 0,
+        "run_id": run_id,
+        "dataset_dir": str(dataset_dir),
+        "result_dir": str(result_dir),
+        "run_mode": "full_strict_pipeline",
+    }
+    (result_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    write_csv(
+        result_dir / "metrics" / "spectral_metrics.csv",
+        [{"sample": "sample_1", "low_energy_rmse_eV": "0.1"}],
+    )
+    return result_dir / "manifest.json"
+
+
 class ComparisonWorkflowTests(unittest.TestCase):
     def load_pipeline_ui_module(self):
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
@@ -473,8 +591,50 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module = self.load_pipeline_ui_module()
         self.assertEqual(module.parse_run_mode(None), "full_strict_pipeline")
         self.assertEqual(module.parse_run_mode("dataset_only"), "dataset_only")
+        self.assertEqual(
+            module.parse_run_mode("train_test_metrics_plots_only"),
+            "train_test_metrics_plots_only",
+        )
         with self.assertRaisesRegex(RuntimeError, "run_mode"):
             module.parse_run_mode("training_only")
+
+    def test_training_plan_validation(self) -> None:
+        module = self.load_pipeline_ui_module()
+        plan = module.parse_training_plan(
+            [
+                {
+                    "label": "epochs400",
+                    "reusable_dataset_ids": ["run_a", "run_b"],
+                    "training_settings": {"max_epochs": 400},
+                },
+                {
+                    "label": "epochs600",
+                    "reusable_dataset_ids": "run_a",
+                    "training_settings": {"max_epochs": 600, "optim_lr": 0.001},
+                },
+            ]
+        )
+        self.assertEqual([item["label"] for item in plan], ["epochs400", "epochs600"])
+        self.assertEqual(plan[0]["training_settings"], {"max_epochs": 400})
+        self.assertEqual(plan[1]["reusable_dataset_ids"], ["run_a"])
+        with self.assertRaisesRegex(RuntimeError, "training_plan"):
+            module.parse_training_plan({"bad": True})
+        with self.assertRaisesRegex(RuntimeError, "reusable_dataset_ids"):
+            module.parse_training_plan([{"label": "empty"}])
+        with self.assertRaisesRegex(RuntimeError, "training_plan solo"):
+            module.ExperimentRunner().start(
+                [3],
+                [],
+                selected_methods=["md"],
+                run_mode="full_strict_pipeline",
+                training_plan=[
+                    {
+                        "label": "epochs400",
+                        "reusable_dataset_ids": ["run_a"],
+                        "training_settings": {"max_epochs": 400},
+                    }
+                ],
+            )
 
     def test_compute_accelerator_validation_and_config_application(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -674,19 +834,19 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertNotIn("ui_training_settings", rendered)
         self.assertNotIn("torch_float32_matmul_precision", rendered)
 
-    def test_default_venv_command_is_repo_portable(self) -> None:
+    def test_default_venv_command_uses_local_graph2mat_env(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
             module.DEFAULT_VENV_ACTIVATE_COMMAND,
-            "source ${REPO_ROOT}/.venv/bin/activate",
+            "source /home/christian/graph2mat-env/bin/activate",
         )
         self.assertEqual(
             module.resolve_venv_activate_from_command("source .venv/bin/activate"),
             "${REPO_ROOT}/.venv/bin/activate",
         )
         self.assertEqual(
-            module.resolve_venv_activate_from_command("source ${REPO_ROOT}/.venv/bin/activate"),
-            "${REPO_ROOT}/.venv/bin/activate",
+            module.resolve_venv_activate_from_command("source /home/christian/graph2mat-env/bin/activate"),
+            "/home/christian/graph2mat-env/bin/activate",
         )
 
     def test_random_cartesian_options_support_multiple_sizes(self) -> None:
@@ -1494,6 +1654,203 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertTrue((root / "results" / "dataset_only_case" / "performance_report.json").exists())
 
+    def test_downstream_only_records_runs_and_cross_evaluation(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            runner = module.ExperimentRunner()
+            calls = {"run_one": [], "cross": 0}
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                calls["run_one"].append((key, kwargs.get("run_mode")))
+                return {
+                    "pipeline": key,
+                    "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
+                    "dataset_label": kwargs.get("dataset_label") or f"dataset_{size}",
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake" / key / f"dataset_{size}"),
+                    "dataset_dir": str(root / "existing" / key / f"dataset_{size}"),
+                    "dataset_sample_ids": [f"{key}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 1.25,
+                    "siesta_counts": {"launched": 0, "skipped_or_reused": size, "failed": 0, "total": size},
+                }
+
+            def fake_cross(*_args, **_kwargs):
+                calls["cross"] += 1
+                return {"ok": True, "cross_evaluations": [], "outputs": {}}
+
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._run_cross_evaluation = fake_cross  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [3],
+                [3],
+                "downstream_only_case",
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                selected_methods=["md", "siesta_fc_cartesian"],
+                run_mode="train_test_metrics_plots_only",
+            )
+            manifest = module.load_config(root / "results" / "downstream_only_case" / "experiment_manifest.yaml")
+            self.assertEqual(manifest["run_mode"], "train_test_metrics_plots_only")
+            self.assertEqual(calls["cross"], 1)
+            self.assertEqual(
+                calls["run_one"],
+                [("md", "train_test_metrics_plots_only"), ("atom_displacement", "train_test_metrics_plots_only")],
+            )
+            self.assertEqual(manifest["timing"]["counters"]["siesta_launched"], 0)
+            self.assertEqual(manifest["timing"]["counters"]["graph2mat_trainings"], 2)
+
+    def test_training_plan_schedules_configs_over_selected_reusable_datasets(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            for label, size in (("md_100", 3), ("md_200", 4), ("md_300", 5)):
+                dataset_dir = make_reusable_md_dataset(root / f"source_{label}", n_samples=size)
+                write_archived_retrainable_run(
+                    module.RESULTS_ROOT,
+                    method_id="md",
+                    dataset_label=label,
+                    dataset_size=size,
+                    dataset_dir=dataset_dir,
+                    run_id=f"{label}_source",
+                )
+            runner = module.ExperimentRunner()
+            candidates = runner.reusable_dataset_candidates_payload()["datasets"]
+            ids_by_label = {item["dataset_label"]: item["id"] for item in candidates}
+            calls: list[tuple[str, int, dict[str, object], str]] = []
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                metadata = kwargs.get("recipe_metadata") or {}
+                calls.append(
+                    (
+                        kwargs.get("dataset_label"),
+                        size,
+                        kwargs.get("training_settings"),
+                        metadata.get("training_plan_label"),
+                    )
+                )
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": kwargs.get("dataset_label"),
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake" / str(kwargs.get("dataset_label"))),
+                    "dataset_dir": str(root / "existing" / str(kwargs.get("dataset_label"))),
+                    "dataset_sample_ids": [f"{key}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 1.0,
+                    "siesta_counts": {"launched": 0, "skipped_or_reused": size, "failed": 0, "total": size},
+                }
+
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [],
+                [],
+                "training_plan_case",
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                selected_methods=["md"],
+                run_mode="train_test_metrics_plots_only",
+                performance={"max_parallel_dataset_jobs": 4},
+                training_plan=[
+                    {
+                        "label": "epochs400",
+                        "reusable_dataset_ids": [
+                            ids_by_label["md_100"],
+                            ids_by_label["md_200"],
+                            ids_by_label["md_300"],
+                        ],
+                        "training_settings": {"max_epochs": 400},
+                    },
+                    {
+                        "label": "epochs600",
+                        "reusable_dataset_ids": [
+                            ids_by_label["md_100"],
+                            ids_by_label["md_200"],
+                        ],
+                        "training_settings": {"max_epochs": 600},
+                    },
+                ],
+            )
+
+            self.assertEqual(len(calls), 5)
+            self.assertEqual([call[3] for call in calls], ["epochs400"] * 3 + ["epochs600"] * 2)
+            self.assertEqual([call[2]["max_epochs"] for call in calls], [400, 400, 400, 600, 600])
+            self.assertTrue(all("epochs" in str(call[0]) for call in calls))
+            manifest = module.load_config(root / "results" / "training_plan_case" / "experiment_manifest.yaml")
+            self.assertEqual(manifest["timing"]["counters"]["dataset_jobs"], 5)
+            self.assertEqual(manifest["timing"]["counters"]["dataset_workers_used"], 1)
+            self.assertEqual(manifest["timing"]["counters"]["graph2mat_trainings"], 5)
+            self.assertEqual([item["label"] for item in manifest["training_plan"]], ["epochs400", "epochs600"])
+
+    def test_reusable_dataset_candidates_match_plot_visible_archived_results(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            visible_dataset = make_reusable_md_dataset(root / "visible_source")
+            hidden_dataset = make_reusable_md_dataset(root / "hidden_source")
+            write_archived_retrainable_run(
+                module.RESULTS_ROOT,
+                method_id="md",
+                dataset_label="visible_md",
+                dataset_size=3,
+                dataset_dir=visible_dataset,
+                run_id="visible_run",
+            )
+            (module.RESULTS_ROOT / "legacy_experiment").mkdir(parents=True)
+            module.write_yaml(
+                module.RESULTS_ROOT / "legacy_experiment" / "experiment_manifest.yaml",
+                {
+                    "runs": [
+                        {
+                            "pipeline": "md",
+                            "method_id": "md",
+                            "dataset_label": "experiment_manifest_only",
+                            "dataset_size": 3,
+                            "returncode": 0,
+                            "run_id": "legacy_experiment",
+                            "dataset_dir": str(hidden_dataset),
+                            "result_dir": str(root / "legacy_result"),
+                        }
+                    ]
+                },
+            )
+            no_metric_result = module.RESULTS_ROOT / "results_md" / "no_metrics" / "run_no_metrics"
+            no_metric_result.mkdir(parents=True)
+            (no_metric_result / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "pipeline": "md",
+                        "method_id": "md",
+                        "dataset_label": "no_metrics",
+                        "dataset_size": 3,
+                        "returncode": 0,
+                        "run_id": "no_metrics",
+                        "dataset_dir": str(hidden_dataset),
+                        "result_dir": str(no_metric_result),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runner = module.ExperimentRunner()
+            payload = runner.reusable_dataset_candidates_payload()
+            labels = [item["dataset_label"] for item in payload["datasets"]]
+            self.assertEqual(labels, ["visible_md"])
+            self.assertEqual([run["dataset_label"] for run in module.plot_data_summary()["runs"]], ["visible_md"])
+
     def test_parallel_callable_tasks_honor_continue_and_fail_fast(self) -> None:
         module = self.load_pipeline_ui_module()
         runner = module.ExperimentRunner()
@@ -1560,6 +1917,325 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(manifest["scientific_status"], "non_comparative")
             self.assertEqual(calls["cross"], 0)
 
+    def test_downstream_only_md_reuses_existing_dataset_without_generation(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            source_dataset = make_reusable_md_dataset(root / "source_md")
+            write_archived_retrainable_run(
+                module.RESULTS_ROOT,
+                method_id="md",
+                dataset_label="existing_md",
+                dataset_size=3,
+                dataset_dir=source_dataset,
+            )
+
+            runner = module.ExperimentRunner()
+            calls: list[tuple[str, object]] = []
+
+            def forbidden_generation(*_args, **_kwargs):
+                raise AssertionError("dataset generation should not be called")
+
+            def fake_validate(key, config, size):
+                calls.append(("validate", (key, size, config["paths"]["dataset_dir"])))
+                return {}
+
+            def fake_process(spec, **kwargs):
+                config = module.load_config(kwargs["config_path"])
+                calls.append(("process", tuple(config["pipeline"]["steps"])))
+                self.assertEqual(tuple(config["pipeline"]["steps"]), module.MD_DOWNSTREAM_STEPS)
+                self.assertIn("workspaces/reuse_run/md/existing_md/dataset", config["paths"]["dataset_dir"])
+                self.assertNotEqual(config["paths"]["dataset_dir"], str(source_dataset))
+                return 0
+
+            def fake_archive(key, size, run_id, workspace, config, returncode, run_log, prepare_metadata, **kwargs):
+                calls.append(("archive", prepare_metadata.get("dataset_reused")))
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": kwargs.get("dataset_label"),
+                    "dataset_size": size,
+                    "returncode": returncode,
+                    "run_mode": kwargs.get("run_mode"),
+                    "dataset_dir": config["paths"]["dataset_dir"],
+                    "result_dir": str(root / "archived"),
+                    "dataset_reused": prepare_metadata.get("dataset_reused"),
+                }
+
+            runner._prepare_md_config = forbidden_generation  # type: ignore[method-assign]
+            runner._validate_split_manifests = fake_validate  # type: ignore[method-assign]
+            runner._run_pipeline_process = fake_process  # type: ignore[method-assign]
+            runner._archive_outputs = fake_archive  # type: ignore[method-assign]
+
+            result = runner._run_one(
+                "md",
+                3,
+                "reuse_run",
+                dataset_label="existing_md",
+                run_mode="train_test_metrics_plots_only",
+            )
+
+            self.assertTrue(result["dataset_reused"])
+            self.assertEqual(calls[0][0], "validate")
+            self.assertEqual(calls[1], ("process", module.MD_DOWNSTREAM_STEPS))
+            self.assertEqual(calls[2], ("archive", True))
+            copied_manifest = (
+                module.WORKSPACES_ROOT
+                / "reuse_run"
+                / "md"
+                / "existing_md"
+                / "dataset"
+                / "splits"
+                / "train_manifest.csv"
+            )
+            self.assertIn(
+                str(module.WORKSPACES_ROOT / "reuse_run" / "md" / "existing_md" / "dataset"),
+                copied_manifest.read_text(encoding="utf-8"),
+            )
+            self.assertNotIn(str(source_dataset), copied_manifest.read_text(encoding="utf-8"))
+
+    def test_downstream_only_md_can_rebuild_splits_without_generation(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            source_dataset = make_reusable_md_dataset(root / "source_md", n_samples=6)
+            write_archived_retrainable_run(
+                module.RESULTS_ROOT,
+                method_id="md",
+                dataset_label="existing_md",
+                dataset_size=6,
+                dataset_dir=source_dataset,
+            )
+
+            runner = module.ExperimentRunner()
+
+            def forbidden_generation(*_args, **_kwargs):
+                raise AssertionError("dataset generation should not be called")
+
+            def fake_validate(key, config, size):
+                dataset_dir = Path(config["paths"]["dataset_dir"])
+                counts = {
+                    split: len(module.read_csv_rows(dataset_dir / "splits" / f"{split}_manifest.csv"))
+                    for split in ("train", "validation", "test")
+                }
+                self.assertEqual(key, "md")
+                self.assertEqual(size, 6)
+                self.assertEqual(counts, {"train": 3, "validation": 1, "test": 2})
+                self.assertEqual(config["splits"]["strategy"], "spread")
+                self.assertTrue((dataset_dir / "splits" / "test" / "1" / "RUN.fdf").exists())
+                self.assertTrue((dataset_dir / "splits" / "test" / "4" / "RUN.fdf").exists())
+                return {}
+
+            def fake_process(*_args, **_kwargs):
+                return 0
+
+            def fake_archive(key, size, run_id, workspace, config, returncode, run_log, prepare_metadata, **kwargs):
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": kwargs.get("dataset_label"),
+                    "dataset_size": size,
+                    "returncode": returncode,
+                    "run_mode": kwargs.get("run_mode"),
+                    "dataset_dir": config["paths"]["dataset_dir"],
+                    "result_dir": str(root / "archived"),
+                    "dataset_reused": prepare_metadata.get("dataset_reused"),
+                    "reused_split_policy": prepare_metadata.get("reused_split_policy"),
+                    "reused_split_counts": prepare_metadata.get("reused_split_counts"),
+                }
+
+            runner._prepare_md_config = forbidden_generation  # type: ignore[method-assign]
+            runner._validate_split_manifests = fake_validate  # type: ignore[method-assign]
+            runner._run_pipeline_process = fake_process  # type: ignore[method-assign]
+            runner._archive_outputs = fake_archive  # type: ignore[method-assign]
+
+            result = runner._run_one(
+                "md",
+                6,
+                "reuse_resplit",
+                dataset_label="existing_md",
+                split_ratios={"train": 0.5, "validation": 1 / 6, "test": 1 / 3},
+                split_mode="spread",
+                run_mode="train_test_metrics_plots_only",
+                reusable_split_policy="rebuild_splits",
+            )
+
+            self.assertTrue(result["dataset_reused"])
+            self.assertEqual(result["reused_split_policy"], "rebuild_splits")
+            self.assertEqual(result["reused_split_counts"], {"train": 3, "validation": 1, "test": 2})
+
+    def test_downstream_only_md_can_select_exact_reusable_dataset(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            source_a = make_reusable_md_dataset(root / "source_a")
+            source_b = make_reusable_md_dataset(root / "source_b")
+            (source_b / "selected_source_marker.txt").write_text("selected\n", encoding="utf-8")
+            for run_name, dataset_dir in (("run_a", source_a), ("run_b", source_b)):
+                write_archived_retrainable_run(
+                    module.RESULTS_ROOT,
+                    method_id="md",
+                    dataset_label="same_label",
+                    dataset_size=3,
+                    dataset_dir=dataset_dir,
+                    run_id=run_name,
+                )
+
+            runner = module.ExperimentRunner()
+            runs_by_dataset = {
+                Path(str(run["dataset_dir"])): run
+                for run in runner._archived_dataset_run_candidates()  # type: ignore[attr-defined]
+            }
+            selected_id = runner._dataset_candidate_id(runs_by_dataset[source_b])  # type: ignore[attr-defined]
+            info = runner.dataset_recipes_info_for_reusable_dataset_ids(
+                [selected_id],
+                selected_methods=["md"],
+            )
+            self.assertEqual(info["md_dataset_specs"][0]["recipe_metadata"]["reuse_source_id"], selected_id)
+
+            def forbidden_generation(*_args, **_kwargs):
+                raise AssertionError("dataset generation should not be called")
+
+            def fake_validate(*_args, **_kwargs):
+                return {}
+
+            def fake_process(*_args, **_kwargs):
+                return 0
+
+            def fake_archive(key, size, run_id, workspace, config, returncode, run_log, prepare_metadata, **kwargs):
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": kwargs.get("dataset_label"),
+                    "dataset_size": size,
+                    "returncode": returncode,
+                    "run_mode": kwargs.get("run_mode"),
+                    "dataset_dir": config["paths"]["dataset_dir"],
+                    "result_dir": str(root / "archived"),
+                    "dataset_reused": prepare_metadata.get("dataset_reused"),
+                    "reused_dataset_dir": prepare_metadata.get("reused_dataset_dir"),
+                }
+
+            runner._prepare_md_config = forbidden_generation  # type: ignore[method-assign]
+            runner._validate_split_manifests = fake_validate  # type: ignore[method-assign]
+            runner._run_pipeline_process = fake_process  # type: ignore[method-assign]
+            runner._archive_outputs = fake_archive  # type: ignore[method-assign]
+            spec = info["md_dataset_specs"][0]
+            result = runner._run_one(
+                "md",
+                int(spec["size"]),
+                "explicit_reuse",
+                dataset_label=str(spec["label"]),
+                recipe_metadata=spec["recipe_metadata"],
+                run_mode="train_test_metrics_plots_only",
+            )
+
+            self.assertTrue(result["dataset_reused"])
+            self.assertEqual(result["reused_dataset_dir"], str(source_b))
+            copied_dataset = module.WORKSPACES_ROOT / "explicit_reuse" / "md" / "same_label" / "dataset"
+            self.assertTrue((copied_dataset / "selected_source_marker.txt").exists())
+
+    def test_downstream_only_random_cartesian_reuses_existing_dataset_without_generation(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            source_dataset = make_reusable_atom_like_dataset(
+                root / "source_random_cartesian",
+                source_root_name="RandomCartesian_steps",
+            )
+            write_archived_retrainable_run(
+                module.RESULTS_ROOT,
+                method_id="random_cartesian",
+                dataset_label="existing_random",
+                dataset_size=3,
+                dataset_dir=source_dataset,
+            )
+
+            runner = module.ExperimentRunner()
+            calls: list[tuple[str, object]] = []
+
+            def forbidden_generation(*_args, **_kwargs):
+                raise AssertionError("dataset generation should not be called")
+
+            def fake_validate(key, config, size):
+                calls.append(("validate", (key, size, config["paths"]["dataset_dir"])))
+                return {}
+
+            def fake_process(spec, **kwargs):
+                config = module.load_config(kwargs["config_path"])
+                calls.append(("process", tuple(config["pipeline"]["steps"])))
+                self.assertEqual(tuple(config["pipeline"]["steps"]), module.ATOM_DOWNSTREAM_STEPS)
+                self.assertIn(
+                    "workspaces/reuse_random/random_cartesian/existing_random/dataset",
+                    config["paths"]["dataset_dir"],
+                )
+                self.assertEqual(
+                    config["paths"]["samples_dir"].split("/")[-1],
+                    "train_samples",
+                )
+                self.assertNotEqual(config["paths"]["dataset_dir"], str(source_dataset))
+                return 0
+
+            def fake_archive(key, size, run_id, workspace, config, returncode, run_log, prepare_metadata, **kwargs):
+                calls.append(("archive", prepare_metadata.get("dataset_reused")))
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": kwargs.get("dataset_label"),
+                    "dataset_size": size,
+                    "returncode": returncode,
+                    "run_mode": kwargs.get("run_mode"),
+                    "dataset_dir": config["paths"]["dataset_dir"],
+                    "result_dir": str(root / "archived"),
+                    "dataset_reused": prepare_metadata.get("dataset_reused"),
+                }
+
+            runner._prepare_atom_config = forbidden_generation  # type: ignore[method-assign]
+            runner._validate_split_manifests = fake_validate  # type: ignore[method-assign]
+            runner._run_pipeline_process = fake_process  # type: ignore[method-assign]
+            runner._archive_outputs = fake_archive  # type: ignore[method-assign]
+
+            result = runner._run_random_cartesian(
+                3,
+                "reuse_random",
+                dataset_label="existing_random",
+                run_mode="train_test_metrics_plots_only",
+            )
+
+            self.assertTrue(result["dataset_reused"])
+            self.assertEqual(calls[0][0], "validate")
+            self.assertEqual(calls[1], ("process", module.ATOM_DOWNSTREAM_STEPS))
+            self.assertEqual(calls[2], ("archive", True))
+
+    def test_downstream_only_fails_clearly_when_dataset_is_missing(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            runner = module.ExperimentRunner()
+
+            def forbidden_generation(*_args, **_kwargs):
+                raise AssertionError("dataset generation should not be called")
+
+            runner._prepare_md_config = forbidden_generation  # type: ignore[method-assign]
+            with self.assertRaisesRegex(RuntimeError, "No existing dataset found"):
+                runner._run_one(
+                    "md",
+                    3,
+                    "missing_reuse",
+                    dataset_label="missing_md",
+                    run_mode="train_test_metrics_plots_only",
+                )
+
     def test_random_cartesian_full_pipeline_is_accepted_for_phase_three(self) -> None:
         module = self.load_pipeline_ui_module()
         runner = module.ExperimentRunner()
@@ -1596,14 +2272,17 @@ class ComparisonWorkflowTests(unittest.TestCase):
             finally:
                 module.threading.Thread = original_thread
             self.assertEqual(status["run_id"], runner._run_id)
-            self.assertEqual(started["args"][-8], "gpu")
-            self.assertEqual(started["args"][-7], ["random_cartesian"])
-            self.assertEqual(started["args"][-6], "full_strict_pipeline")
-            self.assertEqual(started["args"][-5], {"n_structures": 3})
-            self.assertEqual(started["args"][-4]["compute_accelerator"], "gpu")
-            self.assertEqual(started["args"][-3], {})
-            self.assertIsNone(started["args"][-2])
-            self.assertIn("recipes", started["args"][-1])
+            tail = started["args"][-10:]
+            self.assertEqual(tail[0], "gpu")
+            self.assertEqual(tail[1], ["random_cartesian"])
+            self.assertEqual(tail[2], "full_strict_pipeline")
+            self.assertEqual(tail[3], {"n_structures": 3})
+            self.assertEqual(tail[4]["compute_accelerator"], "gpu")
+            self.assertEqual(tail[5], {})
+            self.assertIsNone(tail[6])
+            self.assertIn("recipes", tail[7])
+            self.assertEqual(tail[8], "preserve_archived_splits")
+            self.assertEqual(tail[9], [])
 
     def test_experiment_start_rejects_zero_selected_methods(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -1623,14 +2302,31 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('class="tab active" data-view="experiment"', index_html)
         self.assertIn('id="view-run" class="view"', index_html)
         self.assertIn('id="view-experiment" class="view active"', index_html)
+        self.assertIn('value="train_test_metrics_plots_only"', index_html)
+        self.assertIn('id="reusable-dataset-panel"', index_html)
+        self.assertIn('id="reusable-dataset-list"', index_html)
+        self.assertIn('id="refresh-reusable-datasets"', index_html)
+        self.assertIn('id="reusable-split-policy"', index_html)
+        self.assertIn('id="training-plan-panel"', index_html)
+        self.assertIn('id="add-training-plan-entry"', index_html)
+        self.assertIn('class="metric-info-bubble"', index_html)
+        self.assertIn("Metric guide", index_html)
+        self.assertIn("Low-energy RMSE", index_html)
+        self.assertIn("DOS W1", index_html)
         self.assertNotIn('id="random-cartesian-n-structures"', index_html)
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
-        self.assertIn('run_mode: document.getElementById("run-mode").value', app_js)
-        self.assertIn('value="source ${REPO_ROOT}/.venv/bin/activate"', index_html)
-        self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"', app_js)
-        self.assertNotIn("graph2mat-env", index_html)
-        self.assertNotIn("graph2mat-env", app_js)
+        self.assertIn("run_mode: runMode", app_js)
+        self.assertIn("reusable_dataset_ids: reusableDatasetIds", app_js)
+        self.assertIn("reusable_split_policy: reusableSplitPolicy()", app_js)
+        self.assertIn("training_plan: plan", app_js)
+        self.assertIn("trainingPlanPayload()", app_js)
+        self.assertIn("/api/datasets/reusable", app_js)
+        self.assertIn("selectedReusableDatasetIds()", app_js)
+        self.assertIn("run?.training_tag", app_js)
+        self.assertIn("item.training_tag", app_js)
+        self.assertIn('value="source /home/christian/graph2mat-env/bin/activate"', index_html)
+        self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"', app_js)
         self.assertNotIn('id="compute-accelerator"', index_html)
         self.assertIn('value="cpu"', index_html)
         self.assertIn('value="gpu" selected', index_html)
@@ -1876,6 +2572,74 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 results["random_cartesian"]["prediction_glob"],
                 "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
             )
+
+    def test_retraining_runs_get_incremental_training_tags_for_plots(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            dataset_dir = make_reusable_md_dataset(root / "source_dataset")
+            training_dir = root / "training"
+            training_dir.mkdir(parents=True)
+            config = {
+                "paths": {
+                    "dataset_dir": str(dataset_dir),
+                    "training_dir": str(training_dir),
+                },
+                "checkpoint": {},
+                "performance": {},
+                "training": {"ui_training_settings": {"max_epochs": 5}},
+            }
+            runner = module.ExperimentRunner()
+
+            def fake_evaluate(_key, _config, result_dir):
+                write_csv(
+                    result_dir / "metrics" / "spectral_metrics.csv",
+                    [{"sample": "sample_1", "low_energy_rmse_eV": "0.25"}],
+                )
+                return {"evaluation_time_seconds": 0.0, "returncode": 0}
+
+            runner._evaluate_hamiltonian_metrics = fake_evaluate  # type: ignore[method-assign]
+
+            first = runner._archive_outputs(
+                "md",
+                3,
+                "source",
+                root / "workspace_source",
+                config,
+                0,
+                "",
+                {},
+                dataset_label="Dataset_1000",
+                run_mode="full_strict_pipeline",
+            )
+            second = runner._archive_outputs(
+                "md",
+                3,
+                "retrain",
+                root / "workspace_retrain",
+                config,
+                0,
+                "",
+                {
+                    "dataset_reused": True,
+                    "reused_dataset_dir": first["dataset_dir"],
+                    "reused_result_dir": first["result_dir"],
+                    "reused_run_id": first["run_id"],
+                },
+                dataset_label="Dataset_1000",
+                run_mode="train_test_metrics_plots_only",
+            )
+
+            self.assertEqual(first["training_tag"], "dataset_1000_train1")
+            self.assertEqual(first["training_index"], 1)
+            self.assertEqual(second["training_tag"], "dataset_1000_train2")
+            self.assertEqual(second["training_index"], 2)
+            self.assertEqual(second["training_base_dataset_label"], "Dataset_1000")
+            plots = module.plot_data_summary()
+            tags = {run["run_id"]: run["training_tag"] for run in plots["runs"]}
+            self.assertEqual(tags["source"], "dataset_1000_train1")
+            self.assertEqual(tags["retrain"], "dataset_1000_train2")
 
     def test_plot_summary_reports_missing_cross_csv_and_metric_gaps(self) -> None:
         module = self.load_pipeline_ui_module()

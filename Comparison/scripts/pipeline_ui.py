@@ -61,7 +61,7 @@ LOG_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
 METRIC_VERSION = "2026-05-08.frontier-window-v1"
-DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
+DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -181,7 +181,15 @@ METHOD_REGISTRY: dict[str, MethodSpec] = {
     ),
 }
 
-RUN_MODES = {"dataset_only", "full_strict_pipeline"}
+DATASET_ONLY_RUN_MODE = "dataset_only"
+FULL_STRICT_RUN_MODE = "full_strict_pipeline"
+DOWNSTREAM_ONLY_RUN_MODE = "train_test_metrics_plots_only"
+RUN_MODES = {DATASET_ONLY_RUN_MODE, FULL_STRICT_RUN_MODE, DOWNSTREAM_ONLY_RUN_MODE}
+MD_DOWNSTREAM_STEPS = ("run_md_training", "run_md_testing", "run_md_prediction")
+ATOM_DOWNSTREAM_STEPS = ("render_inputs", "run_atdisp_training", "run_atdisp_testing", "run_atdisp_prediction")
+PRESERVE_ARCHIVED_SPLITS = "preserve_archived_splits"
+REBUILD_REUSABLE_SPLITS = "rebuild_splits"
+REUSABLE_SPLIT_POLICIES = {PRESERVE_ARCHIVED_SPLITS, REBUILD_REUSABLE_SPLITS}
 
 
 def method_registry_payload() -> list[dict[str, Any]]:
@@ -246,13 +254,44 @@ def normalize_selected_methods(value: Any, *, default_legacy: bool = True) -> li
 
 
 def parse_run_mode(value: Any) -> str:
-    mode = "full_strict_pipeline" if value in (None, "") else str(value).strip()
+    mode = FULL_STRICT_RUN_MODE if value in (None, "") else str(value).strip()
     if mode not in RUN_MODES:
         raise RuntimeError(
-            "run_mode debe ser 'dataset_only' o 'full_strict_pipeline' "
+            "run_mode debe ser 'dataset_only', 'full_strict_pipeline' o "
+            "'train_test_metrics_plots_only' "
             f"(recibido: {value!r})."
         )
     return mode
+
+
+def run_mode_skips_dataset_generation(run_mode: str) -> bool:
+    return run_mode == DOWNSTREAM_ONLY_RUN_MODE
+
+
+def parse_reusable_dataset_ids(value: Any) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        raw_ids = [item.strip() for item in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw_ids = [str(item).strip() for item in value]
+    else:
+        raise RuntimeError("reusable_dataset_ids debe ser una lista o texto separado por comas.")
+    ids: list[str] = []
+    for item in raw_ids:
+        if item and item not in ids:
+            ids.append(item)
+    return ids
+
+
+def parse_reusable_split_policy(value: Any) -> str:
+    policy = PRESERVE_ARCHIVED_SPLITS if value in (None, "") else str(value).strip().lower()
+    if policy not in REUSABLE_SPLIT_POLICIES:
+        raise RuntimeError(
+            "reusable_split_policy debe ser 'preserve_archived_splits' o "
+            f"'rebuild_splits' (recibido: {value!r})."
+        )
+    return policy
 
 
 def parse_random_cartesian_options(value: Any) -> dict[str, Any]:
@@ -2702,6 +2741,53 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
     return settings
 
 
+def parse_training_plan(value: Any) -> list[dict[str, Any]]:
+    if value in (None, "", []):
+        return []
+    if not isinstance(value, list):
+        raise RuntimeError("training_plan debe ser una lista de configuraciones.")
+    plan: list[dict[str, Any]] = []
+    used_labels: set[str] = set()
+    for index, raw_item in enumerate(value):
+        if not isinstance(raw_item, dict):
+            raise RuntimeError(f"training_plan[{index}] debe ser un objeto.")
+        dataset_ids = parse_reusable_dataset_ids(raw_item.get("reusable_dataset_ids"))
+        if not dataset_ids:
+            raise RuntimeError(
+                f"training_plan[{index}].reusable_dataset_ids debe contener al menos un dataset."
+            )
+        settings = parse_training_settings(
+            raw_item.get("training_settings", raw_item.get("settings", {}))
+        )
+        raw_label = parse_optional_text(raw_item.get("label"), f"training_plan[{index}].label")
+        display_label = raw_label or f"Config {index + 1}"
+        base_label = compact_dataset_label(
+            display_label,
+            {"index": index + 1, "training_settings": settings},
+            max_length=48,
+        )
+        label = base_label
+        suffix = 2
+        while label in used_labels:
+            label = compact_dataset_label(
+                f"{base_label}_{suffix}",
+                {"index": index + 1, "suffix": suffix},
+                max_length=48,
+            )
+            suffix += 1
+        used_labels.add(label)
+        plan.append(
+            {
+                "index": index + 1,
+                "label": label,
+                "display_label": display_label,
+                "training_settings": settings,
+                "reusable_dataset_ids": dataset_ids,
+            }
+        )
+    return plan
+
+
 def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str, Any] | None) -> None:
     if not settings:
         return
@@ -3270,6 +3356,87 @@ def split_spread(items: list[Path], counts: dict[str, int]) -> dict[str, list[Pa
     if len(train) > counts["train"]:
         train = select_spread(train, counts["train"])
     return {"train": train, "validation": validation, "test": test}
+
+
+def select_spread_items(items: list[Any], count: int) -> list[Any]:
+    if count <= 0:
+        return []
+    if count >= len(items):
+        return list(items)
+
+    used: set[int] = set()
+    selected: list[int] = []
+    for index in range(count):
+        target = min(len(items) - 1, int((index + 0.5) * len(items) / count))
+        if target in used:
+            target = min(
+                (candidate for candidate in range(len(items)) if candidate not in used),
+                key=lambda candidate: abs(candidate - target),
+            )
+        used.add(target)
+        selected.append(target)
+    return [items[index] for index in sorted(selected)]
+
+
+def split_spread_items(items: list[Any], counts: dict[str, int]) -> dict[str, list[Any]]:
+    indexed = list(enumerate(items))
+    test = select_spread_items(indexed, counts["test"])
+    test_indexes = {index for index, _item in test}
+    remaining = [entry for entry in indexed if entry[0] not in test_indexes]
+    validation = select_spread_items(remaining, counts["validation"])
+    validation_indexes = {index for index, _item in validation}
+    train = [entry for entry in remaining if entry[0] not in validation_indexes]
+    if len(train) > counts["train"]:
+        train = select_spread_items(train, counts["train"])
+    return {
+        "train": [item for _index, item in train],
+        "validation": [item for _index, item in validation],
+        "test": [item for _index, item in test],
+    }
+
+
+def split_block_items(items: list[Any], counts: dict[str, int]) -> dict[str, list[Any]]:
+    requested = counts["train"] + counts["validation"] + counts["test"]
+    selected = select_spread_items(items, requested)
+    train_end = counts["train"]
+    validation_end = train_end + counts["validation"]
+    return {
+        "train": selected[:train_end],
+        "validation": selected[train_end:validation_end],
+        "test": selected[validation_end:],
+    }
+
+
+def split_grouped_exact_items(
+    items: list[dict[str, Any]],
+    counts: dict[str, int],
+) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        row = item.get("row") if isinstance(item, dict) else {}
+        group_id = str((row or {}).get("split_group_id") or item.get("name") or item.get("source") or "")
+        groups[group_id].append(item)
+    ordered_groups = [
+        (key, sorted(value, key=lambda entry: sample_sort_key(Path(str(entry.get("source") or "")))))
+        for key, value in sorted(groups.items())
+    ]
+    result: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "test": []}
+    for split_name in ("test", "validation", "train"):
+        target = counts[split_name]
+        for key, samples in list(ordered_groups):
+            if len(result[split_name]) + len(samples) > target:
+                continue
+            result[split_name].extend(samples)
+            ordered_groups.remove((key, samples))
+            if len(result[split_name]) == target:
+                break
+        if len(result[split_name]) != target:
+            raise RuntimeError(
+                "Reusable grouped split no puede satisfacer los tamanos exactos "
+                f"sin partir familias: {split_name} necesita {target}, obtuvo "
+                f"{len(result[split_name])}."
+            )
+    return result
 
 
 ATOM_SPLIT_GROUP_FIELDS = [
@@ -4195,7 +4362,7 @@ def cross_plot_diagnostics(
         append_unique_text(warnings, cross_evaluation.get("missing_cells"))
         append_unique_text(warnings, manifest.get("warnings"))
         skipped = bool(cross_evaluation.get("skipped"))
-        if run_mode == "dataset_only" or skipped:
+        if run_mode == DATASET_ONLY_RUN_MODE or skipped:
             reason = str(cross_evaluation.get("reason") or run_mode or "cross_evaluation_skipped")
             severity = "info"
             message = f"Cross-evaluation omitida para {experiment_id}: {reason}."
@@ -4603,6 +4770,32 @@ def metric_diagnostics(
     }
 
 
+def archived_manifest_result_dir(manifest: dict[str, Any], manifest_path: Path) -> Path:
+    result_dir = Path(manifest.get("result_dir", manifest_path.parent))
+    if not result_dir.is_absolute():
+        result_dir = manifest_path.parent / result_dir
+    if not result_dir.exists():
+        result_dir = manifest_path.parent
+    return result_dir
+
+
+def archived_run_metric_rows(result_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    metrics_dir = result_dir / "metrics"
+    return {
+        "sparse": read_csv_rows(metrics_dir / "sparse_metrics.csv"),
+        "spectral": read_csv_rows(metrics_dir / "spectral_metrics.csv"),
+        "dos": read_csv_rows(metrics_dir / "dos_metrics.csv"),
+        "sparse_sweep": read_csv_rows(metrics_dir / "sparse_threshold_sweep.csv"),
+        "dos_sweep": read_csv_rows(metrics_dir / "dos_sigma_sweep.csv"),
+        "matrix_spectrum": read_csv_rows(metrics_dir / "matrix_spectrum_relationship.csv"),
+    }
+
+
+def archived_run_has_plot_metrics(result_dir: Path) -> bool:
+    rows_by_metric = archived_run_metric_rows(result_dir)
+    return any(rows for rows in rows_by_metric.values())
+
+
 def plot_data_summary() -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     groups = {
@@ -4618,21 +4811,16 @@ def plot_data_summary() -> dict[str, Any]:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            result_dir = Path(manifest.get("result_dir", manifest_path.parent))
-            if not result_dir.is_absolute():
-                result_dir = manifest_path.parent / result_dir
-            if not result_dir.exists():
-                result_dir = manifest_path.parent
-            sparse_rows = read_csv_rows(result_dir / "metrics" / "sparse_metrics.csv")
-            spectral_rows = read_csv_rows(result_dir / "metrics" / "spectral_metrics.csv")
-            dos_rows = read_csv_rows(result_dir / "metrics" / "dos_metrics.csv")
-            sparse_sweep_rows = read_csv_rows(result_dir / "metrics" / "sparse_threshold_sweep.csv")
-            dos_sweep_rows = read_csv_rows(result_dir / "metrics" / "dos_sigma_sweep.csv")
-            relationship_rows = read_csv_rows(
-                result_dir / "metrics" / "matrix_spectrum_relationship.csv"
-            )
-            if not sparse_rows and not spectral_rows and not dos_rows and not relationship_rows and not sparse_sweep_rows and not dos_sweep_rows:
+            result_dir = archived_manifest_result_dir(manifest, manifest_path)
+            metric_rows = archived_run_metric_rows(result_dir)
+            if not any(metric_rows.values()):
                 continue
+            sparse_rows = metric_rows["sparse"]
+            spectral_rows = metric_rows["spectral"]
+            dos_rows = metric_rows["dos"]
+            sparse_sweep_rows = metric_rows["sparse_sweep"]
+            dos_sweep_rows = metric_rows["dos_sweep"]
+            relationship_rows = metric_rows["matrix_spectrum"]
             errors = manifest.get("errors", [])
             if not isinstance(errors, list):
                 errors = []
@@ -4678,6 +4866,18 @@ def plot_data_summary() -> dict[str, Any]:
                     "run_id": str(manifest.get("run_id", manifest_path.parent.name.removeprefix("run_"))),
                     "result_dir": str(result_dir),
                     "dataset_label": manifest.get("dataset_label"),
+                    "training_tag": manifest.get("training_tag"),
+                    "training_index": manifest.get("training_index"),
+                    "training_base_dataset_label": manifest.get("training_base_dataset_label"),
+                    "training_base_dataset_size": manifest.get("training_base_dataset_size"),
+                    "training_base_dataset_dir": manifest.get("training_base_dataset_dir"),
+                    "training_base_result_dir": manifest.get("training_base_result_dir"),
+                    "training_base_run_id": manifest.get("training_base_run_id"),
+                    "training_plan_index": manifest.get("training_plan_index"),
+                    "training_plan_label": manifest.get("training_plan_label"),
+                    "training_plan_display_label": manifest.get("training_plan_display_label"),
+                    "training_plan_settings": manifest.get("training_plan_settings"),
+                    "training_plan_source_dataset_label": manifest.get("training_plan_source_dataset_label"),
                     "recipe_id": manifest.get("recipe_id"),
                     "recipe_label": manifest.get("recipe_label"),
                     "block_id": manifest.get("block_id"),
@@ -4941,12 +5141,20 @@ class ExperimentRunner:
         training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
         dataset_recipes_info: dict[str, Any] | None = None,
+        reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
+        training_plan: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
             selected_methods = normalize_selected_methods(selected_methods)
             run_mode = parse_run_mode(run_mode)
+            reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
+            training_plan = parse_training_plan(training_plan)
+            if training_plan and not run_mode_skips_dataset_generation(run_mode):
+                raise RuntimeError(
+                    "training_plan solo esta disponible con train_test_metrics_plots_only."
+                )
             performance_settings = parse_performance_settings(
                 performance,
                 compute_accelerator=compute_accelerator,
@@ -5021,6 +5229,8 @@ class ExperimentRunner:
                     training_settings,
                     venv_activate_path,
                     dataset_recipes_info,
+                    reusable_split_policy,
+                    training_plan,
                 ),
                 daemon=True,
             )
@@ -5260,7 +5470,7 @@ class ExperimentRunner:
             "pseudopotential_hash_by_method": siesta_report.get("pseudopotential_hash_by_method", {}),
             "basis_pseudopotential_info": basis_and_pseudos,
             "run_mode": run_mode,
-            "scientific_status": "dataset_only" if run_mode == "dataset_only" else (
+            "scientific_status": "dataset_only" if run_mode == DATASET_ONLY_RUN_MODE else (
                 "non_comparative" if len(selected_methods) < 2 else "pending"
             ),
             "selected_methods": list(selected_methods),
@@ -5560,7 +5770,7 @@ class ExperimentRunner:
         counters["siesta_launched"] = int(counters.get("siesta_launched", 0)) + int(counts.get("launched", 0) or 0)
         counters["siesta_skipped_or_reused"] = int(counters.get("siesta_skipped_or_reused", 0)) + int(counts.get("skipped_or_reused", 0) or 0)
         counters["siesta_failed"] = int(counters.get("siesta_failed", 0)) + int(counts.get("failed", 0) or 0)
-        if result.get("run_mode", manifest.get("run_mode")) != "dataset_only":
+        if result.get("run_mode", manifest.get("run_mode")) != DATASET_ONLY_RUN_MODE:
             counters["graph2mat_trainings"] = int(counters.get("graph2mat_trainings", 0)) + 1
             counters["predictions"] = int(counters.get("predictions", 0)) + (1 if int(result.get("predicted_hamiltonians") or 0) > 0 else 0)
 
@@ -5603,10 +5813,16 @@ class ExperimentRunner:
         training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
         dataset_recipes_info: dict[str, Any] | None = None,
+        reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
+        training_plan: list[dict[str, Any]] | None = None,
     ) -> None:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = normalize_selected_methods(selected_methods)
         run_mode = parse_run_mode(run_mode)
+        reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
+        training_plan = parse_training_plan(training_plan)
+        if training_plan and not run_mode_skips_dataset_generation(run_mode):
+            raise RuntimeError("training_plan solo esta disponible con train_test_metrics_plots_only.")
         performance_settings = parse_performance_settings(
             performance,
             compute_accelerator=compute_accelerator,
@@ -5637,6 +5853,8 @@ class ExperimentRunner:
             training_settings,
             dataset_recipes_info,
         )
+        manifest["reusable_split_policy"] = reusable_split_policy
+        manifest["training_plan"] = training_plan
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
         if manifest.get("siesta_settings_warning"):
             manifest.setdefault("warnings", []).append(str(manifest["siesta_settings_warning"]))
@@ -5651,6 +5869,8 @@ class ExperimentRunner:
         try:
             self._append(f"[UI] Comparacion {run_id} iniciada.\n")
             self._append(f"[UI] Run mode: {run_mode}\n")
+            if run_mode_skips_dataset_generation(run_mode):
+                self._append(f"[UI] Reusable split policy: {reusable_split_policy}\n")
             self._append(f"[UI] Selected methods: {', '.join(selected_methods)}\n")
             self._append(f"[UI] MD sizes: {md_sizes}\n")
             self._append(f"[UI] AtomDisplacement sizes: {atom_sizes}\n")
@@ -5717,6 +5937,9 @@ class ExperimentRunner:
             if compute_accelerator == "gpu" and dataset_workers > 1:
                 self._append("[WARN] GPU training requested; max_parallel_dataset_jobs forced to 1 to avoid single-GPU contention.\n")
                 dataset_workers = 1
+            if training_plan and dataset_workers > 1:
+                self._append("[UI] Training plan activo: los entrenamientos se ejecutaran secuencialmente.\n")
+                dataset_workers = 1
             manifest["timing"]["counters"]["dataset_jobs"] = 0
             manifest["timing"]["counters"]["dataset_workers_used"] = dataset_workers
 
@@ -5742,15 +5965,11 @@ class ExperimentRunner:
                 )
                 return label
 
-            md_task_specs = dataset_recipes_info.get("md_dataset_specs") or [
-                {"label": fallback_dataset_label("md", index), "size": size, "recipe_metadata": None}
-                for index, size in enumerate(md_sizes)
-            ]
-            for md_spec in (md_task_specs if "md" in pipeline_keys else []):
+            def add_md_task(md_spec: dict[str, Any], task_training_settings: dict[str, Any]) -> None:
                 size = int(md_spec["size"])
                 dataset_tasks.append((
                     f"md {md_spec.get('label', f'dataset_{size}')}",
-                    lambda size=size, md_spec=md_spec: self._run_one(
+                    lambda size=size, md_spec=md_spec, task_training_settings=task_training_settings: self._run_one(
                         "md",
                         size,
                         run_id,
@@ -5762,24 +5981,18 @@ class ExperimentRunner:
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
-                        training_settings=training_settings,
+                        training_settings=task_training_settings,
                         venv_activate_path=venv_activate_path,
+                        reusable_split_policy=reusable_split_policy,
                     ),
                 ))
-            atom_runs = dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [
-                {
-                    "label": fallback_dataset_label("fc", index),
-                    "size": size,
-                    "displacements": fc_dataset_specs.get(size) if fc_dataset_specs else None,
-                }
-                for index, size in enumerate(atom_sizes)
-            ]
-            for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
+
+            def add_atom_task(atom_spec: dict[str, Any], task_training_settings: dict[str, Any]) -> None:
                 atom_recipe_seed = (atom_spec.get("recipe_metadata") or {}).get("seed")
                 atom_random_seed = atom_recipe_seed if atom_recipe_seed not in (None, "") else random_seed
                 dataset_tasks.append((
                     f"atom_displacement {atom_spec['label']}",
-                    lambda atom_spec=atom_spec, atom_random_seed=atom_random_seed: self._run_one(
+                    lambda atom_spec=atom_spec, atom_random_seed=atom_random_seed, task_training_settings=task_training_settings: self._run_one(
                         "atom_displacement",
                         int(atom_spec["size"]),
                         run_id,
@@ -5792,44 +6005,119 @@ class ExperimentRunner:
                         run_mode=run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
-                        training_settings=training_settings,
+                        training_settings=task_training_settings,
                         venv_activate_path=venv_activate_path,
+                        reusable_split_policy=reusable_split_policy,
                     ),
                 ))
-            if "random_cartesian" in selected_methods:
-                random_specs = dataset_recipes_info.get("random_cartesian_dataset_specs") or random_cartesian_options.get("_dataset_specs") or [
-                    {
-                        "label": fallback_dataset_label("rc", index),
-                        "size": random_size,
-                        "options": {**random_cartesian_options, "n_structures": random_size},
-                        "recipe_metadata": None,
-                    }
-                    for index, random_size in enumerate(random_cartesian_sizes_from_options(random_cartesian_options))
+
+            def add_random_task(random_spec: dict[str, Any], task_training_settings: dict[str, Any]) -> None:
+                random_size = int(random_spec["size"])
+                size_options = {
+                    **random_cartesian_options,
+                    **dict(random_spec.get("options") or {}),
+                    "n_structures": random_size,
+                }
+                size_options.pop("_dataset_specs", None)
+                dataset_tasks.append((
+                    f"random_cartesian {random_spec.get('label', f'dataset_{random_size}')}",
+                    lambda random_size=random_size, size_options=size_options, random_spec=random_spec, task_training_settings=task_training_settings: self._run_random_cartesian(
+                        random_size,
+                        run_id,
+                        dataset_label=str(random_spec.get("label") or f"dataset_{random_size}"),
+                        recipe_metadata=random_spec.get("recipe_metadata"),
+                        split_ratios=split_ratios,
+                        split_mode=split_mode,
+                        random_cartesian_options=size_options,
+                        run_mode=run_mode,
+                        compute_accelerator=compute_accelerator,
+                        performance=performance_settings,
+                        training_settings=task_training_settings,
+                        venv_activate_path=venv_activate_path,
+                        reusable_split_policy=reusable_split_policy,
+                    ),
+                ))
+
+            if training_plan:
+                self._append(f"[UI] Training plan: {len(training_plan)} configuraciones.\n")
+                for plan_item in training_plan:
+                    plan_training_settings = parse_training_settings(plan_item.get("training_settings"))
+                    reusable_info = self.dataset_recipes_info_for_reusable_dataset_ids(
+                        list(plan_item.get("reusable_dataset_ids") or []),
+                        selected_methods=selected_methods,
+                    )
+                    plan_dataset_count = sum(
+                        len(reusable_info.get(key) or [])
+                        for key in (
+                            "md_dataset_specs",
+                            "atom_dataset_specs",
+                            "random_cartesian_dataset_specs",
+                        )
+                    )
+                    self._append(
+                        "[TRAIN-PLAN] "
+                        f"{plan_item['label']}: {plan_dataset_count} datasets; "
+                        f"overrides={json.dumps(json_safe(plan_training_settings), sort_keys=True)}\n"
+                    )
+                    for md_spec in (
+                        reusable_info.get("md_dataset_specs") or []
+                        if "md" in pipeline_keys
+                        else []
+                    ):
+                        add_md_task(
+                            self._spec_with_training_plan_metadata(md_spec, plan_item),
+                            plan_training_settings,
+                        )
+                    for atom_spec in (
+                        reusable_info.get("atom_dataset_specs") or []
+                        if "atom_displacement" in pipeline_keys
+                        else []
+                    ):
+                        add_atom_task(
+                            self._spec_with_training_plan_metadata(atom_spec, plan_item),
+                            plan_training_settings,
+                        )
+                    for random_spec in (
+                        reusable_info.get("random_cartesian_dataset_specs") or []
+                        if "random_cartesian" in selected_methods
+                        else []
+                    ):
+                        add_random_task(
+                            self._spec_with_training_plan_metadata(random_spec, plan_item),
+                            plan_training_settings,
+                        )
+            else:
+                md_task_specs = dataset_recipes_info.get("md_dataset_specs") or [
+                    {"label": fallback_dataset_label("md", index), "size": size, "recipe_metadata": None}
+                    for index, size in enumerate(md_sizes)
                 ]
-                for random_spec in random_specs:
-                    random_size = int(random_spec["size"])
-                    size_options = {
-                        **random_cartesian_options,
-                        **dict(random_spec.get("options") or {}),
-                        "n_structures": random_size,
+                for md_spec in (md_task_specs if "md" in pipeline_keys else []):
+                    add_md_task(md_spec, training_settings)
+
+                atom_runs = dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [
+                    {
+                        "label": fallback_dataset_label("fc", index),
+                        "size": size,
+                        "displacements": fc_dataset_specs.get(size) if fc_dataset_specs else None,
                     }
-                    size_options.pop("_dataset_specs", None)
-                    dataset_tasks.append((
-                        f"random_cartesian {random_spec.get('label', f'dataset_{random_size}')}",
-                        lambda random_size=random_size, size_options=size_options, random_spec=random_spec: self._run_random_cartesian(
-                            random_size,
-                            run_id,
-                            dataset_label=str(random_spec.get("label") or f"dataset_{random_size}"),
-                            recipe_metadata=random_spec.get("recipe_metadata"),
-                            split_ratios=split_ratios,
-                            random_cartesian_options=size_options,
-                            run_mode=run_mode,
-                            compute_accelerator=compute_accelerator,
-                            performance=performance_settings,
-                            training_settings=training_settings,
-                            venv_activate_path=venv_activate_path,
-                        ),
-                    ))
+                    for index, size in enumerate(atom_sizes)
+                ]
+                for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
+                    add_atom_task(atom_spec, training_settings)
+
+                if "random_cartesian" in selected_methods:
+                    random_specs = dataset_recipes_info.get("random_cartesian_dataset_specs") or random_cartesian_options.get("_dataset_specs") or [
+                        {
+                            "label": fallback_dataset_label("rc", index),
+                            "size": random_size,
+                            "options": {**random_cartesian_options, "n_structures": random_size},
+                            "recipe_metadata": None,
+                        }
+                        for index, random_size in enumerate(random_cartesian_sizes_from_options(random_cartesian_options))
+                    ]
+                    for random_spec in random_specs:
+                        add_random_task(random_spec, training_settings)
+
             dataset_results = self._run_dataset_tasks(
                 dataset_tasks,
                 manifest=manifest,
@@ -5846,11 +6134,11 @@ class ExperimentRunner:
                     previous_by_method[nested_key] = result
                 self._record_run_result(manifest, result)
                 self._write_experiment_manifest(manifest)
-            if run_mode == "dataset_only":
+            if run_mode == DATASET_ONLY_RUN_MODE:
                 manifest["cross_evaluation"] = {
                     "ok": False,
                     "skipped": True,
-                    "reason": "dataset_only",
+                    "reason": DATASET_ONLY_RUN_MODE,
                     "warnings": ["dataset_only skips training, prediction, evaluation, cross-evaluation and winner analysis."],
                 }
                 manifest["scientific_status"] = "dataset_only"
@@ -5937,6 +6225,834 @@ class ExperimentRunner:
                 encoding="utf-8",
             )
 
+    def _method_id_for_pipeline_key(self, key: str) -> str:
+        if key == "atom_displacement":
+            return "siesta_fc_cartesian"
+        return key
+
+    def _configure_md_downstream_steps(self, config: dict[str, Any], original_steps: list[str]) -> None:
+        config.setdefault("pipeline", {})["steps"] = [
+            step for step in original_steps if step in MD_DOWNSTREAM_STEPS
+        ] or list(MD_DOWNSTREAM_STEPS)
+
+    def _configure_atom_downstream_steps(self, config: dict[str, Any]) -> None:
+        config.setdefault("pipeline", {})["steps"] = list(ATOM_DOWNSTREAM_STEPS)
+
+    def _dataset_candidate_id(self, run: dict[str, Any]) -> str:
+        payload = {
+            "method_id": run.get("method_id") or run.get("pipeline"),
+            "dataset_label": run.get("dataset_label"),
+            "dataset_size": run.get("dataset_size") or run.get("effective_dataset_size"),
+            "dataset_dir": run.get("dataset_dir"),
+            "result_dir": run.get("result_dir"),
+            "run_id": run.get("run_id"),
+        }
+        return stable_payload_hash(payload, length=16)
+
+    def _archived_dataset_run_candidates(self) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for group_root in (
+            RESULTS_ROOT / "results_md",
+            RESULTS_ROOT / "results_atomdisp",
+            RESULTS_ROOT / "results_random_cartesian",
+        ):
+            for manifest_path in archived_result_manifest_paths(group_root):
+                try:
+                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict):
+                    result_dir = archived_manifest_result_dir(payload, manifest_path)
+                    if not archived_run_has_plot_metrics(result_dir):
+                        continue
+                    candidate = dict(payload)
+                    candidate["_source_manifest_path"] = str(manifest_path)
+                    candidates.append(candidate)
+        return candidates
+
+    def reusable_dataset_candidates_payload(self) -> dict[str, Any]:
+        datasets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for run in self._archived_dataset_run_candidates():
+            candidate_id = self._dataset_candidate_id(run)
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            method_id = normalize_method_id(
+                run.get("method_id") or run.get("pipeline") or "",
+                allow_unknown=True,
+            )
+            try:
+                size = int(run.get("dataset_size") or run.get("effective_dataset_size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            dataset_dir_text = str(run.get("dataset_dir") or "")
+            dataset_exists = bool(dataset_dir_text) and Path(dataset_dir_text).exists()
+            returncode = int(run.get("returncode", 0) or 0)
+            method_spec = METHOD_REGISTRY.get(method_id)
+            datasets.append(
+                {
+                    "id": candidate_id,
+                    "method_id": method_id,
+                    "method_label": method_spec.display_name if method_spec else method_id,
+                    "dataset_label": str(run.get("dataset_label") or f"dataset_{size}"),
+                    "dataset_size": size,
+                    "training_tag": run.get("training_tag"),
+                    "training_index": run.get("training_index"),
+                    "training_base_dataset_label": run.get("training_base_dataset_label"),
+                    "run_id": run.get("run_id"),
+                    "result_dir": run.get("result_dir"),
+                    "dataset_dir": dataset_dir_text,
+                    "reused_from_run_id": run.get("reused_run_id"),
+                    "run_mode": run.get("run_mode"),
+                    "returncode": returncode,
+                    "recipe_id": run.get("recipe_id"),
+                    "block_id": run.get("block_id"),
+                    "seed": run.get("seed"),
+                    "source_manifest_path": run.get("_source_manifest_path"),
+                    "mtime": self._candidate_modified_time(run),
+                    "eligible": returncode == 0 and size > 0 and dataset_exists,
+                    "missing_dataset": bool(dataset_dir_text) and not dataset_exists,
+                }
+            )
+        datasets.sort(
+            key=lambda item: (
+                str(item.get("method_id") or ""),
+                str(item.get("dataset_label") or ""),
+                int(item.get("dataset_size") or 0),
+                float(item.get("mtime") or 0.0),
+            ),
+            reverse=True,
+        )
+        return {
+            "datasets": datasets,
+            "count": len(datasets),
+            "results_root": str(RESULTS_ROOT),
+        }
+
+    def dataset_recipes_info_for_reusable_dataset_ids(
+        self,
+        reusable_dataset_ids: list[str],
+        *,
+        selected_methods: list[str],
+    ) -> dict[str, Any]:
+        selected = set(selected_methods)
+        runs_by_id = {
+            self._dataset_candidate_id(run): run
+            for run in self._archived_dataset_run_candidates()
+        }
+        missing = [item for item in reusable_dataset_ids if item not in runs_by_id]
+        if missing:
+            raise RuntimeError(f"Reusable dataset IDs no encontrados: {missing}. Refresca la lista de datasets.")
+        recipes: dict[str, list[dict[str, Any]]] = {"md": [], "siesta_fc_cartesian": [], "random_cartesian": []}
+        md_specs: list[dict[str, Any]] = []
+        atom_specs: list[dict[str, Any]] = []
+        random_specs: list[dict[str, Any]] = []
+        used_labels_by_method: dict[str, set[str]] = defaultdict(set)
+        for index, reusable_id in enumerate(reusable_dataset_ids):
+            run = dict(runs_by_id[reusable_id])
+            method_id = normalize_method_id(
+                run.get("method_id") or run.get("pipeline") or "",
+                allow_unknown=True,
+            )
+            if method_id not in selected:
+                raise RuntimeError(
+                    f"El dataset reusable {reusable_id} pertenece a {method_id}, "
+                    "pero ese metodo no esta seleccionado."
+                )
+            try:
+                size = int(run.get("dataset_size") or run.get("effective_dataset_size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size <= 0:
+                raise RuntimeError(f"El dataset reusable {reusable_id} no tiene dataset_size valido.")
+            label = str(run.get("dataset_label") or f"dataset_{size}")
+            used_labels = used_labels_by_method[method_id]
+            if label in used_labels:
+                label = f"{label}_{reusable_id[:8]}"
+            used_labels.add(label)
+            generation_parameters = {
+                "reuse_source_id": reusable_id,
+                "reused_dataset_dir": run.get("dataset_dir"),
+                "reused_result_dir": run.get("result_dir"),
+                "reused_run_id": run.get("run_id"),
+            }
+            metadata = {
+                "method": method_id,
+                "recipe_id": str(run.get("recipe_id") or f"reuse_{reusable_id}"),
+                "recipe_label": str(run.get("recipe_label") or f"Reuse {label}"),
+                "block_id": str(run.get("block_id") or f"reuse_{reusable_id}"),
+                "block_label": str(run.get("block_label") or f"Reuse {label}"),
+                "dataset_size": size,
+                "dataset_label": label,
+                "reuse_source_id": reusable_id,
+                "reused_dataset_dir": run.get("dataset_dir"),
+                "reused_result_dir": run.get("result_dir"),
+                "reused_run_id": run.get("run_id"),
+                "generation_parameters": generation_parameters,
+                "generation_parameters_json": json.dumps(
+                    json_safe(generation_parameters),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                "seed": run.get("seed"),
+            }
+            block = {
+                "block_id": metadata["block_id"],
+                "label": metadata["block_label"],
+                "n_structures": size,
+                "reuse_source_id": reusable_id,
+            }
+            if method_id == "md":
+                block["n_snapshots"] = size
+                recipes["md"].append(
+                    {
+                        "recipe_id": metadata["recipe_id"],
+                        "label": metadata["recipe_label"],
+                        "blocks": [block],
+                    }
+                )
+                md_specs.append({"label": label, "size": size, "recipe_metadata": metadata})
+            elif method_id == "siesta_fc_cartesian":
+                recipes["siesta_fc_cartesian"].append(
+                    {
+                        "recipe_id": metadata["recipe_id"],
+                        "label": metadata["recipe_label"],
+                        "blocks": [block],
+                    }
+                )
+                atom_specs.append({"label": label, "size": size, "displacements": [], "recipe_metadata": metadata})
+            elif method_id == "random_cartesian":
+                recipes["random_cartesian"].append(
+                    {
+                        "recipe_id": metadata["recipe_id"],
+                        "label": metadata["recipe_label"],
+                        "blocks": [block],
+                    }
+                )
+                random_specs.append(
+                    {
+                        "label": label,
+                        "size": size,
+                        "options": {"n_structures": size, "reuse_source_id": reusable_id},
+                        "recipe_metadata": metadata,
+                    }
+                )
+            else:
+                raise RuntimeError(f"Metodo no soportado para dataset reusable: {method_id}")
+        recipes = {key: value for key, value in recipes.items() if value}
+        return {
+            "recipes": recipes,
+            "recipe_set_hash": recipe_set_hash(recipes),
+            "md_dataset_specs": md_specs,
+            "atom_dataset_specs": atom_specs,
+            "random_cartesian_dataset_specs": random_specs,
+        }
+
+    def _training_plan_dataset_label(
+        self,
+        dataset_label: Any,
+        plan_item: dict[str, Any],
+    ) -> str:
+        fallback_label = f"train_config_{plan_item.get('index', 0)}"
+        plan_label = plan_item.get("label") or fallback_label
+        return compact_dataset_label(
+            f"{dataset_label}__{plan_label}",
+            {
+                "dataset_label": dataset_label,
+                "training_plan_index": plan_item.get("index"),
+                "training_plan_label": plan_item.get("label"),
+            },
+            max_length=MAX_DATASET_LABEL_LENGTH,
+        )
+
+    def _spec_with_training_plan_metadata(
+        self,
+        spec: dict[str, Any],
+        plan_item: dict[str, Any],
+    ) -> dict[str, Any]:
+        updated = dict(spec)
+        original_label = str(updated.get("label") or f"dataset_{updated.get('size', '')}")
+        metadata = dict(updated.get("recipe_metadata") or {})
+        metadata.update(
+            {
+                "training_plan_index": plan_item.get("index"),
+                "training_plan_label": plan_item.get("label"),
+                "training_plan_display_label": plan_item.get("display_label"),
+                "training_plan_settings": dict(plan_item.get("training_settings") or {}),
+                "training_plan_reusable_dataset_ids": list(plan_item.get("reusable_dataset_ids") or []),
+                "training_plan_source_dataset_label": original_label,
+            }
+        )
+        updated["label"] = self._training_plan_dataset_label(original_label, plan_item)
+        updated["recipe_metadata"] = metadata
+        return updated
+
+    def _dataset_match_score(
+        self,
+        run: dict[str, Any],
+        *,
+        key: str,
+        size: int,
+        dataset_label: str,
+        recipe_metadata: dict[str, Any] | None,
+    ) -> int | None:
+        expected_method = self._method_id_for_pipeline_key(key)
+        actual_method = normalize_method_id(
+            run.get("method_id") or run.get("pipeline") or "",
+            allow_unknown=True,
+        )
+        if actual_method != expected_method:
+            return None
+        if not run.get("dataset_dir"):
+            return None
+        try:
+            run_size = int(run.get("dataset_size") or run.get("effective_dataset_size") or 0)
+        except (TypeError, ValueError):
+            return None
+        if run_size != int(size):
+            return None
+        if int(run.get("returncode", 0) or 0) != 0:
+            return None
+
+        metadata = recipe_metadata or {}
+        recipe_fields = {
+            key: metadata.get(key)
+            for key in ("recipe_id", "block_id", "generation_parameters_json", "seed")
+            if metadata.get(key) not in (None, "")
+        }
+        if recipe_fields:
+            for field, value in recipe_fields.items():
+                if str(run.get(field) or "") != str(value):
+                    return None
+            return 30 + len(recipe_fields)
+
+        if dataset_label and str(run.get("dataset_label") or "") == str(dataset_label):
+            return 20
+        return 10
+
+    def _candidate_modified_time(self, run: dict[str, Any]) -> float:
+        candidates = [
+            Path(str(run.get("_source_manifest_path") or "")),
+            Path(str(run.get("result_dir") or "")),
+            Path(str(run.get("dataset_dir") or "")),
+        ]
+        mtimes = []
+        for path in candidates:
+            try:
+                if path.exists():
+                    mtimes.append(path.stat().st_mtime)
+            except OSError:
+                continue
+        return max(mtimes) if mtimes else 0.0
+
+    def _find_existing_dataset_run(
+        self,
+        key: str,
+        size: int,
+        *,
+        dataset_label: str,
+        recipe_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        reuse_source_id = (recipe_metadata or {}).get("reuse_source_id")
+        if reuse_source_id not in (None, ""):
+            expected_method = self._method_id_for_pipeline_key(key)
+            for run in self._archived_dataset_run_candidates():
+                if self._dataset_candidate_id(run) != str(reuse_source_id):
+                    continue
+                actual_method = normalize_method_id(
+                    run.get("method_id") or run.get("pipeline") or "",
+                    allow_unknown=True,
+                )
+                try:
+                    run_size = int(run.get("dataset_size") or run.get("effective_dataset_size") or 0)
+                except (TypeError, ValueError):
+                    run_size = 0
+                if actual_method != expected_method:
+                    raise RuntimeError(
+                        "Selected reusable dataset method mismatch: "
+                        f"expected={expected_method}, got={actual_method}."
+                    )
+                if run_size != int(size):
+                    raise RuntimeError(
+                        "Selected reusable dataset size mismatch: "
+                        f"expected={size}, got={run_size}."
+                    )
+                if int(run.get("returncode", 0) or 0) != 0:
+                    raise RuntimeError(f"Selected reusable dataset failed originally: {reuse_source_id}.")
+                dataset_dir = Path(str(run.get("dataset_dir") or ""))
+                self._validate_existing_dataset_source(key, dataset_dir, size)
+                return dict(run)
+            raise RuntimeError(f"Selected reusable dataset was not found: {reuse_source_id}. Refresca la lista.")
+        scored: list[tuple[int, float, dict[str, Any]]] = []
+        for run in self._archived_dataset_run_candidates():
+            score = self._dataset_match_score(
+                run,
+                key=key,
+                size=size,
+                dataset_label=dataset_label,
+                recipe_metadata=recipe_metadata,
+            )
+            if score is not None:
+                scored.append((score, self._candidate_modified_time(run), run))
+        if not scored:
+            method_id = self._method_id_for_pipeline_key(key)
+            recipe_id = (recipe_metadata or {}).get("recipe_id")
+            detail = f" recipe_id={recipe_id!r}" if recipe_id not in (None, "") else f" label={dataset_label!r}"
+            raise RuntimeError(
+                "No existing dataset found for downstream-only mode: "
+                f"method={method_id}, size={size},{detail}. "
+                "Run dataset_only or full_strict_pipeline first with the same dataset selection."
+            )
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = dict(scored[0][2])
+        dataset_dir = Path(str(selected.get("dataset_dir") or ""))
+        self._validate_existing_dataset_source(key, dataset_dir, size)
+        return selected
+
+    def _manifest_path_for_split(self, dataset_dir: Path, split_name: str) -> Path:
+        split_root = dataset_dir / "splits"
+        for file_name in (f"{split_name}_valid_manifest.csv", f"{split_name}_manifest.csv"):
+            candidate = split_root / file_name
+            if candidate.exists():
+                return candidate
+        raise RuntimeError(f"Missing existing dataset split manifest: {split_root / (split_name + '_manifest.csv')}")
+
+    def _read_csv_preserving_fields(self, path: Path) -> tuple[list[str], list[dict[str, str]]]:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            rows = [dict(row) for row in reader]
+        return fieldnames, rows
+
+    def _validate_existing_dataset_source(self, key: str, dataset_dir: Path, size: int) -> None:
+        method_id = self._method_id_for_pipeline_key(key)
+        if not dataset_dir.exists() or not dataset_dir.is_dir():
+            raise RuntimeError(f"{method_id}: existing dataset directory is missing: {dataset_dir}")
+        if not (dataset_dir / "splits").exists():
+            raise RuntimeError(f"{method_id}: existing dataset is missing split manifests: {dataset_dir / 'splits'}")
+        if key == "md":
+            basis_candidates = sorted((dataset_dir / "MD_steps" / "basis").glob("*.ion.xml"))
+            sample_root = dataset_dir / "MD_steps"
+        elif key == "random_cartesian":
+            basis_candidates = sorted((dataset_dir / "basis").glob("*.ion.xml")) or sorted(
+                (dataset_dir / "RandomCartesian_steps" / "basis").glob("*.ion.xml")
+            )
+            sample_root = dataset_dir / "RandomCartesian_steps"
+        else:
+            basis_candidates = sorted((dataset_dir / "basis").glob("*.ion.xml")) or sorted(
+                (dataset_dir / "FC_steps" / "basis").glob("*.ion.xml")
+            )
+            sample_root = dataset_dir / "FC_steps"
+        if not basis_candidates:
+            raise RuntimeError(f"{method_id}: existing dataset is missing basis .ion.xml files under {dataset_dir}.")
+        if key in {"md", "random_cartesian", "atom_displacement"} and not sample_root.exists():
+            raise RuntimeError(f"{method_id}: existing dataset is missing sample root: {sample_root}")
+
+        total_rows = 0
+        for split_name in ("train", "validation", "test"):
+            manifest_path = self._manifest_path_for_split(dataset_dir, split_name)
+            _fieldnames, rows = self._read_csv_preserving_fields(manifest_path)
+            if not rows:
+                raise RuntimeError(f"{method_id}: split manifest is empty: {manifest_path}")
+            total_rows += len(rows)
+            for index, row in enumerate(rows, start=2):
+                structure = Path(str(row.get("structure_path") or ""))
+                sample_dir = Path(str(row.get("sample_dir") or ""))
+                if not structure.exists() and sample_dir:
+                    structure = sample_dir / "RUN.fdf"
+                if not structure.exists():
+                    raise RuntimeError(
+                        f"{method_id}: missing structure in {manifest_path}:{index}: {structure}"
+                    )
+                hamiltonian_value = str(row.get("hamiltonian_path") or "")
+                if hamiltonian_value and not Path(hamiltonian_value).exists():
+                    raise RuntimeError(
+                        f"{method_id}: missing reference Hamiltonian in {manifest_path}:{index}: {hamiltonian_value}"
+                    )
+        if total_rows != int(size):
+            raise RuntimeError(
+                f"{method_id}: existing dataset split rows ({total_rows}) do not match requested size {size}."
+            )
+
+    def _rewrite_copied_manifest_value(self, value: Any, source_dataset_dir: Path, target_dataset_dir: Path) -> Any:
+        if value in (None, ""):
+            return value
+        text = str(value)
+        source = str(source_dataset_dir.resolve(strict=False))
+        target = str(target_dataset_dir.resolve(strict=False))
+        if text == source:
+            return target
+        if text.startswith(source + os.sep):
+            return target + text[len(source):]
+        return value
+
+    def _rewrite_copied_dataset_manifests(self, source_dataset_dir: Path, target_dataset_dir: Path) -> None:
+        split_root = target_dataset_dir / "splits"
+        for valid_manifest in sorted(split_root.glob("*_valid_manifest.csv")):
+            valid_manifest.unlink()
+        validation_root = target_dataset_dir / "validation"
+        if validation_root.exists():
+            shutil.rmtree(validation_root)
+        for manifest_path in sorted(split_root.glob("*_manifest.csv")):
+            fieldnames, rows = self._read_csv_preserving_fields(manifest_path)
+            rewritten_rows = [
+                {
+                    key: self._rewrite_copied_manifest_value(value, source_dataset_dir, target_dataset_dir)
+                    for key, value in row.items()
+                }
+                for row in rows
+            ]
+            write_csv_dicts(manifest_path, rewritten_rows, fieldnames)
+
+    def _remove_copied_downstream_outputs(self, dataset_dir: Path) -> None:
+        for pattern in ("ML_prediction.*", "prediction_summary.json", "prediction_manifest.csv"):
+            for path in sorted(dataset_dir.rglob(pattern)):
+                if path.is_file():
+                    path.unlink()
+
+    def _raw_reusable_sample_root(self, key: str, dataset_dir: Path) -> Path:
+        if key == "md":
+            return dataset_dir / "MD_steps"
+        if key == "random_cartesian":
+            return dataset_dir / "RandomCartesian_steps"
+        for candidate in (dataset_dir / "FC_steps", dataset_dir / "AtDis_steps"):
+            if candidate.exists():
+                return candidate
+        return dataset_dir / "FC_steps"
+
+    def _source_name_for_reusable_row(self, key: str, row: dict[str, str]) -> str:
+        if key == "md":
+            for field in ("source_frame_index", "frame_index"):
+                value = str(row.get(field) or "").strip()
+                if value:
+                    return value
+        sample_dir = str(row.get("sample_dir") or "").strip()
+        if sample_dir:
+            return Path(sample_dir).name
+        structure_path = str(row.get("structure_path") or "").strip()
+        if structure_path:
+            return Path(structure_path).parent.name
+        sample_id = str(row.get("sample_id") or "").strip()
+        if sample_id.startswith(("md_", "atomdisp_", "random_")):
+            return sample_id.split("_", 1)[1]
+        return sample_id
+
+    def _is_relative_to_path(self, path: Path, root: Path) -> bool:
+        try:
+            path.resolve(strict=False).relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            return False
+
+    def _reusable_split_cleanup_roots(self, key: str, dataset_dir: Path) -> list[Path]:
+        roots = [dataset_dir / "splits", dataset_dir / "validation"]
+        if key != "md":
+            roots.extend(
+                [
+                    dataset_dir / "train_samples",
+                    dataset_dir / "validation_samples",
+                    dataset_dir / "test_samples",
+                ]
+            )
+        return roots
+
+    def _reusable_split_destination_root(self, key: str, dataset_dir: Path, split_name: str) -> Path:
+        if key == "md":
+            return dataset_dir / "splits" / split_name
+        return {
+            "train": dataset_dir / "train_samples",
+            "validation": dataset_dir / "validation_samples",
+            "test": dataset_dir / "test_samples",
+        }[split_name]
+
+    def _collect_reusable_split_items(
+        self,
+        key: str,
+        dataset_dir: Path,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        raw_root = self._raw_reusable_sample_root(key, dataset_dir)
+        fieldnames: list[str] = []
+        items: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for split_name in ("train", "validation", "test"):
+            manifest_path = self._manifest_path_for_split(dataset_dir, split_name)
+            split_fieldnames, rows = self._read_csv_preserving_fields(manifest_path)
+            for field in split_fieldnames:
+                if field and field not in fieldnames:
+                    fieldnames.append(field)
+            for row in rows:
+                name = self._source_name_for_reusable_row(key, row)
+                if not name or name in seen_names:
+                    continue
+                seen_names.add(name)
+                raw_source = raw_root / name
+                row_source = Path(str(row.get("sample_dir") or ""))
+                source = raw_source if raw_source.exists() else row_source
+                if not source.exists():
+                    raise RuntimeError(
+                        f"{self._method_id_for_pipeline_key(key)}: no puedo reconstruir split; "
+                        f"falta la muestra fuente {source}."
+                    )
+                items.append({"name": name, "source": source, "row": dict(row)})
+        if not items:
+            raise RuntimeError(f"{self._method_id_for_pipeline_key(key)}: no hay muestras para reconstruir splits.")
+        return fieldnames, sorted(items, key=lambda item: sample_sort_key(Path(str(item["source"]))))
+
+    def _stage_resplit_sources(
+        self,
+        items: list[dict[str, Any]],
+        cleanup_roots: list[Path],
+        dataset_dir: Path,
+    ) -> Path | None:
+        pool_dir = dataset_dir / ".reusable_split_source_pool"
+        staged_any = False
+        for item in items:
+            source = Path(str(item["source"]))
+            if not any(self._is_relative_to_path(source, root) for root in cleanup_roots if root.exists()):
+                continue
+            staged = pool_dir / str(item["name"])
+            if staged.exists():
+                shutil.rmtree(staged)
+            shutil.copytree(source, staged)
+            item["source"] = staged
+            staged_any = True
+        return pool_dir if staged_any else None
+
+    def _copy_resplit_sample(self, source: Path, destination: Path) -> None:
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        for pattern in ("ML_prediction.*", "prediction_summary.json", "prediction_manifest.csv"):
+            for path in sorted(destination.glob(pattern)):
+                if path.is_file():
+                    path.unlink()
+        normalize_siesta_matrix_name(destination)
+
+    def _rewrite_resplit_row(
+        self,
+        row: dict[str, Any],
+        *,
+        key: str,
+        dataset_dir: Path,
+        split_name: str,
+        destination: Path,
+        split_mode: str,
+    ) -> dict[str, Any]:
+        updated = dict(row)
+        structure_path = destination / "RUN.fdf"
+        metadata_path = destination / "metadata.json"
+        hamiltonian_path = find_reference_matrix(destination)
+        run_out_path = Path(str(updated.get("run_out_path") or updated.get("output_path") or ""))
+        if not run_out_path.exists():
+            run_out_path = destination / "RUN.out"
+        if key == "md" and not run_out_path.exists():
+            run_out_path = dataset_dir / "RUN.out"
+        updated["split"] = split_name
+        updated["split_strategy"] = split_mode
+        updated["sample_dir"] = str(destination)
+        updated["structure_path"] = str(structure_path)
+        updated["metadata_path"] = str(metadata_path) if metadata_path.exists() else ""
+        updated["hamiltonian_path"] = str(hamiltonian_path or "")
+        updated["run_out_path"] = str(run_out_path) if run_out_path.exists() else ""
+        updated["output_path"] = str(run_out_path) if run_out_path.exists() else ""
+        valid = bool(structure_path.exists() and hamiltonian_path)
+        updated["valid"] = "true" if valid else "false"
+        updated["status"] = "completed" if valid else "incomplete"
+        updated["validation_reason"] = "ok" if valid else "missing_run_fdf_or_matrix"
+        if key == "md":
+            name = destination.name
+            updated["sample_id"] = updated.get("sample_id") or f"md_{name}"
+            updated["frame_index"] = updated.get("frame_index") or name
+            updated["time_index"] = updated.get("time_index") or name
+            updated["source_frame_index"] = updated.get("source_frame_index") or name
+            updated["source_run"] = str(dataset_dir)
+        elif key == "random_cartesian":
+            updated["method"] = "random_cartesian"
+            updated["sample_id"] = updated.get("sample_id") or f"random_{destination.name}"
+            updated["source_run"] = str(dataset_dir / "RandomCartesian_steps")
+        else:
+            updated["method"] = "atom_displacement"
+            updated["sample_id"] = updated.get("sample_id") or f"atomdisp_{destination.name}"
+        return updated
+
+    def _split_reusable_items(
+        self,
+        key: str,
+        items: list[dict[str, Any]],
+        counts: dict[str, int],
+        split_mode: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if split_mode == "spread":
+            return split_spread_items(items, counts)
+        if key == "atom_displacement" and split_mode == "block":
+            return split_grouped_exact_items(items, counts)
+        return split_block_items(items, counts)
+
+    def _rebuild_reusable_dataset_splits(
+        self,
+        key: str,
+        dataset_dir: Path,
+        size: int,
+        split_ratios: dict[str, float],
+        split_mode: str,
+    ) -> dict[str, Any]:
+        method_id = self._method_id_for_pipeline_key(key)
+        fieldnames, items = self._collect_reusable_split_items(key, dataset_dir)
+        counts = validate_split_sizes(size, split_ratios, label=f"{method_id} reusable dataset")
+        if sum(counts.values()) > len(items):
+            raise RuntimeError(
+                f"{method_id}: split rebuild pide {sum(counts.values())} muestras, "
+                f"pero solo hay {len(items)} disponibles."
+            )
+        cleanup_roots = self._reusable_split_cleanup_roots(key, dataset_dir)
+        pool_dir = self._stage_resplit_sources(items, cleanup_roots, dataset_dir)
+        for root in cleanup_roots:
+            if root.exists():
+                shutil.rmtree(root)
+        split_items = self._split_reusable_items(key, items, counts, split_mode)
+        split_root = dataset_dir / "splits"
+        split_root.mkdir(parents=True, exist_ok=True)
+        for split_name, split_entries in split_items.items():
+            rows: list[dict[str, Any]] = []
+            destination_root = self._reusable_split_destination_root(key, dataset_dir, split_name)
+            destination_root.mkdir(parents=True, exist_ok=True)
+            for item in split_entries:
+                destination = destination_root / str(item["name"])
+                self._copy_resplit_sample(Path(str(item["source"])), destination)
+                rows.append(
+                    self._rewrite_resplit_row(
+                        item["row"],
+                        key=key,
+                        dataset_dir=dataset_dir,
+                        split_name=split_name,
+                        destination=destination,
+                        split_mode=split_mode,
+                    )
+                )
+            manifest_path = split_root / f"{split_name}_manifest.csv"
+            row_fields = list(fieldnames)
+            for row in rows:
+                for field in row:
+                    if field not in row_fields:
+                        row_fields.append(field)
+            write_csv_dicts(manifest_path, rows, row_fields)
+        if pool_dir and pool_dir.exists():
+            shutil.rmtree(pool_dir)
+        self._remove_copied_downstream_outputs(dataset_dir)
+        return {
+            "reused_split_policy": REBUILD_REUSABLE_SPLITS,
+            "reused_split_counts": counts,
+            "reused_split_strategy": split_mode,
+            "effective_size": sum(counts.values()),
+        }
+
+    def _copy_existing_dataset_to_workspace(
+        self,
+        key: str,
+        source_run: dict[str, Any],
+        workspace: Path,
+        size: int,
+    ) -> dict[str, Any]:
+        source_dataset_dir = Path(str(source_run.get("dataset_dir") or ""))
+        dataset_dir = workspace / "dataset"
+        if dataset_dir.exists():
+            raise RuntimeError(f"Refusing to overwrite existing dataset workspace: {dataset_dir}")
+        shutil.copytree(source_dataset_dir, dataset_dir)
+        self._rewrite_copied_dataset_manifests(source_dataset_dir, dataset_dir)
+        self._remove_copied_downstream_outputs(dataset_dir)
+        method_id = self._method_id_for_pipeline_key(key)
+        return {
+            "requested_size": size,
+            "effective_size": int(source_run.get("effective_dataset_size") or source_run.get("dataset_size") or size),
+            "generated_samples": source_run.get("generated_samples"),
+            "completed_samples": source_run.get("completed_samples"),
+            "fc_generated_samples": source_run.get("fc_generated_samples"),
+            "fc_completed_samples": source_run.get("fc_completed_samples"),
+            "dataset_reused": True,
+            "reused_dataset_dir": str(source_dataset_dir),
+            "reused_result_dir": source_run.get("result_dir"),
+            "reused_run_id": source_run.get("run_id"),
+            "training_base_method_id": source_run.get("training_base_method_id") or method_id,
+            "training_base_dataset_label": source_run.get("training_base_dataset_label")
+            or source_run.get("dataset_label")
+            or f"dataset_{size}",
+            "training_base_dataset_size": int(
+                source_run.get("training_base_dataset_size")
+                or source_run.get("effective_dataset_size")
+                or source_run.get("dataset_size")
+                or size
+            ),
+            "training_base_dataset_dir": source_run.get("training_base_dataset_dir")
+            or source_run.get("reused_dataset_dir")
+            or str(source_dataset_dir),
+            "training_base_result_dir": source_run.get("training_base_result_dir")
+            or source_run.get("reused_result_dir")
+            or source_run.get("result_dir"),
+            "training_base_run_id": source_run.get("training_base_run_id")
+            or source_run.get("reused_run_id")
+            or source_run.get("run_id"),
+            "generation_seconds": None,
+        }
+
+    def _configure_existing_md_dataset(
+        self,
+        config: dict[str, Any],
+        workspace: Path,
+        size: int,
+        *,
+        original_steps: list[str],
+    ) -> None:
+        dataset_dir = workspace / "dataset"
+        training_dir = workspace / "training"
+        training_dir.mkdir(parents=True, exist_ok=True)
+        config["paths"]["dataset_dir"] = str(dataset_dir)
+        config["paths"]["training_dir"] = str(training_dir)
+        config["md"]["steps"] = size
+        config["training"]["data"]["basis_files"] = "../dataset/MD_steps/basis/*.ion.xml"
+        config["training"]["data"]["train_runs"] = "../dataset/splits/train/*/RUN.fdf"
+        config["testing"]["test_runs"] = "../dataset/splits/test/*/RUN.fdf"
+        config["prediction"]["predict_structs"] = "../dataset/splits/test/*/RUN.fdf"
+        config["checkpoint"]["path"] = None
+        self._configure_md_downstream_steps(config, original_steps)
+
+    def _configure_existing_atom_dataset(
+        self,
+        config: dict[str, Any],
+        workspace: Path,
+        *,
+        method_id: str,
+    ) -> None:
+        dataset_dir = workspace / "dataset"
+        training_dir = workspace / "training"
+        base_dir = workspace / "base"
+        relaxed_dir = workspace / "relaxed"
+        training_dir.mkdir(parents=True, exist_ok=True)
+        copy_pseudopotentials(PIPELINES["atom_displacement"].root / "base", base_dir)
+        copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
+        config["paths"]["base_dir"] = str(base_dir)
+        config["paths"]["relaxed_dir"] = str(relaxed_dir)
+        config["paths"]["dataset_dir"] = str(dataset_dir)
+        config["paths"]["samples_dir"] = str(dataset_dir / "train_samples")
+        config["paths"]["validation_samples_dir"] = str(dataset_dir / "validation_samples")
+        config["paths"]["test_samples_dir"] = str(dataset_dir / "test_samples")
+        config["paths"]["collected_dir"] = str(dataset_dir / "collected")
+        config["paths"]["training_dir"] = str(training_dir)
+        basis_files_pattern = "../dataset/basis/*.ion.xml" if sorted((dataset_dir / "basis").glob("*.ion.xml")) else "../relaxed/*.ion.xml"
+        config["training"]["data"]["basis_files"] = basis_files_pattern
+        config["training"]["data"].setdefault("n_matrix_components", 2)
+        config["testing"]["data"]["basis_files"] = basis_files_pattern
+        config["testing"]["data"].setdefault("n_matrix_components", 2)
+        config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
+        config["prediction"]["data"]["basis_files"] = basis_files_pattern
+        config["prediction"]["data"].setdefault("n_matrix_components", 2)
+        config["prediction"]["data"]["predict_structs"] = "../dataset/test_samples/*/RUN.fdf"
+        config["single_points"]["rerun"] = False
+        config["checkpoint"]["path"] = None
+        if method_id == "random_cartesian":
+            config.setdefault("structure", {}).setdefault("random_cartesian", {})["enabled"] = True
+        self._configure_atom_downstream_steps(config)
+
     def _run_one(
         self,
         key: str,
@@ -5954,6 +7070,7 @@ class ExperimentRunner:
         performance: dict[str, Any] | None = None,
         training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
+        reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -5999,7 +7116,71 @@ class ExperimentRunner:
         prepare_metadata: dict[str, Any] = {}
         if recipe_metadata and recipe_metadata.get("seed") not in (None, ""):
             prepare_metadata["seed"] = recipe_metadata.get("seed")
-        if key == "md":
+        original_steps = list(config.get("pipeline", {}).get("steps", []))
+        if run_mode_skips_dataset_generation(run_mode):
+            reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
+            source_run = self._find_existing_dataset_run(
+                key,
+                size,
+                dataset_label=dataset_label,
+                recipe_metadata=recipe_metadata,
+            )
+            prepare_metadata.update(
+                self._copy_existing_dataset_to_workspace(key, source_run, workspace, size)
+            )
+            prepare_metadata["reused_split_policy"] = reusable_split_policy
+            if reusable_split_policy == REBUILD_REUSABLE_SPLITS:
+                rebuilt = self._rebuild_reusable_dataset_splits(
+                    key,
+                    workspace / "dataset",
+                    size,
+                    split_ratios or dict(DEFAULT_SPLIT_RATIOS),
+                    split_mode,
+                )
+                prepare_metadata.update(rebuilt)
+                config["splits"] = {
+                    "enabled": True,
+                    "strategy": split_mode,
+                    "train": rebuilt["reused_split_counts"]["train"],
+                    "validation": rebuilt["reused_split_counts"]["validation"],
+                    "test": rebuilt["reused_split_counts"]["test"],
+                }
+                self._append(
+                    "[UI] downstream-only: dataset reused; splits rebuilt from "
+                    f"training controls ({split_mode}, counts={rebuilt['reused_split_counts']}).\n"
+                )
+            else:
+                self._append("[UI] downstream-only: preserving archived dataset splits.\n")
+            if key == "md":
+                self._configure_existing_md_dataset(
+                    config,
+                    workspace,
+                    size,
+                    original_steps=original_steps,
+                )
+            else:
+                self._configure_existing_atom_dataset(
+                    config,
+                    workspace,
+                    method_id=self._method_id_for_pipeline_key(key),
+                )
+            write_yaml(config_snapshot_path, config)
+            self._append(
+                "[UI] downstream-only: dataset generation skipped; "
+                f"reusing {prepare_metadata['reused_dataset_dir']}.\n"
+            )
+            self._validate_split_manifests(key, config, size)
+            write_yaml(config_snapshot_path, config)
+            training_started = time.time()
+            returncode = self._run_pipeline_process(
+                spec,
+                key=key,
+                size=size,
+                started_at=started_at,
+                config_path=config_snapshot_path,
+            )
+            prepare_metadata["training_prediction_seconds"] = time.time() - training_started
+        elif key == "md":
             self._prepare_md_config(
                 config,
                 workspace,
@@ -6008,7 +7189,6 @@ class ExperimentRunner:
                 split_mode=split_mode,
                 temperature_blocks=md_temperature_blocks,
             )
-            original_steps = list(config.get("pipeline", {}).get("steps", []))
             config.setdefault("pipeline", {})["steps"] = ["generate_md_dataset"]
             write_yaml(config_snapshot_path, config)
             self._append("[UI] Config temporal MD escrita para generar dataset y manifests.\n")
@@ -6028,17 +7208,13 @@ class ExperimentRunner:
                     f"{generation_returncode}."
                 )
             self._validate_split_manifests(key, config, size)
-            if run_mode == "dataset_only":
+            if run_mode == DATASET_ONLY_RUN_MODE:
                 config["pipeline"]["steps"] = []
                 write_yaml(config_snapshot_path, config)
                 self._append("[UI] dataset_only: MD validado; no se entrena ni predice.\n")
                 returncode = 0
             else:
-                config["pipeline"]["steps"] = [
-                    step
-                    for step in original_steps
-                    if step in {"run_md_training", "run_md_testing", "run_md_prediction"}
-                ] or ["run_md_training", "run_md_testing", "run_md_prediction"]
+                self._configure_md_downstream_steps(config, original_steps)
                 write_yaml(config_snapshot_path, config)
                 self._append("[UI] Config temporal MD escrita para entrenar/evaluar tras validacion.\n")
                 training_started = time.time()
@@ -6082,7 +7258,7 @@ class ExperimentRunner:
                 write_yaml(config_snapshot_path, config)
                 self._append("[UI] Config de entrenamiento restaurada tras SIESTA del test.\n")
             self._validate_split_manifests(key, config, size)
-            if run_mode == "dataset_only":
+            if run_mode == DATASET_ONLY_RUN_MODE:
                 config["pipeline"]["steps"] = []
                 write_yaml(config_snapshot_path, config)
                 self._append("[UI] dataset_only: SIESTA FC y splits validados; no se entrena ni predice.\n")
@@ -6122,12 +7298,14 @@ class ExperimentRunner:
         dataset_label: str | None = None,
         recipe_metadata: dict[str, Any] | None = None,
         split_ratios: dict[str, float] | None = None,
+        split_mode: str = "spread",
         random_cartesian_options: dict[str, Any] | None = None,
         run_mode: str = "dataset_only",
         compute_accelerator: str = "cpu",
         performance: dict[str, Any] | None = None,
         training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
+        reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -6160,78 +7338,60 @@ class ExperimentRunner:
         relaxed_dir = workspace / "relaxed"
         workspace.mkdir(parents=True, exist_ok=True)
         config_snapshot_path = workspace / "pipeline_config.yaml"
-        pseudo_count = copy_pseudopotentials(PIPELINES["atom_displacement"].root / "base", base_dir)
-        relaxed_counts = copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
         random_config = config.setdefault("structure", {}).setdefault("random_cartesian", {})
         random_config.update(random_cartesian_options or {})
         random_config["enabled"] = True
         random_config["n_structures"] = int(size)
-        ratios = split_ratios or split_ratios_from_config(config)
-        validate_split_sizes(size, ratios, label=f"Random Cartesian dataset_{size}")
-        config["paths"]["base_dir"] = str(base_dir)
-        config["paths"]["relaxed_dir"] = str(relaxed_dir)
-        config["paths"]["dataset_dir"] = str(dataset_dir)
-        config["paths"]["samples_dir"] = str(dataset_dir / "RandomCartesian_steps")
-        config["paths"]["collected_dir"] = str(dataset_dir / "collected")
-        config["paths"]["training_dir"] = str(training_dir)
-        config["single_points"]["limit"] = None
-        config["single_points"]["rerun"] = False
-        config["pipeline"]["steps"] = [
-            "render_inputs",
-            "generate_random_cartesian_dataset",
-            "run_single_points",
-            "collect_atom_displacement_dataset",
-        ]
-        write_yaml(config_snapshot_path, config)
-        self._append(f"[UI] Random Cartesian dataset_dir: {dataset_dir}\n")
-        self._append(f"[UI] Random Cartesian samples_dir: {config['paths']['samples_dir']}\n")
-        self._append(f"[UI] Random Cartesian pseudopotenciales copiados: {pseudo_count}\n")
-        self._append(
-            "[UI] Random Cartesian relaxed copiado: "
-            f"{relaxed_counts['basis_files']} basis .ion.xml, {relaxed_counts['xv_files']} XV.\n"
-        )
         self._append(f"[UI] Random Cartesian config: {random_config}\n")
         with self._lock:
             log_start = len(self._logs)
-        generation_returncode = self._run_pipeline_process(
-            spec,
-            key="random_cartesian",
-            size=size,
-            started_at=started_at,
-            config_path=config_snapshot_path,
-        )
-        generation_seconds = time.time() - started_at
-        if generation_returncode != 0:
-            raise RuntimeError(f"Random Cartesian dataset_{size} fallo generando dataset con codigo {generation_returncode}.")
-        prepare_metadata = {
-            "requested_size": size,
-            "effective_size": size,
-            "generated_samples": size,
-            "completed_samples": None,
-            "seed": random_config.get("seed"),
-            "generation_seconds": generation_seconds,
-        }
-        returncode = 0
-        if run_mode != "dataset_only":
-            generation_metadata = dict(prepare_metadata)
-            prepare_metadata = self._prepare_atom_config(
-                config,
+        if run_mode_skips_dataset_generation(run_mode):
+            reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
+            source_run = self._find_existing_dataset_run(
+                "random_cartesian",
+                size,
+                dataset_label=dataset_label,
+                recipe_metadata=recipe_metadata,
+            )
+            prepare_metadata = self._copy_existing_dataset_to_workspace(
+                "random_cartesian",
+                source_run,
                 workspace,
                 size,
-                split_ratios,
-                source_samples_dir=dataset_dir / "RandomCartesian_steps",
-                method_id="random_cartesian",
             )
-            prepare_metadata.update(
-                {
-                    "generation_seconds": generation_metadata.get("generation_seconds"),
-                    "generated_samples": generation_metadata.get("generated_samples"),
-                    "seed": generation_metadata.get("seed"),
+            if recipe_metadata and recipe_metadata.get("seed") not in (None, ""):
+                prepare_metadata["seed"] = recipe_metadata.get("seed")
+            prepare_metadata["reused_split_policy"] = reusable_split_policy
+            if reusable_split_policy == REBUILD_REUSABLE_SPLITS:
+                rebuilt = self._rebuild_reusable_dataset_splits(
+                    "random_cartesian",
+                    workspace / "dataset",
+                    size,
+                    split_ratios or dict(DEFAULT_SPLIT_RATIOS),
+                    split_mode,
+                )
+                prepare_metadata.update(rebuilt)
+                config["splits"] = {
+                    "enabled": True,
+                    "strategy": split_mode,
+                    "train": rebuilt["reused_split_counts"]["train"],
+                    "validation": rebuilt["reused_split_counts"]["validation"],
+                    "test": rebuilt["reused_split_counts"]["test"],
                 }
-            )
+                self._append(
+                    "[UI] downstream-only: Random Cartesian dataset reused; splits rebuilt "
+                    f"from training controls ({split_mode}, counts={rebuilt['reused_split_counts']}).\n"
+                )
+            else:
+                self._append("[UI] downstream-only: preserving archived Random Cartesian splits.\n")
+            self._configure_existing_atom_dataset(config, workspace, method_id="random_cartesian")
             write_yaml(config_snapshot_path, config)
-            self._append("[UI] Config temporal Random Cartesian escrita para entrenar/evaluar.\n")
+            self._append(
+                "[UI] downstream-only: Random Cartesian dataset generation skipped; "
+                f"reusing {prepare_metadata['reused_dataset_dir']}.\n"
+            )
             self._validate_split_manifests("atom_displacement", config, size)
+            write_yaml(config_snapshot_path, config)
             training_started = time.time()
             returncode = self._run_pipeline_process(
                 spec,
@@ -6241,6 +7401,81 @@ class ExperimentRunner:
                 config_path=config_snapshot_path,
             )
             prepare_metadata["training_prediction_seconds"] = time.time() - training_started
+        else:
+            pseudo_count = copy_pseudopotentials(PIPELINES["atom_displacement"].root / "base", base_dir)
+            relaxed_counts = copy_relaxed_basis(PIPELINES["atom_displacement"].root / "relaxed", relaxed_dir)
+            ratios = split_ratios or split_ratios_from_config(config)
+            validate_split_sizes(size, ratios, label=f"Random Cartesian dataset_{size}")
+            config["paths"]["base_dir"] = str(base_dir)
+            config["paths"]["relaxed_dir"] = str(relaxed_dir)
+            config["paths"]["dataset_dir"] = str(dataset_dir)
+            config["paths"]["samples_dir"] = str(dataset_dir / "RandomCartesian_steps")
+            config["paths"]["collected_dir"] = str(dataset_dir / "collected")
+            config["paths"]["training_dir"] = str(training_dir)
+            config["single_points"]["limit"] = None
+            config["single_points"]["rerun"] = False
+            config["pipeline"]["steps"] = [
+                "render_inputs",
+                "generate_random_cartesian_dataset",
+                "run_single_points",
+                "collect_atom_displacement_dataset",
+            ]
+            write_yaml(config_snapshot_path, config)
+            self._append(f"[UI] Random Cartesian dataset_dir: {dataset_dir}\n")
+            self._append(f"[UI] Random Cartesian samples_dir: {config['paths']['samples_dir']}\n")
+            self._append(f"[UI] Random Cartesian pseudopotenciales copiados: {pseudo_count}\n")
+            self._append(
+                "[UI] Random Cartesian relaxed copiado: "
+                f"{relaxed_counts['basis_files']} basis .ion.xml, {relaxed_counts['xv_files']} XV.\n"
+            )
+            generation_returncode = self._run_pipeline_process(
+                spec,
+                key="random_cartesian",
+                size=size,
+                started_at=started_at,
+                config_path=config_snapshot_path,
+            )
+            generation_seconds = time.time() - started_at
+            if generation_returncode != 0:
+                raise RuntimeError(f"Random Cartesian dataset_{size} fallo generando dataset con codigo {generation_returncode}.")
+            prepare_metadata = {
+                "requested_size": size,
+                "effective_size": size,
+                "generated_samples": size,
+                "completed_samples": None,
+                "seed": random_config.get("seed"),
+                "generation_seconds": generation_seconds,
+            }
+            returncode = 0
+            if run_mode != DATASET_ONLY_RUN_MODE:
+                generation_metadata = dict(prepare_metadata)
+                prepare_metadata = self._prepare_atom_config(
+                    config,
+                    workspace,
+                    size,
+                    split_ratios,
+                    source_samples_dir=dataset_dir / "RandomCartesian_steps",
+                    method_id="random_cartesian",
+                )
+                prepare_metadata.update(
+                    {
+                        "generation_seconds": generation_metadata.get("generation_seconds"),
+                        "generated_samples": generation_metadata.get("generated_samples"),
+                        "seed": generation_metadata.get("seed"),
+                    }
+                )
+                write_yaml(config_snapshot_path, config)
+                self._append("[UI] Config temporal Random Cartesian escrita para entrenar/evaluar.\n")
+                self._validate_split_manifests("atom_displacement", config, size)
+                training_started = time.time()
+                returncode = self._run_pipeline_process(
+                    spec,
+                    key="random_cartesian",
+                    size=size,
+                    started_at=started_at,
+                    config_path=config_snapshot_path,
+                )
+                prepare_metadata["training_prediction_seconds"] = time.time() - training_started
         with self._lock:
             run_log = "".join(self._logs[log_start:])
         pipeline_elapsed = time.time() - started_at
@@ -6945,6 +8180,165 @@ class ExperimentRunner:
                 counts["valid"] += 1
         return counts
 
+    def _identity_path(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return str(Path(text).resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            return text
+
+    def _training_base_metadata(
+        self,
+        key: str,
+        dataset_label: str,
+        size: int,
+        dataset_dir: Path,
+        result_dir: Path,
+        run_id: str,
+        prepare_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        method_id = self._method_id_for_pipeline_key(key)
+        dataset_reused = bool(prepare_metadata.get("dataset_reused"))
+        base_dataset_dir = (
+            prepare_metadata.get("training_base_dataset_dir")
+            or prepare_metadata.get("reused_dataset_dir")
+            or str(dataset_dir)
+        )
+        base_result_dir = (
+            prepare_metadata.get("training_base_result_dir")
+            or prepare_metadata.get("reused_result_dir")
+            or (str(result_dir) if not dataset_reused else None)
+        )
+        base_run_id = (
+            prepare_metadata.get("training_base_run_id")
+            or prepare_metadata.get("reused_run_id")
+            or (run_id if not dataset_reused else None)
+        )
+        return {
+            "method_id": str(prepare_metadata.get("training_base_method_id") or method_id),
+            "dataset_label": str(
+                prepare_metadata.get("training_base_dataset_label")
+                or dataset_label
+                or f"dataset_{size}"
+            ),
+            "dataset_size": int(prepare_metadata.get("training_base_dataset_size") or size),
+            "dataset_dir": self._identity_path(base_dataset_dir),
+            "result_dir": self._identity_path(base_result_dir),
+            "run_id": str(base_run_id or ""),
+        }
+
+    def _manifest_training_base_metadata(
+        self,
+        manifest: dict[str, Any],
+        manifest_path: Path,
+        fallback_method_id: str,
+    ) -> dict[str, Any]:
+        dataset_reused = bool(manifest.get("dataset_reused"))
+        result_dir = archived_manifest_result_dir(manifest, manifest_path)
+        dataset_size = manifest.get("training_base_dataset_size") or manifest.get(
+            "effective_dataset_size",
+            manifest.get("dataset_size", 0),
+        )
+        try:
+            dataset_size = int(dataset_size or 0)
+        except (TypeError, ValueError):
+            dataset_size = 0
+        return {
+            "method_id": str(
+                manifest.get("training_base_method_id")
+                or manifest.get("method_id")
+                or fallback_method_id
+            ),
+            "dataset_label": str(
+                manifest.get("training_base_dataset_label")
+                or manifest.get("dataset_label")
+                or f"dataset_{dataset_size}"
+            ),
+            "dataset_size": dataset_size,
+            "dataset_dir": self._identity_path(
+                manifest.get("training_base_dataset_dir")
+                or (manifest.get("reused_dataset_dir") if dataset_reused else None)
+                or manifest.get("dataset_dir")
+            ),
+            "result_dir": self._identity_path(
+                manifest.get("training_base_result_dir")
+                or (manifest.get("reused_result_dir") if dataset_reused else None)
+                or result_dir
+            ),
+            "run_id": str(
+                manifest.get("training_base_run_id")
+                or (manifest.get("reused_run_id") if dataset_reused else None)
+                or manifest.get("run_id")
+                or ""
+            ),
+        }
+
+    def _same_training_base(self, left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if str(left.get("method_id") or "") != str(right.get("method_id") or ""):
+            return False
+        for field in ("result_dir", "dataset_dir"):
+            left_value = str(left.get(field) or "")
+            right_value = str(right.get(field) or "")
+            if left_value and right_value and left_value == right_value:
+                return True
+        left_run_id = str(left.get("run_id") or "")
+        if left_run_id and left_run_id == str(right.get("run_id") or ""):
+            return True
+        has_identity = any(
+            str(left.get(field) or "") or str(right.get(field) or "")
+            for field in ("result_dir", "dataset_dir", "run_id")
+        )
+        if has_identity:
+            return False
+        return (
+            str(left.get("dataset_label") or "") == str(right.get("dataset_label") or "")
+            and int(left.get("dataset_size") or 0) == int(right.get("dataset_size") or 0)
+        )
+
+    def _next_training_index(
+        self,
+        result_group: str,
+        current_base: dict[str, Any],
+        *,
+        current_result_dir: Path,
+    ) -> int:
+        root = RESULTS_ROOT / result_group
+        max_index = 0
+        legacy_matches = 0
+        for manifest_path in archived_result_manifest_paths(root):
+            if self._identity_path(manifest_path.parent) == self._identity_path(current_result_dir):
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if manifest.get("run_mode") == DATASET_ONLY_RUN_MODE:
+                continue
+            if int(manifest.get("returncode", 0) or 0) != 0:
+                continue
+            candidate_base = self._manifest_training_base_metadata(
+                manifest,
+                manifest_path,
+                str(current_base.get("method_id") or ""),
+            )
+            if not self._same_training_base(candidate_base, current_base):
+                continue
+            try:
+                index = int(manifest.get("training_index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            if index > 0:
+                max_index = max(max_index, index)
+            else:
+                legacy_matches += 1
+        return max_index + 1 if max_index else legacy_matches + 1
+
+    def _training_tag(self, base_label: str, training_index: int) -> str:
+        clean_label = compact_dataset_label(base_label, {"training_index": training_index}, max_length=80)
+        return f"{clean_label}_train{training_index}"
+
     def _archive_outputs(
         self,
         key: str,
@@ -7037,10 +8431,19 @@ class ExperimentRunner:
         for validation_file in sorted((dataset_dir / "validation").glob("*/*.csv")):
             copy_if_exists(validation_file, result_dir / "validation" / validation_file.parent.name / validation_file.name)
         siesta_counts = self._single_point_counts(result_dir / "run_summary.json")
-        if run_mode == "dataset_only":
+        if prepare_metadata.get("dataset_reused"):
+            total_reused = int(siesta_counts.get("total") or prepare_metadata.get("effective_size") or size)
+            siesta_counts = {
+                "launched": 0,
+                "skipped_or_reused": total_reused,
+                "failed": 0,
+                "valid": int(siesta_counts.get("valid") or total_reused),
+                "total": total_reused,
+            }
+        if run_mode == DATASET_ONLY_RUN_MODE:
             evaluation_metrics = {
                 "skipped": True,
-                "reason": "dataset_only",
+                "reason": DATASET_ONLY_RUN_MODE,
                 "evaluation_time_seconds": None,
             }
         else:
@@ -7072,7 +8475,7 @@ class ExperimentRunner:
             encoding="utf-8",
         )
         effective_size = int(prepare_metadata.get("effective_size", size))
-        if run_mode == "dataset_only":
+        if run_mode == DATASET_ONLY_RUN_MODE:
             checkpoint_path = None
             signed_checkpoint = {"path": None, "sha256": None, "relative_path": None, "selection": None}
             checkpoint_warning = "Checkpoint not produced in dataset_only mode."
@@ -7104,6 +8507,25 @@ class ExperimentRunner:
         manifest_seed = prepare_metadata.get("seed")
         if manifest_seed in (None, ""):
             manifest_seed = recipe_metadata.get("seed")
+        training_base = self._training_base_metadata(
+            key,
+            dataset_label,
+            effective_size,
+            dataset_dir,
+            result_dir,
+            run_id,
+            prepare_metadata,
+        )
+        if run_mode == DATASET_ONLY_RUN_MODE:
+            training_index = None
+            training_tag = None
+        else:
+            training_index = self._next_training_index(
+                result_group,
+                training_base,
+                current_result_dir=result_dir,
+            )
+            training_tag = self._training_tag(str(training_base["dataset_label"]), training_index)
         manifest = {
             "pipeline": key,
             "method_id": "siesta_fc_cartesian" if key == "atom_displacement" else key,
@@ -7118,6 +8540,18 @@ class ExperimentRunner:
             "dataset_dir": str(dataset_dir),
             "training_dir": str(training_dir),
             "result_dir": str(result_dir),
+            "reused_dataset_dir": prepare_metadata.get("reused_dataset_dir"),
+            "reused_result_dir": prepare_metadata.get("reused_result_dir"),
+            "reused_run_id": prepare_metadata.get("reused_run_id"),
+            "dataset_reused": bool(prepare_metadata.get("dataset_reused")),
+            "training_tag": training_tag,
+            "training_index": training_index,
+            "training_base_method_id": training_base["method_id"],
+            "training_base_dataset_label": training_base["dataset_label"],
+            "training_base_dataset_size": training_base["dataset_size"],
+            "training_base_dataset_dir": training_base["dataset_dir"],
+            "training_base_result_dir": training_base["result_dir"],
+            "training_base_run_id": training_base["run_id"],
             "model_checkpoint": str(checkpoint_path) if checkpoint_path else None,
             "model_checkpoint_metadata": signed_checkpoint,
             "model_checkpoint_sha256": signed_checkpoint.get("sha256"),
@@ -7132,6 +8566,11 @@ class ExperimentRunner:
             "recipe_label": recipe_metadata.get("recipe_label"),
             "block_id": recipe_metadata.get("block_id"),
             "block_label": recipe_metadata.get("block_label"),
+            "training_plan_index": recipe_metadata.get("training_plan_index"),
+            "training_plan_label": recipe_metadata.get("training_plan_label"),
+            "training_plan_display_label": recipe_metadata.get("training_plan_display_label"),
+            "training_plan_settings": recipe_metadata.get("training_plan_settings"),
+            "training_plan_source_dataset_label": recipe_metadata.get("training_plan_source_dataset_label"),
             "recipe_set_hash": recipe_set_hash(recipe_metadata) if recipe_metadata else "",
             "generation_parameters_json": recipe_metadata.get("generation_parameters_json"),
             "predicted_hamiltonians": prediction_count,
@@ -7148,7 +8587,7 @@ class ExperimentRunner:
             "metrics": read_metrics_summary(result_dir / "sample_metrics.csv"),
             "hamiltonian_evaluation": evaluation_metrics,
             "run_mode": run_mode,
-            "scientific_status": "dataset_only" if run_mode == "dataset_only" else "pending",
+            "scientific_status": "dataset_only" if run_mode == DATASET_ONLY_RUN_MODE else "pending",
         }
         (result_dir / "manifest.json").write_text(
             json.dumps(json_safe(manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
@@ -8505,6 +9944,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, plot_data_summary())
             elif path == "/api/datasets/targets":
                 json_response(self, generated_dataset_output_records())
+            elif path == "/api/datasets/reusable":
+                json_response(self, EXPERIMENT_RUNNER.reusable_dataset_candidates_payload())
             elif path == "/api/atom-fc-config":
                 json_response(self, atom_fc_ui_config())
             elif path == "/api/performance-presets":
@@ -8572,6 +10013,14 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 payload = read_json_body(self)
                 selected_methods = normalize_selected_methods(payload.get("selected_methods"))
                 run_mode = parse_run_mode(payload.get("run_mode"))
+                reusable_dataset_ids = parse_reusable_dataset_ids(payload.get("reusable_dataset_ids"))
+                training_plan = parse_training_plan(payload.get("training_plan"))
+                if reusable_dataset_ids and not run_mode_skips_dataset_generation(run_mode):
+                    raise RuntimeError(
+                        "reusable_dataset_ids solo se puede usar con train_test_metrics_plots_only."
+                    )
+                if training_plan and not run_mode_skips_dataset_generation(run_mode):
+                    raise RuntimeError("training_plan solo esta disponible con train_test_metrics_plots_only.")
                 selected_pipeline_keys = pipeline_keys_for_methods(selected_methods)
                 method_options = payload.get("method_options") or {}
                 method_random_options = (
@@ -8596,6 +10045,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 max_datasets = parse_max_datasets(payload.get("max_datasets"))
                 combination_mode = parse_combination_mode(payload.get("combination_mode"))
                 split_mode = parse_split_mode(payload.get("split_mode"))
+                reusable_split_policy = parse_reusable_split_policy(payload.get("reusable_split_policy"))
                 raw_test_sets = payload.get("test_sets")
                 if raw_test_sets in (None, "", []):
                     test_sets = [f"test_{method}" for method in selected_methods] + ["test_mixed"]
@@ -8609,6 +10059,14 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     compute_accelerator=compute_accelerator,
                 )
                 training_settings = parse_training_settings(payload.get("training_settings"))
+                training_plan_dataset_ids: list[str] = []
+                for plan_item in training_plan:
+                    for dataset_id in plan_item["reusable_dataset_ids"]:
+                        if dataset_id not in training_plan_dataset_ids:
+                            training_plan_dataset_ids.append(dataset_id)
+                effective_reusable_dataset_ids = (
+                    training_plan_dataset_ids if training_plan else reusable_dataset_ids
+                )
                 compute_accelerator = str(performance_settings["compute_accelerator"])
                 raw_venv_activate_command = payload.get("venv_activate_command")
                 venv_activate_command = (
@@ -8712,6 +10170,43 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         "atom_dataset_specs": atom_dataset_specs or [],
                         "random_cartesian_dataset_specs": random_cartesian_options.get("_dataset_specs") or [],
                     }
+                if effective_reusable_dataset_ids:
+                    reusable_info = EXPERIMENT_RUNNER.dataset_recipes_info_for_reusable_dataset_ids(
+                        effective_reusable_dataset_ids,
+                        selected_methods=selected_methods,
+                    )
+                    reusable_recipes = reusable_info.get("recipes") or {}
+                    merged_recipes = dict(dataset_recipes_info.get("recipes") or {})
+                    merged_recipes.update(reusable_recipes)
+                    dataset_recipes_info["recipes"] = merged_recipes
+                    if reusable_info.get("md_dataset_specs"):
+                        dataset_recipes_info["md_dataset_specs"] = reusable_info["md_dataset_specs"]
+                        md_sizes = [int(spec["size"]) for spec in reusable_info["md_dataset_specs"]]
+                    if reusable_info.get("atom_dataset_specs"):
+                        dataset_recipes_info["atom_dataset_specs"] = reusable_info["atom_dataset_specs"]
+                        atom_dataset_specs = reusable_info["atom_dataset_specs"]
+                        atom_sizes = [int(spec["size"]) for spec in reusable_info["atom_dataset_specs"]]
+                        fc_dataset_specs = None
+                    if reusable_info.get("random_cartesian_dataset_specs"):
+                        dataset_recipes_info["random_cartesian_dataset_specs"] = reusable_info[
+                            "random_cartesian_dataset_specs"
+                        ]
+                        random_cartesian_options = {
+                            **random_cartesian_options,
+                            "_dataset_specs": reusable_info["random_cartesian_dataset_specs"],
+                        }
+                    if training_plan:
+                        plan_methods: list[str] = []
+                        if reusable_info.get("md_dataset_specs"):
+                            plan_methods.append("md")
+                        if reusable_info.get("atom_dataset_specs"):
+                            plan_methods.append("siesta_fc_cartesian")
+                        if reusable_info.get("random_cartesian_dataset_specs"):
+                            plan_methods.append("random_cartesian")
+                        selected_methods = [method for method in selected_methods if method in plan_methods]
+                        if not selected_methods:
+                            selected_methods = plan_methods
+                    dataset_recipes_info["recipe_set_hash"] = recipe_set_hash(merged_recipes)
                 json_response(
                     self,
                     EXPERIMENT_RUNNER.start(
@@ -8733,6 +10228,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         training_settings,
                         venv_activate_path,
                         dataset_recipes_info,
+                        reusable_split_policy,
+                        training_plan,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

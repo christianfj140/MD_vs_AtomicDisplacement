@@ -111,8 +111,9 @@
                 <select id="run-mode">
                   <option value="dataset_only">Dataset only</option>
                   <option value="full_strict_pipeline" selected>Full strict pipeline</option>
+                  <option value="train_test_metrics_plots_only">Train/test/metrics/plots only</option>
                 </select>
-                <small>Dataset only stops before training, prediction, cross-evaluation and winner analysis.</small>
+                <small>Dataset only stops before training. Train/test/metrics/plots only reuses an existing generated dataset.</small>
               </label>
               <label class="field">
                 <span>MD split mode</span>
@@ -171,12 +172,52 @@
               <input
                 id="venv-activate-command"
                 type="text"
-                value="source ${REPO_ROOT}/.venv/bin/activate"
+                value="source /home/christian/graph2mat-env/bin/activate"
               />
               <small>
                 Se ejecuta antes de cada pipeline del experimento. Puedes cambiarlo sin tocar YAML.
               </small>
             </label>
+            <section id="reusable-dataset-panel" class="reusable-dataset-panel hidden">
+              <div class="panel-heading compact-heading">
+                <div>
+                  <p class="eyebrow">Dataset reuse</p>
+                  <h3>Reusable archived datasets</h3>
+                  <p class="field-help">
+                    En train/test/metrics/plots only puedes marcar los datasets exactos que quieres reutilizar.
+                  </p>
+                </div>
+                <div class="button-row">
+                  <button id="refresh-reusable-datasets" class="button secondary" type="button">Refresh datasets</button>
+                </div>
+              </div>
+              <label class="field">
+                <span>Split source</span>
+                <select id="reusable-split-policy">
+                  <option value="preserve_archived_splits" selected>Use archived splits</option>
+                  <option value="rebuild_splits">Rebuild splits from controls</option>
+                </select>
+                <small>
+                  Rebuild keeps the dataset fixed but rewrites train/validation/test in the run workspace.
+                </small>
+              </label>
+              <div id="reusable-dataset-status" class="muted-text">No reusable datasets loaded.</div>
+              <div class="cleanup-table-wrap reusable-dataset-table-wrap">
+                <table class="cleanup-table reusable-dataset-table">
+                  <thead>
+                    <tr>
+                      <th>Use</th>
+                      <th>Method</th>
+                      <th>Dataset</th>
+                      <th>Size</th>
+                      <th>Run</th>
+                      <th>Path</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reusable-dataset-list"></tbody>
+                </table>
+              </div>
+            </section>
             <div class="training-config-block">
               <p class="eyebrow">Graph2Mat training</p>
               <h3>Training parameters</h3>
@@ -220,6 +261,41 @@
               <small>
                 El número de componentes de matriz Hamiltonian queda bloqueado por el pipeline para evitar salidas spin-polarized incompatibles con referencias SIESTA no polarizadas.
               </small>
+              <section id="training-plan-panel" class="training-plan-panel hidden">
+                <div class="panel-heading compact-heading">
+                  <div>
+                    <p class="eyebrow">Training queue</p>
+                    <h3>Training plan</h3>
+                    <p class="field-help">
+                      Guarda configuraciones de entrenamiento para ejecutarlas secuencialmente sobre los datasets reutilizables seleccionados.
+                    </p>
+                  </div>
+                  <div class="button-row">
+                    <button id="add-training-plan-entry" class="button secondary" type="button">Add current config</button>
+                    <button id="clear-training-plan" class="button danger" type="button">Clear plan</button>
+                  </div>
+                </div>
+                <div class="grid two split-grid">
+                  <label class="field">
+                    <span>Config label</span>
+                    <input id="training-plan-label" type="text" placeholder="epochs400" />
+                  </label>
+                  <div id="training-plan-status" class="muted-text">No queued training configs.</div>
+                </div>
+                <div class="cleanup-table-wrap">
+                  <table class="cleanup-table">
+                    <thead>
+                      <tr>
+                        <th>Config</th>
+                        <th>Datasets</th>
+                        <th>Training overrides</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="training-plan-list"></tbody>
+                  </table>
+                </div>
+              </section>
             </div>
           </section>
 
@@ -547,6 +623,37 @@
                 <h3>Visual comparison</h3>
               </div>
               <div class="button-row">
+                <details class="metric-info-bubble">
+                  <summary aria-label="Metric information" title="Metric information">i</summary>
+                  <div class="metric-info-popover">
+                    <h4>Metric guide</h4>
+                    <dl>
+                      <dt>Low-energy RMSE</dt>
+                      <dd>Error in the low-energy eigenvalue region; useful to compare chemically relevant bands.</dd>
+                      <dt>Fermi-window RMSE</dt>
+                      <dd>Error close to the SIESTA Fermi level; useful for frontier electronic behavior.</dd>
+                      <dt>Frontier-window RMSE</dt>
+                      <dd>HOMO/LUMO fallback when the Fermi-window metric is unavailable.</dd>
+                      <dt>Global / aligned RMSE</dt>
+                      <dd>Whole-spectrum eigenvalue error, optionally after alignment; useful to detect broad spectral drift.</dd>
+                      <dt>Gap error</dt>
+                      <dd>Absolute HOMO-LUMO gap error; useful when the band gap is the target property.</dd>
+                      <dt>Relative Frobenius</dt>
+                      <dd>Relative matrix error on the Hamiltonian; useful for overall matrix fidelity.</dd>
+                      <dt>MAE ref</dt>
+                      <dd>Mean absolute Hamiltonian error on SIESTA reference support.</dd>
+                      <dt>Support F1</dt>
+                      <dd>Overlap between predicted and reference non-zero matrix support; higher is better.</dd>
+                      <dt>DOS W1</dt>
+                      <dd>Wasserstein distance between density-of-states curves; useful for spectral-shape comparison.</dd>
+                      <dt>Time</dt>
+                      <dd>Total pipeline wall time; useful to trade accuracy against compute cost.</dd>
+                    </dl>
+                    <p>
+                      Cross plots reuse the selected cross metric. Lower is better except Support F1.
+                    </p>
+                  </div>
+                </details>
                 <label class="field inline-field">
                   <span>Cross experiments</span>
                   <select id="plot-cross-selection">

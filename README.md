@@ -32,7 +32,8 @@ Abre `http://127.0.0.1:8770`.
 Desde la pestaña `Experiment` se puede:
 
 - seleccionar uno, dos o los tres metodos;
-- elegir `dataset_only` o `full_strict_pipeline`;
+- elegir `dataset_only`, `full_strict_pipeline` o
+  `train_test_metrics_plots_only`;
 - editar recetas de datasets MD, FC Cartesian y Random Cartesian;
 - fijar splits, test sets, metrica primaria, rendimiento y parametros de
   entrenamiento;
@@ -111,7 +112,8 @@ python -m pip install -e /ruta/a/graph2mat
 1. crea workspaces aislados por metodo y dataset;
 2. genera o prepara datasets segun recetas;
 3. valida muestras SIESTA antes de usarlas;
-4. entrena/testea/predice en modo `full_strict_pipeline`;
+4. entrena/testea/predice en modo `full_strict_pipeline` o
+   `train_test_metrics_plots_only`;
 5. archiva estructuras, Hamiltonianos predichos, referencias SIESTA, configs,
    logs y manifests;
 6. construye tests congelados;
@@ -120,7 +122,34 @@ python -m pip install -e /ruta/a/graph2mat
 9. agrega resultados y escribe `recommendation.json`.
 
 En `dataset_only` se generan y validan datasets, pero se omiten entrenamiento,
-prediccion, evaluacion cruzada y analisis de winners.
+prediccion, evaluacion cruzada y analisis de winners. En
+`train_test_metrics_plots_only` se reutiliza un dataset ya archivado con la
+misma seleccion; si faltan sus carpetas, splits o referencias SIESTA, el
+experimento falla antes de entrenar. En ese modo la UI muestra una tabla de
+datasets archivados reutilizables; puedes marcar explicitamente los datasets
+que quieras entrenar de nuevo. Si no marcas ninguno, el backend usa la
+coincidencia automatica por metodo, tamano, etiqueta/receta.
+
+Por defecto ese modo respeta los splits archivados. Si quieres mantener el
+dataset fijo pero cambiar train/validation/test, selecciona `Rebuild splits
+from controls` en `Split source`; la pipeline copia el dataset al workspace del
+nuevo run y reconstruye los splits con los ratios y el `Split mode` elegidos,
+sin regenerar SIESTA ni sobrescribir el dataset original.
+
+Cada entrenamiento con metricas queda etiquetado en su `manifest.json` con
+`training_tag`, `training_index` y el dataset base usado para entrenar. Por
+ejemplo, varios entrenamientos sobre el mismo dataset aparecen como
+`dataset_1000_train1`, `dataset_1000_train2`, etc.; la UI usa ese tag en plots
+y tablas para distinguir reentrenamientos con hiperparametros o splits
+distintos.
+
+Para lanzar varios entrenamientos sobre datasets reutilizables, usa
+`Train/test/metrics/plots only`, selecciona los datasets en `Reusable archived
+datasets`, ajusta los campos de `Training parameters` y pulsa `Add current
+config` en `Training plan`. Puedes repetirlo con otros hiperparametros y otra
+seleccion de datasets. Al ejecutar el experimento, las configuraciones del plan
+se procesan secuencialmente; cada entrada del plan crea un run independiente por
+dataset seleccionado.
 
 Un experimento con un solo metodo es valido para generar datos y diagnosticos,
 pero queda marcado como `non_comparative` porque no puede producir winner

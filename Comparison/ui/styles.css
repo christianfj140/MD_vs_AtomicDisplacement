@@ -941,6 +941,80 @@ pre {
   padding: 20px;
 }
 
+.metric-info-bubble {
+  position: relative;
+  align-self: flex-start;
+}
+
+.metric-info-bubble summary {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink-strong);
+  cursor: pointer;
+  font-weight: 850;
+  list-style: none;
+  box-shadow: var(--shadow-sm);
+}
+
+.metric-info-bubble summary::-webkit-details-marker {
+  display: none;
+}
+
+.metric-info-bubble[open] summary {
+  border-color: #8a5b63;
+  color: #6d3d42;
+}
+
+.metric-info-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  width: min(560px, calc(100vw - 48px));
+  max-height: 70vh;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  box-shadow: var(--shadow);
+  color: var(--ink);
+}
+
+.metric-info-popover h4 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.metric-info-popover dl {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(220px, 1.3fr);
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.metric-info-popover dt {
+  color: var(--ink-strong);
+  font-weight: 850;
+}
+
+.metric-info-popover dd {
+  margin: 0;
+  color: var(--muted-strong);
+}
+
+.metric-info-popover p {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .destructive-panel {
   margin-top: 22px;
   border-color: #e2a3a8;
@@ -983,6 +1057,26 @@ pre {
 .cleanup-table code {
   overflow-wrap: anywhere;
   color: #6d3d42;
+}
+
+.reusable-dataset-panel {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.compact-heading {
+  margin-bottom: 10px;
+}
+
+.reusable-dataset-table-wrap {
+  border-color: var(--line);
+}
+
+.reusable-dataset-table code {
+  color: var(--muted-strong);
 }
 
 .plots-panel.hidden {
@@ -1142,6 +1236,11 @@ pre {
     flex-wrap: wrap;
   }
 
+  .metric-info-popover {
+    right: auto;
+    left: 0;
+  }
+
   .content {
     padding: 18px;
   }
@@ -1166,6 +1265,10 @@ pre {
   }
 
   .dataset-component-row {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-info-popover dl {
     grid-template-columns: 1fr;
   }
 
