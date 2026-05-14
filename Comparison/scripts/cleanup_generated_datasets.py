@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 from datetime import datetime
@@ -15,6 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 KEEP_DATASET_FILENAMES = {".gitkeep"}
 KEEP_DATASET_SUFFIXES = {".psf", ".psml"}
 GENERATED_RESULTS_GROUPS = ("results_md", "results_atomdisp", "results_random_cartesian")
+RESULTS_METHOD_BY_GROUP = {
+    "results_md": "md",
+    "results_atomdisp": "siesta_fc_cartesian",
+    "results_random_cartesian": "random_cartesian",
+}
 
 
 def _is_generated_results_dir(path: Path) -> bool:
@@ -64,6 +70,163 @@ def generated_dataset_targets(repo_root: Path = REPO_ROOT) -> list[Path]:
     return sorted(set(targets), key=lambda path: path.as_posix())
 
 
+def _relative_path(repo_root: Path, path: Path) -> str:
+    repo_root = repo_root.resolve()
+    candidate = path if path.is_absolute() else repo_root / path
+    try:
+        return candidate.absolute().relative_to(repo_root).as_posix()
+    except ValueError:
+        return candidate.as_posix()
+
+
+def _target_id(relative_path: str) -> str:
+    return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:16]
+
+
+def _directory_size_bytes(path: Path) -> int:
+    if path.is_symlink():
+        return 0
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _dataset_kind_and_method(repo_root: Path, path: Path) -> tuple[str, str]:
+    relative = _relative_path(repo_root, path)
+    parts = relative.split("/")
+    if relative.startswith("MD/dataset/"):
+        return "source_dataset", "md"
+    if relative.startswith("AtomDisplacement/dataset/RandomCartesian_steps"):
+        return "source_dataset", "random_cartesian"
+    if relative.startswith("AtomDisplacement/dataset/"):
+        return "source_dataset", "siesta_fc_cartesian"
+    if relative == "Comparison/workspaces":
+        return "workspace_cache", "mixed"
+    if len(parts) >= 3 and parts[0] == "Comparison" and parts[1] == "results":
+        if parts[2] in RESULTS_METHOD_BY_GROUP:
+            return "archived_dataset", RESULTS_METHOD_BY_GROUP[parts[2]]
+        return "experiment_results", "mixed"
+    return "generated_artifact", "unknown"
+
+
+def _manifest_metadata(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        return {}
+    manifest_paths = []
+    if path.is_dir():
+        manifest_paths.extend(sorted(path.glob("run_*/manifest.json")))
+        manifest_paths.extend(sorted(path.glob("*/manifest.json")))
+        manifest_paths.extend(sorted(path.glob("experiment_manifest.yaml")))
+    for manifest_path in manifest_paths:
+        try:
+            if manifest_path.suffix == ".json":
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            else:
+                payload = {}
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def generated_dataset_records(repo_root: Path = REPO_ROOT) -> list[dict[str, Any]]:
+    repo_root = repo_root.resolve()
+    records: list[dict[str, Any]] = []
+    for target in generated_dataset_targets(repo_root):
+        relative = _relative_path(repo_root, target)
+        kind, method = _dataset_kind_and_method(repo_root, target)
+        metadata = _manifest_metadata(target)
+        try:
+            stat = target.lstat() if target.is_symlink() else target.stat()
+        except OSError:
+            stat = None
+        records.append(
+            {
+                "id": _target_id(relative),
+                "name": target.name,
+                "path": str(target),
+                "relative_path": relative,
+                "kind": kind,
+                "method": metadata.get("method_id") or method,
+                "dataset_label": metadata.get("dataset_label") or target.name,
+                "dataset_size": metadata.get("dataset_size"),
+                "run_id": metadata.get("run_id") or metadata.get("experiment_id"),
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
+                "bytes": _directory_size_bytes(target),
+                "warning": (
+                    "Borrar este artefacto fisico no edita recetas ni configuraciones; "
+                    "puede dejar resultados historicos apuntando a una ruta eliminada."
+                    if kind in {"source_dataset", "workspace_cache"}
+                    else ""
+                ),
+            }
+        )
+    return records
+
+
+def _safe_remove_target(repo_root: Path, target: Path) -> None:
+    repo_root = repo_root.resolve()
+    if target.is_symlink():
+        raise RuntimeError(f"No se borra un enlace simbolico: {target}")
+    resolved = target.resolve()
+    if repo_root != resolved and repo_root not in resolved.parents:
+        raise RuntimeError(f"Ruta fuera del repositorio: {target}")
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+
+def cleanup_selected_generated_datasets(
+    repo_root: Path = REPO_ROOT,
+    *,
+    target_ids: list[str],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    target_ids = list(dict.fromkeys(str(target_id) for target_id in target_ids if str(target_id).strip()))
+    if not target_ids:
+        raise RuntimeError("Selecciona al menos un dataset generado para borrar.")
+    records = generated_dataset_records(repo_root)
+    by_id = {record["id"]: record for record in records}
+    unknown = [target_id for target_id in target_ids if target_id not in by_id]
+    if unknown:
+        raise RuntimeError(f"IDs de dataset no reconocidos o ya borrados: {unknown}.")
+    removed: list[str] = []
+    selected_records = [by_id[target_id] for target_id in target_ids]
+    for record in selected_records:
+        target = Path(record["path"])
+        removed.append(str(target))
+        if not dry_run:
+            _safe_remove_target(repo_root, target)
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "dry_run": dry_run,
+        "removed": removed,
+        "selected": selected_records,
+        "preserved": [
+            "MD/pipeline_config.yaml",
+            "AtomDisplacement/pipeline_config.yaml",
+            "Comparison/config/shared_siesta_settings.yaml",
+            "source code under */scripts and */ui",
+            "pseudopotentials *.psf/*.psml in MD/dataset and AtomDisplacement/dataset",
+        ],
+    }
+    if not dry_run:
+        log_path = repo_root / "Comparison" / "generated_dataset_cleanup_manifest.json"
+        log_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return manifest
+
+
 def cleanup_generated_datasets(
     repo_root: Path = REPO_ROOT,
     *,
@@ -75,10 +238,7 @@ def cleanup_generated_datasets(
         removed.append(str(target))
         if dry_run:
             continue
-        if target.is_dir():
-            shutil.rmtree(target)
-        elif target.exists():
-            target.unlink()
+        _safe_remove_target(repo_root, target)
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "dry_run": dry_run,

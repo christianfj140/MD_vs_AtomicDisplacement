@@ -1,8 +1,10 @@
 # Comparison Metrics
 
 This file documents the metrics produced by
-`Comparison/scripts/evaluate_hamiltonian_metrics.py` for archived MD and
-AtomDisplacement runs.
+`Comparison/scripts/evaluate_hamiltonian_metrics.py` for archived comparison
+runs. The current workflow supports the canonical methods `md`,
+`siesta_fc_cartesian`, and `random_cartesian`; legacy names such as
+`atom_displacement` are normalized by `Comparison/scripts/method_registry.py`.
 
 ## Data Flow
 
@@ -27,9 +29,10 @@ eigenvalue extraction, and the metrics evaluator:
 `warnings`, `samples_failed`, and per-sample `sample_status` rows containing the
 selected reference/prediction paths and SHA256 hashes.
 
-The UI endpoint `/api/plots` reads those archived CSV files for both
-`results_md` and `results_atomdisp`. If a manifest contains an absolute path
-from another OS, the UI falls back to the archive directory beside the manifest.
+The UI endpoint `/api/plots` reads those archived CSV files from `results_md`,
+`results_atomdisp`, and `results_random_cartesian`. If a manifest contains an
+absolute path from another OS, the UI falls back to the archive directory beside
+the manifest.
 
 ## Sparse Matrix Metrics
 
@@ -177,14 +180,13 @@ The manifest summary includes both Pearson and Spearman correlations for matrix
 error versus spectral errors. Spearman is the rank-robust companion and should
 be preferred whenever heavy-tailed outliers are visible.
 
-## Interpreting MD vs AtomDisplacement
+## Interpreting Method Comparisons
 
 The safest comparison is:
 
-- MD prediction vs SIESTA reference.
-- AtomDisplacement prediction vs SIESTA reference.
-- Then compare the resulting MD and AtomDisplacement metric distributions on
-  the same frozen SIESTA-referenced test set.
+- each selected method prediction vs its SIESTA reference;
+- then compare the resulting metric distributions on the same frozen
+  SIESTA-referenced test sets;
 - Keep the chosen budget mode explicit:
   `equal_sample_count`, `equal_siesta_budget`, or `both`.
 
@@ -207,15 +209,16 @@ Winner outputs preserve `experiment_id`, `seed`, dataset sizes, test set,
 metric, frozen-test hash, checkpoint manifest, and checkpoint hash. `pooled`
 aggregation is only produced when explicitly requested with
 `--aggregation-mode pooled`. Fewer than three seeds are reported as
-`scientific_status: exploratory`; `robust_comparison` requires at least three
-seeds, complete 2x3 cross evaluation, a complete primary metric, and no severe
-warnings.
+`scientific_status: exploratory`; `robust_comparison` requires enough seeds, a
+complete cross-evaluation grid for the selected methods and frozen test sets, a
+complete primary metric, and no severe warnings.
 
-AtomDisplacement wins only on `test_atomdisp` are treated as
+Wins only on a method's own frozen test set, for example only on
+`test_siesta_fc_cartesian` or only on `test_random_cartesian`, are treated as
 distribution-specific diagnostics, not cross-generalization winners. A
-conservative MD-vs-AtomDisplacement winner must win on `test_md` and/or
-`test_mixed` with the same frozen references, enough seeds, a complete primary
-metric, and no severe warnings.
+conservative winner should hold on `test_md` and/or `test_mixed` with the same
+frozen references, enough seeds, a complete primary metric, and no severe
+warnings.
 
 Winner recommendations are marked `inconclusive` when machine-readable
 validation warnings are present in the aggregated cross metrics, including

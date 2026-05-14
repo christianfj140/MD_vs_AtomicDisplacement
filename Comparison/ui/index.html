@@ -90,6 +90,21 @@
                 <h3>Experiment design</h3>
               </div>
             </div>
+            <div class="method-run-selector" aria-label="Methods to run">
+              <label class="toggle-field method-run-toggle">
+                <input class="method-execution-checkbox" type="checkbox" value="md" checked />
+                <span>MD</span>
+              </label>
+              <label class="toggle-field method-run-toggle">
+                <input class="method-execution-checkbox" type="checkbox" value="siesta_fc_cartesian" checked />
+                <span>FC Cartesian</span>
+              </label>
+              <label class="toggle-field method-run-toggle">
+                <input class="method-execution-checkbox" type="checkbox" value="random_cartesian" checked />
+                <span>Random Cartesian</span>
+              </label>
+              <span id="method-selection-summary" class="muted-text">3 methods selected</span>
+            </div>
             <div class="grid three split-grid">
               <label class="field">
                 <span>Run mode</span>
@@ -311,13 +326,6 @@
                 <div class="fc-mode-note">
                   <strong>Aligned</strong> empareja cada posición de las listas. <strong>Cartesian</strong> expande todas las combinaciones.
                 </div>
-                <div>
-                  <div class="preview-heading">
-                    <span>Dataset preview</span>
-                    <span class="muted-text">first entries shown before running</span>
-                  </div>
-                  <div id="fc-dataset-preview" class="dataset-preview"></div>
-                </div>
               </section>
 
               <section class="method-card method-random">
@@ -329,55 +337,16 @@
                   <span id="random-preview-summary" class="method-summary">1 dataset</span>
                 </div>
                 <p class="field-help">
-                  Cada tarjeta es un dataset Random Cartesian independiente. La amplitud de cada fila se aplica como sigma/rango global y Seed fija la familia aleatoria del dataset.
+                  Cada tarjeta es un dataset Random Cartesian independiente. Cada fila es un bloque dentro del dataset y tiene sus propias secciones atom, bond, angle y validacion.
                 </p>
                 <div id="random-dataset-editor" class="dataset-editor" data-kind="random_cartesian"></div>
                 <div class="button-row">
                   <button id="random-add-dataset" class="button secondary" type="button">+ Add dataset</button>
                 </div>
                 <label class="field dataset-source-field">
-                  <span>Datasets Random Cartesian: estructuras | amplitud max/sigma (Ang)</span>
-                  <textarea id="random-cartesian-dataset-table" rows="5">100 | 0.03</textarea>
+                  <span>Datasets Random Cartesian: estructuras</span>
+                  <textarea id="random-cartesian-dataset-table" rows="5">100</textarea>
                 </label>
-                <input id="random-cartesian-n-structures" type="hidden" value="100" />
-                <div class="grid two split-grid">
-                  <label class="field">
-                    <span>Distribución</span>
-                    <select id="random-cartesian-distribution">
-                      <option value="gaussian" selected>Gaussian</option>
-                      <option value="uniform">Uniform</option>
-                    </select>
-                  </label>
-                  <label class="field">
-                    <span>Seed</span>
-                    <input id="random-cartesian-seed" type="number" step="1" value="1234" />
-                  </label>
-                  <label class="field">
-                    <span>Sigma gaussian (Ang)</span>
-                    <input id="random-cartesian-sigma-ang" type="number" step="0.001" min="0" value="0.03" />
-                  </label>
-                  <label class="field">
-                    <span>Rango uniforme (Ang)</span>
-                    <input id="random-cartesian-uniform-range-ang" type="number" step="0.001" min="0" value="0.05" />
-                  </label>
-                  <label class="field">
-                    <span>Min distance (Ang)</span>
-                    <input id="random-cartesian-min-distance-ang" type="number" step="0.01" min="0" value="0.65" />
-                  </label>
-                  <label class="field">
-                    <span>Átomos movidos</span>
-                    <input id="random-cartesian-move-atoms" type="text" value="all" />
-                    <small>Usa all o índices 1-based separados por comas.</small>
-                  </label>
-                  <label class="field">
-                    <span>Filtro de especies</span>
-                    <input id="random-cartesian-species-filter" type="text" placeholder="H, O" />
-                  </label>
-                  <label class="toggle-field inline-toggle">
-                    <input id="random-cartesian-remove-com" type="checkbox" checked />
-                    <span>Eliminar traslación del centro de masa</span>
-                  </label>
-                </div>
               </section>
             </div>
 
@@ -568,7 +537,6 @@
                 <span>Show plots</span>
               </label>
               <button id="refresh-results" class="button secondary">Refresh</button>
-              <button id="clear-datasets" class="button danger" type="button">Clear datasets</button>
             </div>
           </header>
           <div id="results-grid" class="grid two"></div>
@@ -620,6 +588,39 @@
               <div id="plot-winner" class="plot-card full"></div>
             </div>
           </section>
+          <section id="dataset-cleanup-panel" class="panel destructive-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Destructive actions</p>
+                <h3>Generated datasets</h3>
+                <p class="field-help">
+                  Selecciona artefactos generados concretos. El borrado no toca codigo, configs ni pseudopotenciales.
+                </p>
+              </div>
+              <div class="button-row">
+                <button id="refresh-dataset-targets" class="button secondary" type="button">Reload list</button>
+                <button id="delete-selected-datasets" class="button danger" type="button">Delete selected</button>
+                <button id="clear-datasets" class="button danger" type="button">Clear all generated</button>
+              </div>
+            </div>
+            <div id="dataset-cleanup-status" class="muted-text">Loading generated dataset list...</div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr>
+                    <th>Select</th>
+                    <th>Name</th>
+                    <th>Method</th>
+                    <th>Kind</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                    <th>Path</th>
+                  </tr>
+                </thead>
+                <tbody id="dataset-cleanup-list"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section id="view-api" class="view">
@@ -634,16 +635,17 @@
             <code>POST /api/run</code>
             <code>POST /api/run/stop</code>
             <code>GET /api/run/status</code>
-            <code>GET /api/run/logs?pipeline=md&amp;since=0</code>
-            <code>GET /api/run/logs?pipeline=atom_displacement&amp;since=0</code>
+            <code>GET /api/run/logs?pipeline=md&amp;since=0&amp;limit=2000</code>
+            <code>GET /api/run/logs?pipeline=atom_displacement&amp;since=0&amp;limit=2000</code>
             <code>GET /api/results</code>
             <code>GET /api/plots</code>
+            <code>GET /api/datasets/targets</code>
             <code>POST /api/datasets/clear</code>
             <code>GET /api/atom-fc-config</code>
             <code>POST /api/experiment</code>
             <code>POST /api/experiment/stop</code>
             <code>GET /api/experiment/status</code>
-            <code>GET /api/experiment/logs?since=0</code>
+            <code>GET /api/experiment/logs?since=0&amp;limit=2000</code>
           </div>
         </section>
       </main>

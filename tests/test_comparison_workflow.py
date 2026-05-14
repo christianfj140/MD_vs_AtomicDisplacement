@@ -124,6 +124,23 @@ class ComparisonWorkflowTests(unittest.TestCase):
             REPO_ROOT / "Comparison" / "scripts" / "model_settings.py",
         )
 
+    def test_ui_log_payload_is_bounded_for_polling(self):
+        module = self.load_pipeline_ui_module()
+        logs = [f"line {index}\n" for index in range(10)]
+
+        payload = module.bounded_log_payload(logs, since=0, limit=3)
+
+        self.assertEqual(payload["offset"], 10)
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["dropped_lines"], 7)
+        self.assertEqual(payload["returned_from"], 7)
+        self.assertIn("Log truncado", payload["lines"][0])
+        self.assertEqual(payload["lines"][-1], "line 9\n")
+
+        current_payload = module.bounded_log_payload(logs, since=8, limit=3)
+        self.assertFalse(current_payload["truncated"])
+        self.assertEqual(current_payload["lines"], ["line 8\n", "line 9\n"])
+
     def write_expected_cross_grid(self, path: Path, methods: tuple[str, ...], test_sets: tuple[str, ...]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         expected_cells = [
@@ -727,6 +744,65 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(info["random_cartesian_dataset_specs"][0]["options"]["sigma_ang"], 0.03)
         self.assertRegex(info["random_cartesian_dataset_specs"][0]["label"], r"^RC_dataset1_[A-Za-z0-9]{6}$")
 
+    def test_dataset_recipes_preserve_random_cartesian_nested_components(self) -> None:
+        module = self.load_pipeline_ui_module()
+        recipes = {
+            "random_cartesian": [
+                {
+                    "recipe_id": "rc_components",
+                    "blocks": [
+                        {
+                            "block_id": "rc_bond",
+                            "n_structures": 6,
+                            "components": {
+                                "atom_displacement": {"enabled": False},
+                                "bond_displacement": {
+                                    "enabled": True,
+                                    "distribution": "uniform",
+                                    "min_delta_ang": 0.02,
+                                    "max_delta_ang": 0.02,
+                                },
+                            },
+                        },
+                        {
+                            "block_id": "rc_atom",
+                            "n_structures": 3,
+                            "components": {
+                                "atom_displacement": {
+                                    "enabled": True,
+                                    "distribution": "gaussian",
+                                    "sigma_ang": 0.01,
+                                },
+                                "angle_displacement": {
+                                    "enabled": True,
+                                    "distribution": "uniform",
+                                    "min_delta_deg": -5.0,
+                                    "max_delta_deg": -5.0,
+                                },
+                            },
+                        },
+                    ],
+                }
+            ]
+        }
+        info = module.dataset_recipes_to_execution_specs(
+            recipes,
+            selected_methods=["random_cartesian"],
+            split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            random_cartesian_defaults={"distribution": "gaussian", "sigma_ang": 0.03, "seed": 7},
+        )
+        rc_spec = info["random_cartesian_dataset_specs"][0]
+        block = rc_spec["options"]["blocks"][0]
+        self.assertFalse(block["components"]["atom_displacement"]["enabled"])
+        self.assertTrue(block["components"]["bond_displacement"]["enabled"])
+        self.assertEqual(block["components"]["bond_displacement"]["min_delta_ang"], 0.02)
+        second_block = rc_spec["options"]["blocks"][1]
+        self.assertTrue(second_block["components"]["atom_displacement"]["enabled"])
+        self.assertTrue(second_block["components"]["angle_displacement"]["enabled"])
+        self.assertEqual(second_block["components"]["atom_displacement"]["sigma_ang"], 0.01)
+        self.assertEqual(second_block["components"]["angle_displacement"]["min_delta_deg"], -5.0)
+        self.assertNotIn("components", rc_spec["options"])
+
     def test_composite_dataset_recipes_create_one_run_per_recipe(self) -> None:
         module = self.load_pipeline_ui_module()
         module.atom_fc_sample_limit = lambda _config: 100
@@ -1286,6 +1362,68 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertTrue((root / "MD" / "dataset" / "H.psf").exists())
             self.assertTrue((root / "Comparison" / "generated_dataset_cleanup_manifest.json").exists())
 
+    def test_cleanup_selected_generated_datasets_uses_ids_and_preserves_unselected(self) -> None:
+        cleanup = self.load_module_from_path(
+            "cleanup_generated_datasets_selected_test",
+            REPO_ROOT / "Comparison" / "scripts" / "cleanup_generated_datasets.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            keep = root / "Comparison" / "results" / "results_md" / "keep_dataset"
+            delete = root / "Comparison" / "results" / "results_md" / "delete_dataset"
+            keep.mkdir(parents=True)
+            (keep / "marker.txt").write_text("keep\n", encoding="utf-8")
+            manifest_dir = delete / "run_1"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "method_id": "md",
+                        "dataset_label": "delete_dataset_label",
+                        "dataset_size": 12,
+                        "run_id": "run_1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            records = cleanup.generated_dataset_records(root)
+            delete_record = next(record for record in records if record["name"] == "delete_dataset")
+            self.assertEqual(delete_record["method"], "md")
+            self.assertEqual(delete_record["dataset_label"], "delete_dataset_label")
+            self.assertEqual(delete_record["dataset_size"], 12)
+
+            manifest = cleanup.cleanup_selected_generated_datasets(root, target_ids=[delete_record["id"]])
+            self.assertIn(str(delete), manifest["removed"])
+            self.assertFalse(delete.exists())
+            self.assertTrue(keep.exists())
+            self.assertTrue((root / "Comparison" / "generated_dataset_cleanup_manifest.json").exists())
+
+            with self.assertRaisesRegex(RuntimeError, "no reconocidos"):
+                cleanup.cleanup_selected_generated_datasets(root, target_ids=["not-a-real-id"])
+
+    def test_cleanup_selected_generated_datasets_rejects_symlink_targets(self) -> None:
+        cleanup = self.load_module_from_path(
+            "cleanup_generated_datasets_symlink_test",
+            REPO_ROOT / "Comparison" / "scripts" / "cleanup_generated_datasets.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            outside = root / "outside_dataset_target"
+            outside.mkdir()
+            link = root / "MD" / "dataset" / "bad_link"
+            link.parent.mkdir(parents=True)
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable in this environment: {exc}")
+
+            records = cleanup.generated_dataset_records(root)
+            link_record = next(record for record in records if record["name"] == "bad_link")
+            with self.assertRaisesRegex(RuntimeError, "enlace simbolico|fuera"):
+                cleanup.cleanup_selected_generated_datasets(root, target_ids=[link_record["id"]])
+            self.assertTrue(outside.exists())
+
     def test_dataset_only_records_status_and_skips_cross_evaluation(self) -> None:
         module = self.load_pipeline_ui_module()
         module.STRICT_COMPARISON_MODE = False
@@ -1467,18 +1605,25 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertIsNone(started["args"][-2])
             self.assertIn("recipes", started["args"][-1])
 
+    def test_experiment_start_rejects_zero_selected_methods(self) -> None:
+        module = self.load_pipeline_ui_module()
+        runner = module.ExperimentRunner()
+        with self.assertRaisesRegex(RuntimeError, "Selecciona al menos un metodo"):
+            runner.start([], [], selected_methods=[], run_mode="dataset_only")
+
     def test_ui_experiment_payload_includes_methods_and_run_mode(self) -> None:
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
         self.assertIn('value="md"', index_html)
         self.assertIn('value="siesta_fc_cartesian"', index_html)
         self.assertIn('value="random_cartesian"', index_html)
+        self.assertIn('class="method-execution-checkbox"', index_html)
         self.assertIn('value="random_cartesian" checked', index_html)
         self.assertIn('class="tab hidden" data-view="run"', index_html)
         self.assertIn('class="tab active" data-view="experiment"', index_html)
         self.assertIn('id="view-run" class="view"', index_html)
         self.assertIn('id="view-experiment" class="view active"', index_html)
-        self.assertIn('id="random-cartesian-n-structures"', index_html)
+        self.assertNotIn('id="random-cartesian-n-structures"', index_html)
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
         self.assertIn('run_mode: document.getElementById("run-mode").value', app_js)
@@ -1530,6 +1675,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="md-dataset-table"', index_html)
         self.assertIn('id="fc-dataset-editor"', index_html)
         self.assertIn('id="fc-add-dataset"', index_html)
+        self.assertNotIn('id="fc-dataset-preview"', index_html)
+        self.assertNotIn("Dataset preview", index_html)
         self.assertIn('id="random-dataset-editor"', index_html)
         self.assertIn('id="random-add-dataset"', index_html)
         self.assertIn('id="random-cartesian-dataset-table"', index_html)
@@ -1538,17 +1685,28 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="dataset-recipes-json"', index_html)
         self.assertIn('id="use-dataset-recipes-json"', index_html)
         self.assertIn('id="export-dataset-recipes"', index_html)
-        self.assertIn('id="random-cartesian-distribution"', index_html)
-        self.assertIn('id="random-cartesian-sigma-ang"', index_html)
-        self.assertIn('id="random-cartesian-min-distance-ang"', index_html)
+        self.assertNotIn('id="random-cartesian-distribution"', index_html)
+        self.assertNotIn('id="random-cartesian-sigma-ang"', index_html)
+        self.assertNotIn('id="random-cartesian-min-distance-ang"', index_html)
+        self.assertNotIn('id="random-cartesian-enable-atom"', index_html)
+        self.assertNotIn('id="random-cartesian-seed"', index_html)
+        self.assertNotIn("random-global-grid", index_html)
         self.assertIn("Dataset builder", index_html)
         self.assertIn("setupDatasetEditors()", app_js)
         self.assertIn("parseDatasetRecipes()", app_js)
         self.assertIn("parseMdDatasetTableSpecs()", app_js)
         self.assertIn("parseMdTemperatureBlocks()", app_js)
         self.assertIn("parseFcDatasetTableSpecs()", app_js)
+        self.assertNotIn("renderFcPreview", app_js)
         self.assertIn("parseRandomCartesianDatasetTableSpecs()", app_js)
+        self.assertIn("parseRandomCartesianDatasetSpecsFromEditor", app_js)
+        self.assertIn('row.querySelector(\'[data-field="count"]\')', app_js)
+        self.assertNotIn('parseNumberListInput("random-cartesian-n-structures"', app_js)
         self.assertIn('data-field="dataset-seed"', app_js)
+        self.assertIn('document.createElement("details")', app_js)
+        self.assertIn('className = "dataset-card"', app_js)
+        self.assertIn('class="dataset-card-body"', app_js)
+        self.assertIn('class="dataset-card-chevron"', app_js)
         self.assertIn("applyDatasetSeeds", app_js)
         self.assertIn("datasetSeedPatch", app_js)
         self.assertIn("syncMdTableFromSizes", app_js)
@@ -1564,20 +1722,49 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("compute_accelerator: performance.compute_accelerator", app_js)
         self.assertIn("parseRandomCartesianOptions(methods)", app_js)
         self.assertIn("random_cartesian_options: randomCartesianOptions", app_js)
+        self.assertIn("habilita al menos atom, bond o angle displacement", app_js)
+        self.assertIn("atom_displacement", app_js)
+        self.assertIn("bond_displacement", app_js)
+        self.assertIn("angle_displacement", app_js)
+        self.assertIn("validation = {", app_js)
+        self.assertIn("randomCartesianSettingsFromCard", app_js)
+        self.assertIn("applyRandomCartesianDatasetSettings", app_js)
+        self.assertIn("rows[blockIndex]", app_js)
+        self.assertIn("component ${blockIndex + 1}", app_js)
+        self.assertIn('class="random-block-details"', app_js)
+        self.assertIn('data-field="rc-enable-atom"', app_js)
+        self.assertIn('data-field="rc-atom-sigma"', app_js)
+        self.assertIn('data-field="rc-enable-bond"', app_js)
+        self.assertIn('data-field="rc-bond-sigma"', app_js)
+        self.assertIn('data-field="rc-bond-min-delta"', app_js)
+        self.assertIn('data-field="rc-enable-angle"', app_js)
+        self.assertIn('data-field="rc-angle-sigma"', app_js)
+        self.assertIn('data-field="rc-angle-min-delta"', app_js)
+        self.assertIn('data-field="rc-max-rmsd"', app_js)
+        self.assertIn('data-field="rc-max-attempts"', app_js)
         self.assertIn("n_structures", app_js)
+        self.assertNotIn("random-cartesian-enable-atom", app_js)
+        self.assertNotIn("random-cartesian-seed", app_js)
+        self.assertNotIn("parseMoveAtomsInput", app_js)
         self.assertNotIn("syncRandomCartesianSizeFromAtomPlan", app_js)
         self.assertNotIn("validSizes.join", app_js)
         self.assertIn("resultPipelines", app_js)
         self.assertIn("results_random_cartesian", app_js)
         self.assertIn("wasRunning && !status.running && state.plotsEnabled", app_js)
+        self.assertIn("setMethodSelected", app_js)
+        self.assertIn("Selecciona al menos un metodo", app_js)
         self.assertIn('id="plot-cross-selection"', index_html)
         self.assertIn('id="plot-cross-metric"', index_html)
         self.assertIn('<option value="all" selected>All experiments</option>', index_html)
         self.assertIn('<option value="low_energy_rmse_eV" selected>', index_html)
         self.assertIn('<option value="low_energy_rmse_eV" selected>Low-energy eigenvalue RMSE</option>', index_html)
         self.assertIn('id="clear-datasets"', index_html)
+        self.assertGreater(index_html.index('id="clear-datasets"'), index_html.index('id="plot-winner"'))
+        self.assertIn('id="delete-selected-datasets"', index_html)
+        self.assertIn('id="dataset-cleanup-list"', index_html)
         self.assertIn("clearGeneratedDatasets()", app_js)
         self.assertIn("/api/datasets/clear", app_js)
+        self.assertIn("/api/datasets/targets", app_js)
         self.assertIn("selectedCrossExperimentSet(payload)", app_js)
         self.assertIn("selectedCrossMetric", app_js)
         self.assertIn("groupedCrossMetrics", app_js)
@@ -1607,12 +1794,26 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertLess(index_html.index('data-view="run"'), positions[0])
         self.assertIn('class="tab hidden" data-view="run"', index_html)
 
-    def test_ui_plotly_traces_use_scatter_points_without_line_connections(self) -> None:
+    def test_ui_plotly_traces_use_scatter_points_with_selectable_fit_lines(self) -> None:
         app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
         self.assertIn('mode: "markers"', app_js)
+        self.assertIn('mode: "lines"', app_js)
+        self.assertIn("aggregateFitPoints", app_js)
+        self.assertIn("grouped.has(x)", app_js)
+        self.assertIn("polynomialCoefficients", app_js)
+        self.assertIn('kind === "quadratic" ? 2 : 1', app_js)
+        self.assertIn('label: "Linear fit"', app_js)
+        self.assertIn('label: "Quadratic fit"', app_js)
+        self.assertIn('label: "No fit"', app_js)
+        self.assertIn("withFitSelector", app_js)
+        self.assertIn('visible: kind === "linear"', app_js)
+        self.assertIn('hoverinfo: "skip"', app_js)
+        self.assertNotIn("aggregateSmoothPoints", app_js)
+        self.assertNotIn("smoothLineTrace", app_js)
+        self.assertNotIn("smoothing:", app_js)
+        self.assertNotIn("shape:", app_js)
         self.assertNotIn('mode: "lines+markers"', app_js)
         self.assertNotIn("mode: 'lines+markers'", app_js)
-        self.assertNotIn('mode: "lines"', app_js)
         self.assertNotIn("mode: 'lines'", app_js)
 
     def test_ui_and_backend_default_primary_metric_is_low_energy(self) -> None:
@@ -2289,6 +2490,267 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 basis_file.unlink()
             with self.assertRaisesRegex(RuntimeError, "requires basis"):
                 module.generate_dataset(module.PIPELINE_CONFIG)
+
+    def test_random_cartesian_nested_atom_only_preserves_legacy_geometry(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            legacy_root = root / "legacy"
+            nested_root = root / "nested"
+            legacy_root.mkdir()
+            nested_root.mkdir()
+            self.configure_random_cartesian_module(module, legacy_root, n_structures=1, seed=17)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "sigma_ang": 0.04,
+                    "remove_center_of_mass_translation": False,
+                }
+            )
+            module.generate_dataset(module.PIPELINE_CONFIG)
+            legacy_run = (legacy_root / "dataset" / "RandomCartesian_steps" / "sample_000001" / "RUN.fdf").read_text(encoding="utf-8")
+
+            self.configure_random_cartesian_module(module, nested_root, n_structures=1, seed=17)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "components": {
+                        "atom_displacement": {
+                            "enabled": True,
+                            "distribution": "gaussian",
+                            "sigma_ang": 0.04,
+                            "remove_center_of_mass_translation": False,
+                        },
+                        "bond_displacement": {"enabled": False},
+                        "angle_displacement": {"enabled": False},
+                    }
+                }
+            )
+            module.generate_dataset(module.PIPELINE_CONFIG)
+            nested_run = (nested_root / "dataset" / "RandomCartesian_steps" / "sample_000001" / "RUN.fdf").read_text(encoding="utf-8")
+            metadata = json.loads(
+                (nested_root / "dataset" / "RandomCartesian_steps" / "sample_000001" / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(legacy_run, nested_run)
+            self.assertEqual(metadata["enabled_components"], ["atom_displacement"])
+
+    def test_random_cartesian_bond_only_generation_records_water_metrics(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=1, seed=3)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "components": {
+                        "atom_displacement": {"enabled": False},
+                        "bond_displacement": {
+                            "enabled": True,
+                            "distribution": "uniform",
+                            "min_delta_ang": 0.1,
+                            "max_delta_ang": 0.1,
+                            "min_bond_ang": 0.7,
+                            "max_bond_ang": 1.3,
+                        },
+                        "angle_displacement": {"enabled": False},
+                    },
+                    "validation": {"min_distance_ang": 0.1, "max_attempts_per_structure": 3},
+                }
+            )
+            manifest = module.generate_dataset(module.PIPELINE_CONFIG)
+            metadata = json.loads(
+                (root / "dataset" / "RandomCartesian_steps" / "sample_000001" / "metadata.json").read_text(encoding="utf-8")
+            )
+            metrics = metadata["final_geometry_metrics"]
+            self.assertEqual(metadata["enabled_components"], ["bond_displacement"])
+            self.assertAlmostEqual(metrics["oh_1_ang"], 1.1, places=12)
+            self.assertAlmostEqual(metrics["oh_2_ang"], 1.1, places=12)
+            self.assertIn(module.SCIENTIFIC_WARNING, manifest["warnings"])
+
+    def test_random_cartesian_angle_only_generation_records_angle_delta(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=1, seed=3)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "components": {
+                        "atom_displacement": {"enabled": False},
+                        "bond_displacement": {"enabled": False},
+                        "angle_displacement": {
+                            "enabled": True,
+                            "distribution": "uniform",
+                            "min_delta_deg": -10.0,
+                            "max_delta_deg": -10.0,
+                            "min_angle_deg": 150.0,
+                            "max_angle_deg": 180.0,
+                        },
+                    },
+                    "validation": {"min_distance_ang": 0.1, "max_attempts_per_structure": 3},
+                }
+            )
+            module.generate_dataset(module.PIPELINE_CONFIG)
+            metadata = json.loads(
+                (root / "dataset" / "RandomCartesian_steps" / "sample_000001" / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["enabled_components"], ["angle_displacement"])
+            self.assertAlmostEqual(metadata["final_geometry_metrics"]["hoh_angle_deg"], 170.0, places=10)
+            self.assertAlmostEqual(metadata["angle_displacement_deg"]["delta_deg"], -10.0, places=12)
+
+    def test_random_cartesian_all_components_manifest_and_splits(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=3, seed=9)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "components": {
+                        "atom_displacement": {
+                            "enabled": True,
+                            "distribution": "gaussian",
+                            "sigma_ang": 0.0,
+                        },
+                        "bond_displacement": {
+                            "enabled": True,
+                            "distribution": "uniform",
+                            "min_delta_ang": 0.05,
+                            "max_delta_ang": 0.05,
+                            "min_bond_ang": 0.7,
+                            "max_bond_ang": 1.3,
+                        },
+                        "angle_displacement": {
+                            "enabled": True,
+                            "distribution": "uniform",
+                            "min_delta_deg": -5.0,
+                            "max_delta_deg": -5.0,
+                            "min_angle_deg": 150.0,
+                            "max_angle_deg": 180.0,
+                        },
+                    },
+                    "validation": {"min_distance_ang": 0.1, "max_attempts_per_structure": 3},
+                }
+            )
+            manifest = module.generate_dataset(module.PIPELINE_CONFIG)
+            dataset_root = root / "dataset" / "RandomCartesian_steps"
+            metadata = json.loads((dataset_root / "sample_000001" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                metadata["enabled_components"],
+                ["atom_displacement", "bond_displacement", "angle_displacement"],
+            )
+            self.assertEqual(manifest["component_config"]["bond_displacement"]["min_delta_ang"], 0.05)
+            self.assertEqual(manifest["acceptance_ratio"], 1.0)
+            self.assertIn("deterministic_hashes", manifest)
+            self.assertIn("config_hash", manifest["deterministic_hashes"])
+            self.assertTrue((dataset_root / "split_manifest_train.json").exists())
+            self.assertTrue((dataset_root / "split_manifest_validation.json").exists())
+            self.assertTrue((dataset_root / "split_manifest_test.json").exists())
+
+    def test_random_cartesian_rejection_counts_capture_explicit_reason(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=1, seed=3)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "components": {
+                        "atom_displacement": {"enabled": False},
+                        "bond_displacement": {
+                            "enabled": True,
+                            "distribution": "uniform",
+                            "min_delta_ang": 0.0,
+                            "max_delta_ang": 0.0,
+                            "min_bond_ang": 0.7,
+                            "max_bond_ang": 1.3,
+                        },
+                        "angle_displacement": {"enabled": False},
+                    },
+                    "validation": {"min_distance_ang": 0.1, "max_attempts_per_structure": 3},
+                }
+            )
+            original_sample = module.sample_bounded_scalar
+            calls = {"count": 0}
+
+            def forced_sample(rng, component, *, sigma_key, min_key, max_key):
+                calls["count"] += 1
+                return -0.4 if calls["count"] == 1 else 0.0
+
+            module.sample_bounded_scalar = forced_sample
+            try:
+                manifest = module.generate_dataset(module.PIPELINE_CONFIG)
+            finally:
+                module.sample_bounded_scalar = original_sample
+            metadata = json.loads(
+                (root / "dataset" / "RandomCartesian_steps" / "sample_000001" / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["rejection_counts_by_reason"], {"oh_bond_out_of_range": 1})
+            self.assertEqual(metadata["accepted_attempt"], 2)
+            self.assertEqual(metadata["last_rejection_reason"], "oh_bond_out_of_range")
+
+    def test_random_cartesian_block_nested_override_and_legacy_block_keys_work(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=2, seed=3)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"].update(
+                {
+                    "blocks": [
+                        {
+                            "block_id": "bond_block",
+                            "n_structures": 1,
+                            "components": {
+                                "atom_displacement": {"enabled": False},
+                                "bond_displacement": {
+                                    "enabled": True,
+                                    "distribution": "uniform",
+                                    "min_delta_ang": 0.02,
+                                    "max_delta_ang": 0.02,
+                                },
+                            },
+                            "validation": {"min_distance_ang": 0.1},
+                        },
+                        {
+                            "block_id": "legacy_atom_block",
+                            "n_structures": 1,
+                            "max_displacement": "0.01 Ang",
+                            "remove_center_of_mass_translation": False,
+                            "components": {
+                                "atom_displacement": {"enabled": True},
+                                "bond_displacement": {"enabled": False},
+                                "angle_displacement": {"enabled": False},
+                            },
+                        },
+                    ]
+                }
+            )
+            manifest = module.generate_dataset(module.PIPELINE_CONFIG)
+            dataset_root = root / "dataset" / "RandomCartesian_steps"
+            first = json.loads((dataset_root / "sample_000001" / "metadata.json").read_text(encoding="utf-8"))
+            second = json.loads((dataset_root / "sample_000002" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(first["enabled_components"], ["bond_displacement"])
+            self.assertEqual(second["enabled_components"], ["atom_displacement"])
+            self.assertEqual(manifest["blocks"][1]["components"]["atom_displacement"]["sigma_ang"], 0.01)
+
+    def test_random_cartesian_cli_parser_accepts_component_flags(self) -> None:
+        module = self.load_random_cartesian_module()
+        args = module.build_argument_parser().parse_args(
+            [
+                "--n-structures",
+                "3",
+                "--disable-atom-displacement",
+                "--enable-bond-displacement",
+                "--enable-angle-displacement",
+                "--bond-uniform-range-ang",
+                "0.03",
+                "--angle-sigma-deg",
+                "2.5",
+                "--max-rmsd-from-reference-ang",
+                "0.2",
+            ]
+        )
+        self.assertEqual(args.n_structures, 3)
+        self.assertFalse(args.atom_displacement_enabled)
+        self.assertTrue(args.bond_displacement_enabled)
+        self.assertTrue(args.angle_displacement_enabled)
+        self.assertEqual(args.bond_uniform_range_ang, 0.03)
+        self.assertEqual(args.angle_sigma_deg, 2.5)
+        self.assertEqual(args.max_rmsd_from_reference_ang, 0.2)
 
     def test_run_single_points_updates_random_cartesian_matrix_hashes(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))

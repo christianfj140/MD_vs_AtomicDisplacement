@@ -75,6 +75,39 @@ structure:
     min_distance_ang: 0.65
     max_attempts_per_structure: 100
     remove_center_of_mass_translation: true
+    components:
+      atom_displacement:
+        enabled: true
+        distribution: gaussian
+        sigma_ang: 0.03
+        uniform_range_ang: 0.05
+        move_atoms: all
+        species_filter: []
+        remove_center_of_mass_translation: true
+      bond_displacement:
+        enabled: false
+        distribution: gaussian
+        sigma_ang: 0.01
+        uniform_range_ang: 0.02
+        min_delta_ang: null
+        max_delta_ang: null
+        min_bond_ang: 0.70
+        max_bond_ang: 1.30
+        bonds: h2o_oh
+      angle_displacement:
+        enabled: false
+        distribution: gaussian
+        sigma_deg: 3.0
+        uniform_range_deg: 5.0
+        min_delta_deg: null
+        max_delta_deg: null
+        min_angle_deg: 80.0
+        max_angle_deg: 130.0
+        angles: h2o_hoh
+    validation:
+      min_distance_ang: 0.65
+      max_rmsd_from_reference_ang: null
+      max_attempts_per_structure: 100
   lattice_constant:
     value: 1.0
     unit: Ang

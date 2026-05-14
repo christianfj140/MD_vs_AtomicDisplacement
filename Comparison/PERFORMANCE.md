@@ -1,4 +1,4 @@
-# Rendimiento Del Pipeline
+# Rendimiento del Pipeline
 
 La pestaña **Rendimiento** de la UI configura únicamente controles cableados al backend del experimento one-click.
 
@@ -19,9 +19,23 @@ Evita oversubscription: si ejecutas `N` SIESTA jobs en paralelo y cada uno usa `
 
 Si `gpu` se solicita explícitamente y CUDA no está disponible, el experimento falla de forma clara. Con `auto`, se usa GPU si Torch la detecta y CPU si no.
 
-## No Optimizado En V1
+## Orquestacion
 
-- No hay cache cross-workspace de SIESTA.
-- No hay cache de métricas ni de entrenamiento.
-- No se paralelizan métodos/tamaños completos porque el flujo actual aún muta YAMLs compartidos y los restaura después.
-- No se cambian epochs, basis, SIESTA SCF settings, splits ni validaciones para ganar velocidad.
+- `max_parallel_dataset_jobs` puede ejecutar jobs independientes metodo/dataset
+  en paralelo usando workspaces aislados y snapshots de config. Si se usa una
+  sola GPU, el runner fuerza serializacion para evitar entrenamientos
+  simultaneos en el mismo dispositivo.
+- `max_parallel_prediction_jobs`, `max_parallel_evaluation_jobs` y
+  `max_parallel_metric_jobs` limitan trabajos cruzados cuando sus directorios de
+  salida son independientes. Las agregaciones finales siguen en el proceso padre
+  para conservar manifests deterministas.
+- `error_policy=fail_fast` aborta al primer fallo. `continue_on_error` deja
+  terminar tareas pendientes y marca el experimento como parcial.
+
+## Limitaciones actuales
+
+- No hay cache global segura de SIESTA, metricas, predicciones ni entrenamiento.
+- `enable_experiment_cache` esta reservado: si se activa, el backend falla de
+  forma explicita hasta que exista una clave de hash completa.
+- No se cambian basis, SIESTA SCF settings, splits ni validaciones para ganar
+  velocidad.

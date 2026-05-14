@@ -81,16 +81,23 @@ function canonicalDisplayText(value) {
 const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
 const PRIMARY_METRIC_DEFAULT = "low_energy_rmse_eV";
 const CROSS_PLOT_METRIC_DEFAULT = "low_energy_rmse_eV";
+const LOG_POLL_LIMIT = 2000;
+const POLL_INTERVAL_MS = 1200;
+const POLL_ERROR_TOAST_INTERVAL_MS = 30000;
 
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
   polling: null,
+  pollingInFlight: false,
+  pollingFailures: 0,
+  lastPollingToastAt: 0,
   plotsEnabled: false,
   plotData: null,
   fcMaxPerDisplacement: null,
   experimentWasRunning: false,
   performancePresetCatalog: null,
+  datasetTargets: [],
 };
 
 function showToast(message) {
@@ -170,15 +177,55 @@ async function copyVenvActivationCommand() {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+  } catch (error) {
+    const message = error?.message || "No se pudo conectar con la UI local.";
+    throw new Error(message);
+  }
   const payload = await response.json();
   if (!response.ok || payload.error) {
     throw new Error(payload.error || response.statusText);
   }
   return payload;
+}
+
+function isTransientFetchError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    error instanceof TypeError ||
+    message.includes("failed to fetch") ||
+    message.includes("networkerror") ||
+    message.includes("load failed") ||
+    message.includes("network")
+  );
+}
+
+function handlePollingError(error) {
+  state.pollingFailures += 1;
+  const now = Date.now();
+  if (
+    state.pollingFailures < 3 &&
+    isTransientFetchError(error)
+  ) {
+    return;
+  }
+  if (now - state.lastPollingToastAt < POLL_ERROR_TOAST_INTERVAL_MS) {
+    return;
+  }
+  state.lastPollingToastAt = now;
+  const message = isTransientFetchError(error)
+    ? "Conexion temporal con la UI perdida; reintentando..."
+    : error.message;
+  showToast(message);
+}
+
+function markPollingSuccess() {
+  state.pollingFailures = 0;
 }
 
 function statusText(status) {
@@ -260,7 +307,7 @@ async function pollLogs() {
   await Promise.all(
     pipelines.map(async (pipeline) => {
       const payload = await request(
-        `/api/run/logs?pipeline=${pipeline.key}&since=${state.offsets[pipeline.key]}`,
+        `/api/run/logs?pipeline=${pipeline.key}&since=${state.offsets[pipeline.key]}&limit=${LOG_POLL_LIMIT}`,
       );
       state.offsets[pipeline.key] = payload.offset;
       updatePipelineStatus(payload.status);
@@ -324,6 +371,13 @@ function optionalNumberInput(id, label, { integer = false, min = null } = {}) {
     throw new Error(`${label} debe ser un ${type}${floor}.`);
   }
   return value;
+}
+
+function assertOrderedRange(minValue, maxValue, label) {
+  if (minValue == null || maxValue == null) return;
+  if (minValue > maxValue) {
+    throw new Error(`${label}: el minimo no puede ser mayor que el maximo.`);
+  }
 }
 
 function parseSplitRatios() {
@@ -693,9 +747,9 @@ const datasetEditorConfigs = {
     sourceId: "random-cartesian-dataset-table",
     addDatasetId: "random-add-dataset",
     countLabel: "Estructuras",
-    valueLabel: "Amplitud (Ang)",
+    valueLabel: "",
     defaultCount: "200",
-    defaultValue: "0.03",
+    defaultValue: "",
   },
 };
 
@@ -724,6 +778,12 @@ function blocksForEditorSpec(kind, spec) {
     return (spec.displacements || []).map((entry) => ({
       count: entry.n_structures,
       value: String(entry.value || "").replace(/\s*Ang\s*$/i, ""),
+    }));
+  }
+  if (kind === "random_cartesian") {
+    return (spec.blocks || []).map((block) => ({
+      count: block.n_structures,
+      value: "",
     }));
   }
   return (spec.blocks || []).map((block) => ({
@@ -768,6 +828,153 @@ function applyDatasetSeeds(kind, specs) {
   });
 }
 
+function cardInputValue(card, field) {
+  return String(card?.querySelector(`[data-field="${field}"]`)?.value || "").trim();
+}
+
+function cardChecked(card, field) {
+  return Boolean(card?.querySelector(`[data-field="${field}"]`)?.checked);
+}
+
+function optionalCardNumber(card, field, label, { integer = false, min = null } = {}) {
+  const raw = cardInputValue(card, field);
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || (integer && !Number.isInteger(value)) || (min != null && value < min)) {
+    const type = integer ? "entero" : "numero";
+    const floor = min == null ? "" : ` >= ${min}`;
+    throw new Error(`${label} debe ser un ${type}${floor}.`);
+  }
+  return value;
+}
+
+function cardDistribution(card, field, label) {
+  const distribution = cardInputValue(card, field) || "gaussian";
+  if (!["gaussian", "uniform"].includes(distribution)) {
+    throw new Error(`${label} debe ser gaussian o uniform.`);
+  }
+  return distribution;
+}
+
+function randomCartesianSettingsFromCard(card, label) {
+  const atomEnabled = cardChecked(card, "rc-enable-atom");
+  const bondEnabled = cardChecked(card, "rc-enable-bond");
+  const angleEnabled = cardChecked(card, "rc-enable-angle");
+  if (!atomEnabled && !bondEnabled && !angleEnabled) {
+    throw new Error(`${label}: habilita al menos atom, bond o angle displacement.`);
+  }
+  const bondMinDelta = optionalCardNumber(card, "rc-bond-min-delta", `${label}: bond min delta`);
+  const bondMaxDelta = optionalCardNumber(card, "rc-bond-max-delta", `${label}: bond max delta`);
+  const minBond = optionalCardNumber(card, "rc-min-bond", `${label}: min O-H bond`, { min: 0 }) ?? 0.7;
+  const maxBond = optionalCardNumber(card, "rc-max-bond", `${label}: max O-H bond`, { min: 0 }) ?? 1.3;
+  assertOrderedRange(bondMinDelta, bondMaxDelta, `${label}: bond delta`);
+  assertOrderedRange(minBond, maxBond, `${label}: O-H bond`);
+
+  const angleMinDelta = optionalCardNumber(card, "rc-angle-min-delta", `${label}: angle min delta`);
+  const angleMaxDelta = optionalCardNumber(card, "rc-angle-max-delta", `${label}: angle max delta`);
+  const minAngle = optionalCardNumber(card, "rc-min-angle", `${label}: min H-O-H angle`, { min: 0 }) ?? 80.0;
+  const maxAngle = optionalCardNumber(card, "rc-max-angle", `${label}: max H-O-H angle`, { min: 0 }) ?? 130.0;
+  assertOrderedRange(angleMinDelta, angleMaxDelta, `${label}: angle delta`);
+  assertOrderedRange(minAngle, maxAngle, `${label}: H-O-H angle`);
+  if (maxAngle > 180) throw new Error(`${label}: max H-O-H angle debe ser <= 180.`);
+
+  const minDistance = optionalCardNumber(card, "rc-min-distance", `${label}: min distance`, { min: 0 }) ?? 0.65;
+  const maxRmsd = optionalCardNumber(card, "rc-max-rmsd", `${label}: max RMSD`, { min: 0 });
+  const maxAttempts =
+    optionalCardNumber(card, "rc-max-attempts", `${label}: max attempts`, { integer: true, min: 1 }) ?? 100;
+  const atomDistribution = cardDistribution(card, "rc-atom-distribution", `${label}: atom distribution`);
+  const atomSigma = optionalCardNumber(card, "rc-atom-sigma", `${label}: atom sigma`, { min: 0 }) ?? 0.03;
+  const atomUniformRange =
+    optionalCardNumber(card, "rc-atom-uniform-range", `${label}: atom uniform range`, { min: 0 }) ?? 0.05;
+  const moveAtoms = parseMoveAtomsRaw(cardInputValue(card, "rc-move-atoms"));
+  const speciesFilter = splitList(cardInputValue(card, "rc-species-filter"));
+  const validation = {
+    min_distance_ang: minDistance,
+    max_rmsd_from_reference_ang: maxRmsd,
+    max_attempts_per_structure: maxAttempts,
+  };
+  const components = {
+    atom_displacement: {
+      enabled: atomEnabled,
+      distribution: atomDistribution,
+      sigma_ang: atomSigma,
+      uniform_range_ang: atomUniformRange,
+      move_atoms: moveAtoms,
+      species_filter: speciesFilter,
+      remove_center_of_mass_translation: cardChecked(card, "rc-remove-com"),
+    },
+    bond_displacement: {
+      enabled: bondEnabled,
+      distribution: cardDistribution(card, "rc-bond-distribution", `${label}: bond distribution`),
+      sigma_ang: optionalCardNumber(card, "rc-bond-sigma", `${label}: bond sigma`, { min: 0 }) ?? 0.01,
+      uniform_range_ang:
+        optionalCardNumber(card, "rc-bond-uniform-range", `${label}: bond uniform range`, { min: 0 }) ?? 0.02,
+      min_delta_ang: bondMinDelta,
+      max_delta_ang: bondMaxDelta,
+      min_bond_ang: minBond,
+      max_bond_ang: maxBond,
+      bonds: cardInputValue(card, "rc-bonds") || "h2o_oh",
+    },
+    angle_displacement: {
+      enabled: angleEnabled,
+      distribution: cardDistribution(card, "rc-angle-distribution", `${label}: angle distribution`),
+      sigma_deg: optionalCardNumber(card, "rc-angle-sigma", `${label}: angle sigma`, { min: 0 }) ?? 3.0,
+      uniform_range_deg:
+        optionalCardNumber(card, "rc-angle-uniform-range", `${label}: angle uniform range`, { min: 0 }) ?? 5.0,
+      min_delta_deg: angleMinDelta,
+      max_delta_deg: angleMaxDelta,
+      min_angle_deg: minAngle,
+      max_angle_deg: maxAngle,
+      angles: cardInputValue(card, "rc-angles") || "h2o_hoh",
+    },
+  };
+  return {
+    components,
+    validation,
+    legacy: {
+      distribution: atomDistribution,
+      sigma_ang: atomSigma,
+      uniform_range_ang: atomUniformRange,
+      min_distance_ang: minDistance,
+      max_rmsd_from_reference_ang: maxRmsd,
+      max_attempts_per_structure: maxAttempts,
+      move_atoms: moveAtoms,
+      species_filter: speciesFilter,
+      remove_center_of_mass_translation: cardChecked(card, "rc-remove-com"),
+    },
+  };
+}
+
+function applyRandomCartesianDatasetSettings(specs) {
+  const container = datasetEditorContainer("random_cartesian");
+  if (!container || !Array.isArray(specs) || !specs.length) return specs;
+  const cards = Array.from(container.querySelectorAll(".dataset-card"));
+  return specs.map((spec, index) => {
+    const card = cards[index];
+    if (!card) return spec;
+    const seed = parseDatasetSeed(datasetSeedValue(card), `Random Cartesian dataset ${index + 1}`);
+    const rows = Array.from(card.querySelectorAll(".dataset-component-row"));
+    return {
+      ...spec,
+      ...(seed == null ? {} : { seed }),
+      blocks: (spec.blocks || []).map((block, blockIndex) => {
+        const row = rows[blockIndex];
+        if (!row) return block;
+        const settings = randomCartesianSettingsFromCard(
+          row,
+          `Random Cartesian dataset ${index + 1}, component ${blockIndex + 1}`,
+        );
+        return {
+          ...settings.legacy,
+          ...block,
+          components: settings.components,
+          validation: settings.validation,
+        };
+      }),
+    };
+  });
+}
+
 function specsForEditor(kind) {
   try {
     if (kind === "md") return parseMdDatasetTableSpecsFromText(sourceTextForKind(kind));
@@ -782,19 +989,196 @@ function specsForEditor(kind) {
 function createDatasetComponentRow(kind, count = "", value = "") {
   const config = datasetEditorConfig(kind);
   const row = document.createElement("div");
-  row.className = "dataset-component-row";
+  if (kind === "random_cartesian") {
+    row.className = "dataset-component-row count-only random-block-row";
+    row.innerHTML = `
+      <div class="random-block-row-header">
+        <label>
+          <span>${config.countLabel}</span>
+          <input type="number" min="1" step="1" data-field="count" value="${String(count ?? "")}" />
+        </label>
+        <button class="mini-button danger" type="button" data-action="remove-component">Remove</button>
+      </div>
+      <details class="random-block-details">
+        <summary>Atom / bond / angle parameters</summary>
+        ${randomCartesianDatasetControlsHtml()}
+      </details>
+    `;
+    return row;
+  }
+  row.className = kind === "random_cartesian" ? "dataset-component-row count-only" : "dataset-component-row";
+  const valueField = kind === "random_cartesian" ? "" : `
+    <label>
+      <span>${config.valueLabel}</span>
+      <input type="number" min="0" step="0.001" data-field="value" value="${String(value ?? "")}" />
+    </label>
+  `;
   row.innerHTML = `
     <label>
       <span>${config.countLabel}</span>
       <input type="number" min="1" step="1" data-field="count" value="${String(count ?? "")}" />
     </label>
-    <label>
-      <span>${config.valueLabel}</span>
-      <input type="number" min="0" step="0.001" data-field="value" value="${String(value ?? "")}" />
-    </label>
+    ${valueField}
     <button class="mini-button danger" type="button" data-action="remove-component">Remove</button>
   `;
   return row;
+}
+
+function randomCartesianDatasetControlsHtml() {
+  return `
+    <div class="random-dataset-controls">
+      <section class="random-component-panel">
+        <div class="random-component-header">
+          <label class="toggle-field inline-toggle">
+            <input data-field="rc-enable-atom" type="checkbox" checked />
+            <span>Atom displacement</span>
+          </label>
+        </div>
+        <div class="grid two split-grid">
+          <label class="field">
+            <span>Atom distribution</span>
+            <select data-field="rc-atom-distribution">
+              <option value="gaussian" selected>Gaussian</option>
+              <option value="uniform">Uniform</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Atom sigma (Ang)</span>
+            <input data-field="rc-atom-sigma" type="number" step="0.001" min="0" value="0.03" />
+          </label>
+          <label class="field">
+            <span>Atom uniform range (Ang)</span>
+            <input data-field="rc-atom-uniform-range" type="number" step="0.001" min="0" value="0.05" />
+          </label>
+          <label class="field">
+            <span>Átomos movidos</span>
+            <input data-field="rc-move-atoms" type="text" value="all" />
+          </label>
+          <label class="field">
+            <span>Filtro de especies</span>
+            <input data-field="rc-species-filter" type="text" placeholder="H, O" />
+          </label>
+          <label class="toggle-field inline-toggle">
+            <input data-field="rc-remove-com" type="checkbox" checked />
+            <span>Eliminar traslación</span>
+          </label>
+        </div>
+      </section>
+      <section class="random-component-panel">
+        <div class="random-component-header">
+          <label class="toggle-field inline-toggle">
+            <input data-field="rc-enable-bond" type="checkbox" />
+            <span>Bond displacement</span>
+          </label>
+        </div>
+        <div class="grid two split-grid">
+          <label class="field">
+            <span>Bonds</span>
+            <select data-field="rc-bonds">
+              <option value="h2o_oh" selected>H2O O-H</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Bond distribution</span>
+            <select data-field="rc-bond-distribution">
+              <option value="gaussian" selected>Gaussian</option>
+              <option value="uniform">Uniform</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Bond sigma (Ang)</span>
+            <input data-field="rc-bond-sigma" type="number" step="0.001" min="0" value="0.01" />
+          </label>
+          <label class="field">
+            <span>Bond uniform range (Ang)</span>
+            <input data-field="rc-bond-uniform-range" type="number" step="0.001" min="0" value="0.02" />
+          </label>
+          <label class="field">
+            <span>Bond min delta (Ang)</span>
+            <input data-field="rc-bond-min-delta" type="number" step="0.001" placeholder="-range" />
+          </label>
+          <label class="field">
+            <span>Bond max delta (Ang)</span>
+            <input data-field="rc-bond-max-delta" type="number" step="0.001" placeholder="+range" />
+          </label>
+          <label class="field">
+            <span>Min O-H bond (Ang)</span>
+            <input data-field="rc-min-bond" type="number" step="0.01" min="0" value="0.70" />
+          </label>
+          <label class="field">
+            <span>Max O-H bond (Ang)</span>
+            <input data-field="rc-max-bond" type="number" step="0.01" min="0" value="1.30" />
+          </label>
+        </div>
+      </section>
+      <section class="random-component-panel">
+        <div class="random-component-header">
+          <label class="toggle-field inline-toggle">
+            <input data-field="rc-enable-angle" type="checkbox" />
+            <span>Angle displacement</span>
+          </label>
+        </div>
+        <div class="grid two split-grid">
+          <label class="field">
+            <span>Angles</span>
+            <select data-field="rc-angles">
+              <option value="h2o_hoh" selected>H2O H-O-H</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Angle distribution</span>
+            <select data-field="rc-angle-distribution">
+              <option value="gaussian" selected>Gaussian</option>
+              <option value="uniform">Uniform</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Angle sigma (deg)</span>
+            <input data-field="rc-angle-sigma" type="number" step="0.1" min="0" value="3.0" />
+          </label>
+          <label class="field">
+            <span>Angle uniform range (deg)</span>
+            <input data-field="rc-angle-uniform-range" type="number" step="0.1" min="0" value="5.0" />
+          </label>
+          <label class="field">
+            <span>Angle min delta (deg)</span>
+            <input data-field="rc-angle-min-delta" type="number" step="0.1" placeholder="-range" />
+          </label>
+          <label class="field">
+            <span>Angle max delta (deg)</span>
+            <input data-field="rc-angle-max-delta" type="number" step="0.1" placeholder="+range" />
+          </label>
+          <label class="field">
+            <span>Min H-O-H angle (deg)</span>
+            <input data-field="rc-min-angle" type="number" step="0.1" min="0" max="180" value="80.0" />
+          </label>
+          <label class="field">
+            <span>Max H-O-H angle (deg)</span>
+            <input data-field="rc-max-angle" type="number" step="0.1" min="0" max="180" value="130.0" />
+          </label>
+        </div>
+      </section>
+      <section class="random-component-panel">
+        <div class="random-component-header">
+          <span class="random-component-title">Validation</span>
+        </div>
+        <div class="grid two split-grid">
+          <label class="field">
+            <span>Min distance (Ang)</span>
+            <input data-field="rc-min-distance" type="number" step="0.01" min="0" value="0.65" />
+          </label>
+          <label class="field">
+            <span>Max RMSD (Ang)</span>
+            <input data-field="rc-max-rmsd" type="number" step="0.01" min="0" placeholder="optional" />
+          </label>
+          <label class="field">
+            <span>Max attempts / structure</span>
+            <input data-field="rc-max-attempts" type="number" step="1" min="1" value="100" />
+          </label>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 function updateDatasetEditorTotals(kind) {
@@ -823,14 +1207,18 @@ function updateDatasetEditorTotals(kind) {
 }
 
 function createDatasetCard(kind, blocks, seed = "") {
-  const card = document.createElement("div");
+  const card = document.createElement("details");
   card.className = "dataset-card";
+  card.open = true;
   card.innerHTML = `
-    <div class="dataset-card-header">
+    <summary class="dataset-card-header">
       <div class="dataset-card-title">
         <span class="dataset-card-name">Dataset</span>
         <span class="dataset-card-total">0 estructuras · 0 bloques</span>
       </div>
+      <span class="dataset-card-chevron" aria-hidden="true">▾</span>
+    </summary>
+    <div class="dataset-card-body">
       <div class="dataset-card-meta">
         <label class="dataset-seed-field" title="Seed opcional para este dataset. Si queda vacia se usa la seed global o el comportamiento por defecto.">
           <span>Seed</span>
@@ -838,10 +1226,10 @@ function createDatasetCard(kind, blocks, seed = "") {
         </label>
         <button class="mini-button danger" type="button" data-action="remove-dataset">Remove dataset</button>
       </div>
-    </div>
-    <div class="dataset-components"></div>
-    <div class="button-row">
-      <button class="mini-button" type="button" data-action="add-component">+ Component</button>
+      <div class="dataset-components"></div>
+      <div class="button-row">
+        <button class="mini-button" type="button" data-action="add-component">+ Component</button>
+      </div>
     </div>
   `;
   const list = card.querySelector(".dataset-components");
@@ -875,6 +1263,7 @@ function syncDatasetEditorText(kind) {
     Array.from(card.querySelectorAll(".dataset-component-row"))
       .map((row) => {
         const count = String(row.querySelector('[data-field="count"]')?.value || "").trim();
+        if (kind === "random_cartesian") return count;
         const value = String(row.querySelector('[data-field="value"]')?.value || "").trim();
         return `${count} | ${value}`;
       })
@@ -892,19 +1281,6 @@ function syncDatasetEditorText(kind) {
       )
       .filter((value) => value > 0);
     const hidden = document.getElementById("md-sizes");
-    if (hidden) hidden.value = sizes.join(", ");
-  }
-  if (kind === "random_cartesian") {
-    const sizes = groups
-      .map((group) =>
-        group
-          .split(/\n/)
-          .map((row) => Number(splitDatasetTableRow(row)[0]))
-          .filter((value) => Number.isInteger(value) && value > 0)
-          .reduce((sum, value) => sum + value, 0),
-      )
-      .filter((value) => value > 0);
-    const hidden = document.getElementById("random-cartesian-n-structures");
     if (hidden) hidden.value = sizes.join(", ");
   }
   updateDatasetEditorTotals(kind);
@@ -961,7 +1337,31 @@ function selectedTestSets() {
 }
 
 function selectedMethods() {
-  return Array.from(document.querySelectorAll(".method-checkbox:checked")).map((item) => item.value);
+  const controls = document.querySelectorAll(".method-execution-checkbox");
+  const selector = controls.length ? ".method-execution-checkbox:checked" : ".method-checkbox:checked";
+  return Array.from(document.querySelectorAll(selector)).map((item) => item.value);
+}
+
+function setMethodSelected(method, checked, source = null) {
+  const selectors = [
+    `.method-execution-checkbox[value="${method}"]`,
+    `.method-checkbox[value="${method}"]`,
+  ];
+  for (const selector of selectors) {
+    document.querySelectorAll(selector).forEach((node) => {
+      if (node !== source) node.checked = checked;
+    });
+  }
+}
+
+function updateMethodSelectionSummary() {
+  const node = document.getElementById("method-selection-summary");
+  if (!node) return;
+  const methods = selectedMethods();
+  node.textContent = methods.length
+    ? `${methods.length} method${methods.length === 1 ? "" : "s"} selected: ${methods.map(methodDisplayLabel).join(", ")}`
+    : "No methods selected";
+  node.classList.toggle("error-text", !methods.length);
 }
 
 function pipelineLabel(key) {
@@ -982,8 +1382,8 @@ function slugPart(value) {
     .slice(0, 48) || "x";
 }
 
-function parseMoveAtomsInput() {
-  const raw = inputValue("random-cartesian-move-atoms");
+function parseMoveAtomsRaw(rawInput) {
+  const raw = String(rawInput || "").trim();
   if (!raw || raw.toLowerCase() === "all") return "all";
   return splitList(raw).map((item) => {
     const value = Number(item);
@@ -997,38 +1397,23 @@ function parseMoveAtomsInput() {
 function parseRandomCartesianOptions(methods) {
   const selected = methods.includes("random_cartesian");
   if (!selected) return {};
-  syncDatasetEditorText("random_cartesian");
-  const sizes = parseNumberListInput("random-cartesian-n-structures", "Random Cartesian structures", {
-    integer: true,
-    min: 3,
-  });
+  const specs = parseRandomCartesianDatasetTableSpecs();
+  const sizes = specs.map((spec) => spec.size).filter((size) => Number.isInteger(size) && size > 0);
   if (!sizes.length) return {};
-  const distribution = inputValue("random-cartesian-distribution") || "gaussian";
-  if (!["gaussian", "uniform"].includes(distribution)) {
-    throw new Error("Random Cartesian distribution debe ser gaussian o uniform.");
+  const firstRandomRow = datasetEditorContainer("random_cartesian")?.querySelector(".dataset-component-row");
+  if (firstRandomRow) {
+    const settings = randomCartesianSettingsFromCard(firstRandomRow, "Random Cartesian defaults");
+    return {
+      n_structures: sizes.length === 1 ? sizes[0] : sizes,
+      seed: 1234,
+      ...settings.legacy,
+      components: settings.components,
+      validation: settings.validation,
+    };
   }
-  const seed = optionalNumberInput("random-cartesian-seed", "Random Cartesian seed", {
-    integer: true,
-  });
-  const sigma = optionalNumberInput("random-cartesian-sigma-ang", "Sigma gaussian", { min: 0 });
-  const uniformRange = optionalNumberInput("random-cartesian-uniform-range-ang", "Rango uniforme", {
-    min: 0,
-  });
-  const minDistance = optionalNumberInput("random-cartesian-min-distance-ang", "Min distance", {
-    min: 0,
-  });
   return {
     n_structures: sizes.length === 1 ? sizes[0] : sizes,
-    distribution,
-    seed: seed ?? 1234,
-    sigma_ang: sigma ?? 0.03,
-    uniform_range_ang: uniformRange ?? 0.05,
-    min_distance_ang: minDistance ?? 0.65,
-    move_atoms: parseMoveAtomsInput(),
-    species_filter: splitList(inputValue("random-cartesian-species-filter")),
-    remove_center_of_mass_translation: Boolean(
-      document.getElementById("random-cartesian-remove-com")?.checked,
-    ),
+    seed: 1234,
   };
 }
 
@@ -1118,24 +1503,29 @@ function parseRandomCartesianDatasetTableSpecsFromText(rawText) {
   return splitDatasetTableGroups(raw).map((group, datasetIndex) => {
     const blocks = group.map((row, rowIndex) => {
       const parts = splitDatasetTableRow(row);
-      if (parts.length < 2) {
-        throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "estructuras | amplitud".`);
+      if (parts.length < 1) {
+        throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: usa "estructuras".`);
       }
       const count = Number(parts[0]);
-      const amplitude = numericPrefix(parts[1], `Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}`);
       if (!Number.isInteger(count) || count <= 0) {
         throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: estructuras debe ser entero positivo.`);
       }
-      if (!Number.isFinite(amplitude) || amplitude < 0) {
-        throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: amplitud debe ser >= 0 Ang.`);
-      }
-      return {
-        block_id: `rc_d${datasetIndex + 1}_a${slugPart(amplitude)}_${rowIndex + 1}_${count}`,
-        label: `${count} estructuras @ ${amplitude} Ang`,
+      const block = {
+        block_id: `rc_d${datasetIndex + 1}_${rowIndex + 1}_${count}`,
+        label: `${count} estructuras`,
         n_structures: count,
-        amplitude_ang: amplitude,
-        max_displacement: `${amplitude} Ang`,
       };
+      if (parts.length >= 2) {
+        const amplitude = numericPrefix(parts[1], `Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}`);
+        if (!Number.isFinite(amplitude) || amplitude < 0) {
+          throw new Error(`Random Cartesian dataset ${datasetIndex + 1}, fila ${rowIndex + 1}: amplitud debe ser >= 0 Ang.`);
+        }
+        block.block_id = `rc_d${datasetIndex + 1}_a${slugPart(amplitude)}_${rowIndex + 1}_${count}`;
+        block.label = `${count} estructuras @ ${amplitude} Ang`;
+        block.amplitude_ang = amplitude;
+        block.max_displacement = `${amplitude} Ang`;
+      }
+      return block;
     });
     return {
       index: datasetIndex,
@@ -1145,10 +1535,49 @@ function parseRandomCartesianDatasetTableSpecsFromText(rawText) {
   });
 }
 
+function parseRandomCartesianDatasetSpecsFromEditor() {
+  const container = datasetEditorContainer("random_cartesian");
+  if (!container) return null;
+  const cards = Array.from(container.querySelectorAll(".dataset-card"));
+  if (!cards.length) return null;
+  return cards.map((card, datasetIndex) => {
+    const seed = parseDatasetSeed(datasetSeedValue(card), `Random Cartesian dataset ${datasetIndex + 1}`);
+    const rows = Array.from(card.querySelectorAll(".dataset-component-row"));
+    const blocks = rows.map((row, rowIndex) => {
+      const rawCount = String(row.querySelector('[data-field="count"]')?.value || "").trim();
+      const count = Number(rawCount);
+      if (!Number.isInteger(count) || count <= 0) {
+        throw new Error(
+          `Random Cartesian dataset ${datasetIndex + 1}, component ${rowIndex + 1}: estructuras debe ser entero positivo.`,
+        );
+      }
+      const settings = randomCartesianSettingsFromCard(
+        row,
+        `Random Cartesian dataset ${datasetIndex + 1}, component ${rowIndex + 1}`,
+      );
+      return {
+        ...settings.legacy,
+        block_id: `rc_d${datasetIndex + 1}_${rowIndex + 1}_${count}`,
+        label: `${count} estructuras`,
+        n_structures: count,
+        components: settings.components,
+        validation: settings.validation,
+      };
+    });
+    return {
+      index: datasetIndex,
+      size: blocks.reduce((sum, block) => sum + Number(block.n_structures), 0),
+      ...(seed == null ? {} : { seed }),
+      blocks,
+    };
+  });
+}
+
 function parseRandomCartesianDatasetTableSpecs() {
   syncDatasetEditorText("random_cartesian");
-  return applyDatasetSeeds(
-    "random_cartesian",
+  const editorSpecs = parseRandomCartesianDatasetSpecsFromEditor();
+  if (editorSpecs) return editorSpecs;
+  return applyRandomCartesianDatasetSettings(
     parseRandomCartesianDatasetTableSpecsFromText(
       document.getElementById("random-cartesian-dataset-table")?.value || "",
     ),
@@ -1404,28 +1833,6 @@ function validateFcPreviewSpecs(specs) {
   }
 }
 
-function renderFcPreview(specs) {
-  const preview = document.getElementById("fc-dataset-preview");
-  if (!preview) return;
-  preview.innerHTML = "";
-  const limit = 18;
-  for (const spec of specs.slice(0, limit)) {
-    const item = document.createElement("div");
-    item.className = "preview-row";
-    const details = spec.displacements
-      .map((entry) => `${entry.value}: ${entry.n_structures}`)
-      .join(" | ");
-    item.innerHTML = `<strong>dataset_${spec.index}</strong><span>${spec.size} structures</span><code>${details}</code>`;
-    preview.appendChild(item);
-  }
-  if (specs.length > limit) {
-    const item = document.createElement("div");
-    item.className = "preview-row muted-preview";
-    item.textContent = `... ${specs.length - limit} more datasets not shown`;
-    preview.appendChild(item);
-  }
-}
-
 function setPreviewText(id, text, isError = false) {
   const node = document.getElementById(id);
   if (!node) return;
@@ -1434,10 +1841,13 @@ function setPreviewText(id, text, isError = false) {
 }
 
 function updateMethodCardStates() {
+  const methods = selectedMethods();
   document.querySelectorAll(".method-card").forEach((card) => {
     const checkbox = card.querySelector(".method-checkbox");
-    card.classList.toggle("disabled-method", checkbox && !checkbox.checked);
+    const method = checkbox?.value;
+    card.classList.toggle("disabled-method", method && !methods.includes(method));
   });
+  updateMethodSelectionSummary();
 }
 
 function updateDatasetPreview() {
@@ -1494,7 +1904,6 @@ function updateAtomSizesFromFcPlan() {
       document.getElementById("md-sizes").value = [...new Set(sizes)].join(", ");
       syncMdTableFromSizes([...new Set(sizes)]);
     }
-    renderFcPreview(specs);
     const modeLabel = currentCombinationMode() === "cartesian" ? "cartesian datasets" : "aligned datasets";
     document.getElementById("atom-combination-count").value = specs.length
       ? `${specs.length} ${modeLabel}`
@@ -1505,7 +1914,6 @@ function updateAtomSizesFromFcPlan() {
       document.getElementById("md-sizes").value = "";
     }
     document.getElementById("atom-combination-count").value = `invalid plan: ${error.message}`;
-    renderFcPreview([]);
   }
   updateDatasetPreview();
 }
@@ -1668,7 +2076,7 @@ async function stopExperiment() {
 }
 
 async function pollExperimentLogs() {
-  const payload = await request(`/api/experiment/logs?since=${state.experimentOffset}`);
+  const payload = await request(`/api/experiment/logs?since=${state.experimentOffset}&limit=${LOG_POLL_LIMIT}`);
   state.experimentOffset = payload.offset;
   updateExperimentStatus(payload.status);
   if (payload.lines.length) {
@@ -1677,6 +2085,19 @@ async function pollExperimentLogs() {
     output.scrollTop = output.scrollHeight;
   }
   updateVenvCommandPreview();
+}
+
+async function pollOnce() {
+  if (state.pollingInFlight) return;
+  state.pollingInFlight = true;
+  try {
+    await pollLogs();
+    markPollingSuccess();
+  } catch (error) {
+    handlePollingError(error);
+  } finally {
+    state.pollingInFlight = false;
+  }
 }
 
 async function loadResults() {
@@ -1728,6 +2149,148 @@ function metricValue(run, group, metric) {
 function finiteNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+const PLOT_COLORS = ["#4b6f8f", "#2a7f62", "#9467bd", "#d7a021", "#4f8f84", "#b15c5f", "#6370aa"];
+
+function plotColor(index) {
+  return PLOT_COLORS[index % PLOT_COLORS.length];
+}
+
+function mean(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function aggregateFitPoints(points) {
+  const grouped = new Map();
+  for (const point of points) {
+    const x = finiteNumber(point.x);
+    const y = finiteNumber(point.y);
+    if (x == null || y == null) continue;
+    if (!grouped.has(x)) grouped.set(x, []);
+    grouped.get(x).push(y);
+  }
+  return Array.from(grouped.entries())
+    .map(([x, values]) => ({ x, y: mean(values) }))
+    .sort((a, b) => a.x - b.x);
+}
+
+function solveLinearSystem(matrix, vector) {
+  const n = vector.length;
+  const a = matrix.map((row, index) => [...row, vector[index]]);
+  for (let column = 0; column < n; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < n; row += 1) {
+      if (Math.abs(a[row][column]) > Math.abs(a[pivot][column])) pivot = row;
+    }
+    if (Math.abs(a[pivot][column]) < 1e-12) return null;
+    if (pivot !== column) [a[column], a[pivot]] = [a[pivot], a[column]];
+    const pivotValue = a[column][column];
+    for (let col = column; col <= n; col += 1) a[column][col] /= pivotValue;
+    for (let row = 0; row < n; row += 1) {
+      if (row === column) continue;
+      const factor = a[row][column];
+      for (let col = column; col <= n; col += 1) {
+        a[row][col] -= factor * a[column][col];
+      }
+    }
+  }
+  return a.map((row) => row[n]);
+}
+
+function polynomialCoefficients(points, degree) {
+  if (points.length <= degree) return null;
+  const size = degree + 1;
+  const matrix = Array.from({ length: size }, () => Array(size).fill(0));
+  const vector = Array(size).fill(0);
+  for (const point of points) {
+    const powers = Array.from({ length: size * 2 - 1 }, (_, power) => point.x ** power);
+    for (let row = 0; row < size; row += 1) {
+      for (let col = 0; col < size; col += 1) matrix[row][col] += powers[row + col];
+      vector[row] += point.y * powers[row];
+    }
+  }
+  return solveLinearSystem(matrix, vector);
+}
+
+function evaluatePolynomial(coefficients, x) {
+  return coefficients.reduce((sum, coefficient, power) => sum + coefficient * (x ** power), 0);
+}
+
+function fitLinePoints(points, degree) {
+  const fitPoints = aggregateFitPoints(points);
+  if (fitPoints.length <= degree) return [];
+  const coefficients = polynomialCoefficients(fitPoints, degree);
+  if (!coefficients) return [];
+  const xValues = fitPoints.map((point) => point.x);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return [];
+  const lineX = minX === maxX
+    ? [minX]
+    : Array.from({ length: 80 }, (_, index) => minX + ((maxX - minX) * index) / 79);
+  return lineX.map((x) => ({ x, y: evaluatePolynomial(coefficients, x) }));
+}
+
+function fitTrace(points, name, color, kind, extra = {}) {
+  const degree = kind === "quadratic" ? 2 : 1;
+  const linePoints = fitLinePoints(points, degree);
+  if (linePoints.length < 2) return null;
+  return {
+    type: "scatter",
+    mode: "lines",
+    name: `${name} ${kind} fit`,
+    x: linePoints.map((point) => point.x),
+    y: linePoints.map((point) => point.y),
+    line: {
+      color,
+      width: 2,
+      dash: kind === "quadratic" ? "dash" : "solid",
+    },
+    opacity: 0.42,
+    hoverinfo: "skip",
+    visible: kind === "linear",
+    showlegend: false,
+    meta: { role: "fit", fitKind: kind },
+    ...extra,
+  };
+}
+
+function addFitTraces(traces, points, name, color, extra = {}) {
+  const linear = fitTrace(points, name, color, "linear", extra);
+  const quadratic = fitTrace(points, name, color, "quadratic", extra);
+  if (linear) traces.push(linear);
+  if (quadratic) traces.push(quadratic);
+}
+
+function fitVisibility(traces, fitKind) {
+  return traces.map((trace) => {
+    if (trace.meta?.role !== "fit") return true;
+    if (fitKind === "none") return false;
+    return trace.meta.fitKind === fitKind;
+  });
+}
+
+function withFitSelector(layout, traces) {
+  if (!traces.some((trace) => trace.meta?.role === "fit")) return layout;
+  return {
+    ...layout,
+    margin: { ...layout.margin, t: Math.max(layout.margin?.t || 46, 78) },
+    updatemenus: [
+      {
+        type: "dropdown",
+        x: 1,
+        y: 1.16,
+        xanchor: "right",
+        yanchor: "top",
+        buttons: [
+          { label: "Linear fit", method: "update", args: [{ visible: fitVisibility(traces, "linear") }] },
+          { label: "Quadratic fit", method: "update", args: [{ visible: fitVisibility(traces, "quadratic") }] },
+          { label: "No fit", method: "update", args: [{ visible: fitVisibility(traces, "none") }] },
+        ],
+      },
+    ],
+  };
 }
 
 function sampleMetricValues(run, group, metric) {
@@ -1784,6 +2347,7 @@ function groupedRuns(runs) {
 
 function lineTraces(runs, group, metrics) {
   const traces = [];
+  let traceIndex = 0;
   for (const [pipeline, items] of groupedRuns(runs)) {
     const label = pipelineLabel(pipeline);
     for (const metric of metrics) {
@@ -1791,16 +2355,22 @@ function lineTraces(runs, group, metrics) {
         .map((run) => ({ x: run.dataset_size, y: metricValue(run, group, metric.key), text: run.run_id }))
         .filter((point) => point.y != null);
       if (!points.length) continue;
+      const name = metrics.length > 1 ? `${label} · ${metric.label}` : label;
+      const color = plotColor(traceIndex);
+      const legendgroup = `${pipeline}-${metric.key}`;
+      addFitTraces(traces, points, name, color, { legendgroup });
       traces.push({
         type: "scatter",
         mode: "markers",
-        name: metrics.length > 1 ? `${label} · ${metric.label}` : label,
+        name,
         x: points.map((point) => point.x),
         y: points.map((point) => point.y),
         text: points.map((point) => point.text),
-        marker: { size: 9, opacity: 0.82 },
+        marker: { size: 9, opacity: 0.86, color },
+        legendgroup,
         hovertemplate: "dataset %{x}<br>%{y:.4g}<br>run %{text}<extra>%{fullData.name}</extra>",
       });
+      traceIndex += 1;
     }
   }
   return traces;
@@ -1846,8 +2416,48 @@ function topPlotAnnotation(message, y = 1.12, color = "#9f5b00") {
   };
 }
 
+function plotNode(id) {
+  return typeof id === "string" ? document.getElementById(id) : id;
+}
+
+function resizePlot(id) {
+  const node = plotNode(id);
+  if (!node || !window.Plotly?.Plots?.resize) return;
+  Plotly.Plots.resize(node);
+}
+
+function resizeVisiblePlots() {
+  if (!state.plotsEnabled) return;
+  document.querySelectorAll(".plot-card.js-plotly-plot").forEach((node) => resizePlot(node));
+}
+
+function schedulePlotResize(id = null) {
+  requestAnimationFrame(() => {
+    if (id) {
+      resizePlot(id);
+      return;
+    }
+    resizeVisiblePlots();
+  });
+}
+
+function renderPlot(id, traces, layout, config = {}) {
+  const node = plotNode(id);
+  if (!node || !window.Plotly) return;
+  const nextLayout = {
+    autosize: true,
+    ...layout,
+  };
+  const nextConfig = {
+    responsive: true,
+    displaylogo: false,
+    ...config,
+  };
+  Plotly.react(node, traces, nextLayout, nextConfig).then(() => schedulePlotResize(node));
+}
+
 function renderEmptyPlot(id, title, message, yTitle = "") {
-  Plotly.react(
+  renderPlot(
     id,
     [],
     plotLayout(title, yTitle, { annotations: [emptyPlotAnnotation(message)] }),
@@ -1895,7 +2505,7 @@ function formatMetricDisplay(value, suffix = "") {
 
 function renderLinePlot(id, runs, group, metrics, title, yTitle) {
   const traces = lineTraces(runs, group, metrics);
-  const layout = plotLayout(title, yTitle);
+  let layout = plotLayout(title, yTitle);
   const annotations = [];
   if (metrics.length === 1) {
     const availabilityAnnotation = metricGapAnnotation(runs, group, metrics[0].key);
@@ -1908,7 +2518,8 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
     layout.annotations = annotations;
     layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 74) };
   }
-  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+  layout = withFitSelector(layout, traces);
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function renderBoxPlot(id, runs) {
@@ -2026,7 +2637,7 @@ function renderBoxPlot(id, runs) {
     );
   }
   if (annotations.length) layout.annotations = annotations;
-  Plotly.react(
+  renderPlot(
     id,
     traces,
     layout,
@@ -2036,6 +2647,7 @@ function renderBoxPlot(id, runs) {
 
 function renderScatterPlot(id, runs) {
   const traces = [];
+  let traceIndex = 0;
   for (const [pipeline, items] of groupedRuns(runs)) {
     const label = pipelineLabel(pipeline);
     const x = [];
@@ -2082,6 +2694,9 @@ function renderScatterPlot(id, runs) {
       }
     }
     if (!x.length) continue;
+    const color = plotColor(traceIndex);
+    const points = x.map((value, index) => ({ x: value, y: y[index] }));
+    addFitTraces(traces, points, label, color, { legendgroup: pipeline });
     traces.push({
       type: "scatter",
       mode: "markers",
@@ -2089,11 +2704,13 @@ function renderScatterPlot(id, runs) {
       x,
       y,
       text,
-      marker: { size: 9, opacity: 0.78 },
+      marker: { size: 9, opacity: 0.82, color },
+      legendgroup: pipeline,
       hovertemplate: "%{text}<br>Frobenius %{x:.4g}<br>Global spectral RMSE %{y:.4g} eV<extra>%{fullData.name}</extra>",
     });
+    traceIndex += 1;
   }
-  const layout = plotLayout("Relacion matriz-espectro", "Global spectral RMSE eV", {
+  let layout = plotLayout("Relacion matriz-espectro", "Global spectral RMSE eV", {
     xaxis: { title: "Relative Frobenius error", gridcolor: "#edf1f4", zeroline: false },
     legend: { orientation: "h", y: -0.25 },
   });
@@ -2102,7 +2719,8 @@ function renderScatterPlot(id, runs) {
       emptyPlotAnnotation("No hay pares matriz-espectro comparables."),
     ];
   }
-  Plotly.react(
+  layout = withFitSelector(layout, traces);
+  renderPlot(
     id,
     traces,
     layout,
@@ -2175,7 +2793,7 @@ function renderHeatmap(id, runs) {
       };
     }),
   );
-  Plotly.react(
+  renderPlot(
     id,
     [
       {
@@ -2247,32 +2865,54 @@ function renderSensitivitySweeps(id, runs) {
     }
     const ts = Array.from(sparseByThreshold.keys()).sort((a, b) => a - b);
     if (ts.length) {
+      const sparsePoints = ts.map((t) => ({
+        x: t,
+        y: sparseByThreshold.get(t).reduce((s, v) => s + v, 0) / sparseByThreshold.get(t).length,
+      }));
+      const sparseColor = plotColor(traces.length);
+      addFitTraces(traces, sparsePoints, `${label} sparse-threshold RMSE`, sparseColor, {
+        xaxis: "x1",
+        yaxis: "y1",
+        legendgroup: `${pipeline}-sparse-threshold`,
+      });
       traces.push({
         type: "scatter",
         mode: "markers",
         name: `${label} sparse-threshold RMSE`,
-        x: ts,
-        y: ts.map((t) => sparseByThreshold.get(t).reduce((s, v) => s + v, 0) / sparseByThreshold.get(t).length),
-        marker: { size: 9, opacity: 0.82 },
+        x: sparsePoints.map((point) => point.x),
+        y: sparsePoints.map((point) => point.y),
+        marker: { size: 9, opacity: 0.86, color: sparseColor },
         xaxis: "x1",
         yaxis: "y1",
+        legendgroup: `${pipeline}-sparse-threshold`,
       });
     }
     const ss = Array.from(dosBySigma.keys()).sort((a, b) => a - b);
     if (ss.length) {
+      const dosPoints = ss.map((s) => ({
+        x: s,
+        y: dosBySigma.get(s).reduce((sum, v) => sum + v, 0) / dosBySigma.get(s).length,
+      }));
+      const dosColor = plotColor(traces.length);
+      addFitTraces(traces, dosPoints, `${label} DOS sigma W1`, dosColor, {
+        xaxis: "x2",
+        yaxis: "y2",
+        legendgroup: `${pipeline}-dos-sigma`,
+      });
       traces.push({
         type: "scatter",
         mode: "markers",
         name: `${label} DOS sigma W1`,
-        x: ss,
-        y: ss.map((s) => dosBySigma.get(s).reduce((sum, v) => sum + v, 0) / dosBySigma.get(s).length),
-        marker: { size: 9, opacity: 0.82 },
+        x: dosPoints.map((point) => point.x),
+        y: dosPoints.map((point) => point.y),
+        marker: { size: 9, opacity: 0.86, color: dosColor },
         xaxis: "x2",
         yaxis: "y2",
+        legendgroup: `${pipeline}-dos-sigma`,
       });
     }
   }
-  const layout = {
+  let layout = {
     title: { text: "Sensitivity sweeps", x: 0.02, xanchor: "left", font: { size: 15 } },
     grid: { rows: 1, columns: 2, pattern: "independent" },
     xaxis: { title: "Support threshold", type: "log" },
@@ -2285,7 +2925,8 @@ function renderSensitivitySweeps(id, runs) {
     plot_bgcolor: "#ffffff",
   };
   if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay datos de sensitivity sweep.")];
-  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+  layout = withFitSelector(layout, traces);
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function selectedCrossExperimentSet(payload) {
@@ -2579,7 +3220,7 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
   } else if (annotations.length) {
     layout.annotations = annotations;
   }
-  Plotly.react(
+  renderPlot(
     id,
     [{
       type: "heatmap",
@@ -2613,6 +3254,7 @@ function renderCrossLearning(id, experiment, unavailableMessage = "") {
   }
   const means = groupedCrossMetrics(experiment?.metrics || [], metric);
   const traces = [];
+  let traceIndex = 0;
   for (const method of crossTrainMethods(experiment)) {
     for (const testSet of crossTestSets(experiment)) {
       const points = means
@@ -2620,26 +3262,39 @@ function renderCrossLearning(id, experiment, unavailableMessage = "") {
         .filter((row) => row.metric_available)
         .sort((a, b) => (a.dataset_size ?? 0) - (b.dataset_size ?? 0));
       if (!points.length) continue;
+      const name = `${crossMethodLabel(method)} on ${testSetDisplayLabel(testSet)}`;
+      const color = plotColor(traceIndex);
+      const legendgroup = `${method}-${testSet}`;
+      addFitTraces(
+        traces,
+        points.map((row) => ({ x: row.dataset_size, y: row.mean })),
+        name,
+        color,
+        { legendgroup },
+      );
       traces.push({
         type: "scatter",
         mode: "markers",
-        name: `${crossMethodLabel(method)} on ${testSetDisplayLabel(testSet)}`,
+        name,
         x: points.map((row) => row.dataset_size),
         y: points.map((row) => row.mean),
         text: points.map((row) => `${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
-        marker: { size: 9, opacity: 0.82 },
+        marker: { size: 9, opacity: 0.86, color },
+        legendgroup,
         hovertemplate: "dataset %{x}<br>%{y:.4g}<br>%{text}<extra>%{fullData.name}</extra>",
       });
+      traceIndex += 1;
     }
   }
-  const layout = plotLayout(`Learning curves (${metric})`, metric);
+  let layout = plotLayout(`Learning curves (${metric})`, metric);
   const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
   if (!traces.length) {
     layout.annotations = [(experiment?.metrics || []).length ? missingPlotMetricAnnotation(metric) : emptyPlotAnnotation("No hay curvas cruzadas disponibles.")];
   } else if (missingAnnotation) {
     layout.annotations = [missingAnnotation];
   }
-  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+  layout = withFitSelector(layout, traces);
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function renderCrossCompute(id, experiment, unavailableMessage = "") {
@@ -2665,22 +3320,35 @@ function renderCrossCompute(id, experiment, unavailableMessage = "") {
     return;
   }
   const traces = [];
+  let traceIndex = 0;
   for (const method of crossTrainMethods(experiment)) {
     const points = means
       .filter((row) => row.train_method === method && row.metric_available)
       .sort((a, b) => a.time - b.time);
     if (!points.length) continue;
+    const name = crossMethodLabel(method);
+    const color = plotColor(traceIndex);
+    addFitTraces(
+      traces,
+      points.map((row) => ({ x: row.time, y: row.mean })),
+      name,
+      color,
+      { legendgroup: method },
+    );
     traces.push({
       type: "scatter",
       mode: "markers",
-      name: crossMethodLabel(method),
+      name,
       x: points.map((row) => row.time),
       y: points.map((row) => row.mean),
       text: points.map((row) => `${testSetDisplayLabel(row.test_set)}, ${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
+      marker: { size: 9, opacity: 0.86, color },
+      legendgroup: method,
       hovertemplate: "%{text}<br>%{x:.2f}s<br>%{y:.4g}<extra>%{fullData.name}</extra>",
     });
+    traceIndex += 1;
   }
-  const layout = plotLayout(`Metric vs total compute time (${metric})`, metric, {
+  let layout = plotLayout(`Metric vs total compute time (${metric})`, metric, {
     xaxis: { title: "Total compute seconds", gridcolor: "#edf1f4", zeroline: false },
   });
   const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
@@ -2689,7 +3357,8 @@ function renderCrossCompute(id, experiment, unavailableMessage = "") {
   } else if (missingAnnotation) {
     layout.annotations = [missingAnnotation];
   }
-  Plotly.react(id, traces, layout, { responsive: true, displaylogo: false });
+  layout = withFitSelector(layout, traces);
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
 function renderWinnerMap(id, experiment, unavailableMessage = "") {
@@ -2784,7 +3453,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
     const position = maxValue === 0 ? 0 : index / maxValue;
     return [position, palette[index % palette.length]];
   });
-  Plotly.react(
+  renderPlot(
     id,
     [{
       type: "heatmap",
@@ -2991,6 +3660,7 @@ function renderPlots(payload) {
   renderCrossLearning("plot-learning", crossExperiment, crossMissingText);
   renderCrossCompute("plot-compute", crossExperiment, crossMissingText);
   renderWinnerMap("plot-winner", crossExperiment, crossMissingText);
+  schedulePlotResize();
 }
 
 async function loadPlots() {
@@ -2999,19 +3669,121 @@ async function loadPlots() {
   renderPlots(payload);
 }
 
-async function clearGeneratedDatasets() {
-  const confirmed = window.confirm(
-    "Borrar datasets generados, workspaces y resultados archivados? Se conservaran codigo, configs y pseudopotenciales.",
-  );
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB"];
+  let scaled = value;
+  let index = 0;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  return `${scaled >= 10 || index === 0 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[index]}`;
+}
+
+function datasetTargetLabel(target) {
+  const size = target.dataset_size != null ? ` · ${target.dataset_size}` : "";
+  return `${target.dataset_label || target.name}${size} · ${target.relative_path}`;
+}
+
+function renderDatasetTargets(targets) {
+  const body = document.getElementById("dataset-cleanup-list");
+  const status = document.getElementById("dataset-cleanup-status");
+  if (!body || !status) return;
+  body.innerHTML = "";
+  status.textContent = targets.length
+    ? `${targets.length} generated artifact${targets.length === 1 ? "" : "s"} found`
+    : "No generated datasets found";
+  for (const target of targets) {
+    const row = document.createElement("tr");
+    const selectCell = document.createElement("td");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "dataset-target-checkbox";
+    checkbox.value = target.id;
+    checkbox.setAttribute("aria-label", `Select ${target.relative_path}`);
+    selectCell.appendChild(checkbox);
+
+    const nameCell = document.createElement("td");
+    nameCell.textContent = target.dataset_label || target.name || target.id;
+
+    const methodCell = document.createElement("td");
+    methodCell.textContent = methodDisplayLabel(target.method);
+
+    const kindCell = document.createElement("td");
+    kindCell.textContent = String(target.kind || "");
+
+    const sizeCell = document.createElement("td");
+    sizeCell.textContent = [target.dataset_size != null ? `${target.dataset_size} samples` : "", formatBytes(target.bytes)]
+      .filter(Boolean)
+      .join(" · ") || "-";
+
+    const modifiedCell = document.createElement("td");
+    modifiedCell.textContent = target.modified_at || "-";
+
+    const pathCell = document.createElement("td");
+    const pathCode = document.createElement("code");
+    pathCode.textContent = target.relative_path || target.path;
+    pathCell.appendChild(pathCode);
+    if (target.warning) {
+      const warning = document.createElement("div");
+      warning.className = "muted-text";
+      warning.textContent = target.warning;
+      pathCell.appendChild(warning);
+    }
+
+    row.append(selectCell, nameCell, methodCell, kindCell, sizeCell, modifiedCell, pathCell);
+    body.appendChild(row);
+  }
+}
+
+async function loadDatasetTargets() {
+  const payload = await request("/api/datasets/targets");
+  state.datasetTargets = payload.targets || [];
+  renderDatasetTargets(state.datasetTargets);
+}
+
+function selectedDatasetTargetIds() {
+  return Array.from(document.querySelectorAll(".dataset-target-checkbox:checked")).map((node) => node.value);
+}
+
+function confirmDatasetDeletion(targets, title) {
+  if (!targets.length) {
+    showToast("Selecciona al menos un dataset generado");
+    return false;
+  }
+  const listed = targets.map((target) => `- ${datasetTargetLabel(target)}`).join("\n");
+  return window.confirm(`${title}\n\nSe borrara exactamente:\n${listed}`);
+}
+
+async function deleteDatasetTargets(targetIds, { all = false } = {}) {
+  const targets = all
+    ? state.datasetTargets
+    : state.datasetTargets.filter((target) => targetIds.includes(target.id));
+  const title = all
+    ? "Borrar todos los datasets generados, workspaces y resultados archivados?"
+    : "Borrar los datasets generados seleccionados?";
+  const confirmed = confirmDatasetDeletion(targets, title);
   if (!confirmed) return;
   const payload = await request("/api/datasets/clear", {
     method: "POST",
-    body: JSON.stringify({ dry_run: false }),
+    body: JSON.stringify(all ? { all: true, dry_run: false } : { target_ids: targetIds, dry_run: false }),
   });
   state.plotData = null;
   await loadResults();
+  await loadDatasetTargets();
   const removed = Array.isArray(payload.removed) ? payload.removed.length : 0;
   showToast(`Datasets borrados: ${removed}`);
+}
+
+async function clearGeneratedDatasets() {
+  if (!state.datasetTargets.length) await loadDatasetTargets();
+  await deleteDatasetTargets([], { all: true });
+}
+
+async function deleteSelectedGeneratedDatasets() {
+  await deleteDatasetTargets(selectedDatasetTargetIds(), { all: false });
 }
 
 function setupTabs() {
@@ -3023,6 +3795,8 @@ function setupTabs() {
       document.getElementById(`view-${tab.dataset.view}`).classList.add("active");
       if (tab.dataset.view === "results") {
         loadResults().catch((error) => showToast(error.message));
+        loadDatasetTargets().catch((error) => showToast(error.message));
+        schedulePlotResize();
       }
     });
   });
@@ -3037,7 +3811,15 @@ function setupEvents() {
     stopAll().catch((error) => showToast(error.message));
   });
   document.getElementById("refresh-results").addEventListener("click", () => {
-    loadResults().then(() => showToast("Results refreshed")).catch((error) => showToast(error.message));
+    Promise.all([loadResults(), loadDatasetTargets()])
+      .then(() => showToast("Results refreshed"))
+      .catch((error) => showToast(error.message));
+  });
+  document.getElementById("refresh-dataset-targets")?.addEventListener("click", () => {
+    loadDatasetTargets().then(() => showToast("Dataset list refreshed")).catch((error) => showToast(error.message));
+  });
+  document.getElementById("delete-selected-datasets")?.addEventListener("click", () => {
+    deleteSelectedGeneratedDatasets().catch((error) => showToast(error.message));
   });
   document.getElementById("clear-datasets")?.addEventListener("click", () => {
     clearGeneratedDatasets().catch((error) => showToast(error.message));
@@ -3046,15 +3828,22 @@ function setupEvents() {
     state.plotsEnabled = event.target.checked;
     if (state.plotsEnabled) {
       loadPlots().catch((error) => showToast(error.message));
+      schedulePlotResize();
     } else {
       renderPlots(state.plotData);
     }
   });
   document.getElementById("plot-cross-selection")?.addEventListener("change", () => {
-    if (state.plotsEnabled) renderPlots(state.plotData);
+    if (state.plotsEnabled) {
+      renderPlots(state.plotData);
+      schedulePlotResize();
+    }
   });
   document.getElementById("plot-cross-metric")?.addEventListener("change", () => {
-    if (state.plotsEnabled) renderPlots(state.plotData);
+    if (state.plotsEnabled) {
+      renderPlots(state.plotData);
+      schedulePlotResize();
+    }
   });
   document.getElementById("run-experiment").addEventListener("click", () => {
     runExperiment().catch((error) => showToast(error.message));
@@ -3085,24 +3874,14 @@ function setupEvents() {
   document.getElementById("md-sizes").addEventListener("input", updateDatasetPreview);
   document.getElementById("md-dataset-table")?.addEventListener("input", updateDatasetPreview);
   document.getElementById("random-cartesian-dataset-table")?.addEventListener("input", updateDatasetPreview);
-  [
-    "random-cartesian-n-structures",
-    "random-cartesian-distribution",
-    "random-cartesian-seed",
-    "random-cartesian-sigma-ang",
-    "random-cartesian-uniform-range-ang",
-    "random-cartesian-min-distance-ang",
-    "random-cartesian-move-atoms",
-    "random-cartesian-species-filter",
-    "random-cartesian-remove-com",
-  ].forEach((id) => {
-    const node = document.getElementById(id);
-    node?.addEventListener("input", updateDatasetPreview);
-    node?.addEventListener("change", updateDatasetPreview);
+  document.querySelectorAll(".method-execution-checkbox, .method-checkbox").forEach((node) => {
+    node.addEventListener("change", () => {
+      setMethodSelected(node.value, node.checked, node);
+      updateAtomSizesFromFcPlan();
+      updateDatasetPreview();
+    });
   });
-  document.querySelectorAll(".method-checkbox").forEach((node) => {
-    node.addEventListener("change", updateDatasetPreview);
-  });
+  window.addEventListener("resize", () => schedulePlotResize());
 }
 
 async function boot() {
@@ -3116,11 +3895,10 @@ async function boot() {
   await loadPerformancePresets();
   await loadFcConfig();
   updateDatasetPreview();
-  await pollLogs();
+  await pollOnce();
   await loadResults();
-  state.polling = setInterval(() => {
-    pollLogs().catch((error) => showToast(error.message));
-  }, 1200);
+  await loadDatasetTargets();
+  state.polling = setInterval(pollOnce, POLL_INTERVAL_MS);
 }
 
 boot().catch((error) => showToast(error.message));

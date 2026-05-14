@@ -36,7 +36,11 @@ from siesta_settings import DEFAULT_SHARED, compare_method_settings, file_digest
 from model_settings import compare_method_model_settings
 from reference_selection import choose_reference_matrix as strict_choose_reference_matrix
 from reference_selection import reference_candidates
-from cleanup_generated_datasets import cleanup_generated_datasets
+from cleanup_generated_datasets import (
+    cleanup_generated_datasets,
+    cleanup_selected_generated_datasets,
+    generated_dataset_records,
+)
 from method_registry import (
     METHOD_REGISTRY as SCIENTIFIC_METHOD_REGISTRY,
     normalize_method_id,
@@ -54,6 +58,8 @@ COMPARISON_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = COMPARISON_ROOT / "results"
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
 LOG_HEARTBEAT_SECONDS = 30.0
+DEFAULT_LOG_RESPONSE_LIMIT = 2000
+MAX_LOG_RESPONSE_LIMIT = 20000
 METRIC_VERSION = "2026-05-08.frontier-window-v1"
 DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
 
@@ -1181,7 +1187,16 @@ def dataset_recipes_to_execution_specs(
             first_block_defaults = {
                 key: value
                 for key, value in (random_blocks[0] if random_blocks else {}).items()
-                if key not in {"block_id", "label", "n_structures"}
+                if key not in {
+                    "block_id",
+                    "label",
+                    "n_structures",
+                    "components",
+                    "atom_displacement",
+                    "bond_displacement",
+                    "angle_displacement",
+                    "validation",
+                }
             }
             options = {
                 **random_cartesian_defaults,
@@ -1456,13 +1471,12 @@ class PipelineRunner:
                 "log_size": len(self._logs),
             }
 
-    def logs(self, since: int = 0) -> dict[str, Any]:
+    def logs(self, since: int = 0, limit: int | None = DEFAULT_LOG_RESPONSE_LIMIT) -> dict[str, Any]:
         with self._lock:
-            since = max(0, since)
+            log_payload = bounded_log_payload(self._logs, since=since, limit=limit)
+            log_payload["status"] = self.status()
             return {
-                "offset": len(self._logs),
-                "lines": self._logs[since:],
-                "status": self.status(),
+                **log_payload,
             }
 
 
@@ -4931,7 +4945,7 @@ class ExperimentRunner:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
-            selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
+            selected_methods = normalize_selected_methods(selected_methods)
             run_mode = parse_run_mode(run_mode)
             performance_settings = parse_performance_settings(
                 performance,
@@ -5053,13 +5067,12 @@ class ExperimentRunner:
                 "active_processes": len([process for process in self._processes if process.poll() is None]),
             }
 
-    def logs(self, since: int = 0) -> dict[str, Any]:
+    def logs(self, since: int = 0, limit: int | None = DEFAULT_LOG_RESPONSE_LIMIT) -> dict[str, Any]:
         with self._lock:
-            since = max(0, since)
+            log_payload = bounded_log_payload(self._logs, since=since, limit=limit)
+            log_payload["status"] = self.status()
             return {
-                "offset": len(self._logs),
-                "lines": self._logs[since:],
-                "status": self.status(),
+                **log_payload,
             }
 
     def _append(self, line: str) -> None:
@@ -5592,7 +5605,7 @@ class ExperimentRunner:
         dataset_recipes_info: dict[str, Any] | None = None,
     ) -> None:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
-        selected_methods = selected_methods or ["md", "siesta_fc_cartesian"]
+        selected_methods = normalize_selected_methods(selected_methods)
         run_mode = parse_run_mode(run_mode)
         performance_settings = parse_performance_settings(
             performance,
@@ -8252,6 +8265,32 @@ def clear_generated_dataset_outputs(*, dry_run: bool = False) -> dict[str, Any]:
     return cleanup_generated_datasets(REPO_ROOT, dry_run=dry_run)
 
 
+def generated_dataset_output_records() -> dict[str, Any]:
+    return {
+        "targets": generated_dataset_records(REPO_ROOT),
+        "roots": {
+            "md_dataset": str(REPO_ROOT / "MD" / "dataset"),
+            "atom_dataset": str(REPO_ROOT / "AtomDisplacement" / "dataset"),
+            "comparison_workspaces": str(WORKSPACES_ROOT),
+            "comparison_results": str(RESULTS_ROOT),
+        },
+    }
+
+
+def clear_selected_generated_dataset_outputs(
+    target_ids: list[str],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    if all_status().get("running") or EXPERIMENT_RUNNER.status().get("running"):
+        raise RuntimeError("No se pueden borrar datasets mientras hay pipelines o experimentos en ejecucion.")
+    return cleanup_selected_generated_datasets(
+        REPO_ROOT,
+        target_ids=target_ids,
+        dry_run=dry_run,
+    )
+
+
 def run_all(*, venv_activate_command: str | None = None) -> dict[str, Any]:
     venv_activate_path = apply_venv_activate_to_pipeline_configs(venv_activate_command)
     started: dict[str, Any] = {}
@@ -8356,6 +8395,68 @@ def error_response(handler: BaseHTTPRequestHandler, exc: Exception, status: int 
     json_response(handler, {"error": str(exc)}, status=status)
 
 
+def parse_query_int(
+    query: dict[str, list[str]],
+    key: str,
+    default: int,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
+    raw_value = query.get(key, [str(default)])[0]
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def bounded_log_payload(
+    logs: list[str],
+    *,
+    since: int = 0,
+    limit: int | None = DEFAULT_LOG_RESPONSE_LIMIT,
+) -> dict[str, Any]:
+    """Return a bounded log slice so the browser never downloads huge histories."""
+    total = len(logs)
+    requested_since = max(0, int(since or 0))
+    start = min(requested_since, total)
+    end = total
+    effective_limit = (
+        None
+        if limit is None or int(limit) <= 0
+        else min(int(limit), MAX_LOG_RESPONSE_LIMIT)
+    )
+    dropped_lines = 0
+    truncated = False
+    if effective_limit is not None and end - start > effective_limit:
+        dropped_lines = end - start - effective_limit
+        start = end - effective_limit
+        truncated = True
+    lines = list(logs[start:end])
+    if truncated:
+        lines.insert(
+            0,
+            (
+                "[UI] Log truncado en la respuesta web: "
+                f"se omitieron {dropped_lines} lineas antiguas. "
+                "Los artefactos archivados conservan el run.log completo.\n"
+            ),
+        )
+    return {
+        "offset": total,
+        "lines": lines,
+        "truncated": truncated,
+        "dropped_lines": dropped_lines,
+        "returned_from": start,
+        "requested_since": requested_since,
+        "limit": effective_limit,
+    }
+
+
 class ComparisonUIHandler(BaseHTTPRequestHandler):
     server_version = "ComparisonPipelineUI/1.0"
 
@@ -8388,13 +8489,22 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed_url.query)
                 key = query.get("pipeline", [""])[0]
                 since = int(query.get("since", ["0"])[0])
+                limit = parse_query_int(
+                    query,
+                    "limit",
+                    DEFAULT_LOG_RESPONSE_LIMIT,
+                    minimum=1,
+                    maximum=MAX_LOG_RESPONSE_LIMIT,
+                )
                 if key not in RUNNERS:
                     raise RuntimeError("Pipeline no reconocido.")
-                json_response(self, RUNNERS[key].logs(since=since))
+                json_response(self, RUNNERS[key].logs(since=since, limit=limit))
             elif path == "/api/results":
                 json_response(self, result_summary())
             elif path == "/api/plots":
                 json_response(self, plot_data_summary())
+            elif path == "/api/datasets/targets":
+                json_response(self, generated_dataset_output_records())
             elif path == "/api/atom-fc-config":
                 json_response(self, atom_fc_ui_config())
             elif path == "/api/performance-presets":
@@ -8406,7 +8516,14 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/experiment/logs":
                 query = parse_qs(parsed_url.query)
                 since = int(query.get("since", ["0"])[0])
-                json_response(self, EXPERIMENT_RUNNER.logs(since=since))
+                limit = parse_query_int(
+                    query,
+                    "limit",
+                    DEFAULT_LOG_RESPONSE_LIMIT,
+                    minimum=1,
+                    maximum=MAX_LOG_RESPONSE_LIMIT,
+                )
+                json_response(self, EXPERIMENT_RUNNER.logs(since=since, limit=limit))
             elif path == "/":
                 self._serve_file(UI_DIR / "index.html")
             else:
@@ -8433,9 +8550,22 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, stop_all(), status=HTTPStatus.ACCEPTED)
             elif path == "/api/datasets/clear":
                 payload = read_json_body(self)
+                dry_run = parse_bool(payload.get("dry_run"), False)
+                target_ids = payload.get("target_ids")
+                if target_ids not in (None, ""):
+                    if not isinstance(target_ids, list):
+                        raise RuntimeError("target_ids debe ser una lista de IDs de datasets.")
+                    result = clear_selected_generated_dataset_outputs(
+                        [str(target_id) for target_id in target_ids],
+                        dry_run=dry_run,
+                    )
+                elif parse_bool(payload.get("all"), False):
+                    result = clear_generated_dataset_outputs(dry_run=dry_run)
+                else:
+                    raise RuntimeError("Borrado ambiguo: envia target_ids o all=true.")
                 json_response(
                     self,
-                    clear_generated_dataset_outputs(dry_run=parse_bool(payload.get("dry_run"), False)),
+                    result,
                     status=HTTPStatus.ACCEPTED,
                 )
             elif path == "/api/experiment":
