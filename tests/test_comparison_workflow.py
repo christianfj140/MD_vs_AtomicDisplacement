@@ -259,24 +259,33 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertFalse(current_payload["truncated"])
         self.assertEqual(current_payload["lines"], ["line 8\n", "line 9\n"])
 
-    def write_expected_cross_grid(self, path: Path, methods: tuple[str, ...], test_sets: tuple[str, ...]) -> None:
+    def write_expected_cross_grid(
+        self,
+        path: Path,
+        methods: tuple[str, ...],
+        test_sets: tuple[str, ...],
+        *,
+        expected_context_cells: list[dict[str, object]] | None = None,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         expected_cells = [
             {"train_method": method, "test_set": test_set, "cell_id": f"{method} on {test_set}"}
             for method in methods
             for test_set in test_sets
         ]
+        payload = {
+            "experiment_id": "exp_grid",
+            "canonical_method_ids": ["md", "siesta_fc_cartesian", "random_cartesian"],
+            "selected_methods": list(methods),
+            "selected_frozen_test_sets": list(test_sets),
+            "expected_cell_count": len(expected_cells),
+            "expected_cells": expected_cells,
+        }
+        if expected_context_cells is not None:
+            payload["expected_context_cell_count"] = len(expected_context_cells)
+            payload["expected_context_cells"] = expected_context_cells
         path.write_text(
-            json.dumps(
-                {
-                    "experiment_id": "exp_grid",
-                    "canonical_method_ids": ["md", "siesta_fc_cartesian", "random_cartesian"],
-                    "selected_methods": list(methods),
-                    "selected_frozen_test_sets": list(test_sets),
-                    "expected_cell_count": len(expected_cells),
-                    "expected_cells": expected_cells,
-                }
-            ),
+            json.dumps(payload),
             encoding="utf-8",
         )
 
@@ -322,10 +331,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         method: str,
         test_set: str,
         *,
+        pair_id: str | None = None,
+        result_name: str | None = None,
         primary_metric: str = "low_energy_rmse_eV",
         primary_value: str | None = "0.2",
     ) -> None:
-        result_dir = cross_root / f"{method}__on__{test_set}"
+        result_dir = cross_root / (result_name or f"{method}__on__{test_set}")
         (result_dir / "metrics").mkdir(parents=True)
         write_csv(
             result_dir / "metrics" / "sparse_metrics.csv",
@@ -343,6 +354,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         (result_dir / "cross_evaluation_manifest.json").write_text(
             json.dumps(
                 {
+                    **({"pair_id": pair_id} if pair_id else {}),
                     "train_method": method,
                     "test_set": test_set,
                     "dataset_size": 3,
@@ -2137,6 +2149,90 @@ class ComparisonWorkflowTests(unittest.TestCase):
             manifest = module.load_config(root / "results" / "full_plan_missing_target" / "experiment_manifest.yaml")
             self.assertTrue(any("dataset_targets no encontrados" in warning for warning in manifest["warnings"]))
 
+    def test_full_strict_training_plan_missing_generated_source_fails_clearly(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            recipes = {
+                "md": [
+                    {
+                        "recipe_id": "md_100",
+                        "label": "MD 100",
+                        "blocks": [{"block_id": "md_100", "n_snapshots": 3}],
+                    },
+                    {
+                        "recipe_id": "md_200",
+                        "label": "MD 200",
+                        "blocks": [{"block_id": "md_200", "n_snapshots": 4}],
+                    },
+                ]
+            }
+            recipe_info = module.dataset_recipes_to_execution_specs(
+                recipes,
+                selected_methods=["md"],
+                split_ratios={"train": 0.5, "validation": 0.25, "test": 0.25},
+                random_cartesian_defaults={},
+            )
+            calls: list[dict[str, object]] = []
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                run_mode = kwargs.get("run_mode")
+                calls.append({"size": size, "run_mode": run_mode})
+                if run_mode == module.DATASET_ONLY_RUN_MODE and size == 4:
+                    raise RuntimeError("source generation failed")
+                if run_mode == module.FULL_STRICT_RUN_MODE:
+                    raise AssertionError("training must not start when a selected source was not generated")
+                label = str(kwargs.get("dataset_label"))
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": label,
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake_results" / label),
+                    "dataset_dir": str(root / "fake_datasets" / label),
+                    "dataset_sample_ids": [f"{key}-{label}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{label}-{size}",
+                    "run_mode": run_mode,
+                    "pipeline_elapsed_seconds": 1.0,
+                    "predicted_hamiltonians": 0,
+                    "siesta_counts": {"launched": size, "skipped_or_reused": 0, "failed": 0, "total": size},
+                    "timing_breakdown": {"md_siesta_generation_seconds": 1.0},
+                }
+
+            runner = module.ExperimentRunner()
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [],
+                [],
+                "full_plan_missing_source",
+                split_ratios={"train": 0.5, "validation": 0.25, "test": 0.25},
+                selected_methods=["md"],
+                run_mode="full_strict_pipeline",
+                dataset_recipes_info=recipe_info,
+                performance={"error_policy": "continue_on_error"},
+                training_plan=[
+                    {
+                        "label": "epochs400",
+                        "dataset_targets": [
+                            module.planned_dataset_target_id("md", "md_100"),
+                            module.planned_dataset_target_id("md", "md_200"),
+                        ],
+                        "training_settings": {"max_epochs": 400},
+                    }
+                ],
+            )
+
+            self.assertEqual([call["run_mode"] for call in calls], [module.DATASET_ONLY_RUN_MODE, module.DATASET_ONLY_RUN_MODE])
+            manifest = module.load_config(root / "results" / "full_plan_missing_source" / "experiment_manifest.yaml")
+            self.assertTrue(
+                any("no se generaron los datasets fuente" in warning for warning in manifest["warnings"])
+            )
+
     def test_reusable_dataset_candidates_match_plot_visible_archived_results(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -2705,6 +2801,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
     def test_ui_experiment_payload_includes_methods_and_run_mode(self) -> None:
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        styles_css = (REPO_ROOT / "Comparison" / "ui" / "styles.css").read_text(encoding="utf-8")
         self.assertIn('value="md"', index_html)
         self.assertIn('value="siesta_fc_cartesian"', index_html)
         self.assertIn('value="random_cartesian"', index_html)
@@ -2727,6 +2824,26 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("Metric guide", index_html)
         self.assertIn("Low-energy RMSE", index_html)
         self.assertIn("DOS W1", index_html)
+        self.assertIn("METRIC_HELP", app_js)
+        self.assertIn("PLOT_HELP_BY_ID", app_js)
+        self.assertIn("CROSS_PLOT_HELP_BY_ID", app_js)
+        self.assertIn("installPlotInfoBubble", app_js)
+        self.assertIn("plotInfoFor", app_js)
+        self.assertIn("plot-info-bubble", app_js)
+        self.assertIn("MathJax", index_html)
+        self.assertIn("tex-chtml.js", index_html)
+        self.assertIn("typesetPlotInfoMath", app_js)
+        self.assertIn("plot-info-formula", app_js)
+        self.assertIn('["Formula", info.formula]', app_js)
+        self.assertIn(r"\\operatorname{RMSE}_S", app_js)
+        self.assertIn(r"\\|H^{pred}-H^{ref}\\|_{F,union}", app_js)
+        self.assertIn(r"\\frac{2\\,\\mathrm{precision}\\,\\mathrm{recall}}", app_js)
+        self.assertIn(r"\\operatorname{mean}_{\\text{finite rows}}", app_js)
+        self.assertIn("DOS Wasserstein-1", app_js)
+        self.assertIn("Support F1", app_js)
+        self.assertIn(".plot-info-bubble", styles_css)
+        self.assertIn(".plot-info-popover", styles_css)
+        self.assertIn(".plot-info-formula", styles_css)
         self.assertNotIn('id="random-cartesian-n-structures"', index_html)
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
@@ -2745,6 +2862,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("selectedReusableDatasetIds()", app_js)
         self.assertIn("run?.training_tag", app_js)
         self.assertIn("item.training_tag", app_js)
+        self.assertIn("includeTrainingContext", app_js)
+        self.assertIn("runTrainingGroupLabel", app_js)
         self.assertIn('value="source /home/christian/graph2mat-env/bin/activate"', index_html)
         self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"', app_js)
         self.assertNotIn('id="compute-accelerator"', index_html)
@@ -4805,6 +4924,67 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(report["missing_cells"], [])
             self.assertEqual(report["scientific_status"], "invalid_incomplete_grid")
             self.assertIn("md on test_random_cartesian", report["missing_primary_metric_cells"])
+
+    def test_cross_aggregation_completeness_missing_retraining_context_fails(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            cross_root = root / "cross"
+            self.write_cross_metric_cell(
+                cross_root,
+                "md",
+                "test_md",
+                pair_id="cross_train1",
+                result_name="cross_train1__md__on__test_md",
+            )
+            expected_grid = root / "summary" / "cross_evaluation_expected_grid.json"
+            self.write_expected_cross_grid(
+                expected_grid,
+                ("md",),
+                ("test_md",),
+                expected_context_cells=[
+                    {
+                        "pair_id": "cross_train1",
+                        "train_method": "md",
+                        "test_set": "test_md",
+                        "cell_id": "cross_train1 :: md on test_md",
+                    },
+                    {
+                        "pair_id": "cross_train2",
+                        "train_method": "md",
+                        "test_set": "test_md",
+                        "cell_id": "cross_train2 :: md on test_md",
+                    },
+                ],
+            )
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_missing_context",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary"),
+                "--expected-grid",
+                str(expected_grid),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads((root / "summary" / "cross_evaluation_completeness.json").read_text(encoding="utf-8"))
+            self.assertFalse(report["complete"])
+            self.assertEqual(report["missing_cells"], [])
+            self.assertIn("cross_train2 :: md on test_md", report["missing_context_cells"])
+            with (root / "summary" / "missing_cross_evaluation_cells.csv").open(encoding="utf-8") as handle:
+                missing_rows = list(csv.DictReader(handle))
+            self.assertIn(
+                {
+                    "cell_id": "cross_train2 :: md on test_md",
+                    "issue": "missing_context_cell",
+                    "test_set": "test_md",
+                    "train_method": "md",
+                },
+                missing_rows,
+            )
 
     def test_cross_aggregation_normalizes_legacy_method_ids(self) -> None:
         with workspace_tempdir() as tmp:

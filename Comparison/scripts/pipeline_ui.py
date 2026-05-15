@@ -6335,6 +6335,22 @@ class ExperimentRunner:
                     self._merge_run_timing(manifest, source_result)
                     self._write_experiment_manifest(manifest)
 
+                required_source_targets = sorted(
+                    {
+                        target_id
+                        for plan_item in training_plan
+                        for target_id in self._training_plan_target_ids(plan_item)
+                    }
+                )
+                missing_source_targets = [
+                    target_id for target_id in required_source_targets if target_id not in source_results_by_target
+                ]
+                if missing_source_targets:
+                    raise RuntimeError(
+                        "Training plan no puede continuar: no se generaron los datasets fuente "
+                        f"para targets {missing_source_targets}. Revisa los errores de la fase dataset-only."
+                    )
+
                 self._append(f"[UI] Training plan: {len(training_plan)} configuraciones.\n")
                 for plan_item in training_plan:
                     plan_training_settings = parse_training_settings(plan_item.get("training_settings"))
@@ -9410,26 +9426,40 @@ class ExperimentRunner:
                     [
                         *(str(cell) for cell in completeness.get("missing_cells", []) or []),
                         *(str(cell) for cell in completeness.get("missing_primary_metric_cells", []) or []),
+                        *(str(cell) for cell in completeness.get("missing_context_cells", []) or []),
+                        *(str(cell) for cell in completeness.get("missing_primary_metric_context_cells", []) or []),
                     ]
                 )
             )
+            missing_required_cells = [
+                *(completeness.get("missing_cells", []) or []),
+                *(completeness.get("missing_context_cells", []) or []),
+            ]
+            missing_primary_metric_cells = [
+                *(completeness.get("missing_primary_metric_cells", []) or []),
+                *(completeness.get("missing_primary_metric_context_cells", []) or []),
+            ]
+            extra_unexpected_cells = [
+                *(completeness.get("extra_unexpected_cells", []) or []),
+                *(completeness.get("extra_unexpected_context_cells", []) or []),
+            ]
             invalid_recommendation = {
                 "status": "invalid_incomplete_grid",
                 "scientific_status": "invalid_incomplete_grid",
                 "winner": None,
                 "reason": "Incomplete cross-evaluation grid",
                 "missing_cells": missing_cells,
-                "missing_required_cells": completeness.get("missing_cells", []),
-                "extra_unexpected_cells": completeness.get("extra_unexpected_cells", []),
-                "missing_primary_metric_cells": completeness.get("missing_primary_metric_cells", []),
+                "missing_required_cells": missing_required_cells,
+                "extra_unexpected_cells": extra_unexpected_cells,
+                "missing_primary_metric_cells": missing_primary_metric_cells,
                 "completeness_report": str(completeness_path),
             }
             (summary_root / "recommendation.json").write_text(
                 json.dumps(invalid_recommendation, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
                 encoding="utf-8",
             )
-            summary["missing_cells"].extend(completeness.get("missing_cells", []))
-            summary["missing_cells"].extend(completeness.get("missing_primary_metric_cells", []))
+            summary["missing_cells"].extend(missing_required_cells)
+            summary["missing_cells"].extend(missing_primary_metric_cells)
             summary["warnings"].append("Incomplete cross-evaluation grid; winner analysis skipped.")
             summary["ok"] = False
             summary["outputs"] = {
@@ -9542,6 +9572,34 @@ class ExperimentRunner:
             sorted(runs_by_method[method], key=lambda run: (int(run.get("dataset_size", 0)), str(run.get("dataset_label", ""))))
             for method in selected_methods
         ]
+        expected_context_cells: list[dict[str, Any]] = []
+        for combo in itertools.product(*method_run_lists):
+            combo_by_method = {
+                normalize_method_id(run.get("method_id") or run.get("pipeline"), allow_unknown=True): run
+                for run in combo
+            }
+            pair_id = cross_pair_id(combo_by_method, selected_methods)
+            for train_method in selected_methods:
+                train_result = combo_by_method[train_method]
+                for test_set in test_sets:
+                    expected_context_cells.append(
+                        {
+                            "pair_id": pair_id,
+                            "train_method": train_method,
+                            "test_set": test_set,
+                            "cell_id": f"{pair_id} :: {train_method} on {test_set}",
+                            "train_dataset_label": train_result.get("dataset_label", ""),
+                            "train_training_tag": train_result.get("training_tag"),
+                            "train_training_plan_label": train_result.get("training_plan_label"),
+                            "train_training_plan_index": train_result.get("training_plan_index"),
+                        }
+                    )
+        expected_grid["expected_context_cell_count"] = len(expected_context_cells)
+        expected_grid["expected_context_cells"] = expected_context_cells
+        expected_grid_path.write_text(
+            json.dumps(json_safe(expected_grid), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
         for combo in itertools.product(*method_run_lists):
             combo_by_method = {
                 normalize_method_id(run.get("method_id") or run.get("pipeline"), allow_unknown=True): run
@@ -10007,26 +10065,40 @@ class ExperimentRunner:
                     [
                         *(str(cell) for cell in completeness.get("missing_cells", []) or []),
                         *(str(cell) for cell in completeness.get("missing_primary_metric_cells", []) or []),
+                        *(str(cell) for cell in completeness.get("missing_context_cells", []) or []),
+                        *(str(cell) for cell in completeness.get("missing_primary_metric_context_cells", []) or []),
                     ]
                 )
             )
+            missing_required_cells = [
+                *(completeness.get("missing_cells", []) or []),
+                *(completeness.get("missing_context_cells", []) or []),
+            ]
+            missing_primary_metric_cells = [
+                *(completeness.get("missing_primary_metric_cells", []) or []),
+                *(completeness.get("missing_primary_metric_context_cells", []) or []),
+            ]
+            extra_unexpected_cells = [
+                *(completeness.get("extra_unexpected_cells", []) or []),
+                *(completeness.get("extra_unexpected_context_cells", []) or []),
+            ]
             invalid_recommendation = {
                 "status": "invalid_incomplete_grid",
                 "scientific_status": "invalid_incomplete_grid",
                 "winner": None,
                 "reason": "Incomplete cross-evaluation grid",
                 "missing_cells": missing_cells,
-                "missing_required_cells": completeness.get("missing_cells", []),
-                "extra_unexpected_cells": completeness.get("extra_unexpected_cells", []),
-                "missing_primary_metric_cells": completeness.get("missing_primary_metric_cells", []),
+                "missing_required_cells": missing_required_cells,
+                "extra_unexpected_cells": extra_unexpected_cells,
+                "missing_primary_metric_cells": missing_primary_metric_cells,
                 "completeness_report": str(completeness_path),
             }
             (summary_root / "recommendation.json").write_text(
                 json.dumps(invalid_recommendation, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
                 encoding="utf-8",
             )
-            summary["missing_cells"].extend(completeness.get("missing_cells", []))
-            summary["missing_cells"].extend(completeness.get("missing_primary_metric_cells", []))
+            summary["missing_cells"].extend(missing_required_cells)
+            summary["missing_cells"].extend(missing_primary_metric_cells)
             summary["warnings"].append("Incomplete cross-evaluation grid; winner analysis skipped.")
             summary["ok"] = False
             summary["outputs"] = {

@@ -1131,6 +1131,108 @@ pre {
   min-height: 430px;
 }
 
+.plot-info-bubble {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 35;
+}
+
+.plot-info-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--ink-strong);
+  cursor: help;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 850;
+  line-height: 1;
+  box-shadow: var(--shadow-sm);
+}
+
+.plot-info-button:focus-visible {
+  outline: 3px solid rgba(138, 91, 99, 0.24);
+  outline-offset: 2px;
+}
+
+.plot-info-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(360px, calc(100vw - 48px));
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s ease;
+  visibility: hidden;
+}
+
+.plot-info-bubble:hover .plot-info-popover,
+.plot-info-bubble:focus-within .plot-info-popover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.plot-info-popover h4 {
+  margin: 0 0 10px;
+  color: var(--ink-strong);
+  font-size: 14px;
+}
+
+.plot-info-popover dl {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.45fr) minmax(0, 1fr);
+  gap: 7px 10px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.plot-info-popover dt {
+  color: var(--ink-strong);
+  font-weight: 850;
+}
+
+.plot-info-popover dd {
+  margin: 0;
+  color: var(--muted-strong);
+}
+
+.plot-info-formula {
+  display: block;
+  max-width: 100%;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: #f6f8fa;
+  color: var(--ink-strong);
+  font-size: 11px;
+  overflow-x: auto;
+}
+
+.plot-info-formula mjx-container {
+  margin: 0 !important;
+  min-width: max-content;
+  text-align: left !important;
+}
+
+.plot-card .modebar {
+  right: 42px !important;
+}
+
 .api-list {
   display: grid;
   gap: 10px;
@@ -1269,6 +1371,10 @@ pre {
   }
 
   .metric-info-popover dl {
+    grid-template-columns: 1fr;
+  }
+
+  .plot-info-popover dl {
     grid-template-columns: 1fr;
   }
 

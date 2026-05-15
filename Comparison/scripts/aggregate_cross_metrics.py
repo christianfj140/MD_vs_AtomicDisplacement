@@ -100,7 +100,17 @@ def cell_id(train_method: Any, test_set: Any) -> str:
     return f"{method} on {test}"
 
 
+def context_cell_id(pair_id: Any, train_method: Any, test_set: Any) -> str:
+    pair = str(pair_id or "").strip()
+    base = cell_id(train_method, test_set)
+    return f"{pair} :: {base}" if pair else base
+
+
 def cell_sort_key(value: str) -> tuple[str, str]:
+    if " :: " in value:
+        pair_id, remainder = value.split(" :: ", 1)
+        method, test = cell_sort_key(remainder)
+        return method, f"{test} {pair_id}"
     if " on " not in value:
         return value, ""
     train_method, test_set = value.split(" on ", 1)
@@ -138,6 +148,23 @@ def expected_cells_from_grid(grid: dict[str, Any]) -> set[str]:
     }
 
 
+def expected_context_cells_from_grid(grid: dict[str, Any]) -> set[str]:
+    cells: set[str] = set()
+    raw_cells = grid.get("expected_context_cells") or grid.get("expected_cross_evaluation_cells")
+    if not isinstance(raw_cells, list):
+        return cells
+    for item in raw_cells:
+        if isinstance(item, dict):
+            pair_id = item.get("pair_id")
+            method = item.get("train_method")
+            test_set = item.get("test_set")
+            if pair_id not in (None, "") and method not in (None, "") and test_set not in (None, ""):
+                cells.add(context_cell_id(pair_id, method, test_set))
+        elif isinstance(item, str) and " on " in item:
+            cells.add(str(item))
+    return cells
+
+
 def load_expected_grid(path: Path | None, output_dir: Path) -> tuple[dict[str, Any], str, Path | None]:
     grid_path = path or output_dir / "cross_evaluation_expected_grid.json"
     if grid_path.exists():
@@ -151,6 +178,16 @@ def observed_expected_cells(rows: list[dict[str, Any]]) -> set[str]:
     return {cell_id(method, test_set) for method in methods for test_set in test_sets}
 
 
+def observed_context_cells(rows: list[dict[str, Any]]) -> set[str]:
+    return {
+        context_cell_id(row.get("pair_id"), row.get("train_method"), row.get("test_set"))
+        for row in rows
+        if row.get("pair_id") not in (None, "")
+        and row.get("train_method") not in (None, "")
+        and row.get("test_set") not in (None, "")
+    }
+
+
 def build_completeness_report(
     *,
     experiment_id: str,
@@ -161,14 +198,19 @@ def build_completeness_report(
     primary_metric: str | None = None,
 ) -> dict[str, Any]:
     expected_cells = expected_cells_from_grid(expected_grid) if expected_grid else observed_expected_cells(rows)
+    expected_context_cells = expected_context_cells_from_grid(expected_grid) if expected_grid else observed_context_cells(rows)
     actual_cells = {
         cell_id(row.get("train_method"), row.get("test_set"))
         for row in rows
         if row.get("train_method") not in (None, "") and row.get("test_set") not in (None, "")
     }
+    actual_context_cells = observed_context_cells(rows)
     missing_cells = sorted(expected_cells - actual_cells, key=cell_sort_key)
     extra_cells = sorted(actual_cells - expected_cells, key=cell_sort_key)
+    missing_context_cells = sorted(expected_context_cells - actual_context_cells, key=cell_sort_key)
+    extra_context_cells = sorted(actual_context_cells - expected_context_cells, key=cell_sort_key) if expected_context_cells else []
     missing_primary_metric_cells: list[str] = []
+    missing_primary_metric_context_cells: list[str] = []
     metric_name = str(primary_metric or "").strip()
     if metric_name:
         cells_with_primary_metric = {
@@ -179,7 +221,26 @@ def build_completeness_report(
             and finite(row.get(metric_name))
         }
         missing_primary_metric_cells = sorted(expected_cells - cells_with_primary_metric, key=cell_sort_key)
-    complete = not missing_cells and not extra_cells and not missing_primary_metric_cells
+        context_cells_with_primary_metric = {
+            context_cell_id(row.get("pair_id"), row.get("train_method"), row.get("test_set"))
+            for row in rows
+            if row.get("pair_id") not in (None, "")
+            and row.get("train_method") not in (None, "")
+            and row.get("test_set") not in (None, "")
+            and finite(row.get(metric_name))
+        }
+        missing_primary_metric_context_cells = sorted(
+            expected_context_cells - context_cells_with_primary_metric,
+            key=cell_sort_key,
+        )
+    complete = (
+        not missing_cells
+        and not extra_cells
+        and not missing_primary_metric_cells
+        and not missing_context_cells
+        and not extra_context_cells
+        and not missing_primary_metric_context_cells
+    )
     report = {
         "experiment_id": experiment_id,
         "expected_grid": str(expected_grid_path) if expected_grid_path else None,
@@ -187,14 +248,23 @@ def build_completeness_report(
         "primary_metric": metric_name or None,
         "expected_cell_count": len(expected_cells),
         "actual_cell_count": len(actual_cells),
+        "expected_context_cell_count": len(expected_context_cells),
+        "actual_context_cell_count": len(actual_context_cells),
         "actual_row_count": len(rows),
         "expected_cells": sorted(expected_cells, key=cell_sort_key),
         "actual_cells": sorted(actual_cells, key=cell_sort_key),
+        "expected_context_cells": sorted(expected_context_cells, key=cell_sort_key),
+        "actual_context_cells": sorted(actual_context_cells, key=cell_sort_key),
         "missing_cells": missing_cells,
         "extra_unexpected_cells": extra_cells,
         "extra_cells": extra_cells,
         "unexpected_cells": extra_cells,
+        "missing_context_cells": missing_context_cells,
+        "extra_unexpected_context_cells": extra_context_cells,
+        "extra_context_cells": extra_context_cells,
+        "unexpected_context_cells": extra_context_cells,
         "missing_primary_metric_cells": missing_primary_metric_cells,
+        "missing_primary_metric_context_cells": missing_primary_metric_context_cells,
         "complete": complete,
         "scientific_status": "valid_grid" if complete else "invalid_incomplete_grid",
     }
@@ -209,10 +279,18 @@ def write_completeness_csv(path: Path, report: dict[str, Any]) -> None:
         ("missing_cells", "missing_cell"),
         ("extra_unexpected_cells", "unexpected_cell"),
         ("missing_primary_metric_cells", "missing_primary_metric"),
+        ("missing_context_cells", "missing_context_cell"),
+        ("extra_unexpected_context_cells", "unexpected_context_cell"),
+        ("missing_primary_metric_context_cells", "missing_primary_metric_context"),
     ):
         for cell in report.get(key, []) or []:
-            train_method, test_set = cell.split(" on ", 1) if " on " in cell else (cell, "")
-            issue_rows.append({"issue": issue_type, "train_method": train_method, "test_set": test_set, "cell_id": cell})
+            cell_text = str(cell)
+            if " :: " in cell_text:
+                _pair_id, cell_body = cell_text.split(" :: ", 1)
+            else:
+                cell_body = cell_text
+            train_method, test_set = cell_body.split(" on ", 1) if " on " in cell_body else (cell_body, "")
+            issue_rows.append({"issue": issue_type, "train_method": train_method, "test_set": test_set, "cell_id": cell_text})
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["issue", "train_method", "test_set", "cell_id"])
@@ -312,6 +390,7 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
         rows.append(
             {
                 "experiment_id": experiment_id,
+                "pair_id": manifest.get("pair_id"),
                 "train_method": manifest.get("train_method"),
                 "test_set": manifest.get("test_set"),
                 "test_method": manifest.get("test_method"),

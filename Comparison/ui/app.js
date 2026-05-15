@@ -85,6 +85,179 @@ const LOG_POLL_LIMIT = 2000;
 const POLL_INTERVAL_MS = 1200;
 const POLL_ERROR_TOAST_INTERVAL_MS = 30000;
 
+const METRIC_HELP = {
+  low_energy_rmse_eV: {
+    label: "Low-energy RMSE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\operatorname{RMSE}^{(s)}_S,\\quad \\operatorname{RMSE}_S=\\sqrt{\\frac{1}{|S|}\\sum_{i\\in S}(\\varepsilon^{pred}_i-\\varepsilon^{ref}_i)^2}",
+    description: "Raiz del error cuadratico medio entre autovalores predichos y referencia en la ventana de baja energia.",
+    purpose: "Resume la fidelidad del espectro en la zona que suele dominar comparaciones quimicas y de estructura electronica.",
+    direction: "Menor es mejor; al cuadrar los errores penaliza mas los fallos grandes.",
+  },
+  fermi_window_rmse_eV: {
+    label: "Fermi-window RMSE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\operatorname{RMSE}^{(s)}_F,\\quad \\operatorname{RMSE}_F=\\sqrt{\\frac{1}{N_F}\\sum_{|\\varepsilon^{ref}_i-E_F|\\le w}(\\varepsilon^{pred}_i-\\varepsilon^{ref}_i)^2}",
+    description: "RMSE de autovalores dentro de la ventana alrededor del nivel de Fermi.",
+    purpose: "Sirve para vigilar estados cercanos al borde de ocupacion, donde pequenos errores pueden cambiar propiedades electronicas.",
+    direction: "Menor es mejor; si no hay estados en la ventana se marca como no disponible y se usa el diagnostico frontier aparte.",
+  },
+  frontier_window_rmse_eV: {
+    label: "Frontier RMSE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\operatorname{RMSE}^{(s)}_{frontier},\\quad \\operatorname{RMSE}_{frontier}=\\sqrt{\\operatorname{mean}(e_{HOMO}^2,e_{LUMO}^2)}",
+    description: "RMSE en estados frontier, normalmente alrededor de HOMO/LUMO, cuando la ventana de Fermi no basta.",
+    purpose: "Mantiene un diagnostico local del borde ocupado/no ocupado incluso en sistemas con pocos niveles en la ventana de Fermi.",
+    direction: "Menor es mejor; comparalo junto al gap para entender si el borde espectral se conserva.",
+  },
+  align_global_rmse_eV: {
+    label: "Aligned global RMSE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\sqrt{\\frac{1}{N}\\sum_i((\\varepsilon^{pred}_i+\\Delta)-\\varepsilon^{ref}_i)^2},\\quad \\Delta=\\operatorname{mean}_i(\\varepsilon^{ref}_i-\\varepsilon^{pred}_i)",
+    description: "RMSE del espectro completo tras corregir un desplazamiento global entre prediccion y referencia.",
+    purpose: "Separa errores de forma espectral de un offset casi constante de energia.",
+    direction: "Menor es mejor; si baja mucho frente al RMSE global, el problema puede ser principalmente de alineamiento.",
+  },
+  global_rmse_eV: {
+    label: "Global RMSE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\sqrt{\\frac{1}{N}\\sum_i(\\varepsilon^{pred}_i-\\varepsilon^{ref}_i)^2}",
+    description: "RMSE sobre el conjunto global de autovalores comparables.",
+    purpose: "Da una lectura amplia del error espectral total, sin concentrarse solo en baja energia o Fermi.",
+    direction: "Menor es mejor.",
+  },
+  gap_abs_error_eV: {
+    label: "Gap absolute error",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s |g^{pred}_s-g^{ref}_s|,\\quad g=\\varepsilon_{LUMO}-\\varepsilon_{HOMO}",
+    description: "Error absoluto del gap HOMO-LUMO o gap electronico equivalente frente a la referencia.",
+    purpose: "Ayuda a saber si el modelo conserva separaciones energeticas clave entre estados ocupados y no ocupados.",
+    direction: "Menor es mejor; un valor bajo indica que el tamano del gap se reproduce mejor.",
+  },
+  relative_frobenius_union: {
+    label: "Relative Frobenius",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\frac{\\|H^{pred}-H^{ref}\\|_{F,union}}{\\|H^{ref}\\|_F},\\quad \\|A\\|_F=\\sqrt{\\sum_{ij}|a_{ij}|^2}",
+    description: "Norma Frobenius relativa del error matricial, calculada como energia cuadratica acumulada en la matriz.",
+    purpose: "Mide fidelidad global del Hamiltoniano o matriz sparse antes de mirar sus consecuencias espectrales.",
+    direction: "Menor es mejor; es sensible a errores repartidos por muchos elementos y a errores grandes.",
+  },
+  mae_ref_eV: {
+    label: "MAE ref",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\frac{1}{|R|}\\sum_{ij\\in R}|H^{pred}_{ij}-H^{ref}_{ij}|",
+    description: "Error absoluto medio frente a la referencia en elementos de matriz o valores escalares comparables.",
+    purpose: "Ofrece una lectura robusta del error tipico porque promedia magnitudes absolutas sin cuadrarlas.",
+    direction: "Menor es mejor.",
+  },
+  support_f1: {
+    label: "Support F1",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s F_1^{(s)},\\quad F_1=\\frac{2\\,\\mathrm{precision}\\,\\mathrm{recall}}{\\mathrm{precision}+\\mathrm{recall}}",
+    description: "F1 sobre el soporte sparse: combina precision y recall para entradas no nulas o activas.",
+    purpose: "Evalua si el modelo conserva donde existe acoplamiento/matriz activa, no solo el valor numerico de lo predicho.",
+    direction: "Mayor es mejor; 1 es perfecto y 0 es el peor caso.",
+  },
+  dos_wasserstein_eV: {
+    label: "DOS Wasserstein-1",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\int |\\operatorname{CDF}_{ref}(E)-\\operatorname{CDF}_{pred}(E)|\\,dE",
+    description: "Distancia Wasserstein-1 entre densidades de estados predicha y de referencia.",
+    purpose: "Cuantifica cuanta masa espectral habria que desplazar en energia para transformar una DOS en la otra.",
+    direction: "Menor es mejor; cero indica distribuciones DOS indistinguibles en esta metrica.",
+  },
+  dos_ks_statistic: {
+    label: "DOS KS statistic",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\max_E |\\operatorname{CDF}_{ref}(E)-\\operatorname{CDF}_{pred}(E)|",
+    description: "Maxima separacion entre distribuciones acumuladas de DOS predicha y referencia.",
+    purpose: "Detecta diferencias de forma entre distribuciones, complementando la distancia Wasserstein.",
+    direction: "Menor es mejor; valores grandes apuntan a distribuciones acumuladas mas distintas.",
+  },
+  pipeline_elapsed_seconds: {
+    label: "Pipeline elapsed seconds",
+    formula: "t_{elapsed}=t_{finished}-t_{started}",
+    description: "Tiempo total registrado para una ejecucion o grupo de ejecuciones.",
+    purpose: "Permite comparar coste computacional frente a calidad de metrica.",
+    direction: "Menor es mejor si la precision es comparable.",
+  },
+};
+
+const PLOT_HELP_BY_ID = {
+  "plot-fermi": {
+    title: "Error Fermi-window",
+    metricKey: "fermi_window_rmse_eV",
+  },
+  "plot-low-energy": {
+    title: "Low-energy eigenvalues",
+    metricKey: "low_energy_rmse_eV",
+  },
+  "plot-sparse": {
+    title: "Error sparse matricial",
+    metricKey: "relative_frobenius_union",
+  },
+  "plot-dos": {
+    title: "Distancia DOS total",
+    metricKey: "dos_wasserstein_eV",
+  },
+  "plot-gap": {
+    title: "Error de gap",
+    metricKey: "gap_abs_error_eV",
+  },
+  "plot-frontier": {
+    title: "Frontier window",
+    metricKey: "frontier_window_rmse_eV",
+  },
+  "plot-aligned": {
+    title: "Spectral aligned RMSE",
+    metricKey: "align_global_rmse_eV",
+  },
+  "plot-box": {
+    title: "Distribucion Fermi/frontier",
+    metric: "Fermi-window RMSE por muestra",
+    formula: "\\operatorname{box}\\left(\\operatorname{RMSE}^{(s)}_F\\right);\\quad \\text{fallback } \\operatorname{RMSE}^{(s)}_{frontier}\\text{ si Fermi no esta disponible}",
+    description: "Distribucion por muestra del RMSE en ventana de Fermi, con fallback frontier cuando Fermi no esta disponible.",
+    purpose: "Sirve para ver dispersion, outliers y estabilidad de cada metodo, no solo el promedio.",
+    direction: "Cajas mas bajas y compactas son mejores; puntos altos senalan muestras dificiles.",
+  },
+  "plot-scatter": {
+    title: "Sparse vs spectral",
+    metric: "Relative Frobenius vs global spectral RMSE",
+    formula: "x=\\operatorname{mean}_s(\\text{relative Frobenius}),\\quad y=\\operatorname{mean}_s(\\text{global RMSE})",
+    description: "Relaciona error matricial con error espectral global para cada run.",
+    purpose: "Ayuda a detectar si mejorar la matriz tambien mejora los autovalores, o si hay desacople entre ambas cosas.",
+    direction: "El cuadrante inferior izquierdo es el deseable: bajo error matricial y bajo error espectral.",
+  },
+  "plot-sweeps": {
+    title: "Sensitivity sweeps",
+    metric: "Support threshold RMSE y DOS sigma W1",
+    formula: "\\text{cada punto recalcula } RMSE=\\sqrt{\\operatorname{mean}(e^2)}\\text{ o } W_1=\\int |\\operatorname{CDF}_{ref}-\\operatorname{CDF}_{pred}|\\,dE",
+    description: "Muestra como cambian metricas al variar umbrales de soporte sparse o suavizado sigma de la DOS.",
+    purpose: "Sirve para comprobar robustez: una conclusion fiable no deberia depender de un unico umbral arbitrario.",
+    direction: "Curvas mas bajas y estables suelen indicar comportamiento mas robusto.",
+  },
+  "plot-heatmap": {
+    title: "Resumen compacto de metricas",
+    metric: "MAE, Frobenius, Support F1, RMSE, gap, DOS W1 y tiempo",
+    formula: "z=\\frac{x-\\min(m)}{\\max(m)-\\min(m)},\\quad \\text{si higher-is-better: } z\\leftarrow 1-z",
+    description: "Mapa normalizado por metrica para comparar varias senales en una sola vista.",
+    purpose: "Ayuda a localizar compromisos: buen espectro, buena matriz, buen soporte sparse y coste razonable.",
+    direction: "Verde es mejor dentro de cada columna; Support F1 invierte la escala porque ahi mayor es mejor.",
+  },
+};
+
+const CROSS_PLOT_HELP_BY_ID = {
+  "plot-cross-heatmap": {
+    title: "Cross-evaluation heatmap",
+    purpose: "Compara cada metodo entrenado contra test sets congelados para medir generalizacion cruzada.",
+    direction: "Celdas mas bajas son mejores para metricas de error; las celdas No metric no se sustituyen por otra metrica.",
+  },
+  "plot-learning": {
+    title: "Learning curves",
+    purpose: "Muestra como cambia la metrica seleccionada al aumentar el tamano de dataset.",
+    direction: "Pendientes descendentes indican que mas datos ayudan para ese metodo/test set.",
+  },
+  "plot-compute": {
+    title: "Metric vs total compute time",
+    purpose: "Cruza calidad con coste para elegir configuraciones que compensen computacionalmente.",
+    direction: "Busca puntos hacia abajo y a la izquierda: menor error y menor tiempo.",
+  },
+  "plot-winner": {
+    title: "Winner map",
+    purpose: "Resume que metodo gana para cada combinacion de test/dataset usando la metrica seleccionada.",
+    direction: "El ganador es el menor valor si la metrica es de error; revisa empates, No metric y warnings antes de concluir.",
+  },
+};
+
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
@@ -2582,13 +2755,29 @@ function missingFermiSummary(runs) {
   return pieces.length ? ` | ${pieces.join(" | ")}` : "";
 }
 
-function groupedRuns(runs) {
+function runTrainingGroupLabel(run) {
+  if (run?.training_plan_label) return run.training_plan_label;
+  if (run?.training_index != null && run.training_index !== "") return `train${run.training_index}`;
+  return "";
+}
+
+function groupedRunLabel(groupKey, items) {
+  const first = items?.[0] || {};
+  const pipeline = String(first.pipeline || groupKey).split("||")[0];
+  const trainingLabel = groupKey.includes("||") ? groupKey.split("||").slice(1).join("||") : "";
+  return trainingLabel ? `${pipelineLabel(pipeline)} · ${trainingLabel}` : pipelineLabel(pipeline);
+}
+
+function groupedRuns(runs, options = {}) {
   const groups = new Map();
+  const includeTrainingContext = Boolean(options.includeTrainingContext);
   for (const run of runs) {
-    if (!groups.has(run.pipeline)) {
-      groups.set(run.pipeline, []);
+    const trainingContext = includeTrainingContext ? runTrainingGroupLabel(run) : "";
+    const key = trainingContext ? `${run.pipeline}||${trainingContext}` : run.pipeline;
+    if (!groups.has(key)) {
+      groups.set(key, []);
     }
-    groups.get(run.pipeline).push(run);
+    groups.get(key).push(run);
   }
   for (const items of groups.values()) {
     items.sort((a, b) => a.dataset_size - b.dataset_size || String(a.run_id).localeCompare(String(b.run_id)));
@@ -2599,8 +2788,8 @@ function groupedRuns(runs) {
 function lineTraces(runs, group, metrics) {
   const traces = [];
   let traceIndex = 0;
-  for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelineLabel(pipeline);
+  for (const [groupKey, items] of groupedRuns(runs, { includeTrainingContext: true })) {
+    const label = groupedRunLabel(groupKey, items);
     for (const metric of metrics) {
       const points = items
         .map((run) => ({ x: run.dataset_size, y: metricValue(run, group, metric.key), text: run.training_tag || run.run_id }))
@@ -2608,7 +2797,7 @@ function lineTraces(runs, group, metrics) {
       if (!points.length) continue;
       const name = metrics.length > 1 ? `${label} · ${metric.label}` : label;
       const color = plotColor(traceIndex);
-      const legendgroup = `${pipeline}-${metric.key}`;
+      const legendgroup = `${groupKey}-${metric.key}`;
       addFitTraces(traces, points, name, color, { legendgroup });
       traces.push({
         type: "scatter",
@@ -2671,6 +2860,117 @@ function plotNode(id) {
   return typeof id === "string" ? document.getElementById(id) : id;
 }
 
+function metricHelp(metricKey) {
+  const key = String(metricKey || "").trim();
+  if (METRIC_HELP[key]) return METRIC_HELP[key];
+  return {
+    label: key || "Selected metric",
+    formula: "\\bar{m}_{group}=\\operatorname{mean}_{\\text{finite rows}}(m)",
+    description: "Metrica seleccionada en la tabla de resultados/cross-evaluation.",
+    purpose: "Sirve para comparar los runs con el mismo criterio numerico.",
+    direction: "Interpreta la direccion segun la definicion de la metrica en el experimento.",
+  };
+}
+
+function latexText(value) {
+  return String(value || "").replace(/[{}\\]/g, "");
+}
+
+function plotInfoFor(plotId) {
+  const crossInfo = CROSS_PLOT_HELP_BY_ID[plotId];
+  if (crossInfo) {
+    const metric = selectedCrossMetric();
+    const help = metricHelp(metric);
+    return {
+      title: crossInfo.title,
+      metric: help.label,
+      formula: `\\bar{m}_{group}=\\operatorname{mean}_{\\text{finite rows}}(m),\\quad m=\\text{${latexText(help.label || metric)}}`,
+      description: help.description,
+      purpose: crossInfo.purpose,
+      direction: crossInfo.direction || help.direction,
+    };
+  }
+  const info = PLOT_HELP_BY_ID[plotId];
+  if (!info) return null;
+  if (info.metricKey) {
+    const help = metricHelp(info.metricKey);
+    return {
+      title: info.title,
+      metric: help.label,
+      formula: help.formula,
+      description: help.description,
+      purpose: help.purpose,
+      direction: help.direction,
+    };
+  }
+  return info;
+}
+
+function installPlotInfoBubble(id) {
+  const node = plotNode(id);
+  if (!node) return;
+  node.querySelectorAll(":scope > .plot-info-bubble").forEach((bubble) => bubble.remove());
+  const info = plotInfoFor(node.id);
+  if (!info) return;
+
+  const bubble = document.createElement("div");
+  bubble.className = "plot-info-bubble";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "plot-info-button";
+  button.textContent = "i";
+  button.setAttribute("aria-label", `Informacion de metrica: ${info.title}`);
+
+  const popover = document.createElement("div");
+  popover.className = "plot-info-popover";
+  popover.id = `${node.id}-metric-info`;
+  popover.setAttribute("role", "tooltip");
+  button.setAttribute("aria-describedby", popover.id);
+
+  const heading = document.createElement("h4");
+  heading.textContent = info.title;
+  popover.appendChild(heading);
+
+  const details = document.createElement("dl");
+  [
+    ["Metrica", info.metric],
+    ["Formula", info.formula],
+    ["Que mide", info.description],
+    ["Para que sirve", info.purpose],
+    ["Como leerlo", info.direction],
+  ].forEach(([label, value]) => {
+    if (!value) return;
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const definition = document.createElement("dd");
+    if (label === "Formula") {
+      const formula = document.createElement("div");
+      formula.className = "plot-info-formula";
+      formula.textContent = `\\[${value}\\]`;
+      definition.appendChild(formula);
+    } else {
+      definition.textContent = value;
+    }
+    details.append(term, definition);
+  });
+  popover.appendChild(details);
+
+  bubble.append(button, popover);
+  node.appendChild(bubble);
+  typesetPlotInfoMath(popover);
+}
+
+function typesetPlotInfoMath(node) {
+  if (!window.MathJax?.typesetPromise) {
+    window.addEventListener("load", () => typesetPlotInfoMath(node), { once: true });
+    return;
+  }
+  window.MathJax.typesetPromise([node]).catch((error) => {
+    console.warn("MathJax could not render plot formula", error);
+  });
+}
+
 function resizePlot(id) {
   const node = plotNode(id);
   if (!node || !window.Plotly?.Plots?.resize) return;
@@ -2704,7 +3004,10 @@ function renderPlot(id, traces, layout, config = {}) {
     displaylogo: false,
     ...config,
   };
-  Plotly.react(node, traces, nextLayout, nextConfig).then(() => schedulePlotResize(node));
+  Plotly.react(node, traces, nextLayout, nextConfig).then(() => {
+    installPlotInfoBubble(node);
+    schedulePlotResize(node);
+  });
 }
 
 function renderEmptyPlot(id, title, message, yTitle = "") {

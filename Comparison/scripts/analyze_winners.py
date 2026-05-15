@@ -346,8 +346,14 @@ def invalid_grid_recommendation(
     primary_metric: str,
     base_recommendation: dict[str, Any],
 ) -> dict[str, Any]:
-    missing_required = [str(cell) for cell in report.get("missing_cells") or []]
-    missing_primary = [str(cell) for cell in report.get("missing_primary_metric_cells") or []]
+    missing_required = [
+        *(str(cell) for cell in report.get("missing_cells") or []),
+        *(str(cell) for cell in report.get("missing_context_cells") or []),
+    ]
+    missing_primary = [
+        *(str(cell) for cell in report.get("missing_primary_metric_cells") or []),
+        *(str(cell) for cell in report.get("missing_primary_metric_context_cells") or []),
+    ]
     missing_cells = sorted(dict.fromkeys([*missing_required, *missing_primary]))
     recommendation = {
         "status": "invalid_incomplete_grid",
@@ -358,9 +364,10 @@ def invalid_grid_recommendation(
         "missing_cells": missing_cells,
         "missing_required_cells": missing_required,
         "missing_primary_metric_cells": missing_primary,
-        "extra_unexpected_cells": report.get("extra_unexpected_cells")
-        or report.get("extra_cells")
-        or [],
+        "extra_unexpected_cells": [
+            *(report.get("extra_unexpected_cells") or report.get("extra_cells") or []),
+            *(report.get("extra_unexpected_context_cells") or report.get("extra_context_cells") or []),
+        ],
         "complete": False,
         "cross_evaluation_completeness": report,
         "blocked_recommendation_status": base_recommendation.get("status"),
@@ -2258,10 +2265,14 @@ def build_dataset_size_thresholds_vs_md(
     }
     if completeness_invalid:
         summary["reason"] = "Incomplete cross-evaluation grid"
-        summary["missing_cells"] = list((completeness_report or {}).get("missing_cells") or [])
-        summary["missing_primary_metric_cells"] = list(
-            (completeness_report or {}).get("missing_primary_metric_cells") or []
-        )
+        summary["missing_cells"] = [
+            *((completeness_report or {}).get("missing_cells") or []),
+            *((completeness_report or {}).get("missing_context_cells") or []),
+        ]
+        summary["missing_primary_metric_cells"] = [
+            *((completeness_report or {}).get("missing_primary_metric_cells") or []),
+            *((completeness_report or {}).get("missing_primary_metric_context_cells") or []),
+        ]
     return threshold_rows, summary
 
 
@@ -2534,10 +2545,14 @@ def build_compute_budget_thresholds_vs_md(
     }
     if completeness_invalid:
         summary["reason"] = "Incomplete cross-evaluation grid"
-        summary["missing_cells"] = list((completeness_report or {}).get("missing_cells") or [])
-        summary["missing_primary_metric_cells"] = list(
-            (completeness_report or {}).get("missing_primary_metric_cells") or []
-        )
+        summary["missing_cells"] = [
+            *((completeness_report or {}).get("missing_cells") or []),
+            *((completeness_report or {}).get("missing_context_cells") or []),
+        ]
+        summary["missing_primary_metric_cells"] = [
+            *((completeness_report or {}).get("missing_primary_metric_cells") or []),
+            *((completeness_report or {}).get("missing_primary_metric_context_cells") or []),
+        ]
     return threshold_rows, summary
 
 
@@ -2866,9 +2881,13 @@ def build_final_recommendation(
     baseline = METHOD_MD
     challengers = ordered_challengers(methods)
     completeness_report = completeness_report or {}
-    report_missing_required = [str(cell) for cell in completeness_report.get("missing_cells") or []]
+    report_missing_required = [
+        *(str(cell) for cell in completeness_report.get("missing_cells") or []),
+        *(str(cell) for cell in completeness_report.get("missing_context_cells") or []),
+    ]
     report_missing_primary = [
-        str(cell) for cell in completeness_report.get("missing_primary_metric_cells") or []
+        *(str(cell) for cell in completeness_report.get("missing_primary_metric_cells") or []),
+        *(str(cell) for cell in completeness_report.get("missing_primary_metric_context_cells") or []),
     ]
     missing_required = sorted(
         dict.fromkeys([*report_missing_required, *legacy_recommendation.get("missing_required_cells", [])])
