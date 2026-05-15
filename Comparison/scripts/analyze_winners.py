@@ -25,7 +25,15 @@ from method_registry import normalize_method_id, normalize_test_set_id
 METHOD_MD = "md"
 METHOD_ATOM = "siesta_fc_cartesian"
 DEFAULT_BINARY_TEST_SETS = {"test_md", "test_siesta_fc_cartesian", "test_mixed"}
-METHOD_CONTEXT_FIELDS = ("dataset_size", "dataset_label", "recipe_hash", "result_dir")
+METHOD_CONTEXT_FIELDS = (
+    "dataset_size",
+    "dataset_label",
+    "recipe_hash",
+    "result_dir",
+    "training_tag",
+    "training_plan_label",
+    "training_plan_settings",
+)
 TIMING_FIELDS = (
     "total_time_seconds",
     "siesta_time_seconds",
@@ -44,10 +52,34 @@ METADATA_COLUMNS = {
     "dataset_size",
     "train_dataset_size",
     "dataset_size_by_method",
+    "dataset_label_by_method",
+    "recipe_id_by_method",
+    "recipe_label_by_method",
+    "recipe_set_hash_by_method",
+    "training_tag_by_method",
+    "training_plan_label_by_method",
+    "training_plan_settings_by_method",
     "md_dataset_size",
     "atom_dataset_size",
     "md_dataset_label",
     "atom_dataset_label",
+    "random_dataset_size",
+    "random_dataset_label",
+    "train_dataset_label",
+    "train_training_tag",
+    "train_training_index",
+    "train_training_settings",
+    "train_training_plan_index",
+    "train_training_plan_label",
+    "train_training_plan_settings",
+    "train_training_plan_source_dataset_label",
+    "training_tag",
+    "training_index",
+    "training_settings",
+    "training_plan_index",
+    "training_plan_label",
+    "training_plan_settings",
+    "training_plan_source_dataset_label",
     "compute_budget_mode",
     "md_siesta_reference_count",
     "atomdisp_siesta_reference_count",
@@ -57,6 +89,7 @@ METADATA_COLUMNS = {
     "siesta_settings_warning",
     "model_config_hash",
     "model_config_warning",
+    "training_plan_settings_warning",
     "basis_pseudopotential_warning",
     "leakage_warning",
     "leakage_scientific_status",
@@ -698,6 +731,8 @@ def method_mapping_json(row: dict[str, Any], column: str) -> str | None:
 def normalize_context_value(value: Any) -> Any:
     if value in (None, "", False):
         return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
     if finite(value):
         number = float(value)
         return int(number) if number.is_integer() else number
@@ -1172,10 +1207,16 @@ def build_nway_method_summary(
                 "dataset_label_by_method": method_context_mapping_json(first_row, "dataset_label"),
                 "recipe_hash_by_method": method_context_mapping_json(first_row, "recipe_hash"),
                 "result_dir_by_method": method_context_mapping_json(first_row, "result_dir"),
+                "training_tag_by_method": method_context_mapping_json(first_row, "training_tag"),
+                "training_plan_label_by_method": method_context_mapping_json(first_row, "training_plan_label"),
+                "training_plan_settings_by_method": method_context_mapping_json(first_row, "training_plan_settings"),
                 "dataset_label": mapped_or_legacy_method_value(first_row, "dataset_label", method),
                 "recipe_id": mapped_or_legacy_method_value(first_row, "recipe_id", method),
                 "recipe_hash": mapped_or_legacy_method_value(first_row, "recipe_hash", method),
                 "result_dir": mapped_or_legacy_method_value(first_row, "result_dir", method),
+                "training_tag": mapped_or_legacy_method_value(first_row, "training_tag", method),
+                "training_plan_label": mapped_or_legacy_method_value(first_row, "training_plan_label", method),
+                "training_plan_settings": mapped_or_legacy_method_value(first_row, "training_plan_settings", method),
                 "warning_status": status,
                 "severe_warnings": " | ".join(warnings),
                 "timing_fields_available": ",".join(timing_fields_available),
@@ -1735,6 +1776,12 @@ def build_pairwise_vs_baseline(
                         or challenger.get("recipe_hash_by_method"),
                         "result_dir_by_method": baseline.get("result_dir_by_method")
                         or challenger.get("result_dir_by_method"),
+                        "training_tag_by_method": baseline.get("training_tag_by_method")
+                        or challenger.get("training_tag_by_method"),
+                        "training_plan_label_by_method": baseline.get("training_plan_label_by_method")
+                        or challenger.get("training_plan_label_by_method"),
+                        "training_plan_settings_by_method": baseline.get("training_plan_settings_by_method")
+                        or challenger.get("training_plan_settings_by_method"),
                         "baseline_method": baseline_method,
                         "challenger_method": challenger_method,
                         "test_set": test_set,
@@ -1763,6 +1810,12 @@ def build_pairwise_vs_baseline(
                         "challenger_recipe_hash": challenger.get("recipe_hash"),
                         "baseline_result_dir": baseline.get("result_dir"),
                         "challenger_result_dir": challenger.get("result_dir"),
+                        "baseline_training_tag": baseline.get("training_tag"),
+                        "challenger_training_tag": challenger.get("training_tag"),
+                        "baseline_training_plan_label": baseline.get("training_plan_label"),
+                        "challenger_training_plan_label": challenger.get("training_plan_label"),
+                        "baseline_training_plan_settings": baseline.get("training_plan_settings"),
+                        "challenger_training_plan_settings": challenger.get("training_plan_settings"),
                         "baseline_n_rows": baseline.get("n_rows"),
                         "challenger_n_rows": challenger.get("n_rows"),
                         "baseline_n_seeds": baseline.get("n_seeds"),
@@ -2040,6 +2093,15 @@ def dataset_size_threshold_row(
         "dataset_label_by_method": representative.get("dataset_label_by_method"),
         "recipe_hash_by_method": representative.get("recipe_hash_by_method"),
         "result_dir_by_method": representative.get("result_dir_by_method"),
+        "training_tag_by_method": representative.get("training_tag_by_method"),
+        "training_plan_label_by_method": representative.get("training_plan_label_by_method"),
+        "training_plan_settings_by_method": representative.get("training_plan_settings_by_method"),
+        "challenger_training_tag": representative.get("challenger_training_tag"),
+        "baseline_training_tag": representative.get("baseline_training_tag"),
+        "challenger_training_plan_label": representative.get("challenger_training_plan_label"),
+        "baseline_training_plan_label": representative.get("baseline_training_plan_label"),
+        "challenger_training_plan_settings": representative.get("challenger_training_plan_settings"),
+        "baseline_training_plan_settings": representative.get("baseline_training_plan_settings"),
         "n_seeds": representative.get("seed_stability_valid_n_seeds"),
         "valid_seed_count": representative.get("seed_stability_valid_n_seeds"),
         "seeds": representative.get("seed_stability_valid_seeds"),
@@ -2270,6 +2332,15 @@ def compute_budget_threshold_row(
         "dataset_label_by_method": representative.get("dataset_label_by_method"),
         "recipe_hash_by_method": representative.get("recipe_hash_by_method"),
         "result_dir_by_method": representative.get("result_dir_by_method"),
+        "training_tag_by_method": representative.get("training_tag_by_method"),
+        "training_plan_label_by_method": representative.get("training_plan_label_by_method"),
+        "training_plan_settings_by_method": representative.get("training_plan_settings_by_method"),
+        "challenger_training_tag": representative.get("challenger_training_tag"),
+        "baseline_training_tag": representative.get("baseline_training_tag"),
+        "challenger_training_plan_label": representative.get("challenger_training_plan_label"),
+        "baseline_training_plan_label": representative.get("baseline_training_plan_label"),
+        "challenger_training_plan_settings": representative.get("challenger_training_plan_settings"),
+        "baseline_training_plan_settings": representative.get("baseline_training_plan_settings"),
         "n_seeds": representative.get("seed_stability_valid_n_seeds"),
         "valid_seed_count": representative.get("seed_stability_valid_n_seeds"),
         "seeds": representative.get("seed_stability_valid_seeds"),

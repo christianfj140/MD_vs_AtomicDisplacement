@@ -284,6 +284,79 @@ def parse_reusable_dataset_ids(value: Any) -> list[str]:
     return ids
 
 
+def planned_dataset_target_id(method_id: Any, recipe_id: Any, occurrence: int = 1) -> str:
+    method = normalize_method_id(method_id, allow_unknown=True)
+    recipe = str(recipe_id or "").strip()
+    if not recipe:
+        raise RuntimeError("dataset target recipe_id vacio.")
+    base = f"{method}:{recipe}"
+    return base if int(occurrence) <= 1 else f"{base}#{int(occurrence)}"
+
+
+def parse_dataset_targets(value: Any) -> list[dict[str, Any]]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        raw_targets: list[Any] = [item.strip() for item in value.replace(";", ",").split(",")]
+    elif isinstance(value, list):
+        raw_targets = value
+    else:
+        raise RuntimeError("dataset_targets debe ser una lista o texto separado por comas.")
+    targets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw_target in enumerate(raw_targets):
+        if isinstance(raw_target, dict):
+            target_id = parse_optional_text(
+                raw_target.get("target_id", raw_target.get("id")),
+                f"dataset_targets[{index}].target_id",
+            )
+            method_id = parse_optional_text(raw_target.get("method_id"), f"dataset_targets[{index}].method_id")
+            recipe_id = parse_optional_text(raw_target.get("recipe_id"), f"dataset_targets[{index}].recipe_id")
+            if target_id is None and method_id is not None and recipe_id is not None:
+                target_id = planned_dataset_target_id(method_id, recipe_id)
+            if target_id is None:
+                raise RuntimeError(
+                    f"dataset_targets[{index}] necesita target_id o method_id+recipe_id."
+                )
+            target = {
+                "target_id": target_id,
+                "method_id": normalize_method_id(method_id, allow_unknown=True) if method_id else None,
+                "recipe_id": recipe_id,
+                "dataset_label": parse_optional_text(
+                    raw_target.get("dataset_label"),
+                    f"dataset_targets[{index}].dataset_label",
+                ),
+            }
+        else:
+            target_id = str(raw_target).strip()
+            if not target_id:
+                continue
+            target = {"target_id": target_id}
+        if target["target_id"] not in seen:
+            seen.add(str(target["target_id"]))
+            targets.append(target)
+    return targets
+
+
+def validate_training_plan_for_run_mode(training_plan: list[dict[str, Any]], run_mode: str) -> None:
+    if not training_plan:
+        return
+    if run_mode == DATASET_ONLY_RUN_MODE:
+        raise RuntimeError("training_plan no esta disponible con dataset_only.")
+    for item in training_plan:
+        index = item.get("index", "?")
+        if run_mode_skips_dataset_generation(run_mode):
+            if not item.get("reusable_dataset_ids"):
+                raise RuntimeError(
+                    f"training_plan[{index}] necesita reusable_dataset_ids en train_test_metrics_plots_only."
+                )
+        elif run_mode == FULL_STRICT_RUN_MODE:
+            if not item.get("dataset_targets"):
+                raise RuntimeError(
+                    f"training_plan[{index}] necesita dataset_targets en full_strict_pipeline."
+                )
+
+
 def parse_reusable_split_policy(value: Any) -> str:
     policy = PRESERVE_ARCHIVED_SPLITS if value in (None, "") else str(value).strip().lower()
     if policy not in REUSABLE_SPLIT_POLICIES:
@@ -2373,7 +2446,7 @@ def _base_profile(
         "enable_experiment_cache": False,
         "error_policy": "fail_fast",
         "preset": preset,
-        "torch_float32_matmul_precision": "high" if accelerator != "cpu" else None,
+        "torch_float32_matmul_precision": "high",
     }
 
 
@@ -2752,9 +2825,10 @@ def parse_training_plan(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_item, dict):
             raise RuntimeError(f"training_plan[{index}] debe ser un objeto.")
         dataset_ids = parse_reusable_dataset_ids(raw_item.get("reusable_dataset_ids"))
-        if not dataset_ids:
+        dataset_targets = parse_dataset_targets(raw_item.get("dataset_targets"))
+        if not dataset_ids and not dataset_targets:
             raise RuntimeError(
-                f"training_plan[{index}].reusable_dataset_ids debe contener al menos un dataset."
+                f"training_plan[{index}] debe contener reusable_dataset_ids o dataset_targets."
             )
         settings = parse_training_settings(
             raw_item.get("training_settings", raw_item.get("settings", {}))
@@ -2783,6 +2857,7 @@ def parse_training_plan(value: Any) -> list[dict[str, Any]]:
                 "display_label": display_label,
                 "training_settings": settings,
                 "reusable_dataset_ids": dataset_ids,
+                "dataset_targets": dataset_targets,
             }
         )
     return plan
@@ -5151,10 +5226,7 @@ class ExperimentRunner:
             run_mode = parse_run_mode(run_mode)
             reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
             training_plan = parse_training_plan(training_plan)
-            if training_plan and not run_mode_skips_dataset_generation(run_mode):
-                raise RuntimeError(
-                    "training_plan solo esta disponible con train_test_metrics_plots_only."
-                )
+            validate_training_plan_for_run_mode(training_plan, run_mode)
             performance_settings = parse_performance_settings(
                 performance,
                 compute_accelerator=compute_accelerator,
@@ -5821,8 +5893,7 @@ class ExperimentRunner:
         run_mode = parse_run_mode(run_mode)
         reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
         training_plan = parse_training_plan(training_plan)
-        if training_plan and not run_mode_skips_dataset_generation(run_mode):
-            raise RuntimeError("training_plan solo esta disponible con train_test_metrics_plots_only.")
+        validate_training_plan_for_run_mode(training_plan, run_mode)
         performance_settings = parse_performance_settings(
             performance,
             compute_accelerator=compute_accelerator,
@@ -5965,11 +6036,21 @@ class ExperimentRunner:
                 )
                 return label
 
-            def add_md_task(md_spec: dict[str, Any], task_training_settings: dict[str, Any]) -> None:
+            def add_md_task(
+                md_spec: dict[str, Any],
+                task_training_settings: dict[str, Any],
+                *,
+                task_run_mode: str = run_mode,
+                source_run: dict[str, Any] | None = None,
+                target_id: str | None = None,
+            ) -> None:
                 size = int(md_spec["size"])
-                dataset_tasks.append((
-                    f"md {md_spec.get('label', f'dataset_{size}')}",
-                    lambda size=size, md_spec=md_spec, task_training_settings=task_training_settings: self._run_one(
+                label = f"md {md_spec.get('label', f'dataset_{size}')}"
+                if target_id:
+                    label = f"{label} [{target_id}]"
+
+                def run_md_task() -> dict[str, Any]:
+                    result = self._run_one(
                         "md",
                         size,
                         run_id,
@@ -5978,21 +6059,39 @@ class ExperimentRunner:
                         md_temperature_blocks=md_spec.get("temperature_blocks"),
                         split_ratios=split_ratios,
                         split_mode=split_mode,
-                        run_mode=run_mode,
+                        run_mode=task_run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
                         training_settings=task_training_settings,
                         venv_activate_path=venv_activate_path,
                         reusable_split_policy=reusable_split_policy,
-                    ),
+                        source_run=source_run,
+                    )
+                    if target_id:
+                        result["planned_dataset_target_id"] = target_id
+                    return result
+
+                dataset_tasks.append((
+                    label,
+                    run_md_task,
                 ))
 
-            def add_atom_task(atom_spec: dict[str, Any], task_training_settings: dict[str, Any]) -> None:
+            def add_atom_task(
+                atom_spec: dict[str, Any],
+                task_training_settings: dict[str, Any],
+                *,
+                task_run_mode: str = run_mode,
+                source_run: dict[str, Any] | None = None,
+                target_id: str | None = None,
+            ) -> None:
                 atom_recipe_seed = (atom_spec.get("recipe_metadata") or {}).get("seed")
                 atom_random_seed = atom_recipe_seed if atom_recipe_seed not in (None, "") else random_seed
-                dataset_tasks.append((
-                    f"atom_displacement {atom_spec['label']}",
-                    lambda atom_spec=atom_spec, atom_random_seed=atom_random_seed, task_training_settings=task_training_settings: self._run_one(
+                label = f"atom_displacement {atom_spec['label']}"
+                if target_id:
+                    label = f"{label} [{target_id}]"
+
+                def run_atom_task() -> dict[str, Any]:
+                    result = self._run_one(
                         "atom_displacement",
                         int(atom_spec["size"]),
                         run_id,
@@ -6002,16 +6101,31 @@ class ExperimentRunner:
                         split_ratios=split_ratios,
                         random_seed=atom_random_seed,
                         split_mode=split_mode,
-                        run_mode=run_mode,
+                        run_mode=task_run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
                         training_settings=task_training_settings,
                         venv_activate_path=venv_activate_path,
                         reusable_split_policy=reusable_split_policy,
-                    ),
+                        source_run=source_run,
+                    )
+                    if target_id:
+                        result["planned_dataset_target_id"] = target_id
+                    return result
+
+                dataset_tasks.append((
+                    label,
+                    run_atom_task,
                 ))
 
-            def add_random_task(random_spec: dict[str, Any], task_training_settings: dict[str, Any]) -> None:
+            def add_random_task(
+                random_spec: dict[str, Any],
+                task_training_settings: dict[str, Any],
+                *,
+                task_run_mode: str = run_mode,
+                source_run: dict[str, Any] | None = None,
+                target_id: str | None = None,
+            ) -> None:
                 random_size = int(random_spec["size"])
                 size_options = {
                     **random_cartesian_options,
@@ -6019,9 +6133,12 @@ class ExperimentRunner:
                     "n_structures": random_size,
                 }
                 size_options.pop("_dataset_specs", None)
-                dataset_tasks.append((
-                    f"random_cartesian {random_spec.get('label', f'dataset_{random_size}')}",
-                    lambda random_size=random_size, size_options=size_options, random_spec=random_spec, task_training_settings=task_training_settings: self._run_random_cartesian(
+                label = f"random_cartesian {random_spec.get('label', f'dataset_{random_size}')}"
+                if target_id:
+                    label = f"{label} [{target_id}]"
+
+                def run_random_task() -> dict[str, Any]:
+                    result = self._run_random_cartesian(
                         random_size,
                         run_id,
                         dataset_label=str(random_spec.get("label") or f"dataset_{random_size}"),
@@ -6029,16 +6146,86 @@ class ExperimentRunner:
                         split_ratios=split_ratios,
                         split_mode=split_mode,
                         random_cartesian_options=size_options,
-                        run_mode=run_mode,
+                        run_mode=task_run_mode,
                         compute_accelerator=compute_accelerator,
                         performance=performance_settings,
                         training_settings=task_training_settings,
                         venv_activate_path=venv_activate_path,
                         reusable_split_policy=reusable_split_policy,
-                    ),
+                        source_run=source_run,
+                    )
+                    if target_id:
+                        result["planned_dataset_target_id"] = target_id
+                    return result
+
+                dataset_tasks.append((
+                    label,
+                    run_random_task,
                 ))
 
-            if training_plan:
+            md_task_specs = dataset_recipes_info.get("md_dataset_specs") or [
+                {"label": fallback_dataset_label("md", index), "size": size, "recipe_metadata": None}
+                for index, size in enumerate(md_sizes)
+            ]
+            atom_runs = dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [
+                {
+                    "label": fallback_dataset_label("fc", index),
+                    "size": size,
+                    "displacements": fc_dataset_specs.get(size) if fc_dataset_specs else None,
+                }
+                for index, size in enumerate(atom_sizes)
+            ]
+            random_specs = dataset_recipes_info.get("random_cartesian_dataset_specs") or random_cartesian_options.get("_dataset_specs") or [
+                {
+                    "label": fallback_dataset_label("rc", index),
+                    "size": random_size,
+                    "options": {**random_cartesian_options, "n_structures": random_size},
+                    "recipe_metadata": None,
+                }
+                for index, random_size in enumerate(random_cartesian_sizes_from_options(random_cartesian_options))
+            ]
+
+            def add_planned_target_task(
+                target: dict[str, Any],
+                task_training_settings: dict[str, Any],
+                *,
+                plan_item: dict[str, Any] | None,
+                task_run_mode: str,
+                source_run: dict[str, Any] | None = None,
+            ) -> None:
+                spec = dict(target["spec"])
+                if plan_item is not None:
+                    spec = self._spec_with_training_plan_metadata(spec, plan_item)
+                pipeline_key = str(target["pipeline_key"])
+                target_id = str(target.get("target_id") or "")
+                if pipeline_key == "md":
+                    add_md_task(
+                        spec,
+                        task_training_settings,
+                        task_run_mode=task_run_mode,
+                        source_run=source_run,
+                        target_id=target_id,
+                    )
+                elif pipeline_key == "atom_displacement":
+                    add_atom_task(
+                        spec,
+                        task_training_settings,
+                        task_run_mode=task_run_mode,
+                        source_run=source_run,
+                        target_id=target_id,
+                    )
+                elif pipeline_key == "random_cartesian":
+                    add_random_task(
+                        spec,
+                        task_training_settings,
+                        task_run_mode=task_run_mode,
+                        source_run=source_run,
+                        target_id=target_id,
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported planned dataset target pipeline: {pipeline_key}")
+
+            if training_plan and run_mode_skips_dataset_generation(run_mode):
                 self._append(f"[UI] Training plan: {len(training_plan)} configuraciones.\n")
                 for plan_item in training_plan:
                     plan_training_settings = parse_training_settings(plan_item.get("training_settings"))
@@ -6086,35 +6273,93 @@ class ExperimentRunner:
                             self._spec_with_training_plan_metadata(random_spec, plan_item),
                             plan_training_settings,
                         )
-            else:
-                md_task_specs = dataset_recipes_info.get("md_dataset_specs") or [
-                    {"label": fallback_dataset_label("md", index), "size": size, "recipe_metadata": None}
-                    for index, size in enumerate(md_sizes)
+            elif training_plan and run_mode == FULL_STRICT_RUN_MODE:
+                planned_targets = self._planned_dataset_targets_for_specs(
+                    md_specs=md_task_specs if "md" in pipeline_keys else [],
+                    atom_specs=atom_runs if "atom_displacement" in pipeline_keys else [],
+                    random_specs=random_specs if "random_cartesian" in selected_methods else [],
+                    selected_methods=selected_methods,
+                )
+                planned_targets_by_id = {str(target["target_id"]): target for target in planned_targets}
+                manifest["planned_dataset_targets"] = [
+                    self._planned_dataset_target_public(target)
+                    for target in planned_targets
                 ]
+                for plan_item in training_plan:
+                    missing_targets = [
+                        target_id
+                        for target_id in self._training_plan_target_ids(plan_item)
+                        if target_id not in planned_targets_by_id
+                    ]
+                    if missing_targets:
+                        raise RuntimeError(
+                            f"training_plan[{plan_item.get('index')}].dataset_targets no encontrados: {missing_targets}."
+                        )
+
+                self._append(
+                    f"[UI] Training plan full strict: generando {len(planned_targets)} datasets fuente una vez.\n"
+                )
+                for target in planned_targets:
+                    add_planned_target_task(
+                        target,
+                        {},
+                        plan_item=None,
+                        task_run_mode=DATASET_ONLY_RUN_MODE,
+                    )
+                source_tasks = list(dataset_tasks)
+                dataset_tasks = []
+                source_results = self._run_dataset_tasks(
+                    source_tasks,
+                    manifest=manifest,
+                    workers=dataset_workers,
+                    error_policy=str(performance_settings.get("error_policy", "fail_fast")),
+                )
+                manifest["timing"]["counters"]["dataset_jobs"] = int(
+                    manifest["timing"]["counters"].get("dataset_jobs", 0)
+                ) + len(source_tasks)
+                source_results_by_target: dict[str, dict[str, Any]] = {}
+                manifest["generated_dataset_sources"] = []
+                for source_result in source_results:
+                    target_id = str(source_result.get("planned_dataset_target_id") or "")
+                    if not target_id:
+                        raise RuntimeError("Internal error: generated dataset source missing target id.")
+                    source_results_by_target[target_id] = source_result
+                    source_manifest_path = Path(str(source_result.get("result_dir") or "")) / "manifest.json"
+                    if source_manifest_path.exists():
+                        source_manifest_path.write_text(
+                            json.dumps(json_safe(source_result), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                            encoding="utf-8",
+                        )
+                    public_source = dict(source_result)
+                    manifest["generated_dataset_sources"].append(public_source)
+                    self._merge_run_timing(manifest, source_result)
+                    self._write_experiment_manifest(manifest)
+
+                self._append(f"[UI] Training plan: {len(training_plan)} configuraciones.\n")
+                for plan_item in training_plan:
+                    plan_training_settings = parse_training_settings(plan_item.get("training_settings"))
+                    target_ids = self._training_plan_target_ids(plan_item)
+                    self._append(
+                        "[TRAIN-PLAN] "
+                        f"{plan_item['label']}: {len(target_ids)} datasets; "
+                        f"overrides={json.dumps(json_safe(plan_training_settings), sort_keys=True)}\n"
+                    )
+                    for target_id in target_ids:
+                        add_planned_target_task(
+                            planned_targets_by_id[target_id],
+                            plan_training_settings,
+                            plan_item=plan_item,
+                            task_run_mode=FULL_STRICT_RUN_MODE,
+                            source_run=source_results_by_target[target_id],
+                        )
+            else:
                 for md_spec in (md_task_specs if "md" in pipeline_keys else []):
                     add_md_task(md_spec, training_settings)
 
-                atom_runs = dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [
-                    {
-                        "label": fallback_dataset_label("fc", index),
-                        "size": size,
-                        "displacements": fc_dataset_specs.get(size) if fc_dataset_specs else None,
-                    }
-                    for index, size in enumerate(atom_sizes)
-                ]
                 for atom_spec in (atom_runs if "atom_displacement" in pipeline_keys else []):
                     add_atom_task(atom_spec, training_settings)
 
                 if "random_cartesian" in selected_methods:
-                    random_specs = dataset_recipes_info.get("random_cartesian_dataset_specs") or random_cartesian_options.get("_dataset_specs") or [
-                        {
-                            "label": fallback_dataset_label("rc", index),
-                            "size": random_size,
-                            "options": {**random_cartesian_options, "n_structures": random_size},
-                            "recipe_metadata": None,
-                        }
-                        for index, random_size in enumerate(random_cartesian_sizes_from_options(random_cartesian_options))
-                    ]
                     for random_spec in random_specs:
                         add_random_task(random_spec, training_settings)
 
@@ -6124,7 +6369,9 @@ class ExperimentRunner:
                 workers=dataset_workers,
                 error_policy=str(performance_settings.get("error_policy", "fail_fast")),
             )
-            manifest["timing"]["counters"]["dataset_jobs"] = len(dataset_tasks)
+            manifest["timing"]["counters"]["dataset_jobs"] = int(
+                manifest["timing"]["counters"].get("dataset_jobs", 0)
+            ) + len(dataset_tasks)
             previous_by_method: dict[str, dict[str, Any]] = {}
             for result in sorted(dataset_results, key=lambda item: (str(item.get("method_id") or item.get("pipeline")), int(item.get("dataset_size") or 0), str(item.get("dataset_label") or ""))):
                 method = str(result.get("method_id") or result.get("pipeline"))
@@ -6449,6 +6696,59 @@ class ExperimentRunner:
             "random_cartesian_dataset_specs": random_specs,
         }
 
+    def _planned_dataset_targets_for_specs(
+        self,
+        *,
+        md_specs: list[dict[str, Any]],
+        atom_specs: list[dict[str, Any]],
+        random_specs: list[dict[str, Any]],
+        selected_methods: list[str],
+    ) -> list[dict[str, Any]]:
+        selected = set(selected_methods)
+        targets: list[dict[str, Any]] = []
+        occurrences: dict[tuple[str, str], int] = defaultdict(int)
+
+        def add_target(method_id: str, pipeline_key: str, spec: dict[str, Any]) -> None:
+            if method_id not in selected:
+                return
+            metadata = dict(spec.get("recipe_metadata") or {})
+            recipe_id = str(metadata.get("recipe_id") or spec.get("label") or f"{method_id}_{len(targets) + 1}")
+            occurrences[(method_id, recipe_id)] += 1
+            target_id = planned_dataset_target_id(method_id, recipe_id, occurrences[(method_id, recipe_id)])
+            targets.append(
+                {
+                    "target_id": target_id,
+                    "method_id": method_id,
+                    "pipeline_key": pipeline_key,
+                    "recipe_id": recipe_id,
+                    "dataset_label": str(spec.get("label") or metadata.get("dataset_label") or recipe_id),
+                    "dataset_size": int(spec.get("size") or metadata.get("dataset_size") or 0),
+                    "spec": spec,
+                }
+            )
+
+        for spec in md_specs:
+            add_target("md", "md", spec)
+        for spec in atom_specs:
+            add_target("siesta_fc_cartesian", "atom_displacement", spec)
+        for spec in random_specs:
+            add_target("random_cartesian", "random_cartesian", spec)
+        return targets
+
+    def _planned_dataset_target_public(self, target: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: target.get(key)
+            for key in ("target_id", "method_id", "pipeline_key", "recipe_id", "dataset_label", "dataset_size")
+        }
+
+    def _training_plan_target_ids(self, plan_item: dict[str, Any]) -> list[str]:
+        ids: list[str] = []
+        for target in plan_item.get("dataset_targets") or []:
+            target_id = str((target or {}).get("target_id") or "").strip()
+            if target_id and target_id not in ids:
+                ids.append(target_id)
+        return ids
+
     def _training_plan_dataset_label(
         self,
         dataset_label: Any,
@@ -6481,6 +6781,7 @@ class ExperimentRunner:
                 "training_plan_display_label": plan_item.get("display_label"),
                 "training_plan_settings": dict(plan_item.get("training_settings") or {}),
                 "training_plan_reusable_dataset_ids": list(plan_item.get("reusable_dataset_ids") or []),
+                "training_plan_dataset_targets": list(plan_item.get("dataset_targets") or []),
                 "training_plan_source_dataset_label": original_label,
             }
         )
@@ -7071,6 +7372,7 @@ class ExperimentRunner:
         training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
+        source_run: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -7117,14 +7419,22 @@ class ExperimentRunner:
         if recipe_metadata and recipe_metadata.get("seed") not in (None, ""):
             prepare_metadata["seed"] = recipe_metadata.get("seed")
         original_steps = list(config.get("pipeline", {}).get("steps", []))
-        if run_mode_skips_dataset_generation(run_mode):
+        if source_run is not None or run_mode_skips_dataset_generation(run_mode):
             reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
-            source_run = self._find_existing_dataset_run(
-                key,
-                size,
-                dataset_label=dataset_label,
-                recipe_metadata=recipe_metadata,
-            )
+            reuse_context = "training-plan" if source_run is not None else "downstream-only"
+            if source_run is None:
+                source_run = self._find_existing_dataset_run(
+                    key,
+                    size,
+                    dataset_label=dataset_label,
+                    recipe_metadata=recipe_metadata,
+                )
+            else:
+                self._validate_existing_dataset_source(
+                    key,
+                    Path(str(source_run.get("dataset_dir") or "")),
+                    size,
+                )
             prepare_metadata.update(
                 self._copy_existing_dataset_to_workspace(key, source_run, workspace, size)
             )
@@ -7146,11 +7456,11 @@ class ExperimentRunner:
                     "test": rebuilt["reused_split_counts"]["test"],
                 }
                 self._append(
-                    "[UI] downstream-only: dataset reused; splits rebuilt from "
+                    f"[UI] {reuse_context}: dataset reused; splits rebuilt from "
                     f"training controls ({split_mode}, counts={rebuilt['reused_split_counts']}).\n"
                 )
             else:
-                self._append("[UI] downstream-only: preserving archived dataset splits.\n")
+                self._append(f"[UI] {reuse_context}: preserving archived dataset splits.\n")
             if key == "md":
                 self._configure_existing_md_dataset(
                     config,
@@ -7166,7 +7476,7 @@ class ExperimentRunner:
                 )
             write_yaml(config_snapshot_path, config)
             self._append(
-                "[UI] downstream-only: dataset generation skipped; "
+                f"[UI] {reuse_context}: dataset generation skipped; "
                 f"reusing {prepare_metadata['reused_dataset_dir']}.\n"
             )
             self._validate_split_manifests(key, config, size)
@@ -7306,6 +7616,7 @@ class ExperimentRunner:
         training_settings: dict[str, Any] | None = None,
         venv_activate_path: str | None = None,
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
+        source_run: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
         dataset_label = dataset_label or f"dataset_{size}"
@@ -7345,14 +7656,22 @@ class ExperimentRunner:
         self._append(f"[UI] Random Cartesian config: {random_config}\n")
         with self._lock:
             log_start = len(self._logs)
-        if run_mode_skips_dataset_generation(run_mode):
+        if source_run is not None or run_mode_skips_dataset_generation(run_mode):
             reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
-            source_run = self._find_existing_dataset_run(
-                "random_cartesian",
-                size,
-                dataset_label=dataset_label,
-                recipe_metadata=recipe_metadata,
-            )
+            reuse_context = "training-plan" if source_run is not None else "downstream-only"
+            if source_run is None:
+                source_run = self._find_existing_dataset_run(
+                    "random_cartesian",
+                    size,
+                    dataset_label=dataset_label,
+                    recipe_metadata=recipe_metadata,
+                )
+            else:
+                self._validate_existing_dataset_source(
+                    "random_cartesian",
+                    Path(str(source_run.get("dataset_dir") or "")),
+                    size,
+                )
             prepare_metadata = self._copy_existing_dataset_to_workspace(
                 "random_cartesian",
                 source_run,
@@ -7379,15 +7698,15 @@ class ExperimentRunner:
                     "test": rebuilt["reused_split_counts"]["test"],
                 }
                 self._append(
-                    "[UI] downstream-only: Random Cartesian dataset reused; splits rebuilt "
+                    f"[UI] {reuse_context}: Random Cartesian dataset reused; splits rebuilt "
                     f"from training controls ({split_mode}, counts={rebuilt['reused_split_counts']}).\n"
                 )
             else:
-                self._append("[UI] downstream-only: preserving archived Random Cartesian splits.\n")
+                self._append(f"[UI] {reuse_context}: preserving archived Random Cartesian splits.\n")
             self._configure_existing_atom_dataset(config, workspace, method_id="random_cartesian")
             write_yaml(config_snapshot_path, config)
             self._append(
-                "[UI] downstream-only: Random Cartesian dataset generation skipped; "
+                f"[UI] {reuse_context}: Random Cartesian dataset generation skipped; "
                 f"reusing {prepare_metadata['reused_dataset_dir']}.\n"
             )
             self._validate_split_manifests("atom_displacement", config, size)
@@ -7447,26 +7766,31 @@ class ExperimentRunner:
                 "generation_seconds": generation_seconds,
             }
             returncode = 0
-            if run_mode != DATASET_ONLY_RUN_MODE:
-                generation_metadata = dict(prepare_metadata)
-                prepare_metadata = self._prepare_atom_config(
-                    config,
-                    workspace,
-                    size,
-                    split_ratios,
-                    source_samples_dir=dataset_dir / "RandomCartesian_steps",
-                    method_id="random_cartesian",
-                )
-                prepare_metadata.update(
-                    {
-                        "generation_seconds": generation_metadata.get("generation_seconds"),
-                        "generated_samples": generation_metadata.get("generated_samples"),
-                        "seed": generation_metadata.get("seed"),
-                    }
-                )
+            generation_metadata = dict(prepare_metadata)
+            prepare_metadata = self._prepare_atom_config(
+                config,
+                workspace,
+                size,
+                split_ratios,
+                source_samples_dir=dataset_dir / "RandomCartesian_steps",
+                method_id="random_cartesian",
+            )
+            prepare_metadata.update(
+                {
+                    "generation_seconds": generation_metadata.get("generation_seconds"),
+                    "generated_samples": generation_metadata.get("generated_samples"),
+                    "seed": generation_metadata.get("seed"),
+                }
+            )
+            write_yaml(config_snapshot_path, config)
+            self._append("[UI] Config temporal Random Cartesian escrita para splits reutilizables.\n")
+            self._validate_split_manifests("atom_displacement", config, size)
+            if run_mode == DATASET_ONLY_RUN_MODE:
+                config["pipeline"]["steps"] = []
                 write_yaml(config_snapshot_path, config)
+                self._append("[UI] dataset_only: Random Cartesian validado; no se entrena ni predice.\n")
+            else:
                 self._append("[UI] Config temporal Random Cartesian escrita para entrenar/evaluar.\n")
-                self._validate_split_manifests("atom_displacement", config, size)
                 training_started = time.time()
                 returncode = self._run_pipeline_process(
                     spec,
@@ -8788,7 +9112,7 @@ class ExperimentRunner:
             ["md", "atom_displacement"],
         )
 
-    def _run_cross_evaluation(self, run_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    def _run_cross_evaluation_legacy_binary(self, run_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
         runs = [run for run in manifest.get("runs", []) if run.get("returncode") == 0]
         md_runs = [run for run in runs if run.get("pipeline") == "md"]
         atom_runs = [run for run in runs if run.get("pipeline") == "atom_displacement"]
@@ -9248,6 +9572,37 @@ class ExperimentRunner:
                 method: combo_by_method[method].get("recipe_set_hash")
                 for method in selected_methods
             }
+            training_tag_by_method = {
+                method: combo_by_method[method].get("training_tag")
+                for method in selected_methods
+            }
+            training_plan_label_by_method = {
+                method: combo_by_method[method].get("training_plan_label")
+                for method in selected_methods
+            }
+            training_plan_settings_by_method = {
+                method: combo_by_method[method].get("training_plan_settings")
+                or combo_by_method[method].get("training_settings")
+                for method in selected_methods
+            }
+            training_plan_settings_warning = ""
+            if any(value for value in training_plan_settings_by_method.values()):
+                settings_fingerprints = {
+                    method: json.dumps(
+                        json_safe(training_plan_settings_by_method.get(method) or {}),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                    )
+                    for method in selected_methods
+                }
+                if len(set(settings_fingerprints.values())) > 1:
+                    training_plan_settings_warning = (
+                        "Training plan settings differ across methods for this cross-evaluation pair: "
+                        + ", ".join(
+                            f"{method}={settings_fingerprints[method]}"
+                            for method in selected_methods
+                        )
+                    )
             pair_id = cross_pair_id(combo_by_method, selected_methods)
             pair_common_dir = common_root / pair_id
             build_command = [
@@ -9484,6 +9839,14 @@ class ExperimentRunner:
                     evaluation_start = time.time()
                     evaluation_summary = self._evaluate_hamiltonian_metrics(train_method, train_config, cross_result_dir)
                     evaluation_time = time.time() - evaluation_start
+                    model_config_warning = " | ".join(
+                        item
+                        for item in (
+                            manifest.get("model_config_warning", ""),
+                            training_plan_settings_warning,
+                        )
+                        if item
+                    )
                     cross_manifest = {
                         "experiment_id": run_id,
                         "pair_id": pair_id,
@@ -9497,6 +9860,9 @@ class ExperimentRunner:
                         "recipe_id_by_method": recipe_id_by_method,
                         "recipe_label_by_method": recipe_label_by_method,
                         "recipe_set_hash_by_method": recipe_set_hash_by_method,
+                        "training_tag_by_method": training_tag_by_method,
+                        "training_plan_label_by_method": training_plan_label_by_method,
+                        "training_plan_settings_by_method": training_plan_settings_by_method,
                         "recipe_set_hash": train_result.get("recipe_set_hash", ""),
                         "train_dataset_label": train_result.get("dataset_label", ""),
                         "train_recipe_id": train_result.get("recipe_id"),
@@ -9504,6 +9870,24 @@ class ExperimentRunner:
                         "train_block_id": train_result.get("block_id"),
                         "train_block_label": train_result.get("block_label"),
                         "train_generation_parameters_json": train_result.get("generation_parameters_json"),
+                        "train_training_tag": train_result.get("training_tag"),
+                        "train_training_index": train_result.get("training_index"),
+                        "train_training_settings": train_result.get("training_settings"),
+                        "train_training_plan_index": train_result.get("training_plan_index"),
+                        "train_training_plan_label": train_result.get("training_plan_label"),
+                        "train_training_plan_settings": train_result.get("training_plan_settings"),
+                        "train_training_plan_source_dataset_label": train_result.get(
+                            "training_plan_source_dataset_label"
+                        ),
+                        "training_tag": train_result.get("training_tag"),
+                        "training_index": train_result.get("training_index"),
+                        "training_settings": train_result.get("training_settings"),
+                        "training_plan_index": train_result.get("training_plan_index"),
+                        "training_plan_label": train_result.get("training_plan_label"),
+                        "training_plan_settings": train_result.get("training_plan_settings"),
+                        "training_plan_source_dataset_label": train_result.get(
+                            "training_plan_source_dataset_label"
+                        ),
                         "md_dataset_size": dataset_size_by_method.get("md"),
                         "atom_dataset_size": dataset_size_by_method.get("siesta_fc_cartesian"),
                         "random_dataset_size": dataset_size_by_method.get("random_cartesian"),
@@ -9524,7 +9908,8 @@ class ExperimentRunner:
                         "siesta_settings_hash": manifest.get("siesta_settings_hash"),
                         "siesta_settings_warning": manifest.get("siesta_settings_warning", ""),
                         "model_config_hash": manifest.get("model_config_hash"),
-                        "model_config_warning": manifest.get("model_config_warning", ""),
+                        "model_config_warning": model_config_warning,
+                        "training_plan_settings_warning": training_plan_settings_warning,
                         "basis_pseudopotential_warning": manifest.get("basis_pseudopotential_warning", ""),
                         "strict_comparison_mode": manifest.get("strict_comparison_mode", STRICT_COMPARISON_MODE),
                         "seed": train_result.get("seed"),
@@ -10019,8 +10404,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     raise RuntimeError(
                         "reusable_dataset_ids solo se puede usar con train_test_metrics_plots_only."
                     )
-                if training_plan and not run_mode_skips_dataset_generation(run_mode):
-                    raise RuntimeError("training_plan solo esta disponible con train_test_metrics_plots_only.")
+                validate_training_plan_for_run_mode(training_plan, run_mode)
                 selected_pipeline_keys = pipeline_keys_for_methods(selected_methods)
                 method_options = payload.get("method_options") or {}
                 method_random_options = (
@@ -10060,10 +10444,11 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 )
                 training_settings = parse_training_settings(payload.get("training_settings"))
                 training_plan_dataset_ids: list[str] = []
-                for plan_item in training_plan:
-                    for dataset_id in plan_item["reusable_dataset_ids"]:
-                        if dataset_id not in training_plan_dataset_ids:
-                            training_plan_dataset_ids.append(dataset_id)
+                if run_mode_skips_dataset_generation(run_mode):
+                    for plan_item in training_plan:
+                        for dataset_id in plan_item["reusable_dataset_ids"]:
+                            if dataset_id not in training_plan_dataset_ids:
+                                training_plan_dataset_ids.append(dataset_id)
                 effective_reusable_dataset_ids = (
                     training_plan_dataset_ids if training_plan else reusable_dataset_ids
                 )

@@ -71,6 +71,9 @@ def canonical_manifest_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
         "recipe_id_by_method",
         "recipe_label_by_method",
         "recipe_set_hash_by_method",
+        "training_tag_by_method",
+        "training_plan_label_by_method",
+        "training_plan_settings_by_method",
     ):
         normalized[key] = normalize_method_mapping(normalized.get(key))
     return normalized
@@ -294,6 +297,7 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
             manifest.get("frozen_test_warning"),
             manifest.get("siesta_settings_warning"),
             manifest.get("model_config_warning"),
+            manifest.get("training_plan_settings_warning"),
             manifest.get("basis_pseudopotential_warning"),
             manifest.get("checkpoint_selection_warning"),
             manifest.get("reproducibility_warning"),
@@ -318,6 +322,9 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "recipe_id_by_method": json_text(manifest.get("recipe_id_by_method")),
                 "recipe_label_by_method": json_text(manifest.get("recipe_label_by_method")),
                 "recipe_set_hash_by_method": json_text(manifest.get("recipe_set_hash_by_method")),
+                "training_tag_by_method": json_text(manifest.get("training_tag_by_method")),
+                "training_plan_label_by_method": json_text(manifest.get("training_plan_label_by_method")),
+                "training_plan_settings_by_method": json_text(manifest.get("training_plan_settings_by_method")),
                 "recipe_set_hash": manifest.get("recipe_set_hash"),
                 "train_dataset_label": manifest.get("train_dataset_label"),
                 "train_recipe_id": manifest.get("train_recipe_id"),
@@ -325,6 +332,30 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "train_block_id": manifest.get("train_block_id"),
                 "train_block_label": manifest.get("train_block_label"),
                 "train_generation_parameters_json": manifest.get("train_generation_parameters_json"),
+                "train_training_tag": manifest.get("train_training_tag") or manifest.get("training_tag"),
+                "train_training_index": manifest.get("train_training_index") or manifest.get("training_index"),
+                "train_training_settings": json_text(
+                    manifest.get("train_training_settings") or manifest.get("training_settings")
+                ),
+                "train_training_plan_index": manifest.get("train_training_plan_index")
+                or manifest.get("training_plan_index"),
+                "train_training_plan_label": manifest.get("train_training_plan_label")
+                or manifest.get("training_plan_label"),
+                "train_training_plan_settings": json_text(
+                    manifest.get("train_training_plan_settings")
+                    or manifest.get("training_plan_settings")
+                ),
+                "train_training_plan_source_dataset_label": manifest.get(
+                    "train_training_plan_source_dataset_label"
+                )
+                or manifest.get("training_plan_source_dataset_label"),
+                "training_tag": manifest.get("training_tag"),
+                "training_index": manifest.get("training_index"),
+                "training_settings": json_text(manifest.get("training_settings")),
+                "training_plan_index": manifest.get("training_plan_index"),
+                "training_plan_label": manifest.get("training_plan_label"),
+                "training_plan_settings": json_text(manifest.get("training_plan_settings")),
+                "training_plan_source_dataset_label": manifest.get("training_plan_source_dataset_label"),
                 "md_dataset_size": manifest.get("md_dataset_size"),
                 "atom_dataset_size": manifest.get("atom_dataset_size"),
                 "random_dataset_size": manifest.get("random_dataset_size"),
@@ -343,6 +374,7 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "siesta_settings_warning": manifest.get("siesta_settings_warning"),
                 "model_config_hash": manifest.get("model_config_hash"),
                 "model_config_warning": manifest.get("model_config_warning"),
+                "training_plan_settings_warning": manifest.get("training_plan_settings_warning"),
                 "basis_pseudopotential_warning": manifest.get("basis_pseudopotential_warning"),
                 "strict_comparison_mode": manifest.get("strict_comparison_mode"),
                 "md_dataset_label": manifest.get("md_dataset_label"),

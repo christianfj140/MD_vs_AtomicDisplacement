@@ -617,11 +617,37 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual([item["label"] for item in plan], ["epochs400", "epochs600"])
         self.assertEqual(plan[0]["training_settings"], {"max_epochs": 400})
         self.assertEqual(plan[1]["reusable_dataset_ids"], ["run_a"])
+        full_plan = module.parse_training_plan(
+            [
+                {
+                    "label": "strict400",
+                    "dataset_targets": [
+                        {"target_id": "md:md_100", "method_id": "md", "recipe_id": "md_100"}
+                    ],
+                    "training_settings": {"max_epochs": 400},
+                }
+            ]
+        )
+        self.assertEqual(full_plan[0]["dataset_targets"][0]["target_id"], "md:md_100")
         with self.assertRaisesRegex(RuntimeError, "training_plan"):
             module.parse_training_plan({"bad": True})
-        with self.assertRaisesRegex(RuntimeError, "reusable_dataset_ids"):
+        with self.assertRaisesRegex(RuntimeError, "reusable_dataset_ids o dataset_targets"):
             module.parse_training_plan([{"label": "empty"}])
-        with self.assertRaisesRegex(RuntimeError, "training_plan solo"):
+        with self.assertRaisesRegex(RuntimeError, "dataset_only"):
+            module.ExperimentRunner().start(
+                [3],
+                [],
+                selected_methods=["md"],
+                run_mode="dataset_only",
+                training_plan=[
+                    {
+                        "label": "epochs400",
+                        "dataset_targets": ["md:md_3"],
+                        "training_settings": {"max_epochs": 400},
+                    }
+                ],
+            )
+        with self.assertRaisesRegex(RuntimeError, "dataset_targets"):
             module.ExperimentRunner().start(
                 [3],
                 [],
@@ -1375,6 +1401,59 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertIsNone(recommendation["winner"])
             self.assertIn("random_cartesian on test_md", recommendation["missing_cells"])
 
+    def test_cross_metric_aggregation_preserves_training_plan_metadata(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        aggregate = self.load_module_from_path(
+            "aggregate_cross_metrics_training_plan_test",
+            REPO_ROOT / "Comparison" / "scripts" / "aggregate_cross_metrics.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "cross" / "cross_abc__md__on__test_md"
+            result_dir.mkdir(parents=True)
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "train_method": "md",
+                        "test_set": "test_md",
+                        "test_method": "md",
+                        "dataset_size": 3,
+                        "train_dataset_label": "md_3__epochs400",
+                        "training_tag": "md_3_train2",
+                        "training_index": 2,
+                        "training_settings": {"max_epochs": 400},
+                        "training_plan_label": "epochs400",
+                        "training_plan_settings": {"max_epochs": 400},
+                        "training_plan_source_dataset_label": "md_3",
+                        "training_plan_settings_warning": "Training plan settings differ across methods for this cross-evaluation pair.",
+                        "training_tag_by_method": {"md": "md_3_train2"},
+                        "training_plan_label_by_method": {"md": "epochs400"},
+                        "training_plan_settings_by_method": {"md": {"max_epochs": 400}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_csv(
+                result_dir / "metrics" / "spectral_metrics.csv",
+                [{"sample": "sample_1", "low_energy_rmse_eV": "0.1"}],
+            )
+
+            rows = aggregate.aggregate_one(result_dir, "exp_training_plan")
+
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["training_tag"], "md_3_train2")
+            self.assertEqual(row["train_training_tag"], "md_3_train2")
+            self.assertEqual(row["training_plan_label"], "epochs400")
+            self.assertEqual(row["train_training_plan_label"], "epochs400")
+            self.assertIn("Training plan settings differ", row["training_plan_settings_warning"])
+            self.assertEqual(json.loads(row["training_plan_settings"])["max_epochs"], 400)
+            self.assertEqual(json.loads(row["training_tag_by_method"])["md"], "md_3_train2")
+            self.assertEqual(
+                json.loads(row["training_plan_settings_by_method"])["md"]["max_epochs"],
+                400,
+            )
+
     def test_prepare_cross_result_dir_resets_existing_nonempty_output(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -1793,6 +1872,270 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(manifest["timing"]["counters"]["dataset_workers_used"], 1)
             self.assertEqual(manifest["timing"]["counters"]["graph2mat_trainings"], 5)
             self.assertEqual([item["label"] for item in manifest["training_plan"]], ["epochs400", "epochs600"])
+
+    def test_full_strict_without_training_plan_keeps_single_phase_behavior(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            recipes = {
+                "md": [
+                    {
+                        "recipe_id": "md_100",
+                        "label": "MD 100",
+                        "blocks": [{"block_id": "md_100", "n_snapshots": 3}],
+                    }
+                ]
+            }
+            recipe_info = module.dataset_recipes_to_execution_specs(
+                recipes,
+                selected_methods=["md"],
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                random_cartesian_defaults={},
+            )
+            calls: list[dict[str, object]] = []
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                calls.append(
+                    {
+                        "key": key,
+                        "size": size,
+                        "run_mode": kwargs.get("run_mode"),
+                        "source_run": kwargs.get("source_run"),
+                        "training_settings": kwargs.get("training_settings"),
+                    }
+                )
+                label = str(kwargs.get("dataset_label"))
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": label,
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake_results" / label),
+                    "dataset_dir": str(root / "fake_datasets" / label),
+                    "dataset_sample_ids": [f"{key}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 1.0,
+                    "predicted_hamiltonians": 1,
+                    "siesta_counts": {"launched": size, "skipped_or_reused": 0, "failed": 0, "total": size},
+                    "timing_breakdown": {"training_prediction_seconds": 1.0},
+                }
+
+            runner = module.ExperimentRunner()
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [3],
+                [],
+                "full_no_plan",
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                selected_methods=["md"],
+                run_mode="full_strict_pipeline",
+                dataset_recipes_info=recipe_info,
+            )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["run_mode"], "full_strict_pipeline")
+            self.assertIsNone(calls[0]["source_run"])
+            manifest = module.load_config(root / "results" / "full_no_plan" / "experiment_manifest.yaml")
+            self.assertEqual(len(manifest["runs"]), 1)
+            self.assertNotIn("generated_dataset_sources", manifest)
+
+    def test_full_strict_training_plan_generates_once_then_trains_granular_targets(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            recipes = {
+                "md": [
+                    {
+                        "recipe_id": "md_100",
+                        "label": "MD 100",
+                        "blocks": [{"block_id": "md_100", "n_snapshots": 3}],
+                    },
+                    {
+                        "recipe_id": "md_200",
+                        "label": "MD 200",
+                        "blocks": [{"block_id": "md_200", "n_snapshots": 4}],
+                    },
+                    {
+                        "recipe_id": "md_300",
+                        "label": "MD 300",
+                        "blocks": [{"block_id": "md_300", "n_snapshots": 5}],
+                    },
+                ]
+            }
+            split_ratios = {"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3}
+            recipe_info = module.dataset_recipes_to_execution_specs(
+                recipes,
+                selected_methods=["md"],
+                split_ratios=split_ratios,
+                random_cartesian_defaults={},
+            )
+            calls: list[dict[str, object]] = []
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                metadata = kwargs.get("recipe_metadata") or {}
+                run_mode = kwargs.get("run_mode")
+                source_run = kwargs.get("source_run")
+                label = str(kwargs.get("dataset_label"))
+                calls.append(
+                    {
+                        "label": label,
+                        "size": size,
+                        "run_mode": run_mode,
+                        "source_run": source_run,
+                        "training_settings": kwargs.get("training_settings"),
+                        "training_plan_label": metadata.get("training_plan_label"),
+                    }
+                )
+                is_source = run_mode == module.DATASET_ONLY_RUN_MODE
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": label,
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake_results" / label / str(run_mode)),
+                    "dataset_dir": str(root / "fake_datasets" / label / str(run_mode)),
+                    "dataset_sample_ids": [f"{key}-{label}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{label}-{size}",
+                    "run_mode": run_mode,
+                    "pipeline_elapsed_seconds": 1.0,
+                    "predicted_hamiltonians": 0 if is_source else 1,
+                    "siesta_counts": {
+                        "launched": size if is_source else 0,
+                        "skipped_or_reused": 0 if is_source else size,
+                        "failed": 0,
+                        "total": size,
+                    },
+                    "timing_breakdown": {
+                        "md_siesta_generation_seconds": 1.0 if is_source else None,
+                        "training_prediction_seconds": None if is_source else 1.0,
+                    },
+                    "training_plan_index": metadata.get("training_plan_index"),
+                    "training_plan_label": metadata.get("training_plan_label"),
+                    "training_plan_settings": metadata.get("training_plan_settings"),
+                    "training_plan_source_dataset_label": metadata.get("training_plan_source_dataset_label"),
+                    "training_tag": None if is_source else f"{label}_train1",
+                }
+
+            runner = module.ExperimentRunner()
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [],
+                [],
+                "full_plan_granular",
+                split_ratios=split_ratios,
+                selected_methods=["md"],
+                run_mode="full_strict_pipeline",
+                dataset_recipes_info=recipe_info,
+                performance={"max_parallel_dataset_jobs": 4},
+                training_plan=[
+                    {
+                        "label": "epochs400",
+                        "dataset_targets": [
+                            module.planned_dataset_target_id("md", "md_100"),
+                            module.planned_dataset_target_id("md", "md_200"),
+                            module.planned_dataset_target_id("md", "md_300"),
+                        ],
+                        "training_settings": {"max_epochs": 400},
+                    },
+                    {
+                        "label": "epochs600",
+                        "dataset_targets": [
+                            module.planned_dataset_target_id("md", "md_100"),
+                            module.planned_dataset_target_id("md", "md_300"),
+                        ],
+                        "training_settings": {"max_epochs": 600},
+                    },
+                ],
+            )
+
+            source_calls = [call for call in calls if call["run_mode"] == module.DATASET_ONLY_RUN_MODE]
+            train_calls = [call for call in calls if call["run_mode"] == module.FULL_STRICT_RUN_MODE]
+            self.assertEqual(len(source_calls), 3)
+            self.assertEqual(len(train_calls), 5)
+            self.assertTrue(all(call["source_run"] is None for call in source_calls))
+            self.assertTrue(all(call["source_run"] is not None for call in train_calls))
+            self.assertEqual(
+                [call["training_plan_label"] for call in train_calls],
+                ["epochs400", "epochs400", "epochs400", "epochs600", "epochs600"],
+            )
+            self.assertEqual(
+                [call["training_settings"]["max_epochs"] for call in train_calls],
+                [400, 400, 400, 600, 600],
+            )
+
+            manifest = module.load_config(root / "results" / "full_plan_granular" / "experiment_manifest.yaml")
+            self.assertEqual(len(manifest["generated_dataset_sources"]), 3)
+            self.assertEqual(len(manifest["runs"]), 5)
+            self.assertEqual(manifest["timing"]["counters"]["dataset_jobs"], 8)
+            self.assertEqual(manifest["timing"]["counters"]["dataset_workers_used"], 1)
+            self.assertEqual(manifest["timing"]["counters"]["graph2mat_trainings"], 5)
+            manifest_plan_labels = [run["training_plan_label"] for run in manifest["runs"]]
+            self.assertEqual(manifest_plan_labels.count("epochs400"), 3)
+            self.assertEqual(manifest_plan_labels.count("epochs600"), 2)
+            self.assertTrue(all(run["training_tag"] for run in manifest["runs"]))
+
+    def test_full_strict_training_plan_missing_target_fails_clearly(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            recipes = {
+                "md": [
+                    {
+                        "recipe_id": "md_100",
+                        "label": "MD 100",
+                        "blocks": [{"block_id": "md_100", "n_snapshots": 3}],
+                    }
+                ]
+            }
+            recipe_info = module.dataset_recipes_to_execution_specs(
+                recipes,
+                selected_methods=["md"],
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                random_cartesian_defaults={},
+            )
+            calls: list[object] = []
+
+            def fake_run_one(*args, **kwargs):
+                calls.append((args, kwargs))
+                raise AssertionError("generation should not start for missing target")
+
+            runner = module.ExperimentRunner()
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [],
+                [],
+                "full_plan_missing_target",
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+                selected_methods=["md"],
+                run_mode="full_strict_pipeline",
+                dataset_recipes_info=recipe_info,
+                training_plan=[
+                    {
+                        "label": "bad",
+                        "dataset_targets": ["md:missing"],
+                        "training_settings": {"max_epochs": 400},
+                    }
+                ],
+            )
+
+            self.assertEqual(calls, [])
+            manifest = module.load_config(root / "results" / "full_plan_missing_target" / "experiment_manifest.yaml")
+            self.assertTrue(any("dataset_targets no encontrados" in warning for warning in manifest["warnings"]))
 
     def test_reusable_dataset_candidates_match_plot_visible_archived_results(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -2215,6 +2558,75 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(calls[1], ("process", module.ATOM_DOWNSTREAM_STEPS))
             self.assertEqual(calls[2], ("archive", True))
 
+    def test_random_cartesian_dataset_only_prepares_reusable_splits(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            runner = module.ExperimentRunner()
+            calls: list[tuple[str, object]] = []
+
+            def fake_process(spec, **kwargs):
+                config = module.load_config(kwargs["config_path"])
+                calls.append(("process", tuple(config["pipeline"]["steps"])))
+                return 0
+
+            def fake_prepare_atom_config(config, workspace, size, split_ratios, source_samples_dir=None, method_id="atom_displacement"):
+                calls.append(("prepare_splits", (method_id, Path(source_samples_dir).name if source_samples_dir else None)))
+                dataset_dir = Path(config["paths"]["dataset_dir"])
+                config["paths"]["samples_dir"] = str(dataset_dir / "train_samples")
+                config["paths"]["validation_samples_dir"] = str(dataset_dir / "validation_samples")
+                config["paths"]["test_samples_dir"] = str(dataset_dir / "test_samples")
+                config["paths"]["training_dir"] = str(workspace / "training")
+                config["pipeline"]["steps"] = list(module.ATOM_DOWNSTREAM_STEPS)
+                return {
+                    "requested_size": size,
+                    "effective_size": size,
+                    "generated_samples": size,
+                    "completed_samples": size,
+                    "test_needs_siesta": False,
+                    "dataset_preparation_seconds": 0.1,
+                }
+
+            def fake_validate(key, config, size):
+                calls.append(("validate", (key, tuple(config["pipeline"]["steps"]))))
+                return {}
+
+            def fake_archive(key, size, run_id, workspace, config, returncode, run_log, prepare_metadata, **kwargs):
+                calls.append(("archive", tuple(config["pipeline"]["steps"])))
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": kwargs.get("dataset_label"),
+                    "dataset_size": size,
+                    "returncode": returncode,
+                    "run_mode": kwargs.get("run_mode"),
+                    "dataset_dir": config["paths"]["dataset_dir"],
+                    "result_dir": str(root / "archived"),
+                    "generated_samples": prepare_metadata.get("generated_samples"),
+                }
+
+            runner._run_pipeline_process = fake_process  # type: ignore[method-assign]
+            runner._prepare_atom_config = fake_prepare_atom_config  # type: ignore[method-assign]
+            runner._validate_split_manifests = fake_validate  # type: ignore[method-assign]
+            runner._archive_outputs = fake_archive  # type: ignore[method-assign]
+
+            result = runner._run_random_cartesian(
+                3,
+                "rc_dataset_only",
+                dataset_label="rc_3",
+                run_mode="dataset_only",
+                split_ratios={"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3},
+            )
+
+            self.assertEqual(result["run_mode"], "dataset_only")
+            self.assertEqual(calls[0][0], "process")
+            self.assertIn("generate_random_cartesian_dataset", calls[0][1])
+            self.assertEqual(calls[1], ("prepare_splits", ("random_cartesian", "RandomCartesian_steps")))
+            self.assertEqual(calls[2], ("validate", ("atom_displacement", module.ATOM_DOWNSTREAM_STEPS)))
+            self.assertEqual(calls[3], ("archive", ()))
+
     def test_downstream_only_fails_clearly_when_dataset_is_missing(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -2308,6 +2720,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="refresh-reusable-datasets"', index_html)
         self.assertIn('id="reusable-split-policy"', index_html)
         self.assertIn('id="training-plan-panel"', index_html)
+        self.assertIn('id="planned-dataset-target-panel"', index_html)
+        self.assertIn('id="planned-dataset-target-list"', index_html)
         self.assertIn('id="add-training-plan-entry"', index_html)
         self.assertIn('class="metric-info-bubble"', index_html)
         self.assertIn("Metric guide", index_html)
@@ -2321,6 +2735,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("reusable_split_policy: reusableSplitPolicy()", app_js)
         self.assertIn("training_plan: plan", app_js)
         self.assertIn("trainingPlanPayload()", app_js)
+        self.assertIn("dataset_targets", app_js)
+        self.assertIn("plannedDatasetTargetsFromRecipes", app_js)
+        self.assertIn("defaultRecipeIdForMethod", app_js)
+        self.assertIn("fc_recipe_", app_js)
+        self.assertIn("rc_recipe_", app_js)
+        self.assertIn("selectedPlannedDatasetTargets()", app_js)
         self.assertIn("/api/datasets/reusable", app_js)
         self.assertIn("selectedReusableDatasetIds()", app_js)
         self.assertIn("run?.training_tag", app_js)

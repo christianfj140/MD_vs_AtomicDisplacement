@@ -471,6 +471,15 @@ function reusableDatasetNameById() {
   return new Map((state.reusableDatasets || []).map((item) => [item.id, item.dataset_label || item.id]));
 }
 
+function plannedDatasetTargetNameById() {
+  return new Map(
+    (state.datasetTargets || []).map((item) => [
+      item.target_id,
+      item.dataset_label || item.recipe_id || item.target_id,
+    ]),
+  );
+}
+
 function defaultTrainingPlanLabel(settings) {
   if (settings?.max_epochs) return `epochs${settings.max_epochs}`;
   return `config${state.trainingPlanNextId}`;
@@ -479,7 +488,8 @@ function defaultTrainingPlanLabel(settings) {
 function trainingPlanPayload() {
   return state.trainingPlan.map((entry) => ({
     label: entry.label,
-    reusable_dataset_ids: [...entry.reusable_dataset_ids],
+    ...(entry.reusable_dataset_ids?.length ? { reusable_dataset_ids: [...entry.reusable_dataset_ids] } : {}),
+    ...(entry.dataset_targets?.length ? { dataset_targets: entry.dataset_targets.map((target) => ({ ...target })) } : {}),
     training_settings: { ...entry.training_settings },
   }));
 }
@@ -489,13 +499,19 @@ function renderTrainingPlan() {
   const status = document.getElementById("training-plan-status");
   if (!body || !status) return;
   const nameById = reusableDatasetNameById();
+  const targetNameById = plannedDatasetTargetNameById();
   body.innerHTML = "";
   status.textContent = state.trainingPlan.length
     ? `${state.trainingPlan.length} queued config${state.trainingPlan.length === 1 ? "" : "s"}`
     : "No queued training configs.";
   for (const entry of state.trainingPlan) {
     const row = document.createElement("tr");
-    const datasetNames = entry.reusable_dataset_ids.map((id) => nameById.get(id) || id);
+    const reusableNames = (entry.reusable_dataset_ids || []).map((id) => nameById.get(id) || id);
+    const targetNames = (entry.dataset_targets || []).map((target) => {
+      const targetId = target.target_id || target.id || "";
+      return targetNameById.get(targetId) || target.dataset_label || target.recipe_id || targetId;
+    });
+    const datasetNames = [...reusableNames, ...targetNames];
     const labelCell = document.createElement("td");
     labelCell.textContent = entry.label;
     const datasetCell = document.createElement("td");
@@ -523,12 +539,16 @@ function renderTrainingPlan() {
 
 function addTrainingPlanEntry() {
   const runMode = document.getElementById("run-mode")?.value;
-  if (runMode !== "train_test_metrics_plots_only") {
-    throw new Error("Training plan solo esta disponible en Train/test/metrics/plots only.");
+  if (!["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode)) {
+    throw new Error("Training plan solo esta disponible en Full strict o Train/test/metrics/plots only.");
   }
-  const datasetIds = selectedReusableDatasetIds();
-  if (!datasetIds.length) {
+  const datasetIds = runMode === "train_test_metrics_plots_only" ? selectedReusableDatasetIds() : [];
+  const datasetTargets = runMode === "full_strict_pipeline" ? selectedPlannedDatasetTargets() : [];
+  if (runMode === "train_test_metrics_plots_only" && !datasetIds.length) {
     throw new Error("Selecciona al menos un dataset reusable para esta configuracion.");
+  }
+  if (runMode === "full_strict_pipeline" && !datasetTargets.length) {
+    throw new Error("Selecciona al menos un planned dataset para esta configuracion.");
   }
   const settings = trainingSettings();
   const labelInput = document.getElementById("training-plan-label");
@@ -538,6 +558,7 @@ function addTrainingPlanEntry() {
     id: state.trainingPlanNextId,
     label,
     reusable_dataset_ids: datasetIds,
+    dataset_targets: datasetTargets,
     training_settings: settings,
   });
   state.trainingPlanNextId += 1;
@@ -548,8 +569,10 @@ function addTrainingPlanEntry() {
 function updateTrainingPlanPanel() {
   const panel = document.getElementById("training-plan-panel");
   if (!panel) return;
-  const downstreamOnly = document.getElementById("run-mode")?.value === "train_test_metrics_plots_only";
-  panel.classList.toggle("hidden", !downstreamOnly);
+  const runMode = document.getElementById("run-mode")?.value;
+  const enabled = ["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode);
+  panel.classList.toggle("hidden", !enabled);
+  updatePlannedDatasetTargetPanel();
   renderTrainingPlan();
 }
 
@@ -1829,6 +1852,121 @@ function datasetRecipesForRun(
   );
 }
 
+function plannedDatasetTargetId(methodId, recipeId, occurrence = 1) {
+  const base = `${normalizeMethodId(methodId)}:${String(recipeId || "").trim()}`;
+  return occurrence <= 1 ? base : `${base}#${occurrence}`;
+}
+
+function defaultRecipeIdForMethod(methodId, index) {
+  if (methodId === "md") return `md_recipe_${index + 1}`;
+  if (methodId === "siesta_fc_cartesian") return `fc_recipe_${index + 1}`;
+  if (methodId === "random_cartesian") return `rc_recipe_${index + 1}`;
+  return `${methodId}_recipe_${index + 1}`;
+}
+
+function recipeSize(methodId, recipe) {
+  const blocks = Array.isArray(recipe?.blocks) ? recipe.blocks : [];
+  return blocks.reduce((sum, block) => {
+    const size = methodId === "md" ? Number(block.n_snapshots || block.n_structures || 0) : Number(block.n_structures || 0);
+    return sum + (Number.isFinite(size) ? size : 0);
+  }, 0);
+}
+
+function plannedDatasetTargetsFromRecipes(recipes, methods) {
+  const targets = [];
+  const seen = new Map();
+  for (const methodId of ["md", "siesta_fc_cartesian", "random_cartesian"]) {
+    if (!methods.includes(methodId)) continue;
+    const methodRecipes = Array.isArray(recipes?.[methodId]) ? recipes[methodId] : [];
+    methodRecipes.forEach((recipe, index) => {
+      const recipeId = String(recipe?.recipe_id || defaultRecipeIdForMethod(methodId, index));
+      const key = `${methodId}:${recipeId}`;
+      const occurrence = (seen.get(key) || 0) + 1;
+      seen.set(key, occurrence);
+      targets.push({
+        target_id: plannedDatasetTargetId(methodId, recipeId, occurrence),
+        method_id: methodId,
+        recipe_id: recipeId,
+        dataset_label: recipe?.label || recipeId,
+        dataset_size: recipeSize(methodId, recipe),
+      });
+    });
+  }
+  return targets;
+}
+
+function renderPlannedDatasetTargets(targets = state.datasetTargets) {
+  const body = document.getElementById("planned-dataset-target-list");
+  const status = document.getElementById("planned-dataset-target-status");
+  if (!body || !status) return;
+  const hadCheckboxes = document.querySelectorAll(".planned-dataset-target-checkbox").length > 0;
+  const selectedIds = new Set(selectedPlannedDatasetTargetIds());
+  body.innerHTML = "";
+  state.datasetTargets = targets || [];
+  status.textContent = state.datasetTargets.length
+    ? `${state.datasetTargets.length} planned dataset${state.datasetTargets.length === 1 ? "" : "s"} available`
+    : "No planned datasets loaded.";
+  for (const target of state.datasetTargets) {
+    const row = document.createElement("tr");
+    const useCell = document.createElement("td");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "planned-dataset-target-checkbox";
+    checkbox.value = target.target_id;
+    checkbox.checked = hadCheckboxes ? selectedIds.has(target.target_id) : true;
+    useCell.appendChild(checkbox);
+    const methodCell = document.createElement("td");
+    methodCell.textContent = methodDisplayLabel(target.method_id);
+    const datasetCell = document.createElement("td");
+    datasetCell.textContent = target.dataset_label || target.target_id;
+    const sizeCell = document.createElement("td");
+    sizeCell.textContent = String(target.dataset_size || "-");
+    const recipeCell = document.createElement("td");
+    recipeCell.textContent = target.recipe_id || target.target_id;
+    row.append(useCell, methodCell, datasetCell, sizeCell, recipeCell);
+    body.appendChild(row);
+  }
+}
+
+function currentPlannedDatasetTargets() {
+  const methods = selectedMethods();
+  const mdDatasetSpecs = methods.includes("md") ? parseMdDatasetTableSpecs() : [];
+  const mdSizes = methods.includes("md")
+    ? (mdDatasetSpecs.length ? mdSizesFromSpecs(mdDatasetSpecs) : legacyMdSizesFromHidden())
+    : [];
+  const fcSpecs = methods.includes("siesta_fc_cartesian") ? fcDatasetSpecs() : [];
+  const randomOptions = parseRandomCartesianOptions(methods);
+  const randomDatasetSpecs = methods.includes("random_cartesian") ? parseRandomCartesianDatasetTableSpecs() : [];
+  const recipes = datasetRecipesForRun(
+    methods,
+    mdSizes,
+    fcSpecs,
+    randomOptions,
+    mdDatasetSpecs,
+    randomDatasetSpecs,
+  );
+  return plannedDatasetTargetsFromRecipes(recipes, methods);
+}
+
+function refreshPlannedDatasetTargets({ silent = false } = {}) {
+  if (document.getElementById("run-mode")?.value !== "full_strict_pipeline") {
+    state.datasetTargets = [];
+    renderPlannedDatasetTargets([]);
+    return [];
+  }
+  try {
+    const targets = currentPlannedDatasetTargets();
+    state.datasetTargets = targets;
+    renderPlannedDatasetTargets(targets);
+    return targets;
+  } catch (error) {
+    if (!silent) throw error;
+    const status = document.getElementById("planned-dataset-target-status");
+    if (status) status.textContent = `Planned datasets unavailable: ${error.message}`;
+    return [];
+  }
+}
+
 function exportCurrentDatasetRecipes() {
   const methods = selectedMethods();
   const mdDatasetSpecs = methods.includes("md") ? parseMdDatasetTableSpecs() : [];
@@ -1987,6 +2125,9 @@ function updateDatasetPreview() {
     setPreviewText("random-preview-summary", "Random Cartesian invalido", true);
   }
   updateMethodCardStates();
+  if (document.getElementById("run-mode")?.value === "full_strict_pipeline") {
+    refreshPlannedDatasetTargets({ silent: true });
+  }
 }
 
 function updateAtomSizesFromFcPlan() {
@@ -2133,7 +2274,13 @@ async function runExperiment() {
   const performance = performanceSettings();
   const training = trainingSettings();
   const runMode = document.getElementById("run-mode").value;
-  const plan = runMode === "train_test_metrics_plots_only" ? trainingPlanPayload() : [];
+  if (runMode === "full_strict_pipeline") {
+    state.datasetTargets = plannedDatasetTargetsFromRecipes(datasetRecipes, methods);
+    renderPlannedDatasetTargets(state.datasetTargets);
+  }
+  const plan = ["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode)
+    ? trainingPlanPayload()
+    : [];
   const reusableDatasetIds = runMode === "train_test_metrics_plots_only"
     ? selectedReusableDatasetIds()
     : [];
@@ -3149,16 +3296,25 @@ function groupedCrossMetrics(rows, metric) {
     const atomDatasetSize = finiteNumber(row.atom_dataset_size ?? row.dataset_size);
     const randomDatasetSize = finiteNumber(row.random_dataset_size);
     const trainDatasetSize = finiteNumber(row.train_dataset_size ?? row.dataset_size);
+    const trainTrainingTag = row.train_training_tag || row.training_tag || "";
+    const trainTrainingPlanLabel = row.train_training_plan_label || row.training_plan_label || "";
+    const trainTrainingPlanSettings = row.train_training_plan_settings || row.training_plan_settings || "";
     const key = [
       row.experiment_id,
       row.recipe_set_hash,
       row.md_recipe_set_hash,
       row.atom_recipe_set_hash,
       row.random_recipe_set_hash,
+      row.training_tag_by_method,
+      row.training_plan_label_by_method,
+      row.training_plan_settings_by_method,
       mdDatasetSize,
       atomDatasetSize,
       randomDatasetSize,
       trainDatasetSize,
+      trainTrainingTag,
+      trainTrainingPlanLabel,
+      trainTrainingPlanSettings,
       trainMethod,
       testSet,
     ].join("||");
@@ -3174,6 +3330,9 @@ function groupedCrossMetrics(rows, metric) {
         md_dataset_label: row.md_dataset_label,
         atom_dataset_label: row.atom_dataset_label,
         random_dataset_label: row.random_dataset_label,
+        train_training_tag: trainTrainingTag,
+        train_training_plan_label: trainTrainingPlanLabel,
+        train_training_plan_settings: trainTrainingPlanSettings,
         train_method: trainMethod,
         test_set: testSet,
         values: [],
@@ -3200,6 +3359,9 @@ function groupedCrossMetrics(rows, metric) {
     md_dataset_label: group.md_dataset_label,
     atom_dataset_label: group.atom_dataset_label,
     random_dataset_label: group.random_dataset_label,
+    train_training_tag: group.train_training_tag,
+    train_training_plan_label: group.train_training_plan_label,
+    train_training_plan_settings: group.train_training_plan_settings,
     train_method: group.train_method,
     test_set: group.test_set,
     mean: group.values.length
@@ -3217,10 +3379,12 @@ function groupedCrossMetrics(rows, metric) {
 }
 
 function crossDatasetComboLabel(row) {
+  const trainingLabel = row.train_training_tag || row.train_training_plan_label || "";
   return [
     row.md_dataset_size != null ? `MD ${row.md_dataset_size}` : "",
     row.atom_dataset_size != null ? `FC Cartesian ${row.atom_dataset_size}` : "",
     row.random_dataset_size != null ? `Random Cartesian ${row.random_dataset_size}` : "",
+    trainingLabel ? `train ${trainingLabel}` : "",
     row.recipe_set_hash || "",
   ].filter(Boolean).join(" / ") || `dataset ${row.dataset_size ?? "unknown"}`;
 }
@@ -3851,8 +4015,30 @@ function selectedReusableDatasetIds() {
   return Array.from(document.querySelectorAll(".reusable-dataset-checkbox:checked")).map((node) => node.value);
 }
 
+function selectedPlannedDatasetTargetIds() {
+  return Array.from(document.querySelectorAll(".planned-dataset-target-checkbox:checked")).map((node) => node.value);
+}
+
+function selectedPlannedDatasetTargets() {
+  refreshPlannedDatasetTargets();
+  const selectedIds = new Set(selectedPlannedDatasetTargetIds());
+  return (state.datasetTargets || [])
+    .filter((target) => selectedIds.has(target.target_id))
+    .map((target) => ({ ...target }));
+}
+
 function reusableSplitPolicy() {
   return document.getElementById("reusable-split-policy")?.value || "preserve_archived_splits";
+}
+
+function updatePlannedDatasetTargetPanel() {
+  const panel = document.getElementById("planned-dataset-target-panel");
+  if (!panel) return;
+  const fullStrict = document.getElementById("run-mode")?.value === "full_strict_pipeline";
+  panel.classList.toggle("hidden", !fullStrict);
+  if (fullStrict) {
+    refreshPlannedDatasetTargets({ silent: true });
+  }
 }
 
 function updateReusableDatasetPanel() {
@@ -4033,6 +4219,7 @@ function setupEvents() {
     renderTrainingPlan();
   });
   document.getElementById("run-mode")?.addEventListener("change", () => {
+    state.trainingPlan = [];
     updateReusableDatasetPanel();
     updateTrainingPlanPanel();
   });

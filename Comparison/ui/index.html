@@ -113,7 +113,7 @@
                   <option value="full_strict_pipeline" selected>Full strict pipeline</option>
                   <option value="train_test_metrics_plots_only">Train/test/metrics/plots only</option>
                 </select>
-                <small>Dataset only stops before training. Train/test/metrics/plots only reuses an existing generated dataset.</small>
+                <small>Dataset only stops before training. Full strict can queue training plans after generation. Train/test/metrics/plots only reuses archived datasets.</small>
               </label>
               <label class="field">
                 <span>MD split mode</span>
@@ -267,7 +267,7 @@
                     <p class="eyebrow">Training queue</p>
                     <h3>Training plan</h3>
                     <p class="field-help">
-                      Guarda configuraciones de entrenamiento para ejecutarlas secuencialmente sobre los datasets reutilizables seleccionados.
+                      Guarda configuraciones de entrenamiento para ejecutarlas secuencialmente sobre datasets planeados o reutilizables seleccionados.
                     </p>
                   </div>
                   <div class="button-row">
@@ -275,6 +275,32 @@
                     <button id="clear-training-plan" class="button danger" type="button">Clear plan</button>
                   </div>
                 </div>
+                <section id="planned-dataset-target-panel" class="planned-dataset-target-panel hidden">
+                  <div class="panel-heading compact-heading">
+                    <div>
+                      <p class="eyebrow">Full strict targets</p>
+                      <h3>Planned datasets</h3>
+                      <p class="field-help">
+                        En full strict estos son los datasets que se generarán una vez y después se podrán entrenar con cada configuración.
+                      </p>
+                    </div>
+                    <div id="planned-dataset-target-status" class="muted-text">No planned datasets loaded.</div>
+                  </div>
+                  <div class="cleanup-table-wrap">
+                    <table class="cleanup-table planned-dataset-target-table">
+                      <thead>
+                        <tr>
+                          <th>Use</th>
+                          <th>Method</th>
+                          <th>Dataset</th>
+                          <th>Size</th>
+                          <th>Recipe</th>
+                        </tr>
+                      </thead>
+                      <tbody id="planned-dataset-target-list"></tbody>
+                    </table>
+                  </div>
+                </section>
                 <div class="grid two split-grid">
                   <label class="field">
                     <span>Config label</span>
