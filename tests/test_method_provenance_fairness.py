@@ -201,6 +201,53 @@ class MethodProvenanceFairnessTests(unittest.TestCase):
             )
         )
 
+    def test_hamiltonian_output_flag_mismatch_is_method_provenance_severe(self) -> None:
+        _, md, fc, rc = siesta_fixtures()
+        fc["structure"]["siesta"]["Save.HS"] = "F"
+        report = self.compare_siesta({"md": md, "siesta_fc_cartesian": fc, "random_cartesian": rc})
+        self.assertFalse(report["ok"])
+        severe = [
+            mismatch
+            for mismatch in report["severe_mismatches"]
+            if mismatch["key"] == "Save.HS"
+        ]
+        self.assertTrue(severe)
+        self.assertTrue(all(mismatch["severity"] == "severe" for mismatch in severe))
+
+        module = load_script_module("pipeline_ui_output_flag_provenance_tests", "pipeline_ui.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = {
+                "experiment_id": "output_flag_mismatch_case",
+                "selected_methods": ["md", "siesta_fc_cartesian"],
+                "runs": [
+                    provenance_run(root, "md", "md_190", 190),
+                    provenance_run(root, "siesta_fc_cartesian", "fc_190", 190),
+                ],
+                "siesta_settings_hash_by_method": {
+                    "md": "siesta_md",
+                    "siesta_fc_cartesian": "siesta_fc",
+                },
+                "model_config_hash_by_method": {
+                    "md": "model_md",
+                    "siesta_fc_cartesian": "model_fc",
+                },
+                "basis_hash_by_method": {
+                    "md": "basis_md",
+                    "siesta_fc_cartesian": "basis_fc",
+                },
+                "pseudopotential_hash_by_method": {
+                    "md": "pseudo_md",
+                    "siesta_fc_cartesian": "pseudo_fc",
+                },
+                "siesta_settings_severe_mismatches": severe,
+            }
+            module.refresh_method_provenance(manifest)
+
+        self.assertTrue(
+            any("Save.HS" in warning for warning in manifest["method_provenance_severe_warnings"])
+        )
+
     def test_fc_basis_hash_mismatch_is_severe(self) -> None:
         _, md, fc, rc = siesta_fixtures()
         artifacts = {

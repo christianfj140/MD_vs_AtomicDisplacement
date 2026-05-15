@@ -14,14 +14,22 @@ from pathlib import Path
 
 from md_pipeline_config import (
     command,
+    config_dir,
     load_pipeline_config,
     md_temperature_blocks,
     md_total_steps,
     paths,
     render_run_fdf,
 )
+from material_bundle import file_sha256 as material_file_sha256
+from material_presets import resolve_material_bundle
 
 BOHR_TO_ANG = 0.529177210903
+SPREAD_SPLIT_WARNING = (
+    "MD split strategy 'spread' interleaves trajectory frames across "
+    "train/validation/test and is exploratory/debug only; use "
+    "'blocked_with_gap' with a positive temporal_gap for scientific comparisons."
+)
 MANIFEST_FIELDS = [
     "sample_id",
     "method",
@@ -73,6 +81,38 @@ def require_command(command_name: str) -> None:
             f"No se encontró '{command_name}' en PATH. "
             "Activa tu entorno antes de ejecutar este script."
         )
+
+
+def prepare_material_inputs(config: dict) -> dict:
+    pipeline_paths = paths(config)
+    dataset_dir = pipeline_paths["dataset_dir"]
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    resolved = resolve_material_bundle(config, base_dir=config_dir(config))
+    validated = resolved.validated
+    copied: dict[str, str] = {}
+    verified: dict[str, str] = {}
+    for label, source in sorted(validated.pseudopotentials.items()):
+        destination = dataset_dir / source.name
+        if destination.exists():
+            if not destination.is_file():
+                raise RuntimeError(f"MD pseudopotential path is not a file: {destination}")
+            if material_file_sha256(destination) != material_file_sha256(source):
+                raise RuntimeError(
+                    f"MD pseudopotential for species {label!r} differs from material bundle: {destination}"
+                )
+            verified[label] = destination.name
+            continue
+        shutil.copy2(source, destination)
+        copied[label] = destination.name
+    manifest = resolved.to_manifest_dict()
+    manifest.update(
+        {
+            "pseudopotentials_copied_to_dataset": copied,
+            "pseudopotentials_verified_in_dataset": verified,
+        }
+    )
+    write_json(dataset_dir / "material_provenance.json", manifest)
+    return manifest
 
 
 def recipe_manifest_fields(config: dict, *, sample_index: str = "") -> dict[str, str]:
@@ -776,6 +816,42 @@ def write_split_manifests(
         _write_manifest(split_root / f"{split_name}_manifest.csv", rows)
 
 
+def write_split_summary(
+    split_root: Path,
+    split_ranges: dict[str, list[Path]],
+    excluded_samples: list[tuple[Path, str]],
+    *,
+    strategy: str,
+    temporal_gap: int,
+    warnings: list[str],
+) -> None:
+    split_root.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "strategy": strategy,
+        "temporal_gap": temporal_gap,
+        "counts": {split_name: len(samples) for split_name, samples in split_ranges.items()},
+        "excluded_gap_count": len(excluded_samples),
+        "excluded_gap_samples": [
+            {
+                "sample_id": f"md_{sample.name}",
+                "frame_index": sample.name,
+                "excluded_gap_reason": reason,
+            }
+            for sample, reason in excluded_samples
+        ],
+        "warnings": warnings,
+        "scientific_status": (
+            "exploratory_temporal_leakage_risk"
+            if strategy == "spread"
+            else "temporal_gap_split" if strategy == "blocked_with_gap" else "blocked_split"
+        ),
+    }
+    (split_root / "split_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def prepare_dataset_splits(config: dict) -> None:
     split_config = config.get("splits", {})
     if not bool(split_config.get("enabled", False)):
@@ -808,18 +884,24 @@ def prepare_dataset_splits(config: dict) -> None:
     if split_root.exists():
         shutil.rmtree(split_root)
 
-    strategy = str(split_config.get("strategy", "block")).strip().lower()
-    temporal_gap = int(split_config.get("temporal_gap", 0) or 0)
+    strategy = str(split_config.get("strategy", "blocked_with_gap")).strip().lower()
+    temporal_gap_default = 1 if strategy == "blocked_with_gap" else 0
+    temporal_gap = int(split_config.get("temporal_gap", temporal_gap_default) or 0)
     if temporal_gap < 0:
         raise RuntimeError("splits.temporal_gap debe ser >= 0.")
+    warnings: list[str] = []
     excluded_gap_samples: list[tuple[Path, str]] = []
     if strategy == "spread":
+        warnings.append(SPREAD_SPLIT_WARNING)
+        print(f"[WARN] {SPREAD_SPLIT_WARNING}")
         selected = _select_spread(step_dirs, requested)
         split_ranges = _split_spread(selected, train_count, validation_count, test_count)
     elif strategy == "block":
         selected = _select_spread(step_dirs, requested)
         split_ranges = _split_block(selected, train_count, validation_count, test_count)
     elif strategy == "blocked_with_gap":
+        if temporal_gap <= 0:
+            raise RuntimeError("splits.temporal_gap debe ser > 0 para blocked_with_gap.")
         counts = {"train": train_count, "validation": validation_count, "test": test_count}
         split_ranges, excluded_gap_samples = _split_blocked_with_gap(
             step_dirs,
@@ -841,6 +923,14 @@ def prepare_dataset_splits(config: dict) -> None:
             strategy=strategy,
             temporal_gap=temporal_gap,
         )
+    write_split_summary(
+        split_root,
+        split_ranges,
+        excluded_gap_samples,
+        strategy=strategy,
+        temporal_gap=temporal_gap,
+        warnings=warnings,
+    )
 
     print(
         "[OK] Split MD preparado: "
@@ -865,6 +955,7 @@ def main() -> int:
     require_command(command(config, "siesta"))
 
     pipeline_paths["dataset_dir"].mkdir(parents=True, exist_ok=True)
+    prepare_material_inputs(config)
     if md_temperature_blocks(config):
         run_temperature_block_dataset(config)
     else:

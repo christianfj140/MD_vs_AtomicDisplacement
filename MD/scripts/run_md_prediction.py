@@ -20,7 +20,8 @@ from torch_safe_globals import (
 
 allow_graph2mat_checkpoint_globals()
 
-from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint
+from md_pipeline_config import command, config_dir, load_pipeline_config, paths, resolve_checkpoint
+from graph2mat_material_config import apply_material_graph2mat_config
 
 _PIPELINE_CONFIG = load_pipeline_config()
 apply_torch_float32_matmul_precision(
@@ -35,8 +36,15 @@ from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
 
 
-class SafeMatrixWriter(MatrixWriter):
-    """MatrixWriter variant that keeps valid single-sample predictions."""
+def incomplete_prediction_error(exc: ValueError) -> RuntimeError:
+    return RuntimeError(
+        "Graph2Mat MatrixWriter reported incomplete prediction export: "
+        f"{exc}. Existing output files are not accepted as proof of complete predictions."
+    )
+
+
+class StrictMatrixWriter(MatrixWriter):
+    """MatrixWriter variant that fails closed on partial prediction export."""
 
     def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
         try:
@@ -44,16 +52,7 @@ class SafeMatrixWriter(MatrixWriter):
         except ValueError as exc:
             if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
                 raise
-            outputs = [
-                self._get_out_file(batch.get_example(index), trainer)
-                for index in range(getattr(batch, "num_graphs", 0))
-            ]
-            if not outputs or any(not output.exists() for output in outputs):
-                raise
-            print(
-                "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
-                "escribir las predicciones del batch; se continua."
-            )
+            raise incomplete_prediction_error(exc) from exc
 
 
 def require_command(command_name: str) -> None:
@@ -75,6 +74,18 @@ def expected_prediction_outputs(predict_structs: str, output_file: str) -> list[
     return outputs
 
 
+def validate_prediction_outputs(predict_structs: str, output_file: str) -> None:
+    outputs = expected_prediction_outputs(predict_structs, output_file)
+    if not outputs:
+        raise RuntimeError(f"No prediction structures matched: {predict_structs}")
+    missing = [str(output) for output in outputs if not output.exists()]
+    empty = [str(output) for output in outputs if output.exists() and output.stat().st_size <= 0]
+    if missing:
+        raise RuntimeError("Missing prediction outputs: " + ", ".join(missing[:10]))
+    if empty:
+        raise RuntimeError("Empty prediction outputs: " + ", ".join(empty[:10]))
+
+
 def main() -> int:
     config = load_pipeline_config()
     pipeline_paths = paths(config)
@@ -89,6 +100,12 @@ def main() -> int:
         )
 
     require_command(command(config, "graph2mat"))
+    apply_material_graph2mat_config(
+        config,
+        base_dir=config_dir(config),
+        dataset_dir=pipeline_paths["dataset_dir"],
+        training_dir=pipeline_paths["training_dir"],
+    )
     ckpt_path = resolve_checkpoint(config)
     os.chdir(pipeline_paths["training_dir"])
 
@@ -115,7 +132,7 @@ def main() -> int:
     callbacks = []
     if prediction["callbacks"].get("matrix_writer", True):
         callbacks.append(
-            SafeMatrixWriter(
+            StrictMatrixWriter(
                 output_file=str(prediction["output_file"]),
                 splits=["predict"],
             )
@@ -135,16 +152,11 @@ def main() -> int:
     except ValueError as exc:
         if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
             raise
-        outputs = expected_prediction_outputs(
-            str(prediction["predict_structs"]),
-            str(prediction["output_file"]),
-        )
-        if not outputs or any(not output.exists() for output in outputs):
-            raise
-        print(
-            "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
-            "escribir todas las predicciones esperadas; se continua."
-        )
+        raise incomplete_prediction_error(exc) from exc
+    validate_prediction_outputs(
+        str(prediction["predict_structs"]),
+        str(prediction["output_file"]),
+    )
     print("\n=== Prediccion completada correctamente ===")
     return 0
 

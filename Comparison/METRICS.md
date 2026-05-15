@@ -29,6 +29,15 @@ eigenvalue extraction, and the metrics evaluator:
 `warnings`, `samples_failed`, and per-sample `sample_status` rows containing the
 selected reference/prediction paths and SHA256 hashes.
 
+Archived run and cross-evaluation manifests also carry material provenance when
+available: material label/source, species, atom count, FDF hash,
+pseudopotential and basis hashes, SIESTA output flags, Graph2Mat config hash,
+split manifest hash, dataset recipe, and aggregate reference/prediction matrix
+hashes. Aggregated CSV/JSON rows preserve those fields. If cross-evaluation
+detects different material compatibility hashes across methods, the aggregate
+row receives an `INCOMPATIBLE_MATERIAL_PROVENANCE` severe warning and winner
+analysis treats the comparison as not scientifically valid.
+
 The UI endpoint `/api/plots` reads those archived CSV files from `results_md`,
 `results_atomdisp`, and `results_random_cartesian`. If a manifest contains an
 absolute path from another OS, the UI falls back to the archive directory beside
@@ -77,6 +86,13 @@ manifest records `structural_basis_error` and the UI strict path aborts the
 evaluation. These metrics are diagnostic in the current strict comparison; they
 do not decide the winner.
 
+Structural distance-bin metrics currently use direct Cartesian distances only.
+For material metadata marked as `bulk`, `crystal`, `periodic`, `solid`,
+`surface`, or `slab`, periodic minimum-image distance handling is treated as
+unsupported: block/species structural metrics may still be written, but
+distance-bin rows are omitted and the manifest records a severe
+`unsupported_periodic_distance_bins` warning.
+
 ## Spectral Metrics
 
 Eigenvalues are computed by diagonalizing the symmetrized Hamiltonian. When the
@@ -113,6 +129,15 @@ low-energy metrics are left unavailable and `low_energy_warning` records the
 reason. Metric-time validation treats an invalid or missing required overlap as
 a fatal evaluator error for strict comparisons; the evaluator does not invent an
 identity overlap.
+
+Compatibility gates are intentionally fail-closed for unsupported scientific
+cases. The evaluator rejects mismatched matrix shapes, non-orthogonal references
+without a readable overlap, unsupported multi-component matrices, spin metadata
+outside the supported unpolarized path, k-point sampled FDF inputs, and
+complex-valued Hamiltonian/overlap matrices because this workflow has not yet
+validated spin-orbit or k-point complex semantics. Matrix-level sparse metrics
+remain material-agnostic for supported single-matrix real Hamiltonians with
+compatible reference/prediction shapes.
 
 Configuration defaults are equivalent to:
 
@@ -225,6 +250,11 @@ validation warnings are present in the aggregated cross metrics, including
 SIESTA settings mismatch, Graph2Mat model/config mismatch, or a severe budget
 mismatch. In strict UI comparison mode, SIESTA/model mismatches and geometry
 leakage abort before winner analysis.
+
+Hamiltonian reference output controls are strict SIESTA settings for this
+benchmark: mismatches in `Save.HS`, `TS.HS.Save`, `TS.DE.Save`, or `XML.Write`
+are treated as severe because they decide whether comparable Hamiltonian,
+overlap, and XML reference artifacts are generated.
 
 `timing_breakdown.json` is written for new UI runs and includes the required
 phase keys. Some legacy Graph2Mat/SIESTA entrypoints still expose only coarse

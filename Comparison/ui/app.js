@@ -78,7 +78,7 @@ function canonicalDisplayText(value) {
     .replace(/\brandom_cartesian\b/g, "Random Cartesian");
 }
 
-const DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate";
+const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
 const PRIMARY_METRIC_DEFAULT = "low_energy_rmse_eV";
 const CROSS_PLOT_METRIC_DEFAULT = "low_energy_rmse_eV";
 const LOG_POLL_LIMIT = 2000;
@@ -275,6 +275,8 @@ const state = {
   reusableDatasetsLoaded: false,
   trainingPlan: [],
   trainingPlanNextId: 1,
+  materialPresets: [],
+  materialValidation: null,
 };
 
 function showToast(message) {
@@ -368,6 +370,113 @@ async function request(path, options = {}) {
   if (!response.ok || payload.error) {
     throw new Error(payload.error || response.statusText);
   }
+  return payload;
+}
+
+function materialPayloadFromControls() {
+  const mode = document.getElementById("material-mode")?.value || "preset";
+  if (mode === "preset") {
+    return {
+      mode: "preset",
+      preset: String(document.getElementById("material-preset")?.value || "h2o").trim(),
+    };
+  }
+  return {
+    mode: "bundle",
+    label: String(document.getElementById("material-label")?.value || "").trim(),
+    fdf: String(document.getElementById("material-fdf")?.value || "").trim(),
+    pseudopotential_dir: String(document.getElementById("material-pseudopotential-dir")?.value || "").trim(),
+    basis_dir: String(document.getElementById("material-basis-dir")?.value || "").trim(),
+    structure_type: String(document.getElementById("material-structure-type")?.value || "").trim(),
+  };
+}
+
+function updateMaterialMode() {
+  const mode = document.getElementById("material-mode")?.value || "preset";
+  document.querySelectorAll(".material-preset-field").forEach((node) => {
+    node.classList.toggle("hidden", mode !== "preset");
+  });
+  document.querySelectorAll(".material-bundle-field").forEach((node) => {
+    node.classList.toggle("hidden", mode !== "bundle");
+  });
+}
+
+function materialSpeciesLabel(species) {
+  return (species || [])
+    .map((item) => item?.label)
+    .filter(Boolean)
+    .join(", ") || "unknown";
+}
+
+function renderMaterialValidation(payload) {
+  const container = document.getElementById("material-validation-status");
+  if (!container) return;
+  container.classList.remove("valid", "invalid", "muted");
+  container.textContent = "";
+  if (!payload) {
+    container.classList.add("muted");
+    container.textContent = "Material not validated yet.";
+    return;
+  }
+  if (!payload.ok) {
+    container.classList.add("invalid");
+    container.textContent = payload.message || "Material validation failed.";
+    return;
+  }
+  container.classList.add("valid");
+  const material = payload.material || {};
+  const lines = [
+    `OK: ${material.label || "material"} (${material.material_source || "explicit"})`,
+    `Species: ${materialSpeciesLabel(payload.species || material.species)}`,
+    `Atoms: ${payload.atom_count ?? material.atom_count ?? "unknown"}`,
+    `Pseudopotentials: ${Object.keys(payload.pseudopotentials || material.pseudopotentials || {}).length}`,
+    `Basis files: ${Object.keys(payload.basis_files || material.basis_file_sha256 || {}).length}`,
+  ];
+  if (payload.warnings?.length) {
+    lines.push(`Warnings: ${payload.warnings.join(" | ")}`);
+  }
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.textContent = line;
+    container.appendChild(row);
+  }
+}
+
+async function loadMaterialPresets() {
+  const payload = await request("/api/material/presets");
+  state.materialPresets = payload.presets || [];
+  const select = document.getElementById("material-preset");
+  if (!select) return;
+  const selected = select.value || payload.default_preset || "h2o";
+  select.innerHTML = "";
+  for (const preset of state.materialPresets) {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = preset.valid
+      ? `${preset.name} (${materialSpeciesLabel(preset.species)})`
+      : `${preset.name} (invalid)`;
+    select.appendChild(option);
+  }
+  if (!state.materialPresets.some((preset) => preset.name === selected)) {
+    const option = document.createElement("option");
+    option.value = selected;
+    option.textContent = selected;
+    select.appendChild(option);
+  }
+  select.value = selected;
+}
+
+async function validateMaterialSelection({ silent = false } = {}) {
+  const payload = await request("/api/material/validate", {
+    method: "POST",
+    body: JSON.stringify({ material: materialPayloadFromControls() }),
+  });
+  state.materialValidation = payload;
+  renderMaterialValidation(payload);
+  if (!payload.ok) {
+    throw new Error(payload.message || "Material validation failed.");
+  }
+  if (!silent) showToast("Material validado.");
   return payload;
 }
 
@@ -2459,11 +2568,14 @@ async function runExperiment() {
     : [];
   const venvActivateCommandInput = document.getElementById("venv-activate-command");
   const venvActivateCommand = String(venvActivateCommandInput?.value || "").trim();
+  const material = materialPayloadFromControls();
+  await validateMaterialSelection({ silent: true });
   state.experimentOffset = 0;
   document.getElementById("experiment-log").textContent = "";
   const payload = await request("/api/experiment", {
     method: "POST",
     body: JSON.stringify({
+      material,
       md_sizes: mdSizes,
       atom_sizes: atomSizes,
       selected_methods: methods,
@@ -4510,6 +4622,24 @@ function setupEvents() {
   document.getElementById("refresh-reusable-datasets")?.addEventListener("click", () => {
     loadReusableDatasets().then(() => showToast("Reusable dataset list refreshed")).catch((error) => showToast(error.message));
   });
+  document.getElementById("material-mode")?.addEventListener("change", () => {
+    state.materialValidation = null;
+    updateMaterialMode();
+    renderMaterialValidation(null);
+  });
+  document.getElementById("material-preset")?.addEventListener("change", () => {
+    state.materialValidation = null;
+    renderMaterialValidation(null);
+  });
+  document.querySelectorAll(".material-bundle-field input").forEach((node) => {
+    node.addEventListener("input", () => {
+      state.materialValidation = null;
+      renderMaterialValidation(null);
+    });
+  });
+  document.getElementById("validate-material")?.addEventListener("click", () => {
+    validateMaterialSelection().catch((error) => showToast(error.message));
+  });
   document.getElementById("add-training-plan-entry")?.addEventListener("click", () => {
     try {
       addTrainingPlanEntry();
@@ -4603,6 +4733,13 @@ async function boot() {
   }
   updateVenvCommandPreview();
   await loadPerformancePresets();
+  updateMaterialMode();
+  try {
+    await loadMaterialPresets();
+    await validateMaterialSelection({ silent: true });
+  } catch (error) {
+    renderMaterialValidation({ ok: false, message: error.message });
+  }
   await loadFcConfig();
   updateDatasetPreview();
   updateReusableDatasetPanel();

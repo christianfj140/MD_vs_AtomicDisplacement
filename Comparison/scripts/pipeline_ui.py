@@ -46,6 +46,13 @@ from method_registry import (
     normalize_method_id,
     normalize_test_set_id,
 )
+from material_provenance import (
+    MATERIAL_FLAT_FIELDS,
+    flatten_material_provenance,
+    material_compatibility_warning,
+    material_maps_from_manifest,
+    read_json_file,
+)
 
 try:
     import pty
@@ -57,11 +64,19 @@ UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 COMPARISON_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = COMPARISON_ROOT / "results"
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+from material_bundle import MaterialBundleError, extract_coordinate_species_indices  # noqa: E402
+from material_presets import (  # noqa: E402
+    DEFAULT_PRESET_DIR as MATERIAL_PRESET_DIR,
+    resolve_material_bundle,
+)
 LOG_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
 METRIC_VERSION = "2026-05-08.frontier-window-v1"
-DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"
+DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -642,7 +657,8 @@ def _provenance_entry_for_run(run: dict[str, Any]) -> dict[str, Any]:
         checkpoint_metadata = {}
     checkpoint_hash = run.get("model_checkpoint_sha256") or checkpoint_metadata.get("sha256")
     recipe_hash = run.get("recipe_hash") or run.get("recipe_set_hash")
-    return {
+    material_provenance = flatten_material_provenance(run.get("material_provenance") or run)
+    entry = {
         "dataset_size": run.get("dataset_size"),
         "effective_dataset_size": run.get("effective_dataset_size"),
         "dataset_label": run.get("dataset_label"),
@@ -666,6 +682,10 @@ def _provenance_entry_for_run(run: dict[str, Any]) -> dict[str, Any]:
             run,
         ),
     }
+    if material_provenance:
+        entry["material_provenance"] = material_provenance
+        entry.update({key: material_provenance.get(key) for key in MATERIAL_FLAT_FIELDS if key in material_provenance})
+    return entry
 
 
 def _frozen_test_manifests_from_cross_evaluations(manifest: dict[str, Any]) -> dict[str, str]:
@@ -761,6 +781,17 @@ def build_method_provenance(
             if test_set in {owned_test_set, "test_mixed"} or frozen_test_manifests_by_test_set is not None
         }
         first_run = run_entries[0] if len(run_entries) == 1 else {}
+        representative_run = run_entries[0] if run_entries else {}
+        first_material = flatten_material_provenance(
+            representative_run.get("material_provenance") or representative_run
+        )
+        material_hashes = sorted(
+            {
+                str(run.get("material_compatibility_hash"))
+                for run in run_entries
+                if run.get("material_compatibility_hash")
+            }
+        )
         entry = {
             "method_id": method_id,
             "display_name": (
@@ -797,6 +828,13 @@ def build_method_provenance(
             "warnings": sorted(dict.fromkeys(warnings)),
             "severe_warnings": sorted(dict.fromkeys(severe_warnings)),
         }
+        if first_material:
+            entry["material_provenance"] = first_material
+            entry.update({key: first_material.get(key) for key in MATERIAL_FLAT_FIELDS if key in first_material})
+        if material_hashes:
+            entry["material_compatibility_hashes"] = material_hashes
+            if len(material_hashes) == 1 and not entry.get("material_compatibility_hash"):
+                entry["material_compatibility_hash"] = material_hashes[0]
         provenance[method_id] = entry
     return provenance
 
@@ -822,6 +860,12 @@ def refresh_method_provenance(
             method_warnings.append(f"{method}: {warning}")
         for warning in entry.get("severe_warnings", []) or []:
             severe_warnings.append(f"{method}: {warning}")
+    material_maps = material_maps_from_manifest({"method_provenance": provenance})
+    material_warning = material_compatibility_warning(material_maps)
+    if material_warning:
+        severe_warnings.append(material_warning)
+        manifest["material_compatibility_warning"] = material_warning
+    manifest.update(material_maps)
     manifest["method_provenance_warnings"] = sorted(dict.fromkeys(method_warnings))
     manifest["method_provenance_severe_warnings"] = sorted(dict.fromkeys(severe_warnings))
     return manifest
@@ -1636,6 +1680,146 @@ def write_yaml(path: Path, config: dict[str, Any]) -> None:
     )
 
 
+MATERIAL_BUNDLE_PAYLOAD_KEYS = (
+    "preset",
+    "label",
+    "root_dir",
+    "fdf",
+    "pseudopotential_dir",
+    "basis_dir",
+    "structure_type",
+)
+
+
+def repository_display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def parse_material_payload(value: Any, *, required: bool = False) -> dict[str, Any] | None:
+    if value in (None, ""):
+        if required:
+            raise RuntimeError("Define material.preset o un bundle material completo.")
+        return None
+    if not isinstance(value, dict):
+        raise RuntimeError("material debe ser un objeto JSON.")
+    mode = str(value.get("mode") or "").strip()
+    material: dict[str, Any] = {}
+    if mode == "preset" or value.get("preset") not in (None, ""):
+        preset = str(value.get("preset") or "").strip()
+        if not preset:
+            raise RuntimeError("material.preset no puede estar vacio.")
+        material["preset"] = preset
+        return material
+    for key in MATERIAL_BUNDLE_PAYLOAD_KEYS:
+        if key == "preset":
+            continue
+        item = value.get(key)
+        if item not in (None, ""):
+            material[key] = item
+    if not material:
+        if required:
+            raise RuntimeError("Define material.preset o un bundle material completo.")
+        return None
+    return material
+
+
+def validate_material_payload(
+    value: Any,
+    *,
+    base_dir: Path = REPO_ROOT,
+    required: bool = True,
+) -> dict[str, Any]:
+    material = parse_material_payload(value, required=required)
+    if material is None:
+        return {"ok": True, "material": None, "warnings": []}
+    resolved = resolve_material_bundle(
+        {"material": material},
+        base_dir=base_dir,
+        allow_legacy_default=False,
+        allow_absolute_paths=True,
+    )
+    manifest = resolved.to_manifest_dict()
+    atom_count = len(extract_coordinate_species_indices(resolved.validated.bundle.fdf))
+    manifest["atom_count"] = atom_count
+    warnings = [
+        str(item)
+        for item in (manifest.get("warning"),)
+        if item not in (None, "")
+    ]
+    if manifest.get("absolute_paths_used"):
+        warnings.append(
+            "El bundle usa rutas absolutas; quedan registradas para trazabilidad, "
+            "pero no son portables entre maquinas."
+        )
+    return {
+        "ok": True,
+        "material": manifest,
+        "material_config": material,
+        "warnings": warnings,
+        "species": manifest.get("species", []),
+        "atom_count": atom_count,
+        "pseudopotentials": manifest.get("pseudopotentials", {}),
+        "basis_files": manifest.get("basis_file_sha256", {}),
+    }
+
+
+def material_validation_response(value: Any, *, base_dir: Path = REPO_ROOT) -> dict[str, Any]:
+    try:
+        return validate_material_payload(value, base_dir=base_dir, required=True)
+    except (MaterialBundleError, RuntimeError, OSError) as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "warnings": [],
+            "species": [],
+            "pseudopotentials": {},
+            "basis_files": {},
+        }
+
+
+def material_presets_payload(*, preset_dir: Path = MATERIAL_PRESET_DIR) -> dict[str, Any]:
+    presets: list[dict[str, Any]] = []
+    if preset_dir.exists():
+        preset_paths = sorted(preset_dir.glob("*/material.yaml"))
+    else:
+        preset_paths = []
+    for path in preset_paths:
+        name = path.parent.name
+        item: dict[str, Any] = {
+            "name": name,
+            "path": repository_display_path(path),
+            "valid": False,
+        }
+        try:
+            validation = validate_material_payload({"preset": name}, required=True)
+            material = validation.get("material") or {}
+            item.update(
+                {
+                    "valid": True,
+                    "label": material.get("label"),
+                    "structure_type": material.get("structure_type"),
+                    "species": material.get("species", []),
+                    "warnings": validation.get("warnings", []),
+                }
+            )
+        except (MaterialBundleError, RuntimeError, OSError) as exc:
+            item["error"] = str(exc)
+        presets.append(item)
+    return {
+        "presets": presets,
+        "default_preset": "h2o",
+        "preset_dir": repository_display_path(preset_dir),
+    }
+
+
+def apply_material_to_config(config: dict[str, Any], material: dict[str, Any] | None) -> None:
+    if material is not None:
+        config["material"] = dict(material)
+
+
 def resolve_venv_activate_from_command(command: str) -> str:
     text = str(command).strip()
     if not text:
@@ -1647,6 +1831,10 @@ def resolve_venv_activate_from_command(command: str) -> str:
     text = text.strip("\"'")
     if not text:
         raise RuntimeError("No se pudo extraer la ruta del entorno virtual desde el comando.")
+    if "${GRAPH2MAT_VENV}" in text and not os.environ.get("GRAPH2MAT_VENV"):
+        raise RuntimeError(
+            "GRAPH2MAT_VENV debe estar definido para usarlo como ruta del entorno virtual."
+        )
     if (
         not Path(os.path.expandvars(text.replace("${REPO_ROOT}", str(REPO_ROOT)))).expanduser().is_absolute()
         and not text.startswith("${GRAPH2MAT_VENV}")
@@ -1885,6 +2073,13 @@ def copy_selected_reference_files(source_root: Path, destination_root: Path) -> 
 
 
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
+DEFAULT_MD_SPLIT_MODE = "blocked_with_gap"
+DEFAULT_MD_TEMPORAL_GAP = 1
+DEFAULT_MD_BLOCK_ORDER = "train,validation,test"
+MD_SPREAD_SPLIT_WARNING = (
+    "MD split_mode=spread is exploratory/debug only because temporally adjacent "
+    "trajectory frames can cross train/validation/test."
+)
 DEFAULT_COMMON_TEST_SETS = ["test_md", "test_siesta_fc_cartesian", "test_mixed"]
 DEFAULT_PRIMARY_METRIC = "low_energy_rmse_eV"
 MINIMUM_ROBUST_SEEDS = 3
@@ -2000,6 +2195,29 @@ def validate_split_sizes(
             f"vacios={empty}."
         )
     return counts
+
+
+def md_split_counts_for_mode(
+    dataset_size: int,
+    splits: dict[str, float],
+    *,
+    split_mode: str,
+    label: str,
+) -> tuple[dict[str, int], int]:
+    """Return train/validation/test counts plus frames reserved as temporal gaps."""
+    if split_mode != DEFAULT_MD_SPLIT_MODE:
+        return validate_split_sizes(dataset_size, splits, label=label), 0
+
+    gap = DEFAULT_MD_TEMPORAL_GAP
+    reserved_gap_frames = 2 * gap
+    usable_size = dataset_size - reserved_gap_frames
+    if usable_size < 3:
+        raise RuntimeError(
+            f"{label}: blocked_with_gap con temporal_gap={gap} necesita al menos "
+            f"{3 + reserved_gap_frames} frames MD para mantener train, validation "
+            "y test no vacios."
+        )
+    return validate_split_sizes(usable_size, splits, label=label), reserved_gap_frames
 
 
 def atom_fc_sample_limit(config: dict[str, Any]) -> int | None:
@@ -2156,7 +2374,7 @@ def parse_combination_mode(value: Any) -> str:
 
 
 def parse_split_mode(value: Any) -> str:
-    mode = "block" if value in (None, "") else str(value).strip().lower()
+    mode = DEFAULT_MD_SPLIT_MODE if value in (None, "") else str(value).strip().lower()
     if mode not in {"block", "spread", "blocked_with_gap"}:
         raise RuntimeError(
             "split_mode debe ser 'block', 'spread' o 'blocked_with_gap' "
@@ -3482,6 +3700,34 @@ def split_block_items(items: list[Any], counts: dict[str, int]) -> dict[str, lis
     }
 
 
+def split_blocked_with_gap_items(
+    items: list[Any],
+    counts: dict[str, int],
+    *,
+    temporal_gap: int,
+) -> tuple[dict[str, list[Any]], list[tuple[Any, str]]]:
+    required = sum(counts.values()) + 2 * temporal_gap
+    if required > len(items):
+        raise RuntimeError(
+            "El split MD blocked_with_gap necesita mas muestras de las disponibles: "
+            f"{required} > {len(items)} (gap={temporal_gap}, counts={counts})."
+        )
+    result: dict[str, list[Any]] = {"train": [], "validation": [], "test": []}
+    excluded: list[tuple[Any, str]] = []
+    cursor = 0
+    order = ("train", "validation", "test")
+    for index, split_name in enumerate(order):
+        count = counts[split_name]
+        result[split_name] = list(items[cursor : cursor + count])
+        cursor += count
+        if index < len(order) - 1 and temporal_gap > 0:
+            next_split = order[index + 1]
+            for item in items[cursor : cursor + temporal_gap]:
+                excluded.append((item, f"temporal_gap_between_{split_name}_and_{next_split}"))
+            cursor += temporal_gap
+    return result, excluded
+
+
 def split_grouped_exact_items(
     items: list[dict[str, Any]],
     counts: dict[str, int],
@@ -4164,7 +4410,15 @@ def checkpoint_metadata(checkpoint_path: Path | None, training_dir: Path) -> dic
 
 def write_checkpoint_manifest(training_dir: Path, metadata: dict[str, Any], warning: str) -> Path:
     path = training_dir / "checkpoint_manifest.json"
-    payload = {
+    payload: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload.update(existing)
+        except Exception:
+            payload = {}
+    payload.update({
         "checkpoint_path": metadata.get("path"),
         "checkpoint_sha256": metadata.get("sha256"),
         "relative_path": metadata.get("relative_path"),
@@ -4172,7 +4426,7 @@ def write_checkpoint_manifest(training_dir: Path, metadata: dict[str, Any], warn
         "checkpoint_selection_warning": warning,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "training_dir": str(training_dir),
-    }
+    })
     path.write_text(json.dumps(json_safe(payload), indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
     return path
 
@@ -5204,7 +5458,7 @@ class ExperimentRunner:
         atom_dataset_specs: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
-        split_mode: str = "block",
+        split_mode: str = DEFAULT_MD_SPLIT_MODE,
         test_sets: list[str] | None = None,
         primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
@@ -5218,6 +5472,7 @@ class ExperimentRunner:
         dataset_recipes_info: dict[str, Any] | None = None,
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
         training_plan: list[dict[str, Any]] | None = None,
+        material: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -5227,6 +5482,9 @@ class ExperimentRunner:
             reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
             training_plan = parse_training_plan(training_plan)
             validate_training_plan_for_run_mode(training_plan, run_mode)
+            material_config = parse_material_payload(material, required=material is not None)
+            if material_config is not None:
+                validate_material_payload(material_config, required=True)
             performance_settings = parse_performance_settings(
                 performance,
                 compute_accelerator=compute_accelerator,
@@ -5303,6 +5561,7 @@ class ExperimentRunner:
                     dataset_recipes_info,
                     reusable_split_policy,
                     training_plan,
+                    material_config,
                 ),
                 daemon=True,
             )
@@ -5380,9 +5639,13 @@ class ExperimentRunner:
         performance: dict[str, Any] | None = None,
         training_settings: dict[str, Any] | None = None,
         dataset_recipes_info: dict[str, Any] | None = None,
+        material: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         md_config = load_config(PIPELINES["md"].config_path)
         atom_config = load_config(PIPELINES["atom_displacement"].config_path)
+        material_config = parse_material_payload(material, required=material is not None)
+        for config in (md_config, atom_config):
+            apply_material_to_config(config, material_config)
         performance_settings = parse_performance_settings(
             performance,
             compute_accelerator=compute_accelerator,
@@ -5873,7 +6136,7 @@ class ExperimentRunner:
         atom_dataset_specs: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
-        split_mode: str = "block",
+        split_mode: str = DEFAULT_MD_SPLIT_MODE,
         test_sets: list[str] | None = None,
         primary_metric: str = DEFAULT_PRIMARY_METRIC,
         compute_budget_mode: str = "both",
@@ -5887,6 +6150,7 @@ class ExperimentRunner:
         dataset_recipes_info: dict[str, Any] | None = None,
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
         training_plan: list[dict[str, Any]] | None = None,
+        material: dict[str, Any] | None = None,
     ) -> None:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = normalize_selected_methods(selected_methods)
@@ -5894,6 +6158,12 @@ class ExperimentRunner:
         reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
         training_plan = parse_training_plan(training_plan)
         validate_training_plan_for_run_mode(training_plan, run_mode)
+        material_config = parse_material_payload(material, required=material is not None)
+        material_validation = (
+            validate_material_payload(material_config, required=True)
+            if material_config is not None
+            else None
+        )
         performance_settings = parse_performance_settings(
             performance,
             compute_accelerator=compute_accelerator,
@@ -5923,7 +6193,15 @@ class ExperimentRunner:
             performance_settings,
             training_settings,
             dataset_recipes_info,
+            material_config,
         )
+        if material_validation is not None:
+            manifest["material_selection"] = material_config
+            manifest["material_validation"] = {
+                key: value
+                for key, value in material_validation.items()
+                if key != "material_config"
+            }
         manifest["reusable_split_policy"] = reusable_split_policy
         manifest["training_plan"] = training_plan
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
@@ -5940,6 +6218,20 @@ class ExperimentRunner:
         try:
             self._append(f"[UI] Comparacion {run_id} iniciada.\n")
             self._append(f"[UI] Run mode: {run_mode}\n")
+            if material_validation is not None:
+                material_info = material_validation.get("material") or {}
+                species = ", ".join(
+                    str(item.get("label") or "")
+                    for item in material_validation.get("species") or []
+                    if isinstance(item, dict)
+                )
+                self._append(
+                    "[UI] Material: "
+                    f"{material_info.get('label')} ({material_info.get('material_source')}); "
+                    f"species: {species or 'unknown'}.\n"
+                )
+                for warning in material_validation.get("warnings") or []:
+                    self._append(f"[WARN] Material: {warning}\n")
             if run_mode_skips_dataset_generation(run_mode):
                 self._append(f"[UI] Reusable split policy: {reusable_split_policy}\n")
             self._append(f"[UI] Selected methods: {', '.join(selected_methods)}\n")
@@ -6066,6 +6358,7 @@ class ExperimentRunner:
                         venv_activate_path=venv_activate_path,
                         reusable_split_policy=reusable_split_policy,
                         source_run=source_run,
+                        material=material_config,
                     )
                     if target_id:
                         result["planned_dataset_target_id"] = target_id
@@ -6108,6 +6401,7 @@ class ExperimentRunner:
                         venv_activate_path=venv_activate_path,
                         reusable_split_policy=reusable_split_policy,
                         source_run=source_run,
+                        material=material_config,
                     )
                     if target_id:
                         result["planned_dataset_target_id"] = target_id
@@ -6153,6 +6447,7 @@ class ExperimentRunner:
                         venv_activate_path=venv_activate_path,
                         reusable_split_policy=reusable_split_policy,
                         source_run=source_run,
+                        material=material_config,
                     )
                     if target_id:
                         result["planned_dataset_target_id"] = target_id
@@ -6987,9 +7282,25 @@ class ExperimentRunner:
                     raise RuntimeError(
                         f"{method_id}: missing reference Hamiltonian in {manifest_path}:{index}: {hamiltonian_value}"
                     )
-        if total_rows != int(size):
+        excluded_gap_rows = 0
+        excluded_gap_manifest = dataset_dir / "splits" / "excluded_gap_manifest.csv"
+        if key == "md" and excluded_gap_manifest.exists():
+            _fieldnames, rows = self._read_csv_preserving_fields(excluded_gap_manifest)
+            excluded_gap_rows = len(rows)
+            for index, row in enumerate(rows, start=2):
+                sample_dir = Path(str(row.get("sample_dir") or ""))
+                structure = Path(str(row.get("structure_path") or ""))
+                if not structure.exists() and sample_dir:
+                    structure = sample_dir / "RUN.fdf"
+                if not structure.exists():
+                    raise RuntimeError(
+                        f"{method_id}: missing excluded-gap structure in "
+                        f"{excluded_gap_manifest}:{index}: {structure}"
+                    )
+        if total_rows != int(size) and total_rows + excluded_gap_rows != int(size):
             raise RuntimeError(
-                f"{method_id}: existing dataset split rows ({total_rows}) do not match requested size {size}."
+                f"{method_id}: existing dataset split rows ({total_rows}) "
+                f"plus excluded gap rows ({excluded_gap_rows}) do not match requested size {size}."
             )
 
     def _rewrite_copied_manifest_value(self, value: Any, source_dataset_dir: Path, target_dataset_dir: Path) -> Any:
@@ -7092,7 +7403,10 @@ class ExperimentRunner:
         fieldnames: list[str] = []
         items: list[dict[str, Any]] = []
         seen_names: set[str] = set()
-        for split_name in ("train", "validation", "test"):
+        split_names = ["train", "validation", "test"]
+        if key == "md" and (dataset_dir / "splits" / "excluded_gap_manifest.csv").exists():
+            split_names.append("excluded_gap")
+        for split_name in split_names:
             manifest_path = self._manifest_path_for_split(dataset_dir, split_name)
             split_fieldnames, rows = self._read_csv_preserving_fields(manifest_path)
             for field in split_fieldnames:
@@ -7155,6 +7469,7 @@ class ExperimentRunner:
         split_name: str,
         destination: Path,
         split_mode: str,
+        temporal_gap: int = 0,
     ) -> dict[str, Any]:
         updated = dict(row)
         structure_path = destination / "RUN.fdf"
@@ -7167,6 +7482,8 @@ class ExperimentRunner:
             run_out_path = dataset_dir / "RUN.out"
         updated["split"] = split_name
         updated["split_strategy"] = split_mode
+        updated["temporal_gap"] = str(temporal_gap)
+        updated.setdefault("excluded_gap_reason", "")
         updated["sample_dir"] = str(destination)
         updated["structure_path"] = str(structure_path)
         updated["metadata_path"] = str(metadata_path) if metadata_path.exists() else ""
@@ -7216,10 +7533,20 @@ class ExperimentRunner:
     ) -> dict[str, Any]:
         method_id = self._method_id_for_pipeline_key(key)
         fieldnames, items = self._collect_reusable_split_items(key, dataset_dir)
-        counts = validate_split_sizes(size, split_ratios, label=f"{method_id} reusable dataset")
-        if sum(counts.values()) > len(items):
+        if key == "md":
+            counts, reserved_gap_frames = md_split_counts_for_mode(
+                size,
+                split_ratios,
+                split_mode=split_mode,
+                label=f"{method_id} reusable dataset",
+            )
+        else:
+            counts = validate_split_sizes(size, split_ratios, label=f"{method_id} reusable dataset")
+            reserved_gap_frames = 0
+        requested_items = sum(counts.values()) + reserved_gap_frames
+        if requested_items > len(items):
             raise RuntimeError(
-                f"{method_id}: split rebuild pide {sum(counts.values())} muestras, "
+                f"{method_id}: split rebuild pide {requested_items} muestras, "
                 f"pero solo hay {len(items)} disponibles."
             )
         cleanup_roots = self._reusable_split_cleanup_roots(key, dataset_dir)
@@ -7227,7 +7554,15 @@ class ExperimentRunner:
         for root in cleanup_roots:
             if root.exists():
                 shutil.rmtree(root)
-        split_items = self._split_reusable_items(key, items, counts, split_mode)
+        excluded_gap_items: list[tuple[dict[str, Any], str]] = []
+        if key == "md" and split_mode == DEFAULT_MD_SPLIT_MODE:
+            split_items, excluded_gap_items = split_blocked_with_gap_items(
+                items,
+                counts,
+                temporal_gap=DEFAULT_MD_TEMPORAL_GAP,
+            )
+        else:
+            split_items = self._split_reusable_items(key, items, counts, split_mode)
         split_root = dataset_dir / "splits"
         split_root.mkdir(parents=True, exist_ok=True)
         for split_name, split_entries in split_items.items():
@@ -7245,6 +7580,7 @@ class ExperimentRunner:
                         split_name=split_name,
                         destination=destination,
                         split_mode=split_mode,
+                        temporal_gap=DEFAULT_MD_TEMPORAL_GAP if split_mode == DEFAULT_MD_SPLIT_MODE else 0,
                     )
                 )
             manifest_path = split_root / f"{split_name}_manifest.csv"
@@ -7254,6 +7590,30 @@ class ExperimentRunner:
                     if field not in row_fields:
                         row_fields.append(field)
             write_csv_dicts(manifest_path, rows, row_fields)
+        if excluded_gap_items:
+            rows = []
+            for item, reason in excluded_gap_items:
+                source = Path(str(item["source"]))
+                row = self._rewrite_resplit_row(
+                    item["row"],
+                    key=key,
+                    dataset_dir=dataset_dir,
+                    split_name="excluded_gap",
+                    destination=source,
+                    split_mode=split_mode,
+                    temporal_gap=DEFAULT_MD_TEMPORAL_GAP,
+                )
+                row["valid"] = "false"
+                row["status"] = "excluded"
+                row["validation_reason"] = "excluded_temporal_gap"
+                row["excluded_gap_reason"] = reason
+                rows.append(row)
+            row_fields = list(fieldnames)
+            for row in rows:
+                for field in row:
+                    if field not in row_fields:
+                        row_fields.append(field)
+            write_csv_dicts(split_root / "excluded_gap_manifest.csv", rows, row_fields)
         if pool_dir and pool_dir.exists():
             shutil.rmtree(pool_dir)
         self._remove_copied_downstream_outputs(dataset_dir)
@@ -7261,6 +7621,8 @@ class ExperimentRunner:
             "reused_split_policy": REBUILD_REUSABLE_SPLITS,
             "reused_split_counts": counts,
             "reused_split_strategy": split_mode,
+            "reused_temporal_gap": DEFAULT_MD_TEMPORAL_GAP if reserved_gap_frames else 0,
+            "reused_excluded_gap_count": len(excluded_gap_items),
             "effective_size": sum(counts.values()),
         }
 
@@ -7328,6 +7690,7 @@ class ExperimentRunner:
         config["md"]["steps"] = size
         config["training"]["data"]["basis_files"] = "../dataset/MD_steps/basis/*.ion.xml"
         config["training"]["data"]["train_runs"] = "../dataset/splits/train/*/RUN.fdf"
+        config["training"]["data"]["val_runs"] = "../dataset/splits/validation/*/RUN.fdf"
         config["testing"]["test_runs"] = "../dataset/splits/test/*/RUN.fdf"
         config["prediction"]["predict_structs"] = "../dataset/splits/test/*/RUN.fdf"
         config["checkpoint"]["path"] = None
@@ -7358,6 +7721,7 @@ class ExperimentRunner:
         basis_files_pattern = "../dataset/basis/*.ion.xml" if sorted((dataset_dir / "basis").glob("*.ion.xml")) else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
         config["training"]["data"].setdefault("n_matrix_components", 2)
+        config["training"]["data"]["val_runs"] = "../dataset/validation_samples/*/RUN.fdf"
         config["testing"]["data"]["basis_files"] = basis_files_pattern
         config["testing"]["data"].setdefault("n_matrix_components", 2)
         config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
@@ -7381,7 +7745,7 @@ class ExperimentRunner:
         md_temperature_blocks: list[dict[str, Any]] | None = None,
         split_ratios: dict[str, float] | None = None,
         random_seed: int | None = None,
-        split_mode: str = "block",
+        split_mode: str = DEFAULT_MD_SPLIT_MODE,
         run_mode: str = "full_strict_pipeline",
         compute_accelerator: str = "cpu",
         performance: dict[str, Any] | None = None,
@@ -7389,8 +7753,11 @@ class ExperimentRunner:
         venv_activate_path: str | None = None,
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
         source_run: dict[str, Any] | None = None,
+        material: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES[key]
+        if key != "md" and split_mode == DEFAULT_MD_SPLIT_MODE:
+            split_mode = "block"
         dataset_label = dataset_label or f"dataset_{size}"
         started_at = time.time()
         eta_seconds = self._estimated_seconds(key, size)
@@ -7404,6 +7771,7 @@ class ExperimentRunner:
         self._append(f"\n[UI] === {spec.label} {dataset_label} ===\n")
         self._append(f"[UI] ETA inicial: {format_duration(eta_seconds)}\n")
         config = load_config(spec.config_path)
+        apply_material_to_config(config, parse_material_payload(material, required=material is not None))
         workspace = WORKSPACES_ROOT / run_id / key / dataset_label
         if key == "md":
             result_group = "results_md"
@@ -7471,6 +7839,9 @@ class ExperimentRunner:
                     "validation": rebuilt["reused_split_counts"]["validation"],
                     "test": rebuilt["reused_split_counts"]["test"],
                 }
+                if key == "md" and split_mode == DEFAULT_MD_SPLIT_MODE:
+                    config["splits"]["temporal_gap"] = DEFAULT_MD_TEMPORAL_GAP
+                    config["splits"]["block_order"] = DEFAULT_MD_BLOCK_ORDER
                 self._append(
                     f"[UI] {reuse_context}: dataset reused; splits rebuilt from "
                     f"training controls ({split_mode}, counts={rebuilt['reused_split_counts']}).\n"
@@ -7633,8 +8004,11 @@ class ExperimentRunner:
         venv_activate_path: str | None = None,
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
         source_run: dict[str, Any] | None = None,
+        material: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         spec = PIPELINES["atom_displacement"]
+        if split_mode == DEFAULT_MD_SPLIT_MODE:
+            split_mode = "block"
         dataset_label = dataset_label or f"dataset_{size}"
         started_at = time.time()
         self._set_current(
@@ -7646,6 +8020,7 @@ class ExperimentRunner:
         )
         self._append(f"\n[UI] === Random Cartesian {dataset_label} ===\n")
         config = load_config(spec.config_path)
+        apply_material_to_config(config, parse_material_payload(material, required=material is not None))
         performance = parse_performance_settings(performance, compute_accelerator=compute_accelerator)
         apply_performance_to_config(config, performance)
         training_settings = parse_training_settings(training_settings)
@@ -7876,13 +8251,18 @@ class ExperimentRunner:
         workspace: Path,
         size: int,
         split_ratios: dict[str, float] | None = None,
-        split_mode: str = "block",
+        split_mode: str = DEFAULT_MD_SPLIT_MODE,
         temperature_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         dataset_dir = workspace / "dataset"
         pseudo_count = copy_pseudopotentials(PIPELINES["md"].root / "dataset", dataset_dir)
         ratios = split_ratios or split_ratios_from_config(config)
-        counts = validate_split_sizes(size, ratios, label=f"MD dataset_{size}")
+        counts, reserved_gap_frames = md_split_counts_for_mode(
+            size,
+            ratios,
+            split_mode=split_mode,
+            label=f"MD dataset_{size}",
+        )
         config["paths"]["dataset_dir"] = str(dataset_dir)
         config["paths"]["training_dir"] = str(workspace / "training")
         config["md"]["steps"] = size
@@ -7902,7 +8282,11 @@ class ExperimentRunner:
             "validation": counts["validation"],
             "test": counts["test"],
         }
+        if split_mode == DEFAULT_MD_SPLIT_MODE:
+            config["splits"]["temporal_gap"] = DEFAULT_MD_TEMPORAL_GAP
+            config["splits"]["block_order"] = DEFAULT_MD_BLOCK_ORDER
         config["training"]["data"]["train_runs"] = "../dataset/splits/train/*/RUN.fdf"
+        config["training"]["data"]["val_runs"] = "../dataset/splits/validation/*/RUN.fdf"
         config["testing"]["test_runs"] = "../dataset/splits/test/*/RUN.fdf"
         config["testing"].setdefault("callbacks", {})
         config["testing"]["callbacks"]["plot_matrix_error"] = False
@@ -7927,9 +8311,19 @@ class ExperimentRunner:
             "[UI] MD split: "
             f"{counts['train']} train, {counts['test']} test, "
             f"{counts['validation']} validation; ratios "
-            f"{ratios['train']}/{ratios['validation']}/{ratios['test']}.\n"
+            f"{ratios['train']}/{ratios['validation']}/{ratios['test']}; "
+            f"strategy {split_mode}.\n"
         )
+        if reserved_gap_frames:
+            self._append(
+                "[UI] MD temporal gap: "
+                f"{DEFAULT_MD_TEMPORAL_GAP} frame entre splits; "
+                f"{reserved_gap_frames} frames reservados fuera de train/validation/test.\n"
+            )
+        if split_mode == "spread":
+            self._append(f"[WARN] {MD_SPREAD_SPLIT_WARNING}\n")
         self._append(f"[UI] MD train_runs: {config['training']['data']['train_runs']}\n")
+        self._append(f"[UI] MD val_runs: {config['training']['data']['val_runs']}\n")
         self._append(f"[UI] MD test_runs: {config['testing']['test_runs']}\n")
 
     def _prepare_atom_generation_config(
@@ -8128,6 +8522,7 @@ class ExperimentRunner:
         basis_files_pattern = "../dataset/basis/*.ion.xml" if basis_count else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
         config["training"]["data"].setdefault("n_matrix_components", 2)
+        config["training"]["data"]["val_runs"] = "../dataset/validation_samples/*/RUN.fdf"
         config["prediction"]["data"]["basis_files"] = basis_files_pattern
         config["prediction"]["data"].setdefault("n_matrix_components", 2)
         config["testing"]["data"]["basis_files"] = basis_files_pattern
@@ -8768,6 +9163,7 @@ class ExperimentRunner:
         copy_if_exists(dataset_dir / "collected" / "water_atom_displacement_summary.csv", result_dir / "water_atom_displacement_summary.csv")
         for manifest_file in sorted((dataset_dir / "splits").glob("*_manifest.csv")):
             copy_if_exists(manifest_file, result_dir / "splits" / manifest_file.name)
+        copy_if_exists(dataset_dir / "splits" / "split_summary.json", result_dir / "splits" / "split_summary.json")
         for validation_file in sorted((dataset_dir / "validation").glob("*/*.csv")):
             copy_if_exists(validation_file, result_dir / "validation" / validation_file.parent.name / validation_file.name)
         siesta_counts = self._single_point_counts(result_dir / "run_summary.json")
@@ -8837,7 +9233,38 @@ class ExperimentRunner:
             "rendered_run_fdf": files_content_digest(sorted((result_dir / "structures").glob("*/RUN.fdf"))),
             "pipeline_config": files_content_digest([result_dir / "pipeline_config.yaml"]),
             "checkpoint_manifest": files_content_digest([checkpoint_manifest_path]),
+            "graph2mat_config": files_content_digest([training_dir / "config.yaml"]),
+            "split_manifests": files_content_digest(
+                [
+                    *sorted((result_dir / "splits").glob("*_manifest.csv")),
+                    result_dir / "splits" / "split_summary.json",
+                ]
+            ),
+            "reference_matrices": files_content_digest(
+                [path for path in sorted((result_dir / "siesta_hamiltonians").rglob("*")) if path.is_file()]
+            ),
+            "prediction_matrices": files_content_digest(
+                [path for path in sorted((result_dir / "predicted_hamiltonians").rglob("*")) if path.is_file()]
+            ),
         }
+        graph2mat_config_provenance = read_json_file(training_dir / "config_provenance.json")
+        checkpoint_manifest_payload = read_json_file(checkpoint_manifest_path)
+        checkpoint_graph2mat_provenance = checkpoint_manifest_payload.get("graph2mat_config_provenance")
+        material_provenance = flatten_material_provenance(
+            read_json_file(dataset_dir / "material_provenance.json"),
+            read_json_file(dataset_dir / "samples_manifest.json"),
+            graph2mat_config_provenance,
+            checkpoint_graph2mat_provenance if isinstance(checkpoint_graph2mat_provenance, dict) else {},
+            {
+                "dataset_recipe": recipe_metadata,
+                "dataset_recipe_parameters": recipe_metadata.get("generation_parameters")
+                or recipe_metadata.get("generation_parameters_json"),
+                "graph2mat_config_hash": run_artifact_hashes.get("graph2mat_config"),
+                "split_manifest_hash": run_artifact_hashes.get("split_manifests"),
+                "reference_matrix_sha256": run_artifact_hashes.get("reference_matrices"),
+                "prediction_matrix_sha256": run_artifact_hashes.get("prediction_matrices"),
+            },
+        )
         dataset_sample_ids: list[str] = []
         for split_manifest in sorted((result_dir / "splits").glob("*_manifest.csv")):
             for row in read_csv_rows(split_manifest):
@@ -8898,6 +9325,8 @@ class ExperimentRunner:
             "checkpoint_manifest": str(checkpoint_manifest_path),
             "checkpoint_selection_warning": checkpoint_warning,
             "artifact_hashes": run_artifact_hashes,
+            "material_provenance": material_provenance,
+            **{key: material_provenance.get(key) for key in MATERIAL_FLAT_FIELDS if key in material_provenance},
             "dataset_sample_ids": sorted(set(dataset_sample_ids)),
             "dataset_sample_hash": sample_set_hash(dataset_sample_ids),
             "seed": manifest_seed,
@@ -9388,6 +9817,38 @@ class ExperimentRunner:
                             "structures": copy_counts["structures"],
                             "evaluation": evaluation_summary,
                         }
+                        cross_manifest["method_provenance"] = build_method_provenance(
+                            manifest,
+                            selected_methods=["md", "siesta_fc_cartesian"],
+                            runs=[md_result, atom_result],
+                            frozen_test_manifests_by_test_set={
+                                test_set: str(frozen_manifest_path) if frozen_manifest_path.exists() else ""
+                            },
+                        )
+                        material_maps = material_maps_from_manifest(cross_manifest)
+                        material_warning = material_compatibility_warning(material_maps)
+                        cross_manifest.update(material_maps)
+                        cross_manifest["method_provenance_warnings"] = sorted(
+                            dict.fromkeys(
+                                f"{method}: {warning}"
+                                for method, provenance in cross_manifest["method_provenance"].items()
+                                for warning in provenance.get("warnings", []) or []
+                            )
+                        )
+                        cross_manifest["method_provenance_severe_warnings"] = sorted(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        f"{method}: {warning}"
+                                        for method, provenance in cross_manifest["method_provenance"].items()
+                                        for warning in provenance.get("severe_warnings", []) or []
+                                    ),
+                                    *([material_warning] if material_warning else []),
+                                ]
+                            )
+                        )
+                        if material_warning:
+                            cross_manifest["material_compatibility_warning"] = material_warning
                         (cross_result_dir / "cross_evaluation_manifest.json").write_text(
                             json.dumps(json_safe(cross_manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
                             encoding="utf-8",
@@ -9999,6 +10460,11 @@ class ExperimentRunner:
                             else ""
                         },
                     )
+                    material_maps = material_maps_from_manifest(cross_manifest)
+                    material_warning = material_compatibility_warning(material_maps)
+                    cross_manifest.update(material_maps)
+                    if material_warning:
+                        cross_manifest["material_compatibility_warning"] = material_warning
                     cross_manifest["method_provenance_warnings"] = sorted(
                         dict.fromkeys(
                             f"{method}: {warning}"
@@ -10008,9 +10474,14 @@ class ExperimentRunner:
                     )
                     cross_manifest["method_provenance_severe_warnings"] = sorted(
                         dict.fromkeys(
-                            f"{method}: {warning}"
-                            for method, provenance in cross_manifest["method_provenance"].items()
-                            for warning in provenance.get("severe_warnings", []) or []
+                            [
+                                *(
+                                    f"{method}: {warning}"
+                                    for method, provenance in cross_manifest["method_provenance"].items()
+                                    for warning in provenance.get("severe_warnings", []) or []
+                                ),
+                                *([material_warning] if material_warning else []),
+                            ]
                         )
                     )
                     (cross_result_dir / "cross_evaluation_manifest.json").write_text(
@@ -10407,6 +10878,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, atom_fc_ui_config())
             elif path == "/api/performance-presets":
                 json_response(self, performance_preset_catalog())
+            elif path == "/api/material/presets":
+                json_response(self, material_presets_payload())
             elif path == "/api/methods":
                 json_response(self, {"methods": method_registry_payload(), "run_modes": sorted(RUN_MODES)})
             elif path == "/api/experiment/status":
@@ -10466,8 +10939,18 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     result,
                     status=HTTPStatus.ACCEPTED,
                 )
+            elif path == "/api/material/validate":
+                payload = read_json_body(self)
+                material_payload = payload.get("material", payload)
+                json_response(self, material_validation_response(material_payload))
             elif path == "/api/experiment":
                 payload = read_json_body(self)
+                material_config = parse_material_payload(
+                    payload.get("material"),
+                    required="material" in payload,
+                )
+                if material_config is not None:
+                    validate_material_payload(material_config, required=True)
                 selected_methods = normalize_selected_methods(payload.get("selected_methods"))
                 run_mode = parse_run_mode(payload.get("run_mode"))
                 reusable_dataset_ids = parse_reusable_dataset_ids(payload.get("reusable_dataset_ids"))
@@ -10687,6 +11170,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         dataset_recipes_info,
                         reusable_split_policy,
                         training_plan,
+                        material_config,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

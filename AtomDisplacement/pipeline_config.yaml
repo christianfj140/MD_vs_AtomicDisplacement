@@ -13,7 +13,15 @@ paths:
   run_summary_name: run_summary.json
   collected_json_name: water_atom_displacement_dataset.json
   collected_csv_name: water_atom_displacement_summary.csv
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${REPO_ROOT}/.venv/bin/activate
+material:
+  preset: h2o
+atomic_displacement:
+  recipe: generic_cartesian
+  amplitude_ang: 0.03
+  selected_species: null
+  include_base: true
+  overwrite: false
 commands:
   graph2mat: graph2mat
   siesta: siesta
@@ -65,6 +73,7 @@ structure:
     dSdR_tolerance: -1 1/Bohr
   random_cartesian:
     enabled: false
+    recipe: legacy_components
     n_structures: 100
     seed: 1234
     distribution: gaussian
@@ -209,7 +218,10 @@ splits:
 single_points:
   limit: null
   rerun: false
-  allow_unvalidated_matrices: true
+  # Scientific hardening default: references are reusable only when RUN.out
+  # proves job completion and SCF convergence. Use the CLI debug flag only for
+  # unsafe local recovery/debug workflows.
+  allow_unvalidated_matrices: false
   workers: 1
 training:
   torch_float32_matmul_precision: null
@@ -220,6 +232,7 @@ training:
     n_matrix_components: 2
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     runs_json: runs.json
+    val_runs: ../dataset/validation_samples/*/RUN.fdf
     batch_size: 10
     store_in_memory: true
   model:

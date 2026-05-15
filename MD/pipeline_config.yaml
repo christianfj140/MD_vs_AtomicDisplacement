@@ -4,7 +4,9 @@ paths:
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${REPO_ROOT}/.venv/bin/activate
+material:
+  preset: h2o
 commands:
   graph2mat: graph2mat
   siesta: siesta
@@ -102,6 +104,7 @@ training:
     n_matrix_components: 2
     basis_files: ../dataset/MD_steps/basis/*.ion.xml
     train_runs: ../dataset/splits/train/*/RUN.fdf
+    val_runs: ../dataset/splits/validation/*/RUN.fdf
     batch_size: 10
     store_in_memory: true
   model:
@@ -163,7 +166,11 @@ performance:
   torch_float32_matmul_precision: null
 splits:
   enabled: true
-  strategy: spread
-  train: 8
+  # Leakage-safer scientific default for MD trajectories. The two omitted
+  # frames act as temporal buffers between train/validation/test for 10 steps.
+  strategy: blocked_with_gap
+  temporal_gap: 1
+  block_order: train,validation,test
+  train: 6
   validation: 1
   test: 1

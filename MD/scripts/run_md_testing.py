@@ -19,7 +19,8 @@ from torch_safe_globals import (
 
 allow_graph2mat_checkpoint_globals()
 
-from md_pipeline_config import command, load_pipeline_config, paths, resolve_checkpoint, write_checkpoint_manifest
+from md_pipeline_config import command, config_dir, load_pipeline_config, paths, resolve_checkpoint, write_checkpoint_manifest
+from graph2mat_material_config import apply_material_graph2mat_config
 
 _PIPELINE_CONFIG = load_pipeline_config()
 apply_torch_float32_matmul_precision(
@@ -58,6 +59,12 @@ def main() -> int:
         )
 
     require_command(command(config, "graph2mat"))
+    apply_material_graph2mat_config(
+        config,
+        base_dir=config_dir(config),
+        dataset_dir=pipeline_paths["dataset_dir"],
+        training_dir=pipeline_paths["training_dir"],
+    )
     ckpt_path = resolve_checkpoint(config)
     selection_mode = "configured_path" if config.get("checkpoint", {}).get("path") else str(config.get("checkpoint", {}).get("selection", "latest_version"))
     manifest_path = write_checkpoint_manifest(

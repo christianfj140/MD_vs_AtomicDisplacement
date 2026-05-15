@@ -13,8 +13,14 @@ from md_pipeline_config import (
     load_pipeline_config,
     paths,
     render_training_config,
+    require_explicit_validation_split,
     resolve_checkpoint,
+    config_dir,
     write_checkpoint_manifest,
+)
+from graph2mat_material_config import (
+    apply_material_graph2mat_config,
+    write_graph2mat_config_provenance,
 )
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
@@ -49,12 +55,30 @@ def run_command(cmd: list[str], cwd: Path, config: dict) -> None:
 
 def write_config_yaml(config: dict) -> None:
     pipeline_paths = paths(config)
+    material_provenance = apply_material_graph2mat_config(
+        config,
+        base_dir=config_dir(config),
+        dataset_dir=pipeline_paths["dataset_dir"],
+        training_dir=pipeline_paths["training_dir"],
+    )
+    validation_metadata = require_explicit_validation_split(config)
     # Para reproducibilidad en esta fase, sobreescribimos config.yaml.
     pipeline_paths["training_config_path"].write_text(
         render_training_config(config),
         encoding="utf-8",
     )
+    provenance_path = write_graph2mat_config_provenance(
+        pipeline_paths["training_config_path"],
+        material_provenance,
+        validation_metadata=validation_metadata,
+    )
     print(f"[OK] Config escrito en {pipeline_paths['training_config_path']}")
+    print(f"[OK] Provenance Graph2Mat escrito en {provenance_path}")
+    print(
+        "[OK] Validation split conectado a Graph2Mat: "
+        f"{validation_metadata['validation_source']} "
+        f"({validation_metadata['validation_sample_count']} muestras)."
+    )
 
 
 def main() -> int:
@@ -85,7 +109,7 @@ def main() -> int:
         config,
         ckpt_path,
         selection_mode=selection_mode,
-        selection_metric="best_checkpoint",
+        selection_metric="val_loss",
     )
     print(f"[OK] Checkpoint manifest escrito en {manifest_path}")
 

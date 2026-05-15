@@ -83,6 +83,17 @@ OUTPUT_ARTIFACT_KEYS = {
 }
 
 
+def siesta_mismatch_severity(key: str) -> str:
+    if key in PHYSICS_RELEVANT_KEYS:
+        return "severe"
+    # These flags decide whether SIESTA writes the Hamiltonian/overlap/XML
+    # reference artifacts consumed by the benchmark, so mismatches invalidate a
+    # strict Hamiltonian comparison even though they are output controls.
+    if key in OUTPUT_ARTIFACT_KEYS:
+        return "severe"
+    return "warning"
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
@@ -241,7 +252,7 @@ def pairwise_mismatch_report(
                 value_b = normalize_value(settings_b.get(key))
                 if value_a == value_b:
                     continue
-                severity = "severe" if key in PHYSICS_RELEVANT_KEYS else "warning"
+                severity = siesta_mismatch_severity(key)
                 mismatches.append(
                     mismatch_payload(
                         method_a=method_a,
@@ -325,7 +336,8 @@ def compare_method_settings(
         else ""
     )
     severe_warning = (
-        "Physics-relevant SIESTA settings or basis/pseudopotential artifacts differ across selected methods."
+        "Physics-relevant SIESTA settings, Hamiltonian output flags, or "
+        "basis/pseudopotential artifacts differ across selected methods."
         if severe_mismatches
         else ""
     )

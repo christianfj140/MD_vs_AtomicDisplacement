@@ -11,8 +11,19 @@ import math
 import random
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+ATOM_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ATOM_ROOT.parent
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from fdf_materialization import extract_bundle_structure, materialize_sample_fdf  # noqa: E402
+from material_bundle import BASIS_EXTENSIONS, ValidatedMaterialBundle  # noqa: E402
+from material_presets import resolve_material_bundle  # noqa: E402
 
 from atom_displacement_utils import (
     BASE_DIR,
@@ -35,24 +46,44 @@ from pipeline_config_utils import render_single_point_fdf
 
 DEFAULT_RANDOM_CARTESIAN_CONFIG: dict[str, Any] = {
     "enabled": False,
+    "recipe": "legacy_components",
     "n_structures": 100,
     "seed": 1234,
     "components": None,
     "distribution": "gaussian",
     "sigma_ang": 0.03,
     "uniform_range_ang": 0.05,
+    "max_displacement_ang": None,
     "move_atoms": "all",
     "species_filter": [],
+    "selected_species": None,
     "min_distance_ang": 0.65,
+    "min_interatomic_distance_ang": None,
     "max_rmsd_from_reference_ang": None,
     "max_attempts_per_structure": 100,
     "remove_center_of_mass_translation": True,
+    "variants_per_family": 1,
     "validation": {},
 }
 
 BOHR_TO_ANG = 0.529177210903
 SCIENTIFIC_WARNING = "This is a constrained local non-MD perturbation method, not a thermodynamic ensemble."
+GENERIC_RANDOM_CARTESIAN_RECIPE = "generic_cartesian_noise"
+LEGACY_RANDOM_CARTESIAN_RECIPE = "legacy_components"
 COMPONENT_NAMES = ("atom_displacement", "bond_displacement", "angle_displacement")
+SPLIT_NAMES = ("train", "validation", "test")
+RANDOM_CARTESIAN_SPLIT_STRATEGY = "grouped_family_round_robin"
+RANDOM_CARTESIAN_FAMILY_FIELDS = (
+    "base_geometry_hash",
+    "distribution",
+    "sigma_ang",
+    "uniform_range_ang",
+    "seed_family",
+    "move_atoms",
+    "species_filter",
+    "recipe_id",
+    "block_id",
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -257,8 +288,11 @@ def normalize_angle_component(source: dict[str, Any], *, default_enabled: bool) 
 
 def normalize_validation_config(config: dict[str, Any]) -> dict[str, Any]:
     raw_validation = config.get("validation") if isinstance(config.get("validation"), dict) else {}
+    min_distance_source = config.get("min_interatomic_distance_ang")
+    if min_distance_source in (None, ""):
+        min_distance_source = config.get("min_distance_ang", 0.65)
     validation = {
-        "min_distance_ang": float(raw_validation.get("min_distance_ang", config.get("min_distance_ang", 0.65))),
+        "min_distance_ang": float(raw_validation.get("min_distance_ang", min_distance_source)),
         "max_rmsd_from_reference_ang": raw_validation.get(
             "max_rmsd_from_reference_ang",
             config.get("max_rmsd_from_reference_ang"),
@@ -309,11 +343,81 @@ def enabled_component_names(components: dict[str, dict[str, Any]]) -> list[str]:
     return [name for name in COMPONENT_NAMES if parse_bool(components.get(name, {}).get("enabled"), False)]
 
 
+def raw_random_cartesian_config(root: dict[str, Any]) -> dict[str, Any]:
+    structure_config = (root.get("structure", {}) or {}).get("random_cartesian", {}) or {}
+    top_level_config = root.get("random_cartesian", {}) or {}
+    if top_level_config and not isinstance(top_level_config, dict):
+        raise RuntimeError("random_cartesian debe ser un objeto YAML/JSON.")
+    raw = copy.deepcopy(structure_config)
+    if isinstance(top_level_config, dict):
+        raw.update(top_level_config)
+    return raw
+
+
+def normalize_generic_random_cartesian_config(config: dict[str, Any]) -> dict[str, Any]:
+    generic = copy.deepcopy(config)
+    generic["recipe"] = GENERIC_RANDOM_CARTESIAN_RECIPE
+    generic["n_structures"] = int(generic["n_structures"])
+    generic["seed"] = int(generic["seed"])
+    generic["distribution"] = validate_distribution(generic.get("distribution", "uniform"), label="random_cartesian")
+    max_displacement = generic.get("max_displacement_ang", generic.get("max_displacement"))
+    if max_displacement in (None, ""):
+        max_displacement = generic.get("amplitude_ang", generic.get("uniform_range_ang", 0.05))
+    generic["max_displacement_ang"] = numeric_value_with_unit(max_displacement)
+    if generic["max_displacement_ang"] <= 0:
+        raise RuntimeError("random_cartesian.max_displacement_ang debe ser mayor que cero.")
+    if generic["distribution"] == "gaussian":
+        sigma = generic.get("sigma_ang")
+        generic["sigma_ang"] = float(sigma) if sigma not in (None, "") else generic["max_displacement_ang"] / 3.0
+        if generic["sigma_ang"] < 0:
+            raise RuntimeError("random_cartesian.sigma_ang no puede ser negativo.")
+    else:
+        generic["uniform_range_ang"] = generic["max_displacement_ang"]
+    selected_species = generic.get("selected_species", generic.get("species_filter"))
+    if selected_species in (None, "", "all"):
+        generic["selected_species"] = None
+    elif isinstance(selected_species, str):
+        values = [item.strip() for item in selected_species.split(",") if item.strip()]
+        if not values:
+            raise RuntimeError("random_cartesian.selected_species no puede estar vacio; usa null para todas.")
+        generic["selected_species"] = values
+    elif isinstance(selected_species, (list, tuple, set)):
+        values = [str(item).strip() for item in selected_species if str(item).strip()]
+        if not values:
+            raise RuntimeError("random_cartesian.selected_species no puede estar vacio; usa null para todas.")
+        generic["selected_species"] = values
+    else:
+        raise RuntimeError("random_cartesian.selected_species debe ser null, string o lista.")
+    generic["remove_center_of_mass_translation"] = parse_bool(
+        generic.get("remove_center_of_mass_translation"),
+        True,
+    )
+    generic["variants_per_family"] = int(generic.get("variants_per_family", 1) or 1)
+    if generic["variants_per_family"] <= 0:
+        raise RuntimeError("random_cartesian.variants_per_family debe ser mayor que cero.")
+    generic["validation"] = normalize_validation_config(generic)
+    generic["min_distance_ang"] = float(generic["validation"]["min_distance_ang"])
+    generic["min_interatomic_distance_ang"] = generic["min_distance_ang"]
+    generic["max_rmsd_from_reference_ang"] = generic["validation"]["max_rmsd_from_reference_ang"]
+    generic["max_attempts_per_structure"] = int(generic["validation"]["max_attempts_per_structure"])
+    if generic["n_structures"] <= 0:
+        raise RuntimeError("random_cartesian.n_structures debe ser mayor que cero.")
+    if generic.get("blocks"):
+        raise RuntimeError("random_cartesian.recipe=generic_cartesian_noise no soporta blocks en esta fase.")
+    return generic
+
+
 def random_cartesian_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     root = config or PIPELINE_CONFIG
-    raw = (root.get("structure", {}) or {}).get("random_cartesian", {}) or {}
+    raw = raw_random_cartesian_config(root)
     merged = copy.deepcopy(DEFAULT_RANDOM_CARTESIAN_CONFIG)
     merged.update(raw)
+    recipe = str(merged.get("recipe") or LEGACY_RANDOM_CARTESIAN_RECIPE).strip()
+    if recipe == GENERIC_RANDOM_CARTESIAN_RECIPE:
+        return normalize_generic_random_cartesian_config(merged)
+    if recipe not in {LEGACY_RANDOM_CARTESIAN_RECIPE, "legacy", "components", "h2o_components"}:
+        raise RuntimeError(f"random_cartesian.recipe no soportado: {recipe!r}.")
+    merged["recipe"] = LEGACY_RANDOM_CARTESIAN_RECIPE
     merged["n_structures"] = int(merged["n_structures"])
     merged["seed"] = int(merged["seed"])
     merged["distribution"] = str(merged["distribution"]).strip().lower()
@@ -885,11 +989,132 @@ def copy_required_resources(dataset_root: Path) -> dict[str, list[str]]:
     }
 
 
-def write_split_manifests(dataset_root: Path, samples: list[dict[str, Any]]) -> None:
-    splits = ("train", "validation", "test")
-    for split in splits:
-        rows = [sample for index, sample in enumerate(samples) if splits[index % len(splits)] == split]
-        write_json(dataset_root / f"split_manifest_{split}.json", {"split": split, "samples": rows})
+def _canonical_group_value(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    return value
+
+
+def _derived_family_group_id(sample: dict[str, Any]) -> str | None:
+    payload = {
+        field: _canonical_group_value(sample.get(field))
+        for field in RANDOM_CARTESIAN_FAMILY_FIELDS
+        if sample.get(field) not in (None, "")
+    }
+    required_any = {"base_geometry_hash", "distribution", "seed_family"}
+    if not required_any.issubset(payload):
+        return None
+    return "derived_family:" + json_sha256(payload)
+
+
+def random_cartesian_split_group(sample: dict[str, Any]) -> tuple[str, str, str | None]:
+    for key in ("split_group_id", "random_cartesian_family_id"):
+        value = sample.get(key)
+        if value not in (None, ""):
+            return str(value), key, None
+    derived = _derived_family_group_id(sample)
+    if derived:
+        return (
+            derived,
+            "derived_random_cartesian_family",
+            "missing split_group_id/random_cartesian_family_id; derived split group from family metadata",
+        )
+    sample_id = str(sample.get("sample_id") or sample.get("sample_dir") or "")
+    if not sample_id:
+        sample_id = hashlib.sha256(repr(sample).encode("utf-8", errors="ignore")).hexdigest()
+    return (
+        f"sample_fallback:{sample_id}",
+        "sample_id_fallback",
+        "missing random_cartesian group metadata; each sample was treated as its own weak fallback group",
+    )
+
+
+def grouped_split_assignment(samples: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    for order, sample in enumerate(samples):
+        group_id, group_key, warning = random_cartesian_split_group(sample)
+        group = groups.setdefault(
+            group_id,
+            {
+                "group_id": group_id,
+                "group_key": group_key,
+                "first_index": order,
+                "samples": [],
+            },
+        )
+        group["samples"].append(sample)
+        if warning:
+            warnings.append(warning)
+
+    ordered_groups = sorted(groups.values(), key=lambda item: (int(item["first_index"]), str(item["group_id"])))
+    split_samples: dict[str, list[dict[str, Any]]] = {split: [] for split in SPLIT_NAMES}
+    group_assignments: list[dict[str, Any]] = []
+    for group_index, group in enumerate(ordered_groups):
+        split = SPLIT_NAMES[group_index % len(SPLIT_NAMES)]
+        rows = group["samples"]
+        split_samples[split].extend(rows)
+        group_assignments.append(
+            {
+                "group_id": group["group_id"],
+                "group_key": group["group_key"],
+                "split": split,
+                "sample_count": len(rows),
+                "sample_ids": [sample.get("sample_id") for sample in rows],
+            }
+        )
+
+    unique_warnings = sorted(dict.fromkeys(warnings))
+    summary = {
+        "split_strategy": RANDOM_CARTESIAN_SPLIT_STRATEGY,
+        "group_aware": True,
+        "split_group_keys_used": sorted({assignment["group_key"] for assignment in group_assignments}),
+        "groups": group_assignments,
+        "group_count": len(group_assignments),
+        "counts": {split: len(rows) for split, rows in split_samples.items()},
+        "warnings": unique_warnings,
+        "scientific_status": "grouped_family_splits" if not unique_warnings else "grouped_family_splits_with_fallback",
+    }
+    return split_samples, summary
+
+
+def assert_group_isolation(split_samples: dict[str, list[dict[str, Any]]]) -> None:
+    seen: dict[str, str] = {}
+    for split, rows in split_samples.items():
+        for sample in rows:
+            group_id, _group_key, _warning = random_cartesian_split_group(sample)
+            previous = seen.get(group_id)
+            if previous is not None and previous != split:
+                raise RuntimeError(
+                    "random_cartesian grouped split attempted to split a family "
+                    f"across {previous} and {split}: {group_id}"
+                )
+            seen[group_id] = split
+
+
+def write_split_manifests(dataset_root: Path, samples: list[dict[str, Any]]) -> dict[str, Any]:
+    split_samples, summary = grouped_split_assignment(samples)
+    assert_group_isolation(split_samples)
+    for split, rows in split_samples.items():
+        write_json(
+            dataset_root / f"split_manifest_{split}.json",
+            {
+                "split": split,
+                "split_strategy": summary["split_strategy"],
+                "group_aware": True,
+                "split_group_keys_used": summary["split_group_keys_used"],
+                "warnings": summary["warnings"],
+                "samples": rows,
+            },
+        )
+    write_json(dataset_root / "split_manifest_summary.json", summary)
+    return summary
 
 
 def artifact_hashes(dataset_root: Path, pseudo_sources: list[str]) -> dict[str, Any]:
@@ -919,9 +1144,360 @@ def artifact_hashes(dataset_root: Path, pseudo_sources: list[str]) -> dict[str, 
     }
 
 
-def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
+def structure_from_material_bundle(validated: ValidatedMaterialBundle) -> tuple[Structure, Any]:
+    fdf_structure = extract_bundle_structure(validated)
+    species_labels = {
+        int(species.index): (int(species.atomic_number), str(species.label))
+        for species in fdf_structure.species
+    }
+    return (
+        Structure(
+            lattice_vectors_ang=[list(vector) for vector in fdf_structure.lattice_vectors_ang],
+            species_labels=species_labels,
+            atom_species=list(fdf_structure.atom_species),
+            positions_ang=[list(position) for position in fdf_structure.positions_ang],
+        ),
+        fdf_structure,
+    )
+
+
+def copy_generic_material_resources(
+    validated: ValidatedMaterialBundle,
+    dataset_root: Path,
+) -> dict[str, list[str]]:
+    basis_sources: list[str] = []
+    if validated.bundle.basis_dir is not None:
+        basis_dir = dataset_root / "basis"
+        basis_dir.mkdir(parents=True, exist_ok=True)
+        for path in sorted(item for item in validated.bundle.basis_dir.iterdir() if item.is_file()):
+            if any(path.name.endswith(extension) for extension in BASIS_EXTENSIONS):
+                shutil.copy2(path, basis_dir / path.name)
+                basis_sources.append(str(path))
+    return {
+        "basis": basis_sources,
+        "pseudopotentials": [str(path) for _label, path in sorted(validated.pseudopotentials.items())],
+    }
+
+
+def generic_random_moving_indices(reference: Structure, rc_config: dict[str, Any]) -> list[int]:
+    selected_species = rc_config.get("selected_species")
+    allowed_species = set(str(item) for item in selected_species) if selected_species else set()
+    indices = list(range(len(reference.atom_species)))
+    if allowed_species:
+        indices = [index for index in indices if reference.symbols[index] in allowed_species]
+    if not indices:
+        raise RuntimeError("random_cartesian.selected_species no selecciona ningun atomo.")
+    return indices
+
+
+def bounded_gaussian_vector(rng: random.Random, sigma: float, max_component: float) -> list[float]:
+    if sigma == 0.0 or max_component == 0.0:
+        return [0.0, 0.0, 0.0]
+    for _attempt in range(1000):
+        vector = [rng.gauss(0.0, sigma) for _axis in range(3)]
+        if all(abs(value) <= max_component for value in vector):
+            return vector
+    raise RuntimeError("random_cartesian no pudo muestrear un vector gaussian dentro de max_displacement_ang.")
+
+
+def generic_random_displacement_field(
+    reference: Structure,
+    rc_config: dict[str, Any],
+    rng: random.Random,
+) -> list[list[float]]:
+    moving = generic_random_moving_indices(reference, rc_config)
+    max_component = float(rc_config["max_displacement_ang"])
+    displacements = [[0.0, 0.0, 0.0] for _atom in reference.atom_species]
+    for index in moving:
+        if rc_config["distribution"] == "gaussian":
+            displacements[index] = bounded_gaussian_vector(
+                rng,
+                float(rc_config.get("sigma_ang", max_component / 3.0)),
+                max_component,
+            )
+        else:
+            displacements[index] = [rng.uniform(-max_component, max_component) for _axis in range(3)]
+    if bool(rc_config.get("remove_center_of_mass_translation", True)):
+        mean = [
+            sum(displacements[index][axis] for index in moving) / len(moving)
+            for axis in range(3)
+        ]
+        for index in moving:
+            displacements[index] = [
+                displacements[index][axis] - mean[axis]
+                for axis in range(3)
+            ]
+    return displacements
+
+
+def generic_family_payload(
+    base_geometry_hash: str,
+    rc_config: dict[str, Any],
+    family_index: int,
+    dataset_recipe: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "generation_method": "random_cartesian",
+        "recipe": GENERIC_RANDOM_CARTESIAN_RECIPE,
+        "base_geometry_hash": base_geometry_hash,
+        "distribution": rc_config["distribution"],
+        "max_displacement_ang": float(rc_config["max_displacement_ang"]),
+        "sigma_ang": float(rc_config["sigma_ang"]) if rc_config["distribution"] == "gaussian" else None,
+        "seed_family": int(rc_config["seed"]),
+        "family_index": int(family_index),
+        "variants_per_family": int(rc_config["variants_per_family"]),
+        "selected_species": rc_config.get("selected_species"),
+        "remove_center_of_mass_translation": bool(rc_config.get("remove_center_of_mass_translation", True)),
+        "validation": rc_config["validation"],
+        "recipe_id": dataset_recipe.get("recipe_id"),
+    }
+
+
+def generic_validation_block(rc_config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "validation": rc_config["validation"],
+        "components": {
+            "atom_displacement": {"enabled": True},
+            "bond_displacement": {"enabled": False},
+            "angle_displacement": {"enabled": False},
+        },
+    }
+
+
+def generate_generic_random_cartesian_dataset(
+    config: dict[str, Any],
+    rc_config: dict[str, Any],
+    *,
+    output_dir: str | Path | None = None,
+    material_base_dir: str | Path = REPO_ROOT,
+) -> dict[str, Any]:
+    dataset_root = Path(output_dir) if output_dir is not None else DATASET_DIR / RANDOM_CARTESIAN_STEPS_DIR_NAME
+    if dataset_root.exists():
+        shutil.rmtree(dataset_root)
+    ensure_dir(dataset_root)
+
+    resolved = resolve_material_bundle(config, base_dir=material_base_dir)
+    validated = resolved.validated
+    resources = copy_generic_material_resources(validated, dataset_root)
+    reference, _fdf_structure = structure_from_material_bundle(validated)
+    source_path = str(validated.bundle.fdf)
+    base_geometry_hash = json_sha256(reference.to_json_dict())
+    dataset_recipe = config.get("dataset_recipe") or PIPELINE_CONFIG.get("dataset_recipe") or {}
+    rng = random.Random(int(rc_config["seed"]))
+    validation_block = generic_validation_block(rc_config)
+    selected_indices = generic_random_moving_indices(reference, rc_config)
+    selected_atoms = [
+        {
+            "atom_index": index + 1,
+            "atom_index_zero_based": index,
+            "species": reference.symbols[index],
+            "species_index": int(reference.atom_species[index]),
+        }
+        for index in selected_indices
+    ]
+
+    print("=== Random Cartesian dataset generation ===")
+    print(f"[INFO] Recipe: {GENERIC_RANDOM_CARTESIAN_RECIPE}")
+    print(f"[INFO] Material FDF: {source_path}")
+    print(f"[INFO] Output root: {dataset_root}")
+    print(f"[INFO] n_structures: {rc_config['n_structures']}")
+
+    samples: list[dict[str, Any]] = []
+    total_attempts = 0
+    rejection_counts: dict[str, int] = {}
+    max_component = float(rc_config["max_displacement_ang"])
+    for sample_index in range(int(rc_config["n_structures"])):
+        family_index = sample_index // int(rc_config["variants_per_family"])
+        family_payload = generic_family_payload(base_geometry_hash, rc_config, family_index, dataset_recipe)
+        split_group_id = json_sha256(family_payload)
+        accepted: tuple[int, Structure, list[list[float]], dict[str, Any], str | None] | None = None
+        last_reason = "not_attempted"
+        last_rejected_reason: str | None = None
+        for attempt in range(1, int(rc_config["max_attempts_per_structure"]) + 1):
+            total_attempts += 1
+            displacements = generic_random_displacement_field(reference, rc_config, rng)
+            if any(abs(value) > max_component + 1e-12 for vector in displacements for value in vector):
+                reason = "max_displacement_exceeded_after_centering"
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                last_reason = reason
+                last_rejected_reason = reason
+                continue
+            positions = positions_with_displacements(reference, displacements)
+            candidate = structure_with_positions(reference, positions)
+            ok, reason, geometry_metrics = validate_random_structure(
+                reference,
+                candidate,
+                block_config=validation_block,
+                base_geometry_hash=base_geometry_hash,
+            )
+            last_reason = reason
+            if ok:
+                accepted = (attempt, candidate, displacements, geometry_metrics, last_rejected_reason)
+                break
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            last_rejected_reason = reason
+        if accepted is None:
+            raise RuntimeError(
+                "random_cartesian generic_cartesian_noise could not generate a valid structure "
+                f"for sample_index={sample_index} after {rc_config['max_attempts_per_structure']} "
+                f"attempts: {last_reason}."
+            )
+
+        accepted_attempt, candidate, displacements, geometry_metrics, last_rejected_reason = accepted
+        sample_id = f"sample_{sample_index + 1:06d}"
+        sample_dir = dataset_root / sample_id
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        for pseudo in resources["pseudopotentials"]:
+            shutil.copy2(pseudo, sample_dir / Path(pseudo).name)
+        materialized = materialize_sample_fdf(
+            validated.bundle.fdf,
+            sample_dir / "RUN.fdf",
+            positions_ang=candidate.positions_ang,
+            atom_species=candidate.atom_species,
+            lattice_vectors_ang=candidate.lattice_vectors_ang,
+            system_label=sample_id,
+            system_name=f"{validated.bundle.label} {sample_id}",
+            structure_type=validated.bundle.structure_type,
+        )
+        metadata = {
+            "id": sample_id,
+            "generation_method": "random_cartesian",
+            "method": "random_cartesian",
+            "recipe": GENERIC_RANDOM_CARTESIAN_RECIPE,
+            "recipe_id": dataset_recipe.get("recipe_id"),
+            "recipe_label": dataset_recipe.get("recipe_label"),
+            "material_label": validated.bundle.label,
+            "selected_atoms": selected_atoms,
+            "base_geometry_hash": base_geometry_hash,
+            "base_geometry_source": source_path,
+            "seed": int(rc_config["seed"]),
+            "seed_family": int(rc_config["seed"]),
+            "family_index": family_index,
+            "variants_per_family": int(rc_config["variants_per_family"]),
+            "sample_index": sample_index,
+            "global_sample_id": sample_id,
+            "distribution": rc_config["distribution"],
+            "max_displacement_ang": max_component,
+            "sigma_ang": float(rc_config["sigma_ang"]) if rc_config["distribution"] == "gaussian" else None,
+            "selected_species": rc_config.get("selected_species"),
+            "species_filter": rc_config.get("selected_species") or [],
+            "remove_center_of_mass_translation": bool(rc_config.get("remove_center_of_mass_translation", True)),
+            "displacements_ang": displacements,
+            "atom_displacements_ang": displacements,
+            "final_geometry_metrics": geometry_metrics,
+            "minimum_pair_distance_ang": geometry_metrics.get("minimum_pair_distance_ang"),
+            "rmsd_from_reference_ang": geometry_metrics.get("rmsd_from_reference_ang"),
+            "validation_thresholds": rc_config["validation"],
+            "min_distance_ang": float(rc_config["min_distance_ang"]),
+            "accepted_attempt": accepted_attempt,
+            "acceptance_status": "accepted",
+            "last_rejection_reason": last_rejected_reason,
+            "split_group_id": split_group_id,
+            "random_cartesian_family": family_payload,
+            "random_cartesian_family_id": split_group_id,
+            "fdf_materialization": materialized.metadata,
+        }
+        write_json(sample_dir / "metadata.json", metadata)
+        samples.append(
+            {
+                "sample_id": sample_id,
+                "sample_dir": str(sample_dir),
+                "run_fdf": str(sample_dir / "RUN.fdf"),
+                "metadata": str(sample_dir / "metadata.json"),
+                "split_group_id": split_group_id,
+                "random_cartesian_family_id": split_group_id,
+                "base_geometry_hash": base_geometry_hash,
+                "distribution": metadata["distribution"],
+                "max_displacement_ang": metadata["max_displacement_ang"],
+                "sigma_ang": metadata["sigma_ang"],
+                "seed_family": metadata["seed_family"],
+                "family_index": family_index,
+                "variants_per_family": int(rc_config["variants_per_family"]),
+                "move_atoms": json.dumps("all", sort_keys=True),
+                "species_filter": json.dumps(metadata["species_filter"], sort_keys=True),
+                "accepted_attempt": accepted_attempt,
+                "enabled_components": json.dumps(["atom_displacement"], sort_keys=True),
+                "minimum_pair_distance_ang": metadata["minimum_pair_distance_ang"],
+                "rmsd_from_reference_ang": metadata["rmsd_from_reference_ang"],
+                "method": "random_cartesian",
+                "recipe": GENERIC_RANDOM_CARTESIAN_RECIPE,
+                "recipe_id": dataset_recipe.get("recipe_id"),
+                "global_sample_id": sample_id,
+            }
+        )
+
+    split_summary = write_split_manifests(dataset_root, samples)
+    manifest = {
+        "method_id": "random_cartesian",
+        "generation_method": "random_cartesian",
+        "recipe": GENERIC_RANDOM_CARTESIAN_RECIPE,
+        "dataset_root": str(dataset_root),
+        "requested_structures": int(rc_config["n_structures"]),
+        "generated_structures": len(samples),
+        "total_attempts": total_attempts,
+        "acceptance_ratio": (len(samples) / total_attempts) if total_attempts else 0.0,
+        "rejection_counts_by_reason": dict(sorted(rejection_counts.items())),
+        "seed": int(rc_config["seed"]),
+        "base_geometry_hash": base_geometry_hash,
+        "base_geometry_source": source_path,
+        "material": resolved.to_manifest_dict(),
+        "selected_atoms": selected_atoms,
+        "validation": rc_config["validation"],
+        "config_snapshot": public_random_cartesian_config(rc_config),
+        "dataset_recipe": dataset_recipe,
+        "samples": samples,
+        "split_strategy": split_summary["split_strategy"],
+        "split_group_key": ",".join(split_summary["split_group_keys_used"]),
+        "split_summary": split_summary,
+        "siesta_input_hashes": {
+            sample["sample_id"]: file_sha256(Path(sample["run_fdf"]))
+            for sample in samples
+        },
+        "basis_hashes": {
+            path.name: file_sha256(path)
+            for path in sorted((dataset_root / "basis").glob("*.ion.xml"))
+        },
+        "pseudo_hashes": {
+            Path(path).name: file_sha256(Path(path))
+            for path in resources["pseudopotentials"]
+        },
+        "matrix_file_hashes": {},
+        "deterministic_hashes": {
+            "base_geometry_hash": base_geometry_hash,
+            "config_hash": json_sha256(public_random_cartesian_config(rc_config)),
+            "sample_family_hashes": {
+                sample["sample_id"]: sample["random_cartesian_family_id"]
+                for sample in samples
+            },
+        },
+        "scientific_warning": SCIENTIFIC_WARNING,
+        "warnings": [SCIENTIFIC_WARNING, *split_summary["warnings"]],
+        "severe_warnings": [],
+    }
+    manifest_path = dataset_root.parent / "samples_manifest.json" if output_dir is not None else PIPELINE_PATHS["samples_manifest_path"]
+    write_json(dataset_root / "dataset_manifest.json", manifest)
+    write_json(manifest_path, manifest)
+    write_json(dataset_root / "artifact_hashes.json", artifact_hashes(dataset_root, resources["pseudopotentials"]))
+    print(f"[OK] Random Cartesian dataset generado en {dataset_root}")
+    return manifest
+
+
+def generate_dataset(
+    config: dict[str, Any] | None = None,
+    *,
+    output_dir: str | Path | None = None,
+    material_base_dir: str | Path = REPO_ROOT,
+) -> dict[str, Any]:
     rc_config = random_cartesian_config(config)
-    dataset_root = DATASET_DIR / RANDOM_CARTESIAN_STEPS_DIR_NAME
+    if rc_config.get("recipe") == GENERIC_RANDOM_CARTESIAN_RECIPE:
+        return generate_generic_random_cartesian_dataset(
+            config or PIPELINE_CONFIG,
+            rc_config,
+            output_dir=output_dir,
+            material_base_dir=material_base_dir,
+        )
+
+    dataset_root = Path(output_dir) if output_dir is not None else DATASET_DIR / RANDOM_CARTESIAN_STEPS_DIR_NAME
     if dataset_root.exists():
         shutil.rmtree(dataset_root)
     ensure_dir(dataset_root)
@@ -1076,6 +1652,7 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
             )
             sample_index += 1
 
+    split_summary = write_split_manifests(dataset_root, samples)
     manifest = {
         "method_id": "random_cartesian",
         "generation_method": "random_cartesian",
@@ -1094,6 +1671,9 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "blocks": [public_random_cartesian_config(block) for block in block_configs],
         "dataset_recipe": PIPELINE_CONFIG.get("dataset_recipe") or {},
         "samples": samples,
+        "split_strategy": split_summary["split_strategy"],
+        "split_group_key": ",".join(split_summary["split_group_keys_used"]),
+        "split_summary": split_summary,
         "siesta_input_hashes": {
             sample["sample_id"]: file_sha256(Path(sample["run_fdf"]))
             for sample in samples
@@ -1120,13 +1700,13 @@ def generate_dataset(config: dict[str, Any] | None = None) -> dict[str, Any]:
             },
         },
         "scientific_warning": SCIENTIFIC_WARNING,
-        "warnings": [SCIENTIFIC_WARNING],
+        "warnings": [SCIENTIFIC_WARNING, *split_summary["warnings"]],
         "severe_warnings": [],
     }
+    manifest_path = dataset_root.parent / "samples_manifest.json" if output_dir is not None else PIPELINE_PATHS["samples_manifest_path"]
     write_json(dataset_root / "dataset_manifest.json", manifest)
-    write_json(PIPELINE_PATHS["samples_manifest_path"], manifest)
+    write_json(manifest_path, manifest)
     write_json(dataset_root / "artifact_hashes.json", artifact_hashes(dataset_root, resources["pseudopotentials"]))
-    write_split_manifests(dataset_root, samples)
     print(f"[OK] Random Cartesian dataset generado en {dataset_root}")
     return manifest
 

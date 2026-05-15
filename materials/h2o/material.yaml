@@ -1,0 +1,6 @@
+material:
+  label: h2o
+  fdf: AtomDisplacement/base/RUN.fdf
+  pseudopotential_dir: AtomDisplacement/base
+  basis_dir: AtomDisplacement/relaxed
+  structure_type: molecule

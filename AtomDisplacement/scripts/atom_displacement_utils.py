@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import csv
+import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +35,12 @@ PIPELINE_PATHS = paths(PIPELINE_CONFIG)
 DEFAULT_VENV_ACTIVATE = PIPELINE_PATHS["venv_activate"]
 TORCH_COMPAT_DIR = ATOM_ROOT.parent / "scripts" / "torch_serialization_compat"
 sys.path.insert(0, str(TORCH_COMPAT_DIR))
+SHARED_DIR = ATOM_ROOT.parent / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
 from torch_safe_globals import env_with_torch_compat
+from fdf_materialization import DEFAULT_REQUIRED_OUTPUT_FLAGS
+from material_presets import resolve_material_bundle
 
 BASE_DIR = PIPELINE_PATHS["base_dir"]
 RELAXED_DIR = PIPELINE_PATHS["relaxed_dir"]
@@ -70,6 +76,14 @@ class Structure:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def compute_max_fc_structures(n_atoms: int, include_reference: bool = True) -> int:
@@ -213,6 +227,182 @@ def copy_pseudopotentials(src_dir: Path, dst_dir: Path) -> None:
 
     for psf in psf_files:
         shutil.copy2(psf, dst_dir / psf.name)
+
+
+def _fdf_directive_map(path: Path) -> dict[str, str]:
+    directives: dict[str, str] = {}
+    if not path.exists():
+        return directives
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        clean = raw_line.split("#", 1)[0].strip()
+        if not clean or clean.lower().startswith("%block") or clean.lower().startswith("%endblock"):
+            continue
+        parts = clean.split(None, 1)
+        if not parts:
+            continue
+        key = parts[0]
+        value = parts[1].strip() if len(parts) > 1 else ""
+        directives[key.lower()] = value
+    return directives
+
+
+def _fdf_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    token = value.split()[0].strip().lower() if value.strip() else ""
+    return token in {"t", "true", ".true.", "yes", "1", "on"}
+
+
+def siesta_output_flag_status(run_fdf: Path) -> dict[str, Any]:
+    directives = _fdf_directive_map(run_fdf)
+    flags: dict[str, dict[str, Any]] = {}
+    invalid_reasons: list[str] = []
+    for key, expected in DEFAULT_REQUIRED_OUTPUT_FLAGS.items():
+        raw_value = directives.get(key.lower())
+        flags[key] = {
+            "present": raw_value is not None,
+            "value": raw_value,
+            "enabled": _fdf_truthy(raw_value),
+            "expected": expected,
+        }
+
+    hamiltonian_enabled = flags["Save.HS"]["enabled"] or flags["TS.HS.Save"]["enabled"]
+    if not hamiltonian_enabled:
+        invalid_reasons.append("missing_hamiltonian_output_flag")
+    if not flags["XML.Write"]["enabled"]:
+        invalid_reasons.append("missing_xml_write_flag")
+
+    md_type = directives.get("md.typeofrun", "")
+    md_type_token = str(md_type).split()[0].strip().lower() if str(md_type).split() else ""
+    if md_type_token == "fc":
+        if not flags["TS.HS.Save"]["enabled"]:
+            invalid_reasons.append("missing_fc_tshs_output_flag")
+        if not flags["TS.DE.Save"]["enabled"]:
+            invalid_reasons.append("missing_fc_tsde_output_flag")
+
+    return {
+        "run_fdf": str(run_fdf),
+        "flags": flags,
+        "md_type_of_run": md_type,
+        "valid": not invalid_reasons,
+        "invalid_reasons": invalid_reasons,
+    }
+
+
+def resolve_material_for_config(
+    config: dict[str, Any] | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> Any:
+    return resolve_material_bundle(
+        config or PIPELINE_CONFIG,
+        base_dir=base_dir or ATOM_ROOT.parent,
+    )
+
+
+def prepare_sample_material_inputs(
+    sample_dir: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Copy/verify material pseudopotentials in one SIESTA run directory."""
+
+    resolved = resolve_material_for_config(config, base_dir=base_dir)
+    validated = resolved.validated
+    ensure_dir(sample_dir)
+    copied: dict[str, str] = {}
+    verified: dict[str, str] = {}
+    for label, source in sorted(validated.pseudopotentials.items()):
+        destination = sample_dir / source.name
+        if destination.exists():
+            if not destination.is_file():
+                raise RuntimeError(f"Sample pseudopotential path is not a file: {destination}")
+            if file_sha256(destination) != file_sha256(source):
+                raise RuntimeError(
+                    f"Sample pseudopotential for species {label!r} differs from material bundle: "
+                    f"{destination}"
+                )
+            verified[label] = destination.name
+            continue
+        shutil.copy2(source, destination)
+        copied[label] = destination.name
+    manifest = resolved.to_manifest_dict()
+    manifest.update(
+        {
+            "pseudopotentials_copied_to_sample": copied,
+            "pseudopotentials_verified_in_sample": verified,
+        }
+    )
+    return manifest
+
+
+def material_execution_provenance(
+    sample_dir: Path,
+    validation: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    resolved = resolve_material_for_config(config, base_dir=base_dir)
+    validated = resolved.validated
+    run_fdf = sample_dir / (config or PIPELINE_CONFIG)["paths"]["run_fdf_name"]
+    matrix_path = Path(validation["hamiltonian_path"]) if validation.get("hamiltonian_path") else None
+    return {
+        "material": resolved.to_manifest_dict(),
+        "run_fdf": str(run_fdf) if run_fdf.exists() else "",
+        "run_fdf_sha256": file_sha256(run_fdf) if run_fdf.exists() else "",
+        "pseudopotential_sha256": dict(sorted(validated.pseudopotential_sha256.items())),
+        "basis_file_sha256": dict(sorted(validated.basis_file_sha256.items())),
+        "siesta_output_flags": siesta_output_flag_status(run_fdf) if run_fdf.exists() else {},
+        "scf": {
+            "job_completed": bool(validation.get("job_completed", False)),
+            "scf_converged": bool(validation.get("scf_converged", False)),
+            "stale_output": bool(validation.get("stale_output", False)),
+            "validation_reason": validation.get("validation_reason", ""),
+            "valid": bool(validation.get("valid", False)),
+        },
+        "reference_matrix": {
+            "path": str(matrix_path) if matrix_path else "",
+            "sha256": file_sha256(matrix_path) if matrix_path and matrix_path.exists() else "",
+            "candidate_count": validation.get("reference_matrix_count", 0),
+        },
+    }
+
+
+def update_sample_execution_metadata(
+    sample_dir: Path,
+    validation: dict[str, Any],
+    summary_row: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    metadata_path = sample_dir / "metadata.json"
+    metadata: dict[str, Any] = {}
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise RuntimeError(f"metadata.json must contain an object: {metadata_path}")
+    provenance = material_execution_provenance(
+        sample_dir,
+        validation,
+        config,
+        base_dir=base_dir,
+    )
+    metadata["material"] = provenance["material"]
+    metadata["siesta_execution"] = {
+        "status": summary_row.get("status"),
+        "wall_time_seconds": summary_row.get("wall_time_seconds"),
+        **provenance["scf"],
+    }
+    metadata["siesta_output_flags"] = provenance["siesta_output_flags"]
+    metadata["reference_matrix"] = provenance["reference_matrix"]
+    metadata["fdf_sha256"] = provenance["run_fdf_sha256"]
+    metadata["pseudopotential_sha256"] = provenance["pseudopotential_sha256"]
+    metadata["basis_file_sha256"] = provenance["basis_file_sha256"]
+    write_json(metadata_path, metadata)
+    return metadata
 
 
 def _read_named_block(lines: list[str], block_name: str) -> list[str]:
@@ -508,6 +698,10 @@ def validate_sample_dir(
 
     if not run_fdf.exists():
         reasons.append("missing_run_fdf")
+    output_flag_status: dict[str, Any] = {}
+    if run_fdf.exists():
+        output_flag_status = siesta_output_flag_status(run_fdf)
+        reasons.extend(output_flag_status.get("invalid_reasons", []))
     if reference_matrix is None and not ambiguous_matrix:
         reasons.append("missing_matrix")
     if reference_matrix is not None and run_fdf.exists() and reference_matrix.stat().st_mtime < run_fdf.stat().st_mtime:
@@ -523,10 +717,24 @@ def validate_sample_dir(
     if status.get("output_exists", False) and not status.get("scf_converged", False):
         reasons.append("scf_not_converged")
 
+    unsafe_allowed_reasons = {
+        "missing_output",
+        "job_not_completed",
+        "scf_not_converged",
+        "stale_output",
+    }
     hard_reasons = set(reasons)
+    unsafe_reasons: list[str] = []
     if allow_unvalidated_matrices:
-        hard_reasons -= {"missing_output", "job_not_completed", "scf_not_converged", "stale_output"}
+        unsafe_reasons = [reason for reason in reasons if reason in unsafe_allowed_reasons]
+        hard_reasons -= unsafe_allowed_reasons
     valid = not hard_reasons
+    unsafe_unvalidated = bool(valid and allow_unvalidated_matrices and unsafe_reasons)
+    validation_reason = ";".join(reasons)
+    if valid and not unsafe_unvalidated:
+        validation_reason = "ok"
+    elif unsafe_unvalidated:
+        validation_reason = "unsafe_unvalidated_matrices:" + ";".join(unsafe_reasons)
     return {
         "sample_id": sample_dir.name,
         "sample_dir": str(sample_dir),
@@ -539,9 +747,17 @@ def validate_sample_dir(
         "stale_output": bool(status.get("stale_output", False)),
         "valid": valid,
         "status": "valid" if valid else "invalid",
-        "validation_reason": "ok" if valid else ";".join(reasons),
+        "validation_reason": validation_reason,
         "invalid_reasons": "" if valid else ";".join(reasons),
         "allow_unvalidated_matrices": bool(allow_unvalidated_matrices),
+        "unsafe_unvalidated_matrices": unsafe_unvalidated,
+        "unsafe_validation_reasons": ";".join(unsafe_reasons) if unsafe_unvalidated else "",
+        "siesta_output_flags": output_flag_status,
+        "severe_warnings": (
+            "UNSAFE_UNVALIDATED_MATRIX_REFERENCE:" + ";".join(unsafe_reasons)
+            if unsafe_unvalidated
+            else ""
+        ),
     }
 
 
@@ -562,6 +778,9 @@ def write_validation_outputs(output_dir: Path, rows: list[dict[str, Any]]) -> di
         "validation_reason",
         "invalid_reasons",
         "allow_unvalidated_matrices",
+        "unsafe_unvalidated_matrices",
+        "unsafe_validation_reasons",
+        "severe_warnings",
     ]
 
     def write_csv_file(path: Path, subset: list[dict[str, Any]]) -> None:
@@ -572,14 +791,24 @@ def write_validation_outputs(output_dir: Path, rows: list[dict[str, Any]]) -> di
 
     valid_rows = [row for row in rows if row.get("valid")]
     invalid_rows = [row for row in rows if not row.get("valid")]
+    unsafe_rows = [row for row in rows if row.get("unsafe_unvalidated_matrices")]
     write_csv_file(output_dir / "sample_validation_summary.csv", rows)
     write_csv_file(output_dir / "valid_samples.csv", valid_rows)
     write_csv_file(output_dir / "invalid_samples.csv", invalid_rows)
+    severe_warnings = []
+    if unsafe_rows:
+        severe_warnings.append(
+            "UNSAFE_UNVALIDATED_MATRIX_REFERENCE: "
+            f"{len(unsafe_rows)} sample(s) accepted only because allow_unvalidated_matrices=true."
+        )
     summary = {
         "ok": not invalid_rows,
         "samples_seen": len(rows),
         "valid_samples": len(valid_rows),
         "invalid_samples": len(invalid_rows),
+        "unsafe_unvalidated_samples": len(unsafe_rows),
+        "unsafe_mode": any(row.get("allow_unvalidated_matrices") for row in rows),
+        "severe_warnings": severe_warnings,
         "outputs": {
             "sample_validation_summary": str(output_dir / "sample_validation_summary.csv"),
             "valid_samples": str(output_dir / "valid_samples.csv"),

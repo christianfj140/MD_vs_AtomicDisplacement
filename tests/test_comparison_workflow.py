@@ -63,6 +63,8 @@ def minimal_run_fdf(path: Path) -> None:
                 "0.0 0.7 0.0 2",
                 "0.0 -0.7 0.0 2",
                 "%endblock AtomicCoordinatesAndAtomicSpecies",
+                "Save.HS T",
+                "XML.Write T",
                 "",
             ]
         ),
@@ -240,6 +242,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
         return self.load_module_from_path(
             name,
             REPO_ROOT / "Comparison" / "scripts" / "model_settings.py",
+        )
+
+    def load_md_dataset_module(self, name: str = "generate_md_dataset_test"):
+        sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
+        return self.load_module_from_path(
+            name,
+            REPO_ROOT / "MD" / "scripts" / "generate_md_dataset.py",
         )
 
     def test_ui_log_payload_is_bounded_for_polling(self):
@@ -872,20 +881,46 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertNotIn("ui_training_settings", rendered)
         self.assertNotIn("torch_float32_matmul_precision", rendered)
 
-    def test_default_venv_command_uses_local_graph2mat_env(self) -> None:
+    def test_default_venv_command_uses_repo_local_venv(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(
             module.DEFAULT_VENV_ACTIVATE_COMMAND,
-            "source /home/christian/graph2mat-env/bin/activate",
+            "source ${REPO_ROOT}/.venv/bin/activate",
         )
         self.assertEqual(
             module.resolve_venv_activate_from_command("source .venv/bin/activate"),
             "${REPO_ROOT}/.venv/bin/activate",
         )
         self.assertEqual(
-            module.resolve_venv_activate_from_command("source /home/christian/graph2mat-env/bin/activate"),
-            "/home/christian/graph2mat-env/bin/activate",
+            module.resolve_venv_activate_from_command("source ${REPO_ROOT}/.venv/bin/activate"),
+            "${REPO_ROOT}/.venv/bin/activate",
         )
+
+    def test_graph2mat_venv_token_requires_environment_override(self) -> None:
+        module = self.load_pipeline_ui_module()
+        old_venv = os.environ.pop("GRAPH2MAT_VENV", None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "GRAPH2MAT_VENV"):
+                module.resolve_venv_activate_from_command("source ${GRAPH2MAT_VENV}/bin/activate")
+            os.environ["GRAPH2MAT_VENV"] = "/tmp/graph2mat_venv"
+            self.assertEqual(
+                module.resolve_venv_activate_from_command("source ${GRAPH2MAT_VENV}/bin/activate"),
+                "${GRAPH2MAT_VENV}/bin/activate",
+            )
+        finally:
+            if old_venv is not None:
+                os.environ["GRAPH2MAT_VENV"] = old_venv
+            else:
+                os.environ.pop("GRAPH2MAT_VENV", None)
+
+    def test_versioned_pipeline_configs_do_not_default_to_local_absolute_venv(self) -> None:
+        for config_path in (
+            REPO_ROOT / "MD" / "pipeline_config.yaml",
+            REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml",
+        ):
+            config_text = config_path.read_text(encoding="utf-8")
+            self.assertIn("venv_activate: ${REPO_ROOT}/.venv/bin/activate", config_text)
+            self.assertNotIn("/home/christian", config_text)
 
     def test_random_cartesian_options_support_multiple_sizes(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -1598,7 +1633,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             (root / "Comparison" / "results" / "results_random_cartesian" / "RC_dataset1_GHI789").mkdir(parents=True)
             (root / "Comparison" / "results" / "20260101_000001" / "summary").mkdir(parents=True)
             manifest = cleanup.cleanup_generated_datasets(root)
-            self.assertIn(str(root / "MD" / "dataset" / "MD_steps"), manifest["removed"])
+            self.assertIn("MD/dataset/MD_steps", manifest["removed"])
             self.assertFalse((root / "MD" / "dataset" / "MD_steps").exists())
             self.assertFalse((root / "AtomDisplacement" / "dataset" / "FC_steps").exists())
             self.assertFalse((root / "Comparison" / "workspaces").exists())
@@ -1612,6 +1647,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertTrue((root / "AtomDisplacement" / "pipeline_config.yaml").exists())
             self.assertTrue((root / "MD" / "dataset" / "H.psf").exists())
             self.assertTrue((root / "Comparison" / "generated_dataset_cleanup_manifest.json").exists())
+            cleanup_log = (root / "Comparison" / "generated_dataset_cleanup_manifest.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(str(root), cleanup_log)
 
     def test_cleanup_selected_generated_datasets_uses_ids_and_preserves_unselected(self) -> None:
         cleanup = self.load_module_from_path(
@@ -1645,13 +1684,71 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(delete_record["dataset_size"], 12)
 
             manifest = cleanup.cleanup_selected_generated_datasets(root, target_ids=[delete_record["id"]])
-            self.assertIn(str(delete), manifest["removed"])
+            self.assertIn("Comparison/results/results_md/delete_dataset", manifest["removed"])
             self.assertFalse(delete.exists())
             self.assertTrue(keep.exists())
             self.assertTrue((root / "Comparison" / "generated_dataset_cleanup_manifest.json").exists())
+            cleanup_log = json.loads(
+                (root / "Comparison" / "generated_dataset_cleanup_manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                cleanup_log["selected"][0]["path"],
+                "Comparison/results/results_md/delete_dataset",
+            )
+            self.assertNotIn(str(root), json.dumps(cleanup_log))
 
             with self.assertRaisesRegex(RuntimeError, "no reconocidos"):
                 cleanup.cleanup_selected_generated_datasets(root, target_ids=["not-a-real-id"])
+
+    def test_cleanup_generated_manifest_is_ignored_and_not_required(self) -> None:
+        cleanup = self.load_module_from_path(
+            "cleanup_generated_datasets_no_manifest_test",
+            REPO_ROOT / "Comparison" / "scripts" / "cleanup_generated_datasets.py",
+        )
+        gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("Comparison/generated_dataset_cleanup_manifest.json", gitignore)
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            dataset = root / "Comparison" / "results" / "results_md" / "dataset_a"
+            dataset.mkdir(parents=True)
+            manifest_path = root / "Comparison" / "generated_dataset_cleanup_manifest.json"
+            self.assertFalse(manifest_path.exists())
+            records = cleanup.generated_dataset_records(root)
+            self.assertEqual([record["relative_path"] for record in records], ["Comparison/results/results_md/dataset_a"])
+            self.assertEqual([record["path"] for record in records], ["Comparison/results/results_md/dataset_a"])
+
+    def test_cleanup_refuses_outside_repo_and_repo_root_targets(self) -> None:
+        cleanup = self.load_module_from_path(
+            "cleanup_generated_datasets_boundary_test",
+            REPO_ROOT / "Comparison" / "scripts" / "cleanup_generated_datasets.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "fuera del repositorio"):
+                cleanup._safe_remove_target(root, outside)
+            with self.assertRaisesRegex(RuntimeError, "raiz del repositorio"):
+                cleanup._safe_remove_target(root, root)
+            self.assertTrue(outside.exists())
+            self.assertTrue(root.exists())
+
+    def test_cleanup_dry_run_preserves_targets_and_skips_manifest_write(self) -> None:
+        cleanup = self.load_module_from_path(
+            "cleanup_generated_datasets_dry_run_test",
+            REPO_ROOT / "Comparison" / "scripts" / "cleanup_generated_datasets.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            target = root / "Comparison" / "results" / "results_md" / "dry_run_dataset"
+            target.mkdir(parents=True)
+            manifest = cleanup.cleanup_generated_datasets(root, dry_run=True)
+            self.assertIn("Comparison/results/results_md/dry_run_dataset", manifest["removed"])
+            self.assertTrue(target.exists())
+            self.assertFalse((root / "Comparison" / "generated_dataset_cleanup_manifest.json").exists())
 
     def test_cleanup_selected_generated_datasets_rejects_symlink_targets(self) -> None:
         cleanup = self.load_module_from_path(
@@ -2507,6 +2604,85 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(result["reused_split_policy"], "rebuild_splits")
             self.assertEqual(result["reused_split_counts"], {"train": 3, "validation": 1, "test": 2})
 
+    def test_downstream_only_md_rebuild_includes_excluded_gap_sources(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            dataset_dir = root / "safe_md" / "dataset"
+            (dataset_dir / "MD_steps" / "basis").mkdir(parents=True)
+            (dataset_dir / "MD_steps" / "basis" / "H.ion.xml").write_text("<ion />\n", encoding="utf-8")
+            (dataset_dir / "RUN.out").write_text("Job completed\nSCF cycle converged\n", encoding="utf-8")
+            rows_by_split: dict[str, list[dict[str, str]]] = {
+                "train": [],
+                "validation": [],
+                "test": [],
+                "excluded_gap": [],
+            }
+            split_for_index = {
+                0: "train",
+                1: "train",
+                2: "train",
+                3: "train",
+                4: "train",
+                5: "train",
+                6: "excluded_gap",
+                7: "validation",
+                8: "excluded_gap",
+                9: "test",
+            }
+            for index, split_name in split_for_index.items():
+                raw_dir = dataset_dir / "MD_steps" / str(index)
+                raw_dir.mkdir(parents=True)
+                minimal_run_fdf(raw_dir / "RUN.fdf")
+                (raw_dir / "siesta.TSHS").write_bytes(b"matrix")
+                sample_dir = raw_dir if split_name == "excluded_gap" else dataset_dir / "splits" / split_name / str(index)
+                if split_name != "excluded_gap":
+                    sample_dir.mkdir(parents=True)
+                    minimal_run_fdf(sample_dir / "RUN.fdf")
+                    (sample_dir / "siesta.TSHS").write_bytes(b"matrix")
+                rows_by_split[split_name].append(
+                    {
+                        "sample_id": f"md_{index}",
+                        "method": "md",
+                        "structure_path": str(sample_dir / "RUN.fdf"),
+                        "hamiltonian_path": str(sample_dir / "siesta.TSHS"),
+                        "run_out_path": str(dataset_dir / "RUN.out"),
+                        "status": "excluded" if split_name == "excluded_gap" else "completed",
+                        "valid": "false" if split_name == "excluded_gap" else "true",
+                        "split": split_name,
+                        "split_strategy": "blocked_with_gap",
+                        "temporal_gap": "1",
+                        "source_frame_index": str(index),
+                        "excluded_gap_reason": (
+                            "temporal_gap_between_train_and_validation"
+                            if index == 6
+                            else "temporal_gap_between_validation_and_test" if index == 8 else ""
+                        ),
+                        "sample_dir": str(sample_dir),
+                    }
+                )
+            for split_name, rows in rows_by_split.items():
+                write_csv(dataset_dir / "splits" / f"{split_name}_manifest.csv", rows)
+
+            runner = module.ExperimentRunner()
+            runner._validate_existing_dataset_source("md", dataset_dir, 10)
+            rebuilt = runner._rebuild_reusable_dataset_splits(
+                "md",
+                dataset_dir,
+                10,
+                {"train": 0.8, "validation": 0.1, "test": 0.1},
+                "blocked_with_gap",
+            )
+
+            self.assertEqual(rebuilt["reused_split_counts"], {"train": 6, "validation": 1, "test": 1})
+            self.assertEqual(rebuilt["reused_temporal_gap"], 1)
+            self.assertEqual(rebuilt["reused_excluded_gap_count"], 2)
+            with (dataset_dir / "splits" / "excluded_gap_manifest.csv").open(encoding="utf-8") as handle:
+                excluded_rows = list(csv.DictReader(handle))
+            self.assertEqual([row["source_frame_index"] for row in excluded_rows], ["6", "8"])
+            self.assertTrue((dataset_dir / "splits" / "validation" / "7" / "RUN.fdf").exists())
+            self.assertTrue((dataset_dir / "splits" / "test" / "9" / "RUN.fdf").exists())
+
     def test_downstream_only_md_can_select_exact_reusable_dataset(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -2864,8 +3040,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("item.training_tag", app_js)
         self.assertIn("includeTrainingContext", app_js)
         self.assertIn("runTrainingGroupLabel", app_js)
-        self.assertIn('value="source /home/christian/graph2mat-env/bin/activate"', index_html)
-        self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"', app_js)
+        self.assertIn('value="source ${REPO_ROOT}/.venv/bin/activate"', index_html)
+        self.assertIn('DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"', app_js)
+        self.assertNotIn("/home/christian/graph2mat-env", index_html)
+        self.assertNotIn("/home/christian/graph2mat-env", app_js)
         self.assertNotIn('id="compute-accelerator"', index_html)
         self.assertIn('value="cpu"', index_html)
         self.assertIn('value="gpu" selected', index_html)
@@ -3716,6 +3894,100 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertNotIn("MD.TypeOfRun", run_fdf)
             self.assertNotIn("FC.Displacement", run_fdf)
 
+    def test_random_cartesian_split_manifests_keep_families_isolated(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            self.configure_random_cartesian_module(module, root, n_structures=5, seed=13)
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"]["blocks"] = [
+                {"block_id": "rc_small", "n_structures": 2, "max_displacement": "0.02 Ang", "seed": 21},
+                {"block_id": "rc_large", "n_structures": 3, "max_displacement": "0.05 Ang", "seed": 22},
+            ]
+            manifest = module.generate_dataset(module.PIPELINE_CONFIG)
+            dataset_root = root / "dataset" / "RandomCartesian_steps"
+            split_rows = {
+                split: json.loads((dataset_root / f"split_manifest_{split}.json").read_text(encoding="utf-8"))
+                for split in ("train", "validation", "test")
+            }
+            group_to_split: dict[str, str] = {}
+            for split, payload in split_rows.items():
+                self.assertEqual(payload["split_strategy"], "grouped_family_round_robin")
+                self.assertTrue(payload["group_aware"])
+                for sample in payload["samples"]:
+                    group_id = sample["split_group_id"]
+                    previous = group_to_split.setdefault(group_id, split)
+                    self.assertEqual(previous, split)
+
+            self.assertEqual(len(group_to_split), 2)
+            self.assertEqual(manifest["split_strategy"], "grouped_family_round_robin")
+            self.assertEqual(manifest["split_summary"]["counts"], {"train": 2, "validation": 3, "test": 0})
+            self.assertEqual(manifest["split_summary"]["split_group_keys_used"], ["split_group_id"])
+            self.assertTrue((dataset_root / "split_manifest_summary.json").exists())
+            self.assertTrue((dataset_root / "dataset_manifest.json").exists())
+            self.assertTrue((dataset_root / "artifact_hashes.json").exists())
+
+    def test_random_cartesian_grouped_split_is_deterministic_for_distinct_families(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            samples = [
+                {"sample_id": "sample_a1", "split_group_id": "family_a"},
+                {"sample_id": "sample_a2", "split_group_id": "family_a"},
+                {"sample_id": "sample_b1", "split_group_id": "family_b"},
+                {"sample_id": "sample_c1", "split_group_id": "family_c"},
+            ]
+            first_root = root / "first"
+            second_root = root / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            first = module.write_split_manifests(first_root, samples)
+            second = module.write_split_manifests(second_root, list(reversed(list(reversed(samples)))))
+            self.assertEqual(first, second)
+            self.assertEqual(first["counts"], {"train": 2, "validation": 1, "test": 1})
+            self.assertEqual(
+                [(group["group_id"], group["split"]) for group in first["groups"]],
+                [("family_a", "train"), ("family_b", "validation"), ("family_c", "test")],
+            )
+
+    def test_random_cartesian_missing_group_metadata_uses_explicit_fallback_warning(self) -> None:
+        module = self.load_random_cartesian_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            samples = [
+                {
+                    "sample_id": "sample_1",
+                    "base_geometry_hash": "base",
+                    "distribution": "gaussian",
+                    "sigma_ang": 0.03,
+                    "seed_family": 123,
+                    "move_atoms": "all",
+                    "species_filter": "[]",
+                    "block_id": "block_a",
+                },
+                {
+                    "sample_id": "sample_2",
+                    "base_geometry_hash": "base",
+                    "distribution": "gaussian",
+                    "sigma_ang": 0.03,
+                    "seed_family": 123,
+                    "move_atoms": "all",
+                    "species_filter": "[]",
+                    "block_id": "block_a",
+                },
+                {"sample_id": "sample_3"},
+            ]
+            split_root = root / "splits"
+            split_root.mkdir()
+            summary = module.write_split_manifests(split_root, samples)
+            self.assertEqual(summary["scientific_status"], "grouped_family_splits_with_fallback")
+            self.assertIn("derived_random_cartesian_family", summary["split_group_keys_used"])
+            self.assertIn("sample_id_fallback", summary["split_group_keys_used"])
+            self.assertTrue(any("missing split_group_id" in warning for warning in summary["warnings"]))
+            self.assertTrue(any("weak fallback group" in warning for warning in summary["warnings"]))
+            train_payload = json.loads((split_root / "split_manifest_train.json").read_text(encoding="utf-8"))
+            derived_ids = {sample["sample_id"] for sample in train_payload["samples"]}
+            self.assertEqual(derived_ids, {"sample_1", "sample_2"})
+
     def test_random_cartesian_different_seed_changes_geometries(self) -> None:
         module = self.load_random_cartesian_module()
         with workspace_tempdir() as tmp:
@@ -4172,6 +4444,71 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertFalse(module.validate_sample_dir(failed_scf)["valid"])
             self.assertIn("scf_not_converged", module.validate_sample_dir(failed_scf)["validation_reason"])
             self.assertTrue(module.validate_sample_dir(valid)["valid"])
+
+    def test_atomdisp_single_points_default_config_is_strict(self) -> None:
+        config = (REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml").read_text(encoding="utf-8")
+        self.assertIn("allow_unvalidated_matrices: false", config)
+
+    def test_strict_atomdisp_validation_rejects_stale_matrix(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "atom_displacement_utils",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "atom_displacement_utils.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            sample = make_sample(Path(tmp), "stale_matrix")
+            matrix = sample / "siesta.TSHS"
+            run_fdf = sample / "RUN.fdf"
+            run_out = sample / "RUN.out"
+            os.utime(matrix, (1000, 1000))
+            os.utime(run_fdf, (2000, 2000))
+            os.utime(run_out, (3000, 3000))
+
+            validation = module.validate_sample_dir(sample)
+            self.assertFalse(validation["valid"])
+            self.assertIn("stale_matrix", validation["validation_reason"])
+
+    def test_atomdisp_unsafe_mode_marks_unvalidated_matrix_reuse(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        spec = importlib.util.spec_from_file_location(
+            "atom_displacement_utils",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "atom_displacement_utils.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root, "unsafe_missing_output")
+            (sample / "RUN.out").unlink()
+
+            strict = module.validate_sample_dir(sample)
+            self.assertFalse(strict["valid"])
+            self.assertIn("missing_output", strict["validation_reason"])
+
+            unsafe = module.validate_sample_dir(sample, allow_unvalidated_matrices=True)
+            self.assertTrue(unsafe["valid"])
+            self.assertTrue(unsafe["unsafe_unvalidated_matrices"])
+            self.assertIn("missing_output", unsafe["unsafe_validation_reasons"])
+            self.assertIn("UNSAFE_UNVALIDATED_MATRIX_REFERENCE", unsafe["severe_warnings"])
+            self.assertIn("unsafe_unvalidated_matrices", unsafe["validation_reason"])
+
+            summary = module.write_validation_outputs(root / "validation", [unsafe])
+            self.assertEqual(summary["invalid_samples"], 0)
+            self.assertEqual(summary["unsafe_unvalidated_samples"], 1)
+            self.assertTrue(summary["unsafe_mode"])
+            self.assertTrue(any("UNSAFE_UNVALIDATED_MATRIX_REFERENCE" in item for item in summary["severe_warnings"]))
+            with (root / "validation" / "valid_samples.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["unsafe_unvalidated_matrices"], "True")
+            self.assertIn("missing_output", rows[0]["unsafe_validation_reasons"])
 
     def test_validation_accepts_matching_tshs_and_hsx_outputs(self) -> None:
         with workspace_tempdir() as tmp:
@@ -5028,15 +5365,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
 
     def test_md_blocked_with_gap_separates_splits_and_excludes_gap_frames(self) -> None:
-        sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
-        spec = importlib.util.spec_from_file_location(
-            "generate_md_dataset",
-            REPO_ROOT / "MD" / "scripts" / "generate_md_dataset.py",
-        )
-        assert spec and spec.loader
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        module = self.load_md_dataset_module("generate_md_dataset_gap_unit_test")
 
         with workspace_tempdir() as tmp:
             root = Path(tmp)
@@ -5055,6 +5384,16 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual([path.name for path in splits["validation"]], ["4", "5"])
             self.assertEqual([path.name for path in splits["test"]], ["7", "8"])
             self.assertEqual([path.name for path, _reason in excluded], ["3", "6"])
+            assigned = {
+                split_name: [int(path.name) for path in samples]
+                for split_name, samples in splits.items()
+            }
+            split_names = ["train", "validation", "test"]
+            for left_index, left_name in enumerate(split_names):
+                for right_name in split_names[left_index + 1 :]:
+                    for left_frame in assigned[left_name]:
+                        for right_frame in assigned[right_name]:
+                            self.assertGreater(abs(left_frame - right_frame), 1)
             used = {path.name for samples in splits.values() for path in samples}
             self.assertTrue(used.isdisjoint({path.name for path, _reason in excluded}))
             with self.assertRaisesRegex(RuntimeError, "necesita mas frames"):
@@ -5064,6 +5403,103 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     temporal_gap=1,
                     block_order=["train", "validation", "test"],
                 )
+
+    def test_md_default_split_config_and_ui_are_leakage_safer(self) -> None:
+        config_text = (REPO_ROOT / "MD" / "pipeline_config.yaml").read_text(encoding="utf-8")
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        module = self.load_pipeline_ui_module()
+
+        self.assertIn("strategy: blocked_with_gap", config_text)
+        self.assertIn("temporal_gap: 1", config_text)
+        self.assertNotIn("strategy: spread", config_text)
+        self.assertIn('value="blocked_with_gap" selected', index_html)
+        self.assertIn("Spread split (exploratory)", index_html)
+        self.assertEqual(module.parse_split_mode(None), "blocked_with_gap")
+        counts, reserved_gap_frames = module.md_split_counts_for_mode(
+            10,
+            {"train": 0.8, "validation": 0.1, "test": 0.1},
+            split_mode="blocked_with_gap",
+            label="MD dataset_10",
+        )
+        self.assertEqual(counts, {"train": 6, "validation": 1, "test": 1})
+        self.assertEqual(reserved_gap_frames, 2)
+
+    def test_md_prepare_dataset_splits_writes_gap_metadata_and_spread_warning(self) -> None:
+        module = self.load_md_dataset_module("generate_md_dataset_gap_manifest_test")
+
+        def make_config(root: Path, *, strategy: str) -> dict:
+            dataset_dir = root / strategy / "dataset"
+            steps_dir = dataset_dir / "MD_steps"
+            steps_dir.mkdir(parents=True)
+            for index in range(10):
+                sample_dir = steps_dir / str(index)
+                sample_dir.mkdir()
+                (sample_dir / "RUN.fdf").write_text("SystemLabel siesta\n", encoding="utf-8")
+                (sample_dir / "siesta.TSHS").write_text("matrix\n", encoding="utf-8")
+            (dataset_dir / "RUN.out").write_text("siesta completed\n", encoding="utf-8")
+            return {
+                "paths": {
+                    "dataset_dir": str(dataset_dir),
+                    "training_dir": str(root / strategy / "training"),
+                    "run_fdf_name": "RUN.fdf",
+                    "run_out_name": "RUN.out",
+                    "training_config_name": "config.yaml",
+                    "venv_activate": str(root / "venv" / "activate"),
+                },
+                "md": {"steps": 10, "temperature_blocks": []},
+                "splits": {
+                    "enabled": True,
+                    "strategy": strategy,
+                    "train": 6,
+                    "validation": 1,
+                    "test": 1,
+                    "temporal_gap": 1,
+                    "block_order": "train,validation,test",
+                },
+            }
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            safe_config = make_config(root, strategy="blocked_with_gap")
+            module.prepare_dataset_splits(safe_config)
+            split_root = Path(safe_config["paths"]["dataset_dir"]) / "splits"
+            summary = json.loads((split_root / "split_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["strategy"], "blocked_with_gap")
+            self.assertEqual(summary["temporal_gap"], 1)
+            self.assertEqual(summary["counts"], {"train": 6, "validation": 1, "test": 1})
+            self.assertEqual(
+                [item["frame_index"] for item in summary["excluded_gap_samples"]],
+                ["6", "8"],
+            )
+            with (split_root / "train_manifest.csv").open(encoding="utf-8") as handle:
+                train_rows = list(csv.DictReader(handle))
+            self.assertEqual({row["temporal_gap"] for row in train_rows}, {"1"})
+            with (split_root / "excluded_gap_manifest.csv").open(encoding="utf-8") as handle:
+                excluded_rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [row["excluded_gap_reason"] for row in excluded_rows],
+                [
+                    "temporal_gap_between_train_and_validation",
+                    "temporal_gap_between_validation_and_test",
+                ],
+            )
+
+            spread_config = make_config(root, strategy="spread")
+            module.prepare_dataset_splits(spread_config)
+            spread_summary = json.loads(
+                (
+                    Path(spread_config["paths"]["dataset_dir"])
+                    / "splits"
+                    / "split_summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                spread_summary["scientific_status"],
+                "exploratory_temporal_leakage_risk",
+            )
+            self.assertTrue(
+                any("exploratory/debug only" in warning for warning in spread_summary["warnings"])
+            )
 
     def test_atomdisp_grouped_split_keeps_group_ids_isolated(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
@@ -7906,6 +8342,175 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(args.train_method, method)
 
+    def test_cross_prediction_matrix_writer_partial_error_fails_even_if_output_exists(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_strict_writer",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            output = Path(tmp) / "ML_prediction.HSX"
+            output.write_bytes(b"partial prediction")
+
+            class PartialWriterBase:
+                def __init__(self, output_file: Path, splits: list[str]) -> None:
+                    self.output_file = Path(output_file)
+                    self.splits = splits
+
+                def _get_out_file(self, _example, _trainer):
+                    return self.output_file
+
+                def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
+                    raise ValueError(module.EDGE_LABEL_CONSUMPTION_ERROR)
+
+            class Batch:
+                num_graphs = 1
+
+                def get_example(self, _index):
+                    return object()
+
+            writer_cls = module.strict_matrix_writer_class(PartialWriterBase)
+            writer = writer_cls(output_file=output, splits=["predict"])
+            with self.assertRaisesRegex(RuntimeError, "incomplete prediction export"):
+                writer._on_batch_end("predict", object(), object(), object(), Batch(), 0, 0)
+
+    def test_cross_prediction_command_fails_after_partial_export_error(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_partial_main",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            checkpoint = root / "training" / "lightning_logs" / "version_0" / "checkpoints" / "best.ckpt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"checkpoint")
+            sample = make_sample(root / "samples", "001")
+            manifest = root / "test_manifest.csv"
+            write_csv(manifest, [{"sample_id": "001", "structure_path": str(sample / "RUN.fdf")}])
+            output_dir = root / "predictions"
+
+            def fake_run_prediction(args, _predict_glob):
+                prediction = args.output_dir / "workspace" / "predict_structures" / "001" / "ML_prediction.HSX"
+                prediction.write_bytes(b"partial prediction")
+                raise module.incomplete_prediction_error(ValueError(module.EDGE_LABEL_CONSUMPTION_ERROR))
+
+            original_run_prediction = module.run_prediction
+            original_argv = sys.argv[:]
+            try:
+                module.run_prediction = fake_run_prediction
+                sys.argv = [
+                    "predict_model_on_dataset.py",
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--train-method",
+                    "md",
+                    "--test-set",
+                    "test_md",
+                    "--test-manifest",
+                    str(manifest),
+                    "--output-dir",
+                    str(output_dir),
+                    "--basis-files",
+                    "basis/*.ion.xml",
+                ]
+                status = module.main()
+            finally:
+                module.run_prediction = original_run_prediction
+                sys.argv = original_argv
+
+            self.assertEqual(status, 2)
+            summary = json.loads((output_dir / "prediction_summary.json").read_text(encoding="utf-8"))
+            self.assertFalse(summary["ok"])
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["predicted_samples"], 1)
+            self.assertFalse(summary["prediction_output_validation"]["validated"])
+            self.assertIn("incomplete prediction export", summary["error"])
+            rows = module.read_rows(output_dir / "prediction_manifest.csv")
+            self.assertEqual(rows[0]["prediction_output_validated"], "False")
+
+    def test_cross_prediction_existing_output_alone_fails_validation(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_existing_only",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            output = root / "out" / "predicted_hamiltonians" / "001" / "ML_prediction.HSX"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"prediction")
+            rows = [{"sample_id": "001", "status": "predicted", "prediction_path": str(output)}]
+            with self.assertRaisesRegex(RuntimeError, "missing prediction for samples: 001"):
+                module.validate_prediction_outputs(rows, root / "workspace", root / "out")
+
+    def test_cross_prediction_missing_sample_fails_validation(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_missing",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample_1 = make_sample(root / "samples", "001")
+            sample_2 = make_sample(root / "samples", "002")
+            rows = [
+                {"sample_id": "001", "structure_path": str(sample_1 / "RUN.fdf")},
+                {"sample_id": "002", "structure_path": str(sample_2 / "RUN.fdf")},
+            ]
+            workspace = root / "workspace"
+            copied = module.copy_sample_inputs(rows, workspace)
+            (workspace / "predict_structures" / "001" / "ML_prediction.HSX").write_bytes(b"prediction")
+            prediction_rows = module.collect_predictions(copied, workspace, root / "out")
+            with self.assertRaisesRegex(RuntimeError, "missing prediction for samples: 002"):
+                module.validate_prediction_outputs(prediction_rows, workspace, root / "out")
+
+    def test_cross_prediction_mismatched_output_path_fails_validation(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_path_mismatch",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            workspace_prediction = root / "workspace" / "predict_structures" / "001" / "ML_prediction.HSX"
+            archive_prediction = root / "out" / "predicted_hamiltonians" / "001" / "ML_prediction.HSX"
+            wrong_prediction = root / "out" / "predicted_hamiltonians" / "wrong" / "ML_prediction.HSX"
+            workspace_prediction.parent.mkdir(parents=True)
+            archive_prediction.parent.mkdir(parents=True)
+            wrong_prediction.parent.mkdir(parents=True)
+            workspace_prediction.write_bytes(b"prediction")
+            archive_prediction.write_bytes(b"prediction")
+            wrong_prediction.write_bytes(b"prediction")
+            rows = [{"sample_id": "001", "status": "predicted", "prediction_path": str(wrong_prediction)}]
+            with self.assertRaisesRegex(RuntimeError, "prediction path mismatch for samples: 001"):
+                module.validate_prediction_outputs(rows, root / "workspace", root / "out")
+
+    def test_cross_prediction_complete_set_passes_validation(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_complete",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample_1 = make_sample(root / "samples", "001")
+            sample_2 = make_sample(root / "samples", "002")
+            rows = [
+                {"sample_id": "001", "structure_path": str(sample_1 / "RUN.fdf")},
+                {"sample_id": "002", "structure_path": str(sample_2 / "RUN.fdf")},
+            ]
+            workspace = root / "workspace"
+            copied = module.copy_sample_inputs(rows, workspace)
+            for sample_id in ("001", "002"):
+                (workspace / "predict_structures" / sample_id / "ML_prediction.HSX").write_bytes(
+                    f"prediction {sample_id}".encode("utf-8")
+                )
+            prediction_rows = module.collect_predictions(copied, workspace, root / "out")
+            validation = module.validate_prediction_outputs(prediction_rows, workspace, root / "out")
+            self.assertTrue(validation["validated"])
+            self.assertEqual(validation["validated_samples"], 2)
+
     def test_siesta_settings_hash_and_mismatch_warning(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
         spec = importlib.util.spec_from_file_location(
@@ -7992,6 +8597,54 @@ class ComparisonWorkflowTests(unittest.TestCase):
         ]
         self.assertTrue(severe)
         self.assertTrue(any("siesta_fc_cartesian" in mismatch["methods"] for mismatch in severe))
+
+    def test_siesta_settings_hamiltonian_output_flag_mismatches_are_severe(self) -> None:
+        module = self.load_module_from_path(
+            "siesta_settings_output_flags_bad",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        shared, md, atom = self.siesta_settings_fixture()
+        cases = {
+            "Save.HS": lambda config: config["structure"]["siesta"].__setitem__("Save.HS", "F"),
+            "TS.HS.Save": lambda config: config["structure"]["force_constants"].__setitem__("save_tshs", False),
+            "TS.DE.Save": lambda config: config["structure"]["force_constants"].__setitem__("save_tsde", False),
+            "XML.Write": lambda config: config["structure"]["siesta"].__setitem__("XML.Write", "F"),
+        }
+        for key, mutate in cases.items():
+            with self.subTest(key=key):
+                atom_bad = copy.deepcopy(atom)
+                mutate(atom_bad)
+                report = module.compare_method_settings(
+                    {"md": md, "siesta_fc_cartesian": atom_bad},
+                    shared,
+                    selected_methods=["md", "siesta_fc_cartesian"],
+                )
+                severe = [
+                    mismatch
+                    for mismatch in report["severe_mismatches"]
+                    if mismatch["key"] == key
+                ]
+                self.assertFalse(report["ok"])
+                self.assertTrue(report["severe_warning"])
+                self.assertTrue(severe)
+                self.assertTrue(all(mismatch["scientifically_relevant"] for mismatch in severe))
+
+    def test_siesta_settings_cosmetic_untracked_setting_is_not_severe(self) -> None:
+        module = self.load_module_from_path(
+            "siesta_settings_cosmetic_not_severe",
+            REPO_ROOT / "Comparison" / "scripts" / "siesta_settings.py",
+        )
+        shared, md, atom = self.siesta_settings_fixture()
+        atom_bad = copy.deepcopy(atom)
+        atom_bad["structure"]["siesta"]["LongOutput"] = "F"
+        report = module.compare_method_settings(
+            {"md": md, "siesta_fc_cartesian": atom_bad},
+            shared,
+            selected_methods=["md", "siesta_fc_cartesian"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["severe_mismatches"], [])
+        self.assertNotIn("LongOutput", {mismatch["key"] for mismatch in report["pairwise_mismatch_report"]})
 
     def test_siesta_settings_path_only_artifact_differences_are_not_severe(self) -> None:
         module = self.load_module_from_path(
@@ -8345,9 +8998,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         fc_block = json.loads(json.dumps(block))
         module.force_shared_hyperparams(md_block, fc_block)
         self.assertEqual(md_block["data"]["train_runs"], "../MD/dataset/splits/train/*/RUN.fdf")
+        self.assertEqual(md_block["data"]["val_runs"], "../MD/dataset/splits/validation/*/RUN.fdf")
         self.assertEqual(fc_block["data"]["train_runs"], "../AtomDisplacement/dataset/train_samples/*/RUN.fdf")
+        self.assertEqual(fc_block["data"]["val_runs"], "../AtomDisplacement/dataset/validation_samples/*/RUN.fdf")
         module.force_shared_hyperparams(md_block, fc_block, debug_full_dataset_globs=True)
         self.assertEqual(md_block["data"]["train_runs"], "../MD/dataset/MD_steps/*/RUN.fdf")
+        self.assertIsNone(md_block["data"]["val_runs"])
 
     def test_verify_integrity_accepts_multi_displacement_fc_layout(self) -> None:
         with workspace_tempdir() as tmp:
@@ -8856,6 +9512,154 @@ class ComparisonWorkflowTests(unittest.TestCase):
         script = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
         self.assertIn('config["structure"]["force_constants"]["allow_missing_matrix"] = False', script)
         self.assertNotIn('config["structure"]["force_constants"]["allow_missing_matrix"] = True', script)
+
+    def test_md_training_config_and_checkpoint_manifest_record_validation_split(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
+        module = self.load_module_from_path(
+            "md_pipeline_config_validation_test",
+            REPO_ROOT / "MD" / "scripts" / "md_pipeline_config.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            training_dir = root / "training"
+            validation_dir = root / "dataset" / "splits" / "validation" / "0"
+            checkpoint = training_dir / "lightning_logs" / "version_0" / "checkpoints" / "best-01.ckpt"
+            validation_dir.mkdir(parents=True)
+            checkpoint.parent.mkdir(parents=True)
+            minimal_run_fdf(validation_dir / "RUN.fdf")
+            checkpoint.write_bytes(b"checkpoint")
+            config = {
+                "paths": {
+                    "dataset_dir": str(root / "dataset"),
+                    "training_dir": str(training_dir),
+                    "run_fdf_name": "RUN.fdf",
+                    "run_out_name": "RUN.out",
+                    "training_config_name": "config.yaml",
+                    "venv_activate": str(root / "venv" / "activate"),
+                },
+                "training": {
+                    "data": {
+                        "out_matrix": "hamiltonian",
+                        "symmetric_matrix": True,
+                        "basis_files": "../dataset/MD_steps/basis/*.ion.xml",
+                        "train_runs": "../dataset/splits/train/*/RUN.fdf",
+                        "val_runs": "../dataset/splits/validation/*/RUN.fdf",
+                    },
+                    "model": {},
+                    "trainer": {},
+                },
+            }
+
+            rendered = module.render_training_config(config)
+            self.assertIn("val_runs: ../dataset/splits/validation/*/RUN.fdf", rendered)
+            metadata = module.require_explicit_validation_split(config)
+            self.assertEqual(metadata["validation_source"], "training.data.val_runs")
+            self.assertEqual(metadata["validation_sample_count"], 1)
+            manifest_path = module.write_checkpoint_manifest(
+                config,
+                checkpoint.relative_to(training_dir).as_posix(),
+                selection_mode="latest_version",
+                selection_metric="val_loss",
+            )
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["checkpoint_selection_validation_backed"])
+            self.assertEqual(payload["checkpoint_selection_metric"], "val_loss")
+            self.assertEqual(payload["validation_source"], "training.data.val_runs")
+            self.assertEqual(payload["validation_sample_count"], 1)
+
+    def test_md_training_fails_without_explicit_validation_split(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
+        module = self.load_module_from_path(
+            "md_pipeline_config_missing_validation_test",
+            REPO_ROOT / "MD" / "scripts" / "md_pipeline_config.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            config = {
+                "paths": {
+                    "dataset_dir": str(root / "dataset"),
+                    "training_dir": str(root / "training"),
+                    "run_fdf_name": "RUN.fdf",
+                    "run_out_name": "RUN.out",
+                    "training_config_name": "config.yaml",
+                    "venv_activate": str(root / "venv" / "activate"),
+                },
+                "training": {
+                    "data": {
+                        "train_runs": "../dataset/splits/train/*/RUN.fdf",
+                        "val_runs": "../dataset/splits/validation/*/RUN.fdf",
+                    }
+                },
+            }
+            with self.assertRaisesRegex(RuntimeError, "explicit validation split"):
+                module.require_explicit_validation_split(config)
+
+    def test_atomdisp_training_config_and_checkpoint_manifest_record_validation_split(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
+        module = self.load_module_from_path(
+            "atom_pipeline_config_validation_test",
+            REPO_ROOT / "AtomDisplacement" / "scripts" / "pipeline_config_utils.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            training_dir = root / "training"
+            checkpoint = training_dir / "lightning_logs" / "version_0" / "checkpoints" / "best-01.ckpt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(b"checkpoint")
+            training_dir.joinpath("runs.json").write_text(
+                json.dumps(
+                    {
+                        "train": ["../dataset/train_samples/0/RUN.fdf"],
+                        "val": ["../dataset/validation_samples/1/RUN.fdf"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "paths": {
+                    "base_dir": str(root / "base"),
+                    "relaxed_dir": str(root / "relaxed"),
+                    "dataset_dir": str(root / "dataset"),
+                    "samples_dir": str(root / "dataset" / "train_samples"),
+                    "collected_dir": str(root / "dataset" / "collected"),
+                    "training_dir": str(training_dir),
+                    "run_fdf_name": "RUN.fdf",
+                    "run_out_name": "RUN.out",
+                    "training_config_name": "config.yaml",
+                    "runs_json_name": "runs.json",
+                    "samples_manifest_name": "samples.json",
+                    "run_summary_name": "run_summary.json",
+                    "collected_json_name": "collected.json",
+                    "collected_csv_name": "collected.csv",
+                    "venv_activate": str(root / "venv" / "activate"),
+                },
+                "training": {
+                    "data": {
+                        "out_matrix": "hamiltonian",
+                        "symmetric_matrix": True,
+                        "basis_files": "../dataset/basis/*.ion.xml",
+                        "runs_json": "runs.json",
+                    },
+                    "model": {},
+                    "trainer": {},
+                },
+            }
+
+            rendered = module.render_training_config(config)
+            self.assertIn("runs_json: runs.json", rendered)
+            metadata = module.require_explicit_validation_split(config)
+            self.assertEqual(metadata["validation_source"], "training.data.runs_json:val")
+            self.assertEqual(metadata["validation_sample_count"], 1)
+            manifest_path = module.write_checkpoint_manifest(
+                config,
+                checkpoint.relative_to(training_dir).as_posix(),
+                selection_mode="latest_version",
+                selection_metric="val_loss",
+            )
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertTrue(payload["checkpoint_selection_validation_backed"])
+            self.assertEqual(payload["checkpoint_selection_metric"], "val_loss")
+            self.assertEqual(payload["validation_source"], "training.data.runs_json:val")
 
     def test_checkpoint_manifest_written_by_training_scripts(self) -> None:
         for path in (

@@ -32,6 +32,14 @@ DOS_SIGMA_SWEEP_EV = [0.05, 0.10, 0.20, 0.40]
 DOS_POINTS = 1000
 LOW_ENERGY_N_STATES = 10
 LOW_ENERGY_ALIGNMENT = "none"
+COMPLEX_IMAG_TOLERANCE = 1e-12
+PERIODIC_STRUCTURE_TYPES = {"bulk", "crystal", "periodic", "solid", "surface", "slab"}
+UNSUPPORTED_KPOINT_DIRECTIVES = {
+    "kgrid_cutoff",
+    "kgridcutoff",
+    "kgrid_monkhorst_pack",
+    "kgrid.monkhorstpack",
+}
 RECOMMENDATION_PRIMARY_METRIC_PRIORITY = [
     "low_energy_rmse_eV",
     "frontier_window_rmse_eV",
@@ -185,6 +193,86 @@ def sample_structure_metadata(structure_path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def structure_type_from_metadata(structure_path: Path) -> str:
+    metadata = sample_structure_metadata(structure_path)
+    material = metadata.get("material") if isinstance(metadata.get("material"), dict) else {}
+    value = (
+        metadata.get("material_structure_type")
+        or metadata.get("structure_type")
+        or material.get("structure_type")
+        or ""
+    )
+    return str(value or "").strip().lower()
+
+
+def _strip_fdf_comment(line: str) -> str:
+    return line.split("#", 1)[0].strip()
+
+
+def unsupported_kpoint_issues(sample: str, structure_path: Path) -> list[dict[str, Any]]:
+    """Detect k-point sampling forms this evaluator does not validate."""
+    if not structure_path.exists():
+        return []
+    issues: list[dict[str, Any]] = []
+    in_kgrid_block = False
+    try:
+        lines = structure_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError as exc:
+        return [
+            {
+                "sample": sample,
+                "kind": "structure_kpoint_check",
+                "severity": "fatal",
+                "error": str(exc),
+                "structure_path": str(structure_path),
+            }
+        ]
+    for raw_line in lines:
+        clean = _strip_fdf_comment(raw_line)
+        if not clean:
+            continue
+        lower = clean.lower()
+        parts = lower.split()
+        key = parts[0] if parts else ""
+        if lower.startswith("%block"):
+            block_name = parts[1] if len(parts) > 1 else ""
+            in_kgrid_block = block_name in UNSUPPORTED_KPOINT_DIRECTIVES
+            if in_kgrid_block:
+                issues.append(
+                    {
+                        "sample": sample,
+                        "kind": "unsupported_kpoint_sampling",
+                        "severity": "fatal",
+                        "error": (
+                            "K-point sampled Hamiltonian metrics are not implemented by this "
+                            "evaluator; only gamma/single-matrix comparisons are supported."
+                        ),
+                        "structure_path": str(structure_path),
+                        "directive": block_name,
+                    }
+                )
+            continue
+        if lower.startswith("%endblock"):
+            in_kgrid_block = False
+            continue
+        if in_kgrid_block or key in UNSUPPORTED_KPOINT_DIRECTIVES:
+            issues.append(
+                {
+                    "sample": sample,
+                    "kind": "unsupported_kpoint_sampling",
+                    "severity": "fatal",
+                    "error": (
+                        "K-point sampled Hamiltonian metrics are not implemented by this "
+                        "evaluator; only gamma/single-matrix comparisons are supported."
+                    ),
+                    "structure_path": str(structure_path),
+                    "directive": key,
+                }
+            )
+            break
+    return issues
 
 
 def sample_method_id(structure_path: Path, fallback: str = "") -> str:
@@ -343,6 +431,10 @@ def evaluate_sample(
         else:
             rows["fatal_errors"].append(stale_issue)
             sample_errors.append(stale_issue)
+    structure_path = result_dir / "structures" / sample / "RUN.fdf"
+    for issue in unsupported_kpoint_issues(sample, structure_path):
+        rows["fatal_errors"].append(issue)
+        sample_errors.append(issue)
     if sample_errors:
         rows["errors"].extend(sample_errors)
         rows["sample_status"].append(
@@ -428,16 +520,31 @@ def evaluate_sample(
             result_dir / "structures" / sample / "RUN.fdf",
             basis_counts,
         )
+        structural_warnings = structural.get("warnings", []) or []
+        if structural_warnings:
+            rows["warnings"].extend(structural_warnings)
+            sample_warnings.extend(structural_warnings)
         if structural["available"]:
             rows["block"].extend(structural["block_rows"])
             rows["species_pair"].extend(structural["species_pair_rows"])
             rows["distance_bin"].extend(structural["distance_bin_rows"])
         else:
             rows["structural_unavailable"].append({"sample": sample, "reason": structural["reason"]})
+        if structural.get("distance_unavailable_reason"):
+            rows["structural_unavailable"].append(
+                {"sample": sample, "reason": str(structural["distance_unavailable_reason"])}
+            )
     except Exception as exc:
         rows["structural_unavailable"].append({"sample": sample, "reason": str(exc)})
         sample_warnings.append(
-            append_issue(rows, "warnings", sample=sample, kind="structural_metrics", message=str(exc))
+            append_issue(
+                rows,
+                "warnings",
+                sample=sample,
+                kind="structural_metrics",
+                severity="severe",
+                message=str(exc),
+            )
         )
 
     eigen_root = result_dir / "eigenvalues"
@@ -611,6 +718,33 @@ def matrix_compatibility_errors(sample: str, reference: MatrixData, predicted: M
             }
         )
     graph2mat_auxiliary_prediction = is_graph2mat_auxiliary_prediction(reference, predicted)
+    for role, data in (("reference", reference), ("prediction", predicted)):
+        if matrix_has_complex_values(data.hamiltonian):
+            errors.append(
+                {
+                    "sample": sample,
+                    "kind": "unsupported_complex_hamiltonian",
+                    "error": (
+                        f"Unsupported complex-valued {role} Hamiltonian. The current benchmark "
+                        "does not validate spin-orbit/k-point complex matrix semantics."
+                    ),
+                    "matrix_role": role,
+                    "matrix_path": str(data.path),
+                }
+            )
+        if data.overlap is not None and matrix_has_complex_values(data.overlap):
+            errors.append(
+                {
+                    "sample": sample,
+                    "kind": "unsupported_complex_overlap",
+                    "error": (
+                        f"Unsupported complex-valued {role} overlap. The current benchmark "
+                        "does not validate complex generalized eigenproblems."
+                    ),
+                    "matrix_role": role,
+                    "matrix_path": str(data.path),
+                }
+            )
     if reference.component_count != 1:
         errors.append(
             {
@@ -645,6 +779,26 @@ def matrix_compatibility_errors(sample: str, reference: MatrixData, predicted: M
                 ),
                 "reference_spin": reference.spin_kind,
                 "predicted_spin": predicted.spin_kind,
+            }
+        )
+    if unsupported_spin_kind(reference.spin_kind):
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "unsupported_spin_kind",
+                "error": f"Unsupported reference spin metadata: {reference.spin_kind}.",
+                "matrix_role": "reference",
+                "spin_kind": reference.spin_kind,
+            }
+        )
+    if unsupported_spin_kind(predicted.spin_kind) and not graph2mat_auxiliary_prediction:
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "unsupported_spin_kind",
+                "error": f"Unsupported prediction spin metadata: {predicted.spin_kind}.",
+                "matrix_role": "prediction",
+                "spin_kind": predicted.spin_kind,
             }
         )
     if reference.overlap is not None and reference.overlap.shape != reference.hamiltonian.shape:
@@ -686,6 +840,21 @@ def is_graph2mat_auxiliary_prediction(reference: MatrixData, predicted: MatrixDa
         and "unpolarized" in reference_spin
         and "polarized" in predicted_spin
     )
+
+
+def matrix_has_complex_values(matrix: sparse.spmatrix) -> bool:
+    if not np.iscomplexobj(matrix.data):
+        return False
+    if matrix.data.size == 0:
+        return False
+    return bool(np.max(np.abs(np.imag(matrix.data))) > COMPLEX_IMAG_TOLERANCE)
+
+
+def unsupported_spin_kind(spin_kind: str | None) -> bool:
+    text = str(spin_kind or "").strip().lower()
+    if not text:
+        return False
+    return "unpolarized" not in text and text not in {"none", "false", "0"}
 
 
 def matrix_compatibility_warnings(sample: str, reference: MatrixData, predicted: MatrixData) -> list[dict[str, Any]]:
@@ -944,6 +1113,8 @@ def _empty_structural_metrics(reason: str) -> dict[str, Any]:
         "block_rows": [],
         "species_pair_rows": [],
         "distance_bin_rows": [],
+        "warnings": [],
+        "distance_unavailable_reason": "",
     }
 
 
@@ -979,6 +1150,25 @@ def structural_sparse_metrics(
     if reference.hamiltonian.shape != predicted.hamiltonian.shape or reference.hamiltonian.shape[0] != reference.hamiltonian.shape[1]:
         raise RuntimeError("Matrix shape mismatch for structural metrics.")
     atom_by_orbital = orbital_atom_map_from_basis(species, basis_counts, reference.hamiltonian.shape[0])
+    structure_type = structure_type_from_metadata(structure_path)
+    periodic_distance_unsupported = structure_type in PERIODIC_STRUCTURE_TYPES
+    structural_warnings: list[dict[str, Any]] = []
+    distance_unavailable_reason = ""
+    if periodic_distance_unsupported:
+        distance_unavailable_reason = (
+            "Periodic distance-bin structural metrics are unsupported unless periodic "
+            "minimum-image handling is explicitly implemented and validated."
+        )
+        structural_warnings.append(
+            {
+                "sample": sample,
+                "kind": "unsupported_periodic_distance_bins",
+                "severity": "severe",
+                "error": distance_unavailable_reason,
+                "structure_type": structure_type,
+                "structure_path": str(structure_path),
+            }
+        )
 
     ref_values = csr_value_dict(reference.hamiltonian, SUPPORT_THRESHOLD)
     pred_values = csr_value_dict(predicted.hamiltonian, SUPPORT_THRESHOLD)
@@ -994,7 +1184,8 @@ def structural_sparse_metrics(
         block_groups.setdefault((row_atom, col_atom), []).append(entry)
         species_pair = f"{species[row_atom]}-{species[col_atom]}"
         species_groups.setdefault(species_pair, []).append(entry)
-        distance_groups.setdefault(distance_bin(distance), []).append(entry)
+        if not periodic_distance_unsupported:
+            distance_groups.setdefault(distance_bin(distance), []).append(entry)
 
     block_rows = _finalize_groups(
         block_groups,
@@ -1010,9 +1201,13 @@ def structural_sparse_metrics(
         species_groups,
         lambda key, _entries: {"sample": sample, "species_pair": key},
     )
-    distance_rows = _finalize_groups(
-        distance_groups,
-        lambda key, _entries: {"sample": sample, "distance_bin": key},
+    distance_rows = (
+        []
+        if periodic_distance_unsupported
+        else _finalize_groups(
+            distance_groups,
+            lambda key, _entries: {"sample": sample, "distance_bin": key},
+        )
     )
     return {
         "available": True,
@@ -1020,6 +1215,8 @@ def structural_sparse_metrics(
         "block_rows": block_rows,
         "species_pair_rows": species_rows,
         "distance_bin_rows": distance_rows,
+        "warnings": structural_warnings,
+        "distance_unavailable_reason": distance_unavailable_reason,
     }
 
 
@@ -1524,7 +1721,14 @@ def extract(
     except Exception as exc:
         basis_counts = {}
         structural_basis_error = str(exc)
-        warnings.append({"sample": "*", "kind": "structural_basis", "error": structural_basis_error})
+        warnings.append(
+            {
+                "sample": "*",
+                "kind": "structural_basis",
+                "severity": "severe",
+                "error": structural_basis_error,
+            }
+        )
 
     def merge_sample_rows(sample_rows: dict[str, list[dict[str, Any]]]) -> None:
         sparse_rows.extend(sample_rows["sparse"])
@@ -1779,6 +1983,11 @@ def extract(
             ),
         },
     }
+    severe_warnings = [
+        issue
+        for issue in warnings
+        if str(issue.get("severity") or "").lower() in {"severe", "fatal"}
+    ]
     manifest = {
         "result_dir": str(result_dir),
         "samples_seen": len(sample_names),
@@ -1817,7 +2026,17 @@ def extract(
         "metric_workers": max(1, int(workers)),
         "fatal_errors": fatal_errors,
         "warnings": warnings,
+        "severe_warnings": severe_warnings,
         "errors": errors,
+        "metric_compatibility": {
+            "sparse_matrix_metrics_material_agnostic": True,
+            "complex_hamiltonians_supported": False,
+            "spin_polarized_supported": False,
+            "kpoint_sampled_supported": False,
+            "periodic_distance_bins_supported": False,
+            "nonorthogonal_spectral_requires_reference_overlap": True,
+            "structural_metrics_require_basis_species_coverage": True,
+        },
         "summary": summary,
         "recommendation_metric_policy": {
             "primary_metric_priority": RECOMMENDATION_PRIMARY_METRIC_PRIORITY,

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+from glob import glob
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
 from siesta_run_fdf import md_common_settings, render_common_run_fdf, render_md_layer
+from graph2mat_material_config import load_graph2mat_config_provenance
 
 
 def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -222,6 +224,79 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _path_values(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def _matched_training_paths(training_dir: Path, patterns: list[str]) -> list[str]:
+    matches: list[str] = []
+    for pattern in patterns:
+        raw_path = Path(pattern)
+        search = raw_path if raw_path.is_absolute() else training_dir / pattern
+        matches.extend(str(path) for path in sorted(glob(str(search))))
+    return matches
+
+
+def validation_source_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    training_dir = paths(config)["training_dir"]
+    data = (config.get("training", {}) or {}).get("data", {}) or {}
+    val_patterns = _path_values(data.get("val_runs"))
+    val_matches = _matched_training_paths(training_dir, val_patterns)
+    if val_patterns:
+        return {
+            "validation_source": "training.data.val_runs",
+            "validation_runs": val_patterns[0] if len(val_patterns) == 1 else val_patterns,
+            "validation_sample_count": len(val_matches),
+            "checkpoint_selection_validation_backed": bool(val_matches),
+            "checkpoint_selection_metric": "val_loss",
+            "checkpoint_selection_criterion": "Graph2Mat ModelCheckpoint monitor=val_loss mode=min",
+        }
+
+    runs_json = data.get("runs_json")
+    if runs_json:
+        json_path = Path(str(runs_json))
+        if not json_path.is_absolute():
+            json_path = training_dir / json_path
+        runs_dict: dict[str, Any] = {}
+        if json_path.exists():
+            with json_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            runs_dict = payload if isinstance(payload, dict) else {}
+        val_entries = _path_values(runs_dict.get("val"))
+        return {
+            "validation_source": "training.data.runs_json:val",
+            "validation_runs_json": str(runs_json),
+            "validation_sample_count": len(val_entries),
+            "checkpoint_selection_validation_backed": bool(val_entries),
+            "checkpoint_selection_metric": "val_loss",
+            "checkpoint_selection_criterion": "Graph2Mat ModelCheckpoint monitor=val_loss mode=min",
+        }
+
+    return {
+        "validation_source": None,
+        "validation_sample_count": 0,
+        "checkpoint_selection_validation_backed": False,
+        "checkpoint_selection_metric": None,
+        "checkpoint_selection_criterion": None,
+        "checkpoint_selection_warning": "No explicit Graph2Mat validation split was configured.",
+    }
+
+
+def require_explicit_validation_split(config: dict[str, Any]) -> dict[str, Any]:
+    metadata = validation_source_metadata(config)
+    if not metadata["checkpoint_selection_validation_backed"]:
+        raise RuntimeError(
+            "MD strict training requires an explicit validation split for Graph2Mat "
+            "checkpoint selection. Set training.data.val_runs to the generated "
+            "validation split and ensure it matches at least one RUN.fdf."
+        )
+    return metadata
+
+
 def write_checkpoint_manifest(
     config: dict[str, Any],
     checkpoint_rel_path: str,
@@ -235,6 +310,7 @@ def write_checkpoint_manifest(
     checkpoint_path = Path(checkpoint_rel_path)
     if not checkpoint_path.is_absolute():
         checkpoint_path = training_dir / checkpoint_path
+    validation_metadata = validation_source_metadata(config)
     payload = {
         "checkpoint_path": str(checkpoint_path),
         "relative_path": checkpoint_rel_path,
@@ -245,7 +321,11 @@ def write_checkpoint_manifest(
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "training_dir": str(training_dir),
+        **validation_metadata,
     }
+    provenance = load_graph2mat_config_provenance(training_dir)
+    if provenance:
+        payload["graph2mat_config_provenance"] = provenance
     manifest_path = training_dir / "checkpoint_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return manifest_path

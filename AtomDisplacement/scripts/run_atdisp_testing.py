@@ -20,7 +20,8 @@ from torch_safe_globals import (
 allow_graph2mat_checkpoint_globals()
 
 from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, completed_sample_dirs, resolve_ckpt_rel_path
-from pipeline_config_utils import write_checkpoint_manifest
+from pipeline_config_utils import config_dir, write_checkpoint_manifest
+from graph2mat_material_config import apply_material_graph2mat_config
 
 apply_torch_float32_matmul_precision(
     PIPELINE_CONFIG.get("training", {}).get("torch_float32_matmul_precision")
@@ -110,6 +111,12 @@ def strict_test_runs() -> str:
 def main() -> int:
     print("=== AtomDisplacement (test) ===")
     patch_graph2mat_run_loading()
+    apply_material_graph2mat_config(
+        PIPELINE_CONFIG,
+        base_dir=config_dir(PIPELINE_CONFIG),
+        dataset_dir=DATASET_DIR,
+        training_dir=TRAINING_DIR,
+    )
 
     ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, "")
     selection_mode = "configured_path" if PIPELINE_CONFIG.get("checkpoint", {}).get("path") else str(PIPELINE_CONFIG.get("checkpoint", {}).get("selection", "latest_version"))

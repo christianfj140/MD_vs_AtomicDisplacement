@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,12 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from graph2mat_material_config import apply_material_graph2mat_config
+
 MD_CONFIG = REPO_ROOT / "MD" / "pipeline_config.yaml"
 FC_CONFIG = REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml"
 
@@ -44,20 +51,42 @@ def graph2mat_training_block(config: dict[str, Any], dataset_kind: str) -> dict[
 def set_portable_paths(block: dict[str, Any], dataset_kind: str, *, debug_full_dataset_globs: bool = False) -> None:
     data = block["data"]
     if dataset_kind == "md":
-        data["basis_files"] = "../MD/dataset/MD_steps/basis/*.ion.xml"
         data["train_runs"] = (
             "../MD/dataset/MD_steps/*/RUN.fdf"
             if debug_full_dataset_globs
             else "../MD/dataset/splits/train/*/RUN.fdf"
         )
+        data["val_runs"] = None if debug_full_dataset_globs else "../MD/dataset/splits/validation/*/RUN.fdf"
     else:
-        data["basis_files"] = "../AtomDisplacement/dataset/FC_steps/basis/*.ion.xml"
         data["train_runs"] = (
             "../AtomDisplacement/dataset/FC_steps/*/RUN.fdf"
             if debug_full_dataset_globs
             else "../AtomDisplacement/dataset/train_samples/*/RUN.fdf"
         )
+        data["val_runs"] = None if debug_full_dataset_globs else "../AtomDisplacement/dataset/validation_samples/*/RUN.fdf"
         data.pop("runs_json", None)
+
+
+def apply_material_basis(
+    block: dict[str, Any],
+    pipeline_config: dict[str, Any],
+    *,
+    config_path: Path,
+    dataset_dir: Path,
+    training_dir: Path,
+) -> dict[str, Any]:
+    wrapper = {
+        "material": copy.deepcopy(pipeline_config.get("material")),
+        "training": block,
+    }
+    provenance = apply_material_graph2mat_config(
+        wrapper,
+        base_dir=config_path.parent,
+        dataset_dir=dataset_dir,
+        training_dir=training_dir,
+    )
+    block["data"] = wrapper["training"]["data"]
+    return provenance
 
 
 def force_shared_hyperparams(
@@ -127,12 +156,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    md_pipeline = load_yaml(args.md_config)
-    fc_pipeline = load_yaml(args.fc_config)
+    output_dir = args.output_dir.resolve()
+    md_config_path = args.md_config.resolve()
+    fc_config_path = args.fc_config.resolve()
+    md_pipeline = load_yaml(md_config_path)
+    fc_pipeline = load_yaml(fc_config_path)
 
     md_block = graph2mat_training_block(md_pipeline, "md")
     fc_block = graph2mat_training_block(fc_pipeline, "fc")
     force_shared_hyperparams(md_block, fc_block, debug_full_dataset_globs=args.debug_full_dataset_globs)
+    apply_material_basis(
+        md_block,
+        md_pipeline,
+        config_path=md_config_path,
+        dataset_dir=REPO_ROOT / "MD" / "dataset",
+        training_dir=output_dir,
+    )
+    apply_material_basis(
+        fc_block,
+        fc_pipeline,
+        config_path=fc_config_path,
+        dataset_dir=REPO_ROOT / "AtomDisplacement" / "dataset",
+        training_dir=output_dir,
+    )
     validate_config(md_block, "config_md")
     validate_config(fc_block, "config_fc")
 
@@ -141,7 +187,7 @@ def main() -> int:
         "config_fc.yaml": fc_block,
     }
     for name, block in outputs.items():
-        path = args.output_dir / name
+        path = output_dir / name
         if args.dry_run:
             print(f"[DRY-RUN] Escribir {path}")
         else:
@@ -149,8 +195,8 @@ def main() -> int:
             print(f"[OK] Escrito {path}")
 
     print("\nComandos:")
-    print(f"  cd {args.output_dir} && graph2mat models mace main fit -c config_md.yaml")
-    print(f"  cd {args.output_dir} && graph2mat models mace main fit -c config_fc.yaml")
+    print(f"  cd {output_dir} && graph2mat models mace main fit -c config_md.yaml")
+    print(f"  cd {output_dir} && graph2mat models mace main fit -c config_fc.yaml")
     return 0
 
 

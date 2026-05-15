@@ -105,6 +105,49 @@ source .venv/bin/activate
 python -m pip install -e /ruta/a/graph2mat
 ```
 
+## Materiales y presets
+
+El flujo historico sigue usando H2O, pero ahora esta declarado como preset de
+material en `materials/h2o/material.yaml`. Los configs principales lo seleccionan
+explicitamente con:
+
+```yaml
+material:
+  preset: h2o
+```
+
+Ese preset apunta al `RUN.fdf` base, pseudopotenciales y basis ya versionados
+para H2O. La validacion de bundles vive en `shared/material_bundle.py` y la capa
+de presets/fallback legacy en `shared/material_presets.py`. Por compatibilidad,
+un config antiguo sin seccion `material` puede resolverse al preset `h2o` con una
+advertencia de migracion; los nuevos materiales deberan declarar su propio bundle
+antes de conectarse al pipeline en fases posteriores.
+
+Un bundle explicito usa las mismas claves que valida el backend:
+
+```yaml
+material:
+  label: sic
+  fdf: materials/sic/RUN.fdf
+  pseudopotential_dir: materials/sic/pseudos
+  basis_dir: materials/sic/basis
+  structure_type: crystal
+```
+
+En la UI, la pestaña `Experiment` incluye `Material bundle`: puedes elegir el
+preset `h2o` o introducir las rutas de un bundle, pulsar `Validate material` y
+ver especies, cobertura de pseudopotenciales, basis y warnings antes de lanzar
+el experimento. Si seleccionas un bundle custom invalido, la UI/API no vuelve a
+H2O de forma silenciosa; el inicio del experimento falla con el error de
+validacion del backend.
+
+Tambien existe una primera receta material-agnostica para AtomicDisplacement:
+`AtomDisplacement/scripts/generate_generic_cartesian_displacement_dataset.py`.
+Lee el bundle validado y genera estructuras `+/-x`, `+/-y`, `+/-z` para cada
+atomo seleccionado, usando `atomic_displacement.recipe: generic_cartesian`. Las
+recetas historicas de enlaces/angulos siguen siendo especificas de H2O y se
+mantienen separadas.
+
 ## Flujo cientifico de `Comparison`
 
 `Comparison/scripts/pipeline_ui.py` orquesta el experimento completo:
@@ -135,6 +178,19 @@ dataset fijo pero cambiar train/validation/test, selecciona `Rebuild splits
 from controls` en `Split source`; la pipeline copia el dataset al workspace del
 nuevo run y reconstruye los splits con los ratios y el `Split mode` elegidos,
 sin regenerar SIESTA ni sobrescribir el dataset original.
+
+Para MD, el `Split mode` por defecto es `blocked_with_gap`: separa bloques
+contiguos de train, validation y test y deja un frame temporal fuera entre
+particiones. El modo `spread` sigue disponible para exploracion/debug, pero se
+marca con warning porque puede colocar frames MD temporalmente adyacentes en
+particiones distintas.
+
+Los YAML de entrenamiento generados pasan la validacion a Graph2Mat de forma
+explicita: MD usa `training.data.val_runs` y AtomDisplacement/Random Cartesian
+usan `runs.json` con la clave `val` o `val_runs` cuando el split copiado lo
+permite. El `checkpoint_manifest.json` guarda la fuente de validacion,
+`val_loss` como criterio de seleccion de `best-*.ckpt`, y si la seleccion queda
+respaldada por un split de validacion.
 
 Cada entrenamiento con metricas queda etiquetado en su `manifest.json` con
 `training_tag`, `training_index` y el dataset base usado para entrenar. Por
@@ -264,6 +320,23 @@ cada tarjeta de dataset Random Cartesian. Un dataset puede sumar varios bloques
 de estructuras, y cada bloque puede activar una combinacion distinta y tener
 amplitudes, rangos, limites geometricos y validacion propios.
 
+Para materiales arbitrarios, Random Cartesian tambien acepta la receta explicita
+`generic_cartesian_noise`, que lee el bundle `material`, perturba coordenadas
+atomicas con una semilla determinista y escribe grupos `split_group_id` para no
+separar variantes correlacionadas entre train/validation/test:
+
+```yaml
+random_cartesian:
+  recipe: generic_cartesian_noise
+  n_structures: 100
+  max_displacement_ang: 0.05
+  selected_species: null
+  min_interatomic_distance_ang: 0.6
+  remove_center_of_mass_translation: true
+  seed: 12345
+  variants_per_family: 1
+```
+
 ## UI de resultados
 
 La pestaña `Results` muestra tablas y plots Plotly. Los plots de dispersion
@@ -307,9 +380,17 @@ Random Cartesian se genera desde la ruta de `Comparison` o directamente con:
 python3 AtomDisplacement/scripts/generate_random_cartesian_dataset.py
 ```
 
+Los single-points de AtomDisplacement/Random Cartesian validan matrices SIESTA
+de forma estricta por defecto: una `.TSHS`/`.HSX` solo se reutiliza si el
+`RUN.out` correspondiente demuestra completion, convergencia SCF y no es stale
+respecto al `RUN.fdf` cuando el repositorio puede comprobarlo. La opcion
+`--allow-unvalidated-matrices` queda reservada para depuracion local y marca los
+resumenes con `UNSAFE_UNVALIDATED_MATRIX_REFERENCE`.
+
 ## Scripts utiles de comparacion
 
 ```bash
+python3 Comparison/scripts/material_agnostic_smoke.py --case both
 python3 Comparison/scripts/verify_dataset_integrity.py --dry-run
 python3 Comparison/scripts/validate_sample_bundle.py --help
 python3 Comparison/scripts/check_geometry_leakage.py --help
@@ -319,12 +400,17 @@ python3 Comparison/scripts/analyze_winners.py --help
 python3 Comparison/scripts/cleanup_generated_datasets.py --dry-run
 ```
 
+El cleanup puede escribir `Comparison/generated_dataset_cleanup_manifest.json`
+como log local generado. Ese archivo no es fuente de verdad portable y queda
+ignorado por git.
+
 ## Tests y validacion local
 
 ```bash
 python3 -m unittest tests/test_comparison_workflow.py
 python3 -m unittest tests/test_analyze_winners_three_methods.py
 python3 -m unittest tests/test_method_provenance_fairness.py
+python3 -m unittest tests/test_material_agnostic_smoke.py
 python3 -m unittest tests/test_three_method_scientific_smoke.py
 ```
 

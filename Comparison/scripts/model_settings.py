@@ -25,6 +25,7 @@ DEFAULT_ATOM_CONFIG = REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml"
 IGNORED_DATA_KEYS = {
     "basis_files",
     "train_runs",
+    "val_runs",
     "test_runs",
     "predict_structs",
     "runs_json",

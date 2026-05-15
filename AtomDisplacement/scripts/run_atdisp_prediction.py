@@ -21,6 +21,8 @@ from torch_safe_globals import (
 allow_graph2mat_checkpoint_globals()
 
 from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, resolve_ckpt_rel_path
+from pipeline_config_utils import config_dir
+from graph2mat_material_config import apply_material_graph2mat_config
 
 apply_torch_float32_matmul_precision(
     PIPELINE_CONFIG.get("training", {}).get("torch_float32_matmul_precision")
@@ -37,8 +39,15 @@ SPLITS_DIR = DATASET_DIR / "splits"
 EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
 
 
-class SafeMatrixWriter(MatrixWriter):
-    """MatrixWriter variant that keeps valid single-sample predictions."""
+def incomplete_prediction_error(exc: ValueError) -> RuntimeError:
+    return RuntimeError(
+        "Graph2Mat MatrixWriter reported incomplete prediction export: "
+        f"{exc}. Existing output files are not accepted as proof of complete predictions."
+    )
+
+
+class StrictMatrixWriter(MatrixWriter):
+    """MatrixWriter variant that fails closed on partial prediction export."""
 
     def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
         try:
@@ -46,16 +55,7 @@ class SafeMatrixWriter(MatrixWriter):
         except ValueError as exc:
             if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
                 raise
-            outputs = [
-                self._get_out_file(batch.get_example(index), trainer)
-                for index in range(getattr(batch, "num_graphs", 0))
-            ]
-            if not outputs or any(not output.exists() for output in outputs):
-                raise
-            print(
-                "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
-                "escribir las predicciones del batch; se continua."
-            )
+            raise incomplete_prediction_error(exc) from exc
 
 
 def patch_graph2mat_run_loading() -> None:
@@ -135,9 +135,27 @@ def expected_prediction_outputs(predict_structs: str, output_file: str) -> list[
     return outputs
 
 
+def validate_prediction_outputs(predict_structs: str, output_file: str) -> None:
+    outputs = expected_prediction_outputs(predict_structs, output_file)
+    if not outputs:
+        raise RuntimeError(f"No prediction structures matched: {predict_structs}")
+    missing = [str(output) for output in outputs if not output.exists()]
+    empty = [str(output) for output in outputs if output.exists() and output.stat().st_size <= 0]
+    if missing:
+        raise RuntimeError("Missing prediction outputs: " + ", ".join(missing[:10]))
+    if empty:
+        raise RuntimeError("Empty prediction outputs: " + ", ".join(empty[:10]))
+
+
 def main() -> int:
     print("=== AtomDisplacement (predict) ===")
     patch_graph2mat_run_loading()
+    apply_material_graph2mat_config(
+        PIPELINE_CONFIG,
+        base_dir=config_dir(PIPELINE_CONFIG),
+        dataset_dir=DATASET_DIR,
+        training_dir=TRAINING_DIR,
+    )
 
     ckpt_path = resolve_ckpt_rel_path(TRAINING_DIR, "")
     os.chdir(TRAINING_DIR)
@@ -163,7 +181,7 @@ def main() -> int:
     datamodule = MatrixDataModule(**datamodule_kwargs)
     callbacks = []
     if bool(callbacks_config["matrix_writer"]):
-        callbacks.append(SafeMatrixWriter(output_file=callbacks_config["output_file"], splits=["predict"]))
+        callbacks.append(StrictMatrixWriter(output_file=callbacks_config["output_file"], splits=["predict"]))
     trainer = pl.Trainer(
         accelerator=PIPELINE_CONFIG["training"]["trainer"]["accelerator"],
         logger=False,
@@ -175,16 +193,11 @@ def main() -> int:
     except ValueError as exc:
         if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
             raise
-        outputs = expected_prediction_outputs(
-            predict_structs,
-            str(callbacks_config["output_file"]),
-        )
-        if not outputs or any(not output.exists() for output in outputs):
-            raise
-        print(
-            "[WARN] MatrixWriter reporto etiquetas de arista sobrantes tras "
-            "escribir todas las predicciones esperadas; se continua."
-        )
+        raise incomplete_prediction_error(exc) from exc
+    validate_prediction_outputs(
+        predict_structs,
+        str(callbacks_config["output_file"]),
+    )
     print("\n=== Prediccion completada correctamente ===")
     return 0
 

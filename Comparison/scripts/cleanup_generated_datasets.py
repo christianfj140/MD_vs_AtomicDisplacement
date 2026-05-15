@@ -21,6 +21,7 @@ RESULTS_METHOD_BY_GROUP = {
     "results_atomdisp": "siesta_fc_cartesian",
     "results_random_cartesian": "random_cartesian",
 }
+CLEANUP_MANIFEST_RELATIVE_PATH = "Comparison/generated_dataset_cleanup_manifest.json"
 
 
 def _is_generated_results_dir(path: Path) -> bool:
@@ -154,7 +155,7 @@ def generated_dataset_records(repo_root: Path = REPO_ROOT) -> list[dict[str, Any
             {
                 "id": _target_id(relative),
                 "name": target.name,
-                "path": str(target),
+                "path": relative,
                 "relative_path": relative,
                 "kind": kind,
                 "method": metadata.get("method_id") or method,
@@ -179,12 +180,41 @@ def _safe_remove_target(repo_root: Path, target: Path) -> None:
     if target.is_symlink():
         raise RuntimeError(f"No se borra un enlace simbolico: {target}")
     resolved = target.resolve()
-    if repo_root != resolved and repo_root not in resolved.parents:
+    if resolved == repo_root:
+        raise RuntimeError(f"No se borra la raiz del repositorio: {target}")
+    if repo_root not in resolved.parents:
         raise RuntimeError(f"Ruta fuera del repositorio: {target}")
     if target.is_dir():
         shutil.rmtree(target)
     elif target.exists():
         target.unlink()
+
+
+def _target_from_record(repo_root: Path, record: dict[str, Any]) -> Path:
+    relative_path = str(record.get("relative_path") or "").strip()
+    if not relative_path:
+        raise RuntimeError("Registro de cleanup sin relative_path portable.")
+    raw_candidate = repo_root / relative_path
+    candidate = raw_candidate.resolve(strict=False)
+    repo_root_resolved = repo_root.resolve(strict=False)
+    try:
+        candidate.relative_to(repo_root_resolved)
+    except ValueError as exc:
+        raise RuntimeError(f"Ruta de cleanup fuera del repositorio: {relative_path}") from exc
+    return raw_candidate
+
+
+def _portable_record(record: dict[str, Any]) -> dict[str, Any]:
+    portable = dict(record)
+    relative_path = str(portable.get("relative_path") or "")
+    portable["path"] = relative_path
+    return portable
+
+
+def _write_cleanup_manifest(repo_root: Path, manifest: dict[str, Any]) -> None:
+    log_path = repo_root / CLEANUP_MANIFEST_RELATIVE_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def cleanup_selected_generated_datasets(
@@ -204,15 +234,15 @@ def cleanup_selected_generated_datasets(
     removed: list[str] = []
     selected_records = [by_id[target_id] for target_id in target_ids]
     for record in selected_records:
-        target = Path(record["path"])
-        removed.append(str(target))
+        target = _target_from_record(repo_root, record)
+        removed.append(str(record["relative_path"]))
         if not dry_run:
             _safe_remove_target(repo_root, target)
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "dry_run": dry_run,
         "removed": removed,
-        "selected": selected_records,
+        "selected": [_portable_record(record) for record in selected_records],
         "preserved": [
             "MD/pipeline_config.yaml",
             "AtomDisplacement/pipeline_config.yaml",
@@ -222,8 +252,7 @@ def cleanup_selected_generated_datasets(
         ],
     }
     if not dry_run:
-        log_path = repo_root / "Comparison" / "generated_dataset_cleanup_manifest.json"
-        log_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _write_cleanup_manifest(repo_root, manifest)
     return manifest
 
 
@@ -235,7 +264,7 @@ def cleanup_generated_datasets(
     targets = generated_dataset_targets(repo_root)
     removed: list[str] = []
     for target in targets:
-        removed.append(str(target))
+        removed.append(_relative_path(repo_root, target))
         if dry_run:
             continue
         _safe_remove_target(repo_root, target)
@@ -252,8 +281,7 @@ def cleanup_generated_datasets(
         ],
     }
     if not dry_run:
-        log_path = repo_root / "Comparison" / "generated_dataset_cleanup_manifest.json"
-        log_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _write_cleanup_manifest(repo_root, manifest)
     return manifest
 
 

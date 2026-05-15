@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from method_registry import normalize_method_id, normalize_method_mapping, normalize_test_set_id
+from material_provenance import (
+    MATERIAL_FLAT_FIELDS,
+    MATERIAL_MAP_FIELDS,
+    flatten_material_provenance,
+    material_compatibility_warning,
+    material_maps_from_manifest,
+)
 
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
@@ -74,6 +81,7 @@ def canonical_manifest_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
         "training_tag_by_method",
         "training_plan_label_by_method",
         "training_plan_settings_by_method",
+        *MATERIAL_MAP_FIELDS,
     ):
         normalized[key] = normalize_method_mapping(normalized.get(key))
     return normalized
@@ -353,6 +361,12 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
     manifest = canonical_manifest_metadata(manifest)
     prediction_summary = read_json(result_dir / "prediction_summary.json")
     evaluation_manifest = read_json(metrics_root / "manifest.json")
+    material_provenance = flatten_material_provenance(
+        manifest.get("material_provenance") if isinstance(manifest.get("material_provenance"), dict) else {},
+        manifest,
+    )
+    material_maps = material_maps_from_manifest(manifest)
+    material_warning = manifest.get("material_compatibility_warning") or material_compatibility_warning(material_maps)
     joined, duplicate_errors = join_by_sample(sparse, spectral, dos)
     if duplicate_errors:
         raise RuntimeError(f"{result_dir}: duplicate sample ids in metric CSVs: {' | '.join(duplicate_errors)}")
@@ -384,11 +398,11 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
             manifest.get("artifact_hash_warning"),
             manifest.get("matrix_warning"),
             manifest.get("prediction_warning"),
+            material_warning,
             evaluation_warning,
         ]
         warning_text = " | ".join(str(item) for item in warnings if item not in (None, "", False))
-        rows.append(
-            {
+        output_row = {
                 "experiment_id": experiment_id,
                 "pair_id": manifest.get("pair_id"),
                 "train_method": manifest.get("train_method"),
@@ -455,6 +469,7 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "model_config_warning": manifest.get("model_config_warning"),
                 "training_plan_settings_warning": manifest.get("training_plan_settings_warning"),
                 "basis_pseudopotential_warning": manifest.get("basis_pseudopotential_warning"),
+                "material_compatibility_warning": material_warning,
                 "strict_comparison_mode": manifest.get("strict_comparison_mode"),
                 "md_dataset_label": manifest.get("md_dataset_label"),
                 "atom_dataset_label": manifest.get("atom_dataset_label"),
@@ -486,8 +501,17 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "total_time_seconds": manifest.get("total_time_seconds"),
                 "evaluation_samples_seen": evaluation_manifest.get("samples_seen"),
                 **row,
+        }
+        output_row.update(
+            {
+                key: json_text(material_provenance.get(key))
+                if isinstance(material_provenance.get(key), (dict, list))
+                else material_provenance.get(key)
+                for key in MATERIAL_FLAT_FIELDS
             }
         )
+        output_row.update({key: json_text(material_maps.get(key)) for key in MATERIAL_MAP_FIELDS})
+        rows.append(output_row)
     return rows
 
 

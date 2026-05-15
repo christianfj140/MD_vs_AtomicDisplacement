@@ -120,6 +120,58 @@
               </label>
               <span id="method-selection-summary" class="muted-text">3 methods selected</span>
             </div>
+            <section class="material-selector-panel">
+              <div class="panel-heading compact-heading">
+                <div>
+                  <p class="eyebrow">Material bundle</p>
+                  <h3>SIESTA input source</h3>
+                  <p class="field-help">
+                    Selecciona el preset H2O o declara un bundle material validado por el backend antes de lanzar el experimento.
+                  </p>
+                </div>
+                <button id="validate-material" class="button secondary" type="button">Validate material</button>
+              </div>
+              <div class="grid four split-grid">
+                <label class="field">
+                  <span>Material source</span>
+                  <select id="material-mode">
+                    <option value="preset" selected>Preset</option>
+                    <option value="bundle">Custom bundle</option>
+                  </select>
+                </label>
+                <label class="field material-preset-field">
+                  <span>Preset</span>
+                  <select id="material-preset">
+                    <option value="h2o" selected>h2o</option>
+                  </select>
+                </label>
+                <label class="field material-bundle-field hidden">
+                  <span>Material label</span>
+                  <input id="material-label" type="text" placeholder="sic" />
+                </label>
+                <label class="field material-bundle-field hidden">
+                  <span>Structure type</span>
+                  <input id="material-structure-type" type="text" placeholder="molecule / crystal" />
+                </label>
+              </div>
+              <div class="grid three split-grid material-bundle-field hidden">
+                <label class="field">
+                  <span>RUN.fdf</span>
+                  <input id="material-fdf" type="text" placeholder="materials/sic/RUN.fdf" />
+                </label>
+                <label class="field">
+                  <span>Pseudopotential directory</span>
+                  <input id="material-pseudopotential-dir" type="text" placeholder="materials/sic/pseudos" />
+                </label>
+                <label class="field">
+                  <span>Basis directory</span>
+                  <input id="material-basis-dir" type="text" placeholder="materials/sic/basis" />
+                </label>
+              </div>
+              <div id="material-validation-status" class="material-validation muted">
+                Material not validated yet.
+              </div>
+            </section>
             <div class="grid three split-grid">
               <label class="field">
                 <span>Run mode</span>
@@ -133,10 +185,11 @@
               <label class="field">
                 <span>MD split mode</span>
                 <select id="split-mode">
+                  <option value="blocked_with_gap" selected>Blocked + temporal gap</option>
                   <option value="block">Block split</option>
-                  <option value="spread">Spread split</option>
+                  <option value="spread">Spread split (exploratory)</option>
                 </select>
-                <small>Block avoids interleaving adjacent MD frames across train/test.</small>
+                <small>Default keeps one MD frame out between train, validation and test; spread is exploratory/debug only.</small>
               </label>
               <label class="field">
                 <span>Primary metric</span>
@@ -187,7 +240,7 @@
               <input
                 id="venv-activate-command"
                 type="text"
-                value="source /home/christian/graph2mat-env/bin/activate"
+                value="source ${REPO_ROOT}/.venv/bin/activate"
               />
               <small>
                 Se ejecuta antes de cada pipeline del experimento. Puedes cambiarlo sin tocar YAML.
@@ -787,6 +840,8 @@
             <code>GET /api/run/logs?pipeline=atom_displacement&amp;since=0&amp;limit=2000</code>
             <code>GET /api/results</code>
             <code>GET /api/plots</code>
+            <code>GET /api/material/presets</code>
+            <code>POST /api/material/validate</code>
             <code>GET /api/datasets/targets</code>
             <code>POST /api/datasets/clear</code>
             <code>GET /api/atom-fc-config</code>
