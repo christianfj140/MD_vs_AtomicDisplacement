@@ -40,6 +40,89 @@ const TEST_SET_DISPLAY_LABELS = {
   test_mixed: "Mixed test (test_mixed)",
 };
 
+const PLOTLY_SCRIPT_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js";
+const MATHJAX_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
+let plotlyLoadPromise = null;
+let mathJaxLoadPromise = null;
+
+function loadExternalScript(id, src) {
+  const existing = document.getElementById(id);
+  if (existing?.dataset.loaded === "true") return Promise.resolve();
+  if (existing?.dataset.loading === "true") {
+    return new Promise((resolve, reject) => {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", () => reject(new Error(`No se pudo cargar ${src}`)), { once: true });
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.id = id;
+    script.src = src;
+    script.async = true;
+    script.dataset.loading = "true";
+    script.addEventListener("load", () => {
+      script.dataset.loaded = "true";
+      script.dataset.loading = "false";
+      resolve();
+    });
+    script.addEventListener("error", () => {
+      script.dataset.loading = "false";
+      reject(new Error(`No se pudo cargar ${src}`));
+    });
+    document.head.appendChild(script);
+  });
+}
+
+function ensurePlotlyLoaded() {
+  if (window.Plotly) return Promise.resolve();
+  if (!plotlyLoadPromise) {
+    plotlyLoadPromise = loadExternalScript("plotly-runtime", PLOTLY_SCRIPT_URL)
+      .then(() => {
+        if (!window.Plotly) throw new Error("Plotly no esta disponible despues de cargar el script.");
+      })
+      .catch((error) => {
+        plotlyLoadPromise = null;
+        throw error;
+      });
+  }
+  return plotlyLoadPromise;
+}
+
+function configureMathJax() {
+  window.MathJax = {
+    ...(window.MathJax || {}),
+    tex: {
+      inlineMath: [["\\(", "\\)"]],
+      displayMath: [["\\[", "\\]"]],
+      ...((window.MathJax || {}).tex || {}),
+    },
+    chtml: {
+      scale: 0.92,
+      ...((window.MathJax || {}).chtml || {}),
+    },
+    startup: {
+      ...((window.MathJax || {}).startup || {}),
+      typeset: false,
+    },
+  };
+}
+
+function ensureMathJaxLoaded() {
+  if (window.MathJax?.typesetPromise) return Promise.resolve();
+  configureMathJax();
+  if (!mathJaxLoadPromise) {
+    mathJaxLoadPromise = loadExternalScript("mathjax-runtime", MATHJAX_SCRIPT_URL)
+      .then(() => {
+        if (!window.MathJax?.typesetPromise) throw new Error("MathJax no esta disponible despues de cargar el script.");
+      })
+      .catch((error) => {
+        mathJaxLoadPromise = null;
+        throw error;
+      });
+  }
+  return mathJaxLoadPromise;
+}
+
 function normalizeMethodId(value) {
   const text = String(value || "").trim();
   return METHOD_ID_ALIASES[text] || text;
@@ -3294,13 +3377,12 @@ function installPlotInfoBubble(id) {
 }
 
 function typesetPlotInfoMath(node) {
-  if (!window.MathJax?.typesetPromise) {
-    window.addEventListener("load", () => typesetPlotInfoMath(node), { once: true });
-    return;
-  }
-  window.MathJax.typesetPromise([node]).catch((error) => {
-    console.warn("MathJax could not render plot formula", error);
-  });
+  if (!node) return;
+  ensureMathJaxLoaded()
+    .then(() => window.MathJax.typesetPromise([node]))
+    .catch((error) => {
+      console.warn("MathJax could not render plot formula", error);
+    });
 }
 
 function resizePlot(id) {
@@ -4834,6 +4916,11 @@ function renderPlots(payload) {
 }
 
 async function loadPlots() {
+  const status = document.getElementById("plots-status");
+  if (state.plotsEnabled && !window.Plotly) {
+    if (status) status.textContent = "Cargando Plotly...";
+    await ensurePlotlyLoaded();
+  }
   const payload = await request("/api/plots");
   state.plotData = payload;
   renderPlots(payload);
