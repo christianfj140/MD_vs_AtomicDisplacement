@@ -829,7 +829,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "num_interactions": "2",
                 "correlation": "3",
                 "max_ell": "4",
-                "hidden_irreps": "32x0e + 32x1o",
+                "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o + 32x4e",
                 "loss": "graph2mat.metrics.block_type_mae",
             }
         )
@@ -840,7 +840,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(config["training"]["model"]["num_interactions"], 2)
         self.assertEqual(config["training"]["model"]["correlation"], 3)
         self.assertEqual(config["training"]["model"]["max_ell"], 4)
-        self.assertEqual(config["training"]["model"]["hidden_irreps"], "32x0e + 32x1o")
+        self.assertEqual(config["training"]["model"]["hidden_irreps"], "32x0e + 32x1o + 32x2e + 32x3o + 32x4e")
         self.assertEqual(config["training"]["model"]["optim_lr"], 0.001)
         self.assertEqual(config["training"]["ui_training_settings"], settings)
         with self.assertRaisesRegex(RuntimeError, "training_settings.max_epochs"):
@@ -849,6 +849,18 @@ class ComparisonWorkflowTests(unittest.TestCase):
             module.parse_training_settings({"optim_lr": -0.1})
         with self.assertRaisesRegex(RuntimeError, "training_settings.max_ell"):
             module.parse_training_settings({"max_ell": -1})
+        with self.assertRaisesRegex(RuntimeError, "misma multiplicidad"):
+            module.parse_training_settings(
+                {"max_ell": 2, "hidden_irreps": "32x0e + 16x1o + 32x2e"}
+            )
+        with self.assertRaisesRegex(RuntimeError, "lmax=1"):
+            module.parse_training_settings(
+                {"max_ell": 2, "hidden_irreps": "32x0e + 32x1o"}
+            )
+        with self.assertRaisesRegex(RuntimeError, "Faltan|faltan"):
+            module.parse_training_settings(
+                {"max_ell": 2, "hidden_irreps": "32x0e + 32x2e"}
+            )
 
     def test_md_graph2mat_training_config_excludes_ui_metadata(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
@@ -3075,9 +3087,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="training-correlation"', index_html)
         self.assertIn('id="training-max-ell"', index_html)
         self.assertIn('id="training-hidden-irreps"', index_html)
+        self.assertIn('id="training-hidden-irreps-alert"', index_html)
         self.assertIn('id="training-loss"', index_html)
         self.assertIn("performanceSettings()", app_js)
         self.assertIn("trainingSettings()", app_js)
+        self.assertIn("validateHiddenIrrepsText", app_js)
+        self.assertIn("renderHiddenIrrepsValidation", app_js)
         self.assertIn("loadPerformancePresets()", app_js)
         self.assertIn("/api/performance-presets", app_js)
         self.assertIn("applyPerformancePreset", app_js)

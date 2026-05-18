@@ -13,6 +13,7 @@ import math
 import os
 import json
 import platform
+import re
 import select
 import secrets
 import shutil
@@ -3007,6 +3008,71 @@ def parse_optional_text(value: Any, name: str) -> str | None:
     return text
 
 
+HIDDEN_IRREPS_TERM_RE = re.compile(r"^(?:(\d+)\s*x\s*)?(\d+)\s*([eoEO])$")
+
+
+def parse_hidden_irreps_terms(value: str, name: str = "training_settings.hidden_irreps") -> list[dict[str, Any]]:
+    terms: list[dict[str, Any]] = []
+    for raw_term in str(value).split("+"):
+        term = raw_term.strip()
+        if not term:
+            raise RuntimeError(f"{name}: termino vacio en hidden_irreps.")
+        match = HIDDEN_IRREPS_TERM_RE.fullmatch(term)
+        if not match:
+            raise RuntimeError(
+                f'{name}: "{term}" no es un termino Irreps valido. '
+                "Usa formato NxLe, por ejemplo 10x1o."
+            )
+        multiplier = int(match.group(1) or "1")
+        ell = int(match.group(2))
+        parity = match.group(3).lower()
+        if multiplier <= 0:
+            raise RuntimeError(f"{name}: la multiplicidad debe ser positiva.")
+        terms.append({"multiplier": multiplier, "ell": ell, "parity": parity})
+    return terms
+
+
+def expected_hidden_irreps(multiplier: int, max_ell: int) -> str:
+    return " + ".join(
+        f"{multiplier}x{ell}{'e' if ell % 2 == 0 else 'o'}"
+        for ell in range(max_ell + 1)
+    )
+
+
+def validate_hidden_irreps(value: str, max_ell: int | None, name: str = "training_settings.hidden_irreps") -> None:
+    terms = parse_hidden_irreps_terms(value, name)
+    multipliers = {int(term["multiplier"]) for term in terms}
+    if len(multipliers) != 1:
+        raise RuntimeError(
+            f"{name}: todos los terminos deben tener la misma multiplicidad/canales."
+        )
+    seen_ell: set[int] = set()
+    for term in terms:
+        ell = int(term["ell"])
+        if ell in seen_ell:
+            raise RuntimeError(f"{name}: l={ell} aparece mas de una vez.")
+        seen_ell.add(ell)
+        expected_parity = "e" if ell % 2 == 0 else "o"
+        if str(term["parity"]) != expected_parity:
+            raise RuntimeError(
+                f"{name}: paridad inesperada para l={ell}; usa {ell}{expected_parity}."
+            )
+    if max_ell is None:
+        return
+    lmax = max(seen_ell)
+    multiplier = next(iter(multipliers))
+    expected = expected_hidden_irreps(multiplier, max_ell)
+    if lmax != max_ell:
+        raise RuntimeError(
+            f"{name}: lmax={lmax} no coincide con training_settings.max_ell={max_ell}. "
+            f"Usa {expected}."
+        )
+    missing = [ell for ell in range(max_ell + 1) if ell not in seen_ell]
+    if missing:
+        missing_text = ", ".join(f"l={ell}" for ell in missing)
+        raise RuntimeError(f"{name}: faltan {missing_text}. Usa {expected}.")
+
+
 def parse_training_settings(value: Any) -> dict[str, Any]:
     if value in (None, ""):
         raw: dict[str, Any] = {}
@@ -3029,6 +3095,11 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
         parsed_text = parse_optional_text(raw.get(key), f"training_settings.{key}")
         if parsed_text is not None:
             settings[key] = parsed_text
+    if settings.get("hidden_irreps") is not None:
+        validate_hidden_irreps(
+            str(settings["hidden_irreps"]),
+            settings.get("max_ell") if isinstance(settings.get("max_ell"), int) else None,
+        )
     return settings
 
 
@@ -3100,6 +3171,12 @@ def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str
     for key in ("loss", "hidden_irreps"):
         if settings.get(key) is not None:
             model[key] = str(settings[key])
+    if model.get("hidden_irreps") is not None and model.get("max_ell") is not None:
+        validate_hidden_irreps(
+            str(model["hidden_irreps"]),
+            int(model["max_ell"]),
+            "training.model.hidden_irreps",
+        )
     training["ui_training_settings"] = dict(settings)
 
 

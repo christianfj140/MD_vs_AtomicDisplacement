@@ -414,6 +414,29 @@ pre {
   box-shadow: 0 0 0 3px var(--focus);
 }
 
+.field.invalid input,
+.field.invalid textarea,
+.field.invalid select {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  box-shadow: 0 0 0 3px rgba(186, 70, 76, 0.14);
+}
+
+.field-alert {
+  padding: 8px 10px;
+  border: 1px solid #efb9bd;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: #7d3036;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.field-alert.hidden {
+  display: none;
+}
+
 .training-config-block {
   margin-top: 18px;
   padding: 18px;

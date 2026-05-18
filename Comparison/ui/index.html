@@ -323,7 +323,13 @@
                 </label>
                 <label class="field">
                   <span>Hidden irreps</span>
-                  <input id="training-hidden-irreps" type="text" value="10x0e + 10x1o + 10x2e" />
+                  <input
+                    id="training-hidden-irreps"
+                    type="text"
+                    value="10x0e + 10x1o + 10x2e"
+                    aria-describedby="training-hidden-irreps-alert"
+                  />
+                  <small id="training-hidden-irreps-alert" class="field-alert hidden" role="alert"></small>
                 </label>
               </div>
               <small>

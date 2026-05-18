@@ -727,7 +727,102 @@ function optionalTextInput(id) {
   return value ? value : null;
 }
 
+function parseHiddenIrrepsTerms(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return [];
+  return text.split("+").map((part) => {
+    const term = part.trim();
+    const match = term.match(/^(?:(\d+)\s*x\s*)?(\d+)\s*([eo])$/i);
+    if (!match) {
+      throw new Error(`Termino "${term}" invalido. Usa formato NxLe, por ejemplo 10x1o.`);
+    }
+    const mul = match[1] ? Number(match[1]) : 1;
+    const ell = Number(match[2]);
+    const parity = match[3].toLowerCase();
+    if (!Number.isInteger(mul) || mul <= 0) {
+      throw new Error(`Termino "${term}": la multiplicidad debe ser un entero positivo.`);
+    }
+    if (!Number.isInteger(ell) || ell < 0) {
+      throw new Error(`Termino "${term}": l debe ser un entero >= 0.`);
+    }
+    return { mul, ell, parity, term };
+  });
+}
+
+function expectedIrrepsText(channels, maxEll) {
+  const width = Number.isInteger(channels) && channels > 0 ? channels : 10;
+  return Array.from({ length: maxEll + 1 }, (_, ell) => {
+    const parity = ell % 2 === 0 ? "e" : "o";
+    return `${width}x${ell}${parity}`;
+  }).join(" + ");
+}
+
+function validateHiddenIrrepsText(raw, maxEllRaw) {
+  const text = String(raw || "").trim();
+  if (!text) return { ok: true };
+  const terms = parseHiddenIrrepsTerms(text);
+  if (!terms.length) return { ok: true };
+
+  const multipliers = new Set(terms.map((term) => term.mul));
+  if (multipliers.size !== 1) {
+    throw new Error("Todos los irreps deben tener la misma multiplicidad/canales: 32x0e + 32x1o + 32x2e.");
+  }
+
+  const seenEll = new Set();
+  for (const term of terms) {
+    if (seenEll.has(term.ell)) {
+      throw new Error(`l=${term.ell} aparece mas de una vez en Hidden irreps.`);
+    }
+    seenEll.add(term.ell);
+    const expectedParity = term.ell % 2 === 0 ? "e" : "o";
+    if (term.parity !== expectedParity) {
+      throw new Error(`Paridad no esperada en l=${term.ell}: usa ${term.ell}${expectedParity}.`);
+    }
+  }
+
+  const maxEll = Number(maxEllRaw);
+  if (Number.isFinite(maxEll) && Number.isInteger(maxEll) && maxEll >= 0) {
+    const lmax = Math.max(...terms.map((term) => term.ell));
+    const channels = terms[0].mul;
+    const expected = expectedIrrepsText(channels, maxEll);
+    if (lmax !== maxEll) {
+      throw new Error(`Hidden irreps tiene lmax=${lmax}, pero Max ell=${maxEll}. Usa: ${expected}`);
+    }
+    for (let ell = 0; ell <= maxEll; ell += 1) {
+      if (!seenEll.has(ell)) {
+        throw new Error(`Falta l=${ell} para Max ell=${maxEll}. Usa: ${expected}`);
+      }
+    }
+  }
+
+  const dimension = terms.reduce((total, term) => total + term.mul * (2 * term.ell + 1), 0);
+  return { ok: true, dimension, channels: terms[0].mul, lmax: Math.max(...terms.map((term) => term.ell)) };
+}
+
+function renderHiddenIrrepsValidation({ throwOnInvalid = false } = {}) {
+  const input = document.getElementById("training-hidden-irreps");
+  const alert = document.getElementById("training-hidden-irreps-alert");
+  if (!input || !alert) return { ok: true };
+  const field = input.closest(".field");
+  try {
+    const result = validateHiddenIrrepsText(input.value, document.getElementById("training-max-ell")?.value);
+    field?.classList.remove("invalid");
+    alert.classList.add("hidden");
+    alert.textContent = "";
+    input.setAttribute("aria-invalid", "false");
+    return result;
+  } catch (error) {
+    field?.classList.add("invalid");
+    alert.classList.remove("hidden");
+    alert.textContent = error.message;
+    input.setAttribute("aria-invalid", "true");
+    if (throwOnInvalid) throw error;
+    return { ok: false, message: error.message };
+  }
+}
+
 function trainingSettings() {
+  renderHiddenIrrepsValidation({ throwOnInvalid: true });
   const settings = {
     max_epochs: optionalPositiveInteger("training-max-epochs", "Training epochs"),
     optim_lr: optionalNumberInput("training-optim-lr", "Learning rate", { min: 0.000001 }),
@@ -4640,6 +4735,12 @@ function setupEvents() {
   document.getElementById("validate-material")?.addEventListener("click", () => {
     validateMaterialSelection().catch((error) => showToast(error.message));
   });
+  document.getElementById("training-hidden-irreps")?.addEventListener("input", () => {
+    renderHiddenIrrepsValidation();
+  });
+  document.getElementById("training-max-ell")?.addEventListener("input", () => {
+    renderHiddenIrrepsValidation();
+  });
   document.getElementById("add-training-plan-entry")?.addEventListener("click", () => {
     try {
       addTrainingPlanEntry();
@@ -4732,6 +4833,7 @@ async function boot() {
     venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;
   }
   updateVenvCommandPreview();
+  renderHiddenIrrepsValidation();
   await loadPerformancePresets();
   updateMaterialMode();
   try {
