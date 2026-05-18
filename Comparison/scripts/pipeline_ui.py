@@ -3081,7 +3081,7 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
     else:
         raise RuntimeError("training_settings debe ser un objeto.")
     settings: dict[str, Any] = {}
-    for key in ("max_epochs", "batch_size", "num_interactions", "correlation"):
+    for key in ("max_epochs", "batch_size", "loader_threads", "num_interactions", "correlation"):
         parsed = parse_optional_positive_int(raw.get(key), f"training_settings.{key}")
         if parsed is not None:
             settings[key] = parsed
@@ -3163,6 +3163,8 @@ def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str
         trainer["max_epochs"] = int(settings["max_epochs"])
     if settings.get("batch_size") is not None:
         data["batch_size"] = int(settings["batch_size"])
+    if settings.get("loader_threads") is not None:
+        data["loader_threads"] = int(settings["loader_threads"])
     for key in ("num_interactions", "correlation", "max_ell"):
         if settings.get(key) is not None:
             model[key] = int(settings[key])
@@ -9816,6 +9818,13 @@ class ExperimentRunner:
                         ]
                         if n_matrix_components is not None:
                             predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                        loader_threads = (
+                            train_config.get("training", {})
+                            .get("data", {})
+                            .get("loader_threads")
+                        )
+                        if loader_threads is not None:
+                            predict_command.extend(["--loader-threads", str(loader_threads)])
                         matmul_precision = train_config.get("training", {}).get("torch_float32_matmul_precision")
                         if matmul_precision in {"high", "medium"}:
                             predict_command.extend(["--torch-float32-matmul-precision", str(matmul_precision)])
@@ -10350,6 +10359,13 @@ class ExperimentRunner:
                     ]
                     if n_matrix_components is not None:
                         predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                    loader_threads = (
+                        train_config.get("training", {})
+                        .get("data", {})
+                        .get("loader_threads")
+                    )
+                    if loader_threads is not None:
+                        predict_command.extend(["--loader-threads", str(loader_threads)])
                     matmul_precision = train_config.get("training", {}).get("torch_float32_matmul_precision")
                     if matmul_precision in {"high", "medium"}:
                         predict_command.extend(["--torch-float32-matmul-precision", str(matmul_precision)])

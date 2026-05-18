@@ -827,6 +827,7 @@ function trainingSettings() {
     max_epochs: optionalPositiveInteger("training-max-epochs", "Training epochs"),
     optim_lr: optionalNumberInput("training-optim-lr", "Learning rate", { min: 0.000001 }),
     batch_size: optionalPositiveInteger("training-batch-size", "Training batch size"),
+    loader_threads: optionalPositiveInteger("training-loader-threads", "Training loader threads"),
     loss: optionalTextInput("training-loss"),
     num_interactions: optionalPositiveInteger("training-num-interactions", "Model interactions"),
     correlation: optionalPositiveInteger("training-correlation", "Model correlation"),

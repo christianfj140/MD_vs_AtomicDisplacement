@@ -306,6 +306,10 @@
                   <input id="training-batch-size" type="number" step="1" min="1" placeholder="preset rendimiento" />
                 </label>
                 <label class="field">
+                  <span>Loader threads</span>
+                  <input id="training-loader-threads" type="number" step="1" min="1" placeholder="Graph2Mat default" />
+                </label>
+                <label class="field">
                   <span>Loss</span>
                   <input id="training-loss" type="text" value="graph2mat.metrics.block_type_mae" />
                 </label>
@@ -333,7 +337,7 @@
                 </label>
               </div>
               <small>
-                El número de componentes de matriz Hamiltonian queda bloqueado por el pipeline para evitar salidas spin-polarized incompatibles con referencias SIESTA no polarizadas.
+                Usa la misma multiplicidad en todos los ell de hidden irreps, por ejemplo 32x0e + 32x1o + 32x2e + 32x3o. El número de componentes de matriz Hamiltonian queda bloqueado por el pipeline para evitar salidas spin-polarized incompatibles con referencias SIESTA no polarizadas.
               </small>
               <section id="training-plan-panel" class="training-plan-panel hidden">
                 <div class="panel-heading compact-heading">

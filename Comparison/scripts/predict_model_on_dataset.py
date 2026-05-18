@@ -283,6 +283,8 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
         datamodule_kwargs["n_matrix_components"] = int(args.n_matrix_components)
     if "batch_size" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["batch_size"] = 1
+    if "loader_threads" in inspect.signature(MatrixDataModule).parameters and args.loader_threads is not None:
+        datamodule_kwargs["loader_threads"] = int(args.loader_threads)
     datamodule = MatrixDataModule(**datamodule_kwargs)
     StrictMatrixWriter = strict_matrix_writer_class(MatrixWriter)
     callbacks = [StrictMatrixWriter(output_file=PREDICTION_OUTPUT_FILE, splits=["predict"])]
@@ -350,6 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--store-in-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--accelerator", default="cpu")
     parser.add_argument("--n-matrix-components", type=int, default=None)
+    parser.add_argument("--loader-threads", type=int, default=None)
     parser.add_argument("--torch-float32-matmul-precision", choices=["high", "medium"], default=None)
     parser.add_argument("--patch-graph2mat-basis-loading", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -358,6 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.loader_threads is not None and args.loader_threads <= 0:
+        raise RuntimeError("--loader-threads must be a positive integer.")
     apply_torch_float32_matmul_precision(args.torch_float32_matmul_precision)
     if not args.checkpoint.exists():
         raise RuntimeError(f"Checkpoint does not exist: {args.checkpoint}")

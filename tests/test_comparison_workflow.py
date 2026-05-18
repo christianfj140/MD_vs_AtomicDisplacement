@@ -826,6 +826,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "max_epochs": "50",
                 "optim_lr": "0.001",
                 "batch_size": "32",
+                "loader_threads": "8",
                 "num_interactions": "2",
                 "correlation": "3",
                 "max_ell": "4",
@@ -837,6 +838,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module.apply_training_settings_to_config(config, settings)
         self.assertEqual(config["training"]["trainer"]["max_epochs"], 50)
         self.assertEqual(config["training"]["data"]["batch_size"], 32)
+        self.assertEqual(config["training"]["data"]["loader_threads"], 8)
         self.assertEqual(config["training"]["model"]["num_interactions"], 2)
         self.assertEqual(config["training"]["model"]["correlation"], 3)
         self.assertEqual(config["training"]["model"]["max_ell"], 4)
@@ -849,6 +851,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
             module.parse_training_settings({"optim_lr": -0.1})
         with self.assertRaisesRegex(RuntimeError, "training_settings.max_ell"):
             module.parse_training_settings({"max_ell": -1})
+        with self.assertRaisesRegex(RuntimeError, "training_settings.loader_threads"):
+            module.parse_training_settings({"loader_threads": 0})
         with self.assertRaisesRegex(RuntimeError, "misma multiplicidad"):
             module.parse_training_settings(
                 {"max_ell": 2, "hidden_irreps": "32x0e + 16x1o + 32x2e"}
@@ -861,6 +865,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
             module.parse_training_settings(
                 {"max_ell": 2, "hidden_irreps": "32x0e + 32x2e"}
             )
+        with self.assertRaisesRegex(RuntimeError, "misma multiplicidad"):
+            module.parse_training_settings({"hidden_irreps": "32x0e + 24x1o"})
+        with self.assertRaisesRegex(RuntimeError, "Irreps valido"):
+            module.parse_training_settings({"hidden_irreps": "32 0e"})
 
     def test_md_graph2mat_training_config_excludes_ui_metadata(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
@@ -3083,6 +3091,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="training-max-epochs"', index_html)
         self.assertIn('id="training-optim-lr"', index_html)
         self.assertIn('id="training-batch-size"', index_html)
+        self.assertIn('id="training-loader-threads"', index_html)
         self.assertIn('id="training-num-interactions"', index_html)
         self.assertIn('id="training-correlation"', index_html)
         self.assertIn('id="training-max-ell"', index_html)

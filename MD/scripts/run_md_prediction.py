@@ -127,6 +127,8 @@ def main() -> int:
         datamodule_kwargs["batch_size"] = 1
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["n_matrix_components"] = int(training_data.get("n_matrix_components", 2))
+    if "loader_threads" in inspect.signature(MatrixDataModule).parameters and training_data.get("loader_threads") is not None:
+        datamodule_kwargs["loader_threads"] = int(training_data["loader_threads"])
     datamodule = MatrixDataModule(**datamodule_kwargs)
 
     callbacks = []

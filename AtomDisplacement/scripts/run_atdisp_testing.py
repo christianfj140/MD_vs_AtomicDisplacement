@@ -145,6 +145,9 @@ def main() -> int:
     }
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["n_matrix_components"] = int(data.get("n_matrix_components", 2))
+    loader_threads = PIPELINE_CONFIG.get("training", {}).get("data", {}).get("loader_threads")
+    if "loader_threads" in inspect.signature(MatrixDataModule).parameters and loader_threads is not None:
+        datamodule_kwargs["loader_threads"] = int(loader_threads)
     datamodule = MatrixDataModule(**datamodule_kwargs)
     callbacks = []
     if bool(callbacks_config["plot_matrix_error"]):
