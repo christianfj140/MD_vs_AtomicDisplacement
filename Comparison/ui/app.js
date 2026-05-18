@@ -477,9 +477,14 @@ const state = {
   reusableDatasetsLoaded: false,
   trainingPlan: [],
   trainingPlanNextId: 1,
+  sweepExcludedIndices: new Set(),
+  sweepPreviewPage: 1,
+  sweepPreviewSignature: null,
   materialPresets: [],
   materialValidation: null,
 };
+
+const SWEEP_PREVIEW_PAGE_SIZE = 8;
 
 function showToast(message) {
   const toast = document.getElementById("toast");
@@ -1045,6 +1050,264 @@ function trainingSettingsSummary(settings) {
   const entries = Object.entries(settings || {});
   if (!entries.length) return "defaults";
   return entries.map(([key, value]) => `${key}=${value}`).join(", ");
+}
+
+function splitSweepList(value) {
+  return String(value || "")
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseSweepNumberList(id, label, { integer = false, min = null } = {}) {
+  return splitSweepList(inputValue(id)).map((item) => {
+    const value = Number(item);
+    if (!Number.isFinite(value) || (integer && !Number.isInteger(value)) || (min != null && value < min)) {
+      const type = integer ? "entero" : "numero";
+      const floor = min == null ? "" : ` >= ${min}`;
+      throw new Error(`${label}: "${item}" debe ser un ${type}${floor}.`);
+    }
+    return value;
+  });
+}
+
+function parseSweepTextList(id) {
+  return splitSweepList(inputValue(id));
+}
+
+function hiddenIrrepsDimension(raw) {
+  const terms = parseHiddenIrrepsTerms(raw);
+  return terms.reduce((total, term) => total + term.mul * (2 * term.ell + 1), 0);
+}
+
+function sweepParametersFromControls() {
+  const parameters = {};
+  const setIfAny = (key, values) => {
+    if (values.length) parameters[key] = [...new Set(values)];
+  };
+  setIfAny("max_epochs", parseSweepNumberList("sweep-max-epochs", "Sweep epochs", { integer: true, min: 1 }));
+  setIfAny("optim_lr", parseSweepNumberList("sweep-optim-lr", "Sweep learning rate", { min: 0.000001 }));
+  setIfAny("batch_size", parseSweepNumberList("sweep-batch-size", "Sweep batch size", { integer: true, min: 1 }));
+  setIfAny("loader_threads", parseSweepNumberList("sweep-loader-threads", "Sweep loader threads", { integer: true, min: 1 }));
+  setIfAny("loss", parseSweepTextList("sweep-loss"));
+  setIfAny(
+    "num_interactions",
+    parseSweepNumberList("sweep-num-interactions", "Sweep interactions", { integer: true, min: 1 }),
+  );
+  setIfAny("correlation", parseSweepNumberList("sweep-correlation", "Sweep correlation", { integer: true, min: 1 }));
+  setIfAny("max_ell", parseSweepNumberList("sweep-max-ell", "Sweep max ell", { integer: true, min: 0 }));
+  setIfAny("hidden_irreps", parseSweepTextList("sweep-hidden-irreps"));
+  setIfAny(
+    "hidden_irreps_channels",
+    parseSweepNumberList("sweep-hidden-irreps-channels", "Sweep hidden irreps channels", {
+      integer: true,
+      min: 1,
+    }),
+  );
+  if (parameters.hidden_irreps?.length && parameters.hidden_irreps_channels?.length) {
+    throw new Error("Usa Hidden irreps list o Hidden irreps channels, no ambos.");
+  }
+  return parameters;
+}
+
+function sweepParameterSignature(parameters) {
+  return JSON.stringify(parameters || {});
+}
+
+function sortedSweepExcludedIndices() {
+  return [...state.sweepExcludedIndices].sort((a, b) => a - b);
+}
+
+function syncSweepExclusionsForParameters(parameters) {
+  const signature = sweepParameterSignature(parameters);
+  if (state.sweepPreviewSignature !== signature) {
+    state.sweepExcludedIndices = new Set();
+    state.sweepPreviewPage = 1;
+    state.sweepPreviewSignature = signature;
+  }
+  return sortedSweepExcludedIndices();
+}
+
+function hyperparameterSweepPayload({ includeTargets = false } = {}) {
+  const enabled = Boolean(document.getElementById("sweep-enabled")?.checked);
+  if (!enabled) return { enabled: false };
+  if (state.trainingPlan.length) {
+    throw new Error("No mezcles Hyperparameter sweep con Training plan manual.");
+  }
+  const maxConfigs = optionalPositiveInteger("sweep-max-configs", "Sweep max configs") || 256;
+  const parameters = sweepParametersFromControls();
+  if (!Object.keys(parameters).length) {
+    throw new Error("Hyperparameter sweep necesita al menos una lista de valores.");
+  }
+  const excludedIndices = syncSweepExclusionsForParameters(parameters);
+  const payload = {
+    enabled: true,
+    mode: "cartesian",
+    label_prefix: optionalTextInput("sweep-label-prefix") || "sweep",
+    max_configs: maxConfigs,
+    parameters,
+  };
+  if (excludedIndices.length) payload.excluded_indices = excludedIndices;
+  if (includeTargets) {
+    const runMode = document.getElementById("run-mode")?.value;
+    if (runMode === "dataset_only") {
+      throw new Error("Hyperparameter sweep no esta disponible con dataset_only.");
+    }
+    if (runMode === "train_test_metrics_plots_only") {
+      const ids = selectedReusableDatasetIds();
+      if (!ids.length) {
+        throw new Error("Selecciona al menos un dataset reusable para el sweep.");
+      }
+      payload.reusable_dataset_ids = ids;
+    }
+    if (runMode === "full_strict_pipeline") {
+      const targets = selectedPlannedDatasetTargets();
+      if (!targets.length) {
+        throw new Error("Selecciona al menos un planned dataset para el sweep.");
+      }
+      payload.dataset_targets = targets;
+    }
+  }
+  return payload;
+}
+
+function sweepConfigCount(parameters) {
+  return Object.values(parameters || {}).reduce((total, values) => total * Math.max(1, values.length), 1);
+}
+
+function sweepPreviewLabel(index, settings, sweepParameters, prefix) {
+  const parts = [`${prefix}${String(index).padStart(3, "0")}`];
+  if ("max_epochs" in sweepParameters) parts.push(`ep${settings.max_epochs}`);
+  if ("optim_lr" in sweepParameters) parts.push(`lr${slugPart(settings.optim_lr)}`);
+  if ("max_ell" in sweepParameters) parts.push(`l${settings.max_ell}`);
+  if ("hidden_irreps_channels" in sweepParameters) parts.push(`c${sweepParameters.hidden_irreps_channels}`);
+  if ("num_interactions" in sweepParameters) parts.push(`i${settings.num_interactions}`);
+  if ("correlation" in sweepParameters) parts.push(`corr${settings.correlation}`);
+  if ("batch_size" in sweepParameters) parts.push(`b${settings.batch_size}`);
+  if ("loader_threads" in sweepParameters) parts.push(`w${settings.loader_threads}`);
+  return parts.join("_");
+}
+
+function expandSweepPreview(payload, baseSettings) {
+  const parameters = payload.parameters || {};
+  const keys = Object.keys(parameters).sort();
+  const count = sweepConfigCount(parameters);
+  const excludedSet = new Set((payload.excluded_indices || []).map((value) => Number(value)));
+  const outOfRange = [...excludedSet].filter((index) => index > count);
+  if (outOfRange.length) {
+    throw new Error(`Exclusiones de sweep fuera de rango: ${outOfRange.slice(0, 10).join(", ")}.`);
+  }
+  const activeCount = count - excludedSet.size;
+  if (activeCount <= 0) {
+    return { count, activeCount, excludedCount: excludedSet.size, rows: [], warning: "Todas las configuraciones del sweep estan excluidas." };
+  }
+  if (activeCount > payload.max_configs) {
+    return {
+      count,
+      activeCount,
+      excludedCount: excludedSet.size,
+      rows: [],
+      warning: `El sweep genera ${activeCount} configuraciones activas (${count} totales, ${excludedSet.size} excluidas); max_configs=${payload.max_configs}.`,
+    };
+  }
+  const rows = [];
+  const combos = cartesianProduct(keys.map((key) => parameters[key]));
+  for (const [zeroIndex, combo] of combos.entries()) {
+    const sweepParameters = Object.fromEntries(combo.map((value, i) => [keys[i], value]));
+    const settings = { ...baseSettings };
+    for (const [key, value] of Object.entries(sweepParameters)) {
+      if (key !== "hidden_irreps_channels") settings[key] = value;
+    }
+    if ("hidden_irreps_channels" in sweepParameters) {
+      const maxEll = settings.max_ell;
+      if (!Number.isInteger(Number(maxEll)) || Number(maxEll) < 0) {
+        throw new Error("hidden_irreps_channels requiere Max ell en el sweep o en los controles.");
+      }
+      settings.hidden_irreps = expectedIrrepsText(Number(sweepParameters.hidden_irreps_channels), Number(maxEll));
+    }
+    let dimension = "";
+    if (settings.hidden_irreps) {
+      validateHiddenIrrepsText(settings.hidden_irreps, settings.max_ell);
+      dimension = hiddenIrrepsDimension(settings.hidden_irreps);
+    }
+    rows.push({
+      index: zeroIndex + 1,
+      label: sweepPreviewLabel(zeroIndex + 1, settings, sweepParameters, payload.label_prefix || "sweep"),
+      settings,
+      sweepParameters,
+      dimension,
+      excluded: excludedSet.has(zeroIndex + 1),
+    });
+  }
+  return { count, activeCount, excludedCount: excludedSet.size, rows };
+}
+
+function renderHyperparameterSweepPreview() {
+  const status = document.getElementById("sweep-status");
+  const body = document.getElementById("sweep-preview-list");
+  const nav = document.getElementById("sweep-preview-nav");
+  const pageLabel = document.getElementById("sweep-preview-page");
+  if (!status || !body) return;
+  body.innerHTML = "";
+  if (nav) nav.classList.add("hidden");
+  try {
+    const payload = hyperparameterSweepPayload();
+    if (!payload.enabled) {
+      status.textContent = "Sweep disabled.";
+      state.sweepPreviewPage = 1;
+      return;
+    }
+    const preview = expandSweepPreview(payload, trainingSettings());
+    if (preview.warning) {
+      status.textContent = preview.warning;
+      return;
+    }
+    const totalPages = Math.max(1, Math.ceil(preview.rows.length / SWEEP_PREVIEW_PAGE_SIZE));
+    state.sweepPreviewPage = Math.min(Math.max(1, state.sweepPreviewPage), totalPages);
+    const start = (state.sweepPreviewPage - 1) * SWEEP_PREVIEW_PAGE_SIZE;
+    const pageRows = preview.rows.slice(start, start + SWEEP_PREVIEW_PAGE_SIZE);
+    status.textContent = `${preview.activeCount} active / ${preview.count} total configuration${preview.count === 1 ? "" : "s"}; ${preview.excludedCount} excluded. Uncheck Run to exclude a combo.`;
+    if (nav) nav.classList.toggle("hidden", totalPages <= 1);
+    if (pageLabel) pageLabel.textContent = `Page ${state.sweepPreviewPage} / ${totalPages}`;
+    for (const row of pageRows) {
+      const tr = document.createElement("tr");
+      const runCell = document.createElement("td");
+      const includeCheckbox = document.createElement("input");
+      includeCheckbox.type = "checkbox";
+      includeCheckbox.checked = !row.excluded;
+      includeCheckbox.dataset.sweepIncludeIndex = String(row.index);
+      includeCheckbox.setAttribute("aria-label", `Run sweep configuration ${row.index}`);
+      runCell.appendChild(includeCheckbox);
+      const indexCell = document.createElement("td");
+      indexCell.textContent = String(row.index);
+      const labelCell = document.createElement("td");
+      labelCell.textContent = row.label;
+      const overridesCell = document.createElement("td");
+      overridesCell.textContent = trainingSettingsSummary(row.settings);
+      const dimCell = document.createElement("td");
+      dimCell.textContent = row.dimension ? String(row.dimension) : "-";
+      tr.append(runCell, indexCell, labelCell, overridesCell, dimCell);
+      body.appendChild(tr);
+    }
+    body.querySelectorAll("[data-sweep-include-index]").forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        const index = Number(checkbox.getAttribute("data-sweep-include-index"));
+        if (!Number.isInteger(index) || index <= 0) return;
+        if (checkbox.checked) {
+          state.sweepExcludedIndices.delete(index);
+        } else {
+          state.sweepExcludedIndices.add(index);
+        }
+        renderHyperparameterSweepPreview();
+      });
+    });
+    document.getElementById("sweep-preview-first")?.toggleAttribute("disabled", state.sweepPreviewPage <= 1);
+    document.getElementById("sweep-preview-prev")?.toggleAttribute("disabled", state.sweepPreviewPage <= 1);
+    document.getElementById("sweep-preview-next")?.toggleAttribute("disabled", state.sweepPreviewPage >= totalPages);
+    document.getElementById("sweep-preview-last")?.toggleAttribute("disabled", state.sweepPreviewPage >= totalPages);
+  } catch (error) {
+    status.textContent = error.message;
+  }
 }
 
 function reusableDatasetNameById() {
@@ -2858,7 +3121,8 @@ async function runExperiment() {
     state.datasetTargets = plannedDatasetTargetsFromRecipes(datasetRecipes, methods);
     renderPlannedDatasetTargets(state.datasetTargets);
   }
-  const plan = ["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode)
+  const sweep = hyperparameterSweepPayload({ includeTargets: true });
+  const plan = !sweep.enabled && ["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode)
     ? trainingPlanPayload()
     : [];
   const reusableDatasetIds = runMode === "train_test_metrics_plots_only"
@@ -2894,6 +3158,7 @@ async function runExperiment() {
       performance,
       training_settings: training,
       training_plan: plan,
+      hyperparameter_sweep: sweep,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
       venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
@@ -2991,9 +3256,57 @@ function finiteNumber(value) {
 }
 
 const PLOT_COLORS = ["#4b6f8f", "#2a7f62", "#9467bd", "#d7a021", "#4f8f84", "#b15c5f", "#6370aa"];
+const DEEPH_REFERENCE_COLORS = ["#b45309", "#9f1239", "#6d28d9", "#0f766e", "#374151"];
+const DEEPH_PAPER_REFERENCE_LINES = {
+  "plot-deeph-mev": [
+    {
+      value: 1.3,
+      label: "DeepH MoS2 pairs 1.3 meV",
+      detail: "MoS2 atom-pair H' MAEs reported in the paper span 0.7-1.3 meV.",
+    },
+    {
+      value: 2.1,
+      label: "DeepH graphene avg 2.1 meV",
+      detail: "Graphene H' orbital-combination MAE averaged over all 13x13 orbital pairs.",
+    },
+    {
+      value: 3.5,
+      label: "DeepH CNT d>2nm 3.5 meV",
+      detail: "CNT Hamiltonian MAE reported below this value for nanotube diameter above 2 nm.",
+    },
+    {
+      value: 6.6,
+      label: "DeepH graphene NN 6.6 meV",
+      detail: "Graphene nearest-neighbor 1s Hamiltonian element MAE.",
+    },
+    {
+      value: 8.5,
+      label: "DeepH graphene max 8.5 meV",
+      detail: "Upper end of the reported graphene orbital-combination MAE range.",
+    },
+  ],
+  "plot-deeph-r2": [
+    {
+      value: 0.9994,
+      label: "DeepH graphene R2 0.9994",
+      detail: "Reported coefficient of determination for the graphene nearest-neighbor 1s element.",
+    },
+  ],
+  "plot-deeph-dos": [
+    {
+      value: 0.0001,
+      label: "DeepH DOS MAE 1e-4",
+      detail: "Graphene DOS MAE reported as about 0.1 x 10^-3 eV^-1 A^-2.",
+    },
+  ],
+};
 
 function plotColor(index) {
   return PLOT_COLORS[index % PLOT_COLORS.length];
+}
+
+function deephReferenceColor(index) {
+  return DEEPH_REFERENCE_COLORS[index % DEEPH_REFERENCE_COLORS.length];
 }
 
 function mean(values) {
@@ -3245,6 +3558,100 @@ function plotLayout(title, yTitle, extra = {}) {
   };
 }
 
+function traceYValues(traces) {
+  const values = [];
+  for (const trace of traces || []) {
+    if (!Array.isArray(trace.y)) continue;
+    for (const value of trace.y) {
+      const number = finiteNumber(value);
+      if (number != null) values.push(number);
+    }
+  }
+  return values;
+}
+
+function yAxisRangeIncludingReferences(layout, traces, references) {
+  const values = traceYValues(traces);
+  for (const reference of references || []) {
+    const value = finiteNumber(reference.value);
+    if (value != null) values.push(value);
+  }
+  if (!values.length) return null;
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null;
+  const currentRange = layout?.yaxis?.range;
+  const baseMin = Array.isArray(currentRange) && currentRange.length === 2
+    ? Math.min(finiteNumber(currentRange[0]) ?? minValue, minValue)
+    : minValue;
+  const baseMax = Array.isArray(currentRange) && currentRange.length === 2
+    ? Math.max(finiteNumber(currentRange[1]) ?? maxValue, maxValue)
+    : maxValue;
+  if (baseMin === baseMax) {
+    const pad = Math.max(Math.abs(baseMin) * 0.05, 1e-6);
+    return [baseMin - pad, baseMax + pad];
+  }
+  const pad = Math.max((baseMax - baseMin) * 0.06, 1e-6);
+  return [baseMin - pad, baseMax + pad];
+}
+
+function withHorizontalReferenceLines(layout, traces, references, note = "") {
+  const validReferences = (references || [])
+    .map((reference) => ({ ...reference, value: finiteNumber(reference.value) }))
+    .filter((reference) => reference.value != null);
+  if (!validReferences.length) return layout;
+  const shapes = [...(layout.shapes || [])];
+  const annotations = [...(layout.annotations || [])];
+  validReferences.forEach((reference, index) => {
+    const color = reference.color || deephReferenceColor(index);
+    shapes.push({
+      type: "line",
+      xref: "paper",
+      x0: 0,
+      x1: 1,
+      yref: "y",
+      y0: reference.value,
+      y1: reference.value,
+      line: { color, width: 1.5, dash: reference.dash || "dash" },
+    });
+    annotations.push({
+      text: reference.label,
+      xref: "paper",
+      x: 1,
+      xanchor: "right",
+      yref: "y",
+      y: reference.value,
+      yanchor: "bottom",
+      showarrow: false,
+      font: { size: 11, color },
+      bgcolor: "rgba(255, 255, 255, 0.82)",
+      bordercolor: "rgba(148, 163, 184, 0.55)",
+      borderwidth: 1,
+      borderpad: 2,
+      hovertext: reference.detail || reference.label,
+      hoverlabel: { bgcolor: "#ffffff", bordercolor: color, font: { color: "#17202a" } },
+    });
+  });
+  if (note) {
+    annotations.push(topPlotAnnotation(note, 1.3, "#56616f"));
+  }
+  const yRange = yAxisRangeIncludingReferences(layout, traces, validReferences);
+  return {
+    ...layout,
+    shapes,
+    annotations,
+    margin: {
+      ...layout.margin,
+      r: Math.max(layout.margin?.r || 18, 112),
+      t: Math.max(layout.margin?.t || 46, note ? 96 : 74),
+    },
+    yaxis: {
+      ...(layout.yaxis || {}),
+      ...(yRange ? { range: yRange } : {}),
+    },
+  };
+}
+
 function emptyPlotAnnotation(message) {
   return {
     text: message,
@@ -3486,6 +3893,14 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
     layout.annotations = annotations;
     layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 74) };
   }
+  layout = withHorizontalReferenceLines(
+    layout,
+    traces,
+    DEEPH_PAPER_REFERENCE_LINES[id],
+    DEEPH_PAPER_REFERENCE_LINES[id]
+      ? "DeepH paper reference lines are diagnostic guides; repository metrics use raw/global supports."
+      : "",
+  );
   layout = withFitSelector(layout, traces);
   renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
@@ -3516,6 +3931,12 @@ function renderR2Plot(id, runs) {
     layout.annotations = annotations;
     layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 74) };
   }
+  layout = withHorizontalReferenceLines(
+    layout,
+    traces,
+    DEEPH_PAPER_REFERENCE_LINES[id],
+    "DeepH paper reference line is diagnostic; this plot uses repository sparse supports.",
+  );
   layout = withFitSelector(layout, traces);
   renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
@@ -3560,6 +3981,12 @@ function renderDosFermiMaePlot(id, runs) {
     layout.annotations = annotations;
     layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 92) };
   }
+  layout = withHorizontalReferenceLines(
+    layout,
+    traces,
+    DEEPH_PAPER_REFERENCE_LINES[id],
+    "DeepH DOS reference uses graphene paper units; treat as a visual guide.",
+  );
   layout = withFitSelector(layout, traces);
   renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
@@ -5059,7 +5486,8 @@ function formatBytes(bytes) {
 
 function datasetTargetLabel(target) {
   const size = target.dataset_size != null ? ` · ${target.dataset_size}` : "";
-  return `${target.dataset_label || target.name}${size} · ${target.relative_path}`;
+  const run = target.run_id ? ` · run ${target.run_id}` : "";
+  return `${target.dataset_label || target.name}${size}${run} · ${target.relative_path}`;
 }
 
 function renderDatasetTargets(targets) {
@@ -5068,8 +5496,8 @@ function renderDatasetTargets(targets) {
   if (!body || !status) return;
   body.innerHTML = "";
   status.textContent = targets.length
-    ? `${targets.length} generated artifact${targets.length === 1 ? "" : "s"} found`
-    : "No generated datasets found";
+    ? `${targets.length} plot-visible result run${targets.length === 1 ? "" : "s"} found`
+    : "No plot-visible result runs found";
   for (const target of targets) {
     const row = document.createElement("tr");
     const selectCell = document.createElement("td");
@@ -5107,6 +5535,12 @@ function renderDatasetTargets(targets) {
       warning.textContent = target.warning;
       pathCell.appendChild(warning);
     }
+    if (Array.isArray(target.metric_files) && target.metric_files.length) {
+      const metrics = document.createElement("div");
+      metrics.className = "muted-text";
+      metrics.textContent = `Plot metrics: ${target.metric_files.join(", ")}`;
+      pathCell.appendChild(metrics);
+    }
 
     row.append(selectCell, nameCell, methodCell, kindCell, sizeCell, modifiedCell, pathCell);
     body.appendChild(row);
@@ -5137,13 +5571,14 @@ async function deleteDatasetTargets(targetIds, { all = false } = {}) {
     ? state.datasetTargets
     : state.datasetTargets.filter((target) => targetIds.includes(target.id));
   const title = all
-    ? "Borrar todos los datasets generados, workspaces y resultados archivados?"
-    : "Borrar los datasets generados seleccionados?";
+    ? "Borrar todos los runs que alimentan los plots?"
+    : "Borrar los runs seleccionados que alimentan los plots?";
   const confirmed = confirmDatasetDeletion(targets, title);
   if (!confirmed) return;
+  const ids = all ? targets.map((target) => target.id) : targetIds;
   const payload = await request("/api/datasets/clear", {
     method: "POST",
-    body: JSON.stringify(all ? { all: true, dry_run: false } : { target_ids: targetIds, dry_run: false }),
+    body: JSON.stringify({ target_ids: ids, dry_run: false }),
   });
   state.plotData = null;
   await loadResults();
@@ -5154,6 +5589,10 @@ async function deleteDatasetTargets(targetIds, { all = false } = {}) {
 
 async function clearGeneratedDatasets() {
   if (!state.datasetTargets.length) await loadDatasetTargets();
+  if (!state.datasetTargets.length) {
+    showToast("No hay runs visibles en plots para borrar");
+    return;
+  }
   await deleteDatasetTargets([], { all: true });
 }
 
@@ -5216,9 +5655,62 @@ function setupEvents() {
   });
   document.getElementById("training-hidden-irreps")?.addEventListener("input", () => {
     renderHiddenIrrepsValidation();
+    renderHyperparameterSweepPreview();
   });
   document.getElementById("training-max-ell")?.addEventListener("input", () => {
     renderHiddenIrrepsValidation();
+    renderHyperparameterSweepPreview();
+  });
+  [
+    "training-max-epochs",
+    "training-optim-lr",
+    "training-batch-size",
+    "training-loader-threads",
+    "training-loss",
+    "training-num-interactions",
+    "training-correlation",
+  ].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", () => renderHyperparameterSweepPreview());
+  });
+  [
+    "sweep-enabled",
+    "sweep-label-prefix",
+    "sweep-max-configs",
+    "sweep-max-epochs",
+    "sweep-optim-lr",
+    "sweep-batch-size",
+    "sweep-loader-threads",
+    "sweep-loss",
+    "sweep-num-interactions",
+    "sweep-correlation",
+    "sweep-max-ell",
+    "sweep-hidden-irreps",
+    "sweep-hidden-irreps-channels",
+  ].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", () => renderHyperparameterSweepPreview());
+    document.getElementById(id)?.addEventListener("change", () => renderHyperparameterSweepPreview());
+  });
+  document.getElementById("sweep-preview-first")?.addEventListener("click", () => {
+    state.sweepPreviewPage = 1;
+    renderHyperparameterSweepPreview();
+  });
+  document.getElementById("sweep-preview-prev")?.addEventListener("click", () => {
+    state.sweepPreviewPage = Math.max(1, state.sweepPreviewPage - 1);
+    renderHyperparameterSweepPreview();
+  });
+  document.getElementById("sweep-preview-next")?.addEventListener("click", () => {
+    state.sweepPreviewPage += 1;
+    renderHyperparameterSweepPreview();
+  });
+  document.getElementById("sweep-preview-last")?.addEventListener("click", () => {
+    try {
+      const payload = hyperparameterSweepPayload();
+      const preview = expandSweepPreview(payload, trainingSettings());
+      state.sweepPreviewPage = Math.max(1, Math.ceil(preview.rows.length / SWEEP_PREVIEW_PAGE_SIZE));
+    } catch {
+      state.sweepPreviewPage = 1;
+    }
+    renderHyperparameterSweepPreview();
   });
   document.getElementById("add-training-plan-entry")?.addEventListener("click", () => {
     try {
@@ -5235,6 +5727,13 @@ function setupEvents() {
     state.trainingPlan = [];
     updateReusableDatasetPanel();
     updateTrainingPlanPanel();
+    renderHyperparameterSweepPreview();
+  });
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target?.classList?.contains("reusable-dataset-checkbox") || target?.classList?.contains("planned-dataset-target-checkbox")) {
+      renderHyperparameterSweepPreview();
+    }
   });
   document.getElementById("delete-selected-datasets")?.addEventListener("click", () => {
     deleteSelectedGeneratedDatasets().catch((error) => showToast(error.message));
@@ -5299,6 +5798,7 @@ function setupEvents() {
       updateDatasetPreview();
       updateReusableDatasetPanel();
       updateTrainingPlanPanel();
+      renderHyperparameterSweepPreview();
     });
   });
   window.addEventListener("resize", () => schedulePlotResize());
@@ -5325,6 +5825,7 @@ async function boot() {
   updateDatasetPreview();
   updateReusableDatasetPanel();
   updateTrainingPlanPanel();
+  renderHyperparameterSweepPreview();
   await pollOnce();
   state.polling = setInterval(pollOnce, POLL_INTERVAL_MS);
 }

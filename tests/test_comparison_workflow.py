@@ -683,6 +683,225 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 ],
             )
 
+    def test_hyperparameter_sweep_cartesian_expansion_downstream(self) -> None:
+        module = self.load_pipeline_ui_module()
+        self.assertEqual(module.parse_hyperparameter_sweep(None), {"enabled": False})
+        self.assertEqual(
+            module.expand_hyperparameter_sweep_to_training_plan(
+                {"enabled": False},
+                base_training_settings={"max_epochs": 1},
+                run_mode="train_test_metrics_plots_only",
+                reusable_dataset_ids=["run_a"],
+            ),
+            [],
+        )
+        sweep = module.parse_hyperparameter_sweep(
+            {
+                "enabled": True,
+                "max_configs": 10,
+                "parameters": {
+                    "max_epochs": [100, 200],
+                    "optim_lr": [0.005, 0.001],
+                },
+            }
+        )
+        plan = module.expand_hyperparameter_sweep_to_training_plan(
+            sweep,
+            base_training_settings={"batch_size": 32},
+            run_mode="train_test_metrics_plots_only",
+            reusable_dataset_ids=["run_a"],
+        )
+        self.assertEqual(len(plan), 4)
+        self.assertEqual(len({item["label"] for item in plan}), 4)
+        self.assertTrue(all(item["reusable_dataset_ids"] == ["run_a"] for item in plan))
+        self.assertEqual(plan[0]["training_settings"]["batch_size"], 32)
+        self.assertEqual(plan[0]["sweep_index"], 1)
+        self.assertIn("max_epochs", plan[0]["sweep_parameters"])
+
+    def test_hyperparameter_sweep_excludes_cartesian_indices(self) -> None:
+        module = self.load_pipeline_ui_module()
+        sweep = module.parse_hyperparameter_sweep(
+            {
+                "enabled": True,
+                "max_configs": 4,
+                "parameters": {
+                    "max_epochs": [100, 200],
+                    "optim_lr": [0.005, 0.001],
+                },
+                "excluded_indices": [1, 3],
+            }
+        )
+        self.assertEqual(sweep["excluded_indices"], [1, 3])
+        plan = module.expand_hyperparameter_sweep_to_training_plan(
+            sweep,
+            run_mode="train_test_metrics_plots_only",
+            reusable_dataset_ids=["run_a"],
+        )
+        self.assertEqual(len(plan), 2)
+        self.assertEqual([item["index"] for item in plan], [1, 2])
+        self.assertEqual([item["sweep_index"] for item in plan], [2, 4])
+        self.assertTrue(all(not item["label"].startswith("sweep001") for item in plan))
+
+        with self.assertRaisesRegex(RuntimeError, "fuera de rango"):
+            module.expand_hyperparameter_sweep_to_training_plan(
+                {
+                    "enabled": True,
+                    "parameters": {"max_epochs": [1]},
+                    "excluded_indices": [2],
+                },
+                run_mode="train_test_metrics_plots_only",
+                reusable_dataset_ids=["run_a"],
+            )
+        with self.assertRaisesRegex(RuntimeError, "excluye todas"):
+            module.expand_hyperparameter_sweep_to_training_plan(
+                {
+                    "enabled": True,
+                    "parameters": {"max_epochs": [1]},
+                    "excluded_indices": [1],
+                },
+                run_mode="train_test_metrics_plots_only",
+                reusable_dataset_ids=["run_a"],
+            )
+
+    def test_hyperparameter_sweep_generates_irreps_channels_and_dimension(self) -> None:
+        module = self.load_pipeline_ui_module()
+        plan = module.expand_hyperparameter_sweep_to_training_plan(
+            {
+                "enabled": True,
+                "parameters": {
+                    "max_ell": [2, 3],
+                    "hidden_irreps_channels": [10],
+                },
+            },
+            base_training_settings={"max_epochs": 1},
+            run_mode="full_strict_pipeline",
+            dataset_targets=[{"target_id": "md:md_100", "method_id": "md", "recipe_id": "md_100"}],
+        )
+        self.assertEqual(len(plan), 2)
+        self.assertEqual(plan[0]["training_settings"]["hidden_irreps"], "10x0e + 10x1o + 10x2e")
+        self.assertEqual(plan[0]["hidden_irreps_dimension"], 90)
+        self.assertEqual(plan[1]["training_settings"]["hidden_irreps"], "10x0e + 10x1o + 10x2e + 10x3o")
+        self.assertEqual(plan[1]["hidden_irreps_dimension"], 160)
+        self.assertEqual(plan[0]["dataset_targets"][0]["target_id"], "md:md_100")
+
+    def test_hyperparameter_sweep_validation_errors(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with self.assertRaisesRegex(RuntimeError, "limite 2"):
+            module.expand_hyperparameter_sweep_to_training_plan(
+                {
+                    "enabled": True,
+                    "max_configs": 2,
+                    "parameters": {"max_epochs": [1, 2], "optim_lr": [0.1, 0.01]},
+                },
+                run_mode="train_test_metrics_plots_only",
+                reusable_dataset_ids=["run_a"],
+            )
+        with self.assertRaisesRegex(RuntimeError, "dataset_only"):
+            module.expand_hyperparameter_sweep_to_training_plan(
+                {"enabled": True, "parameters": {"max_epochs": [1]}},
+                run_mode="dataset_only",
+            )
+        with self.assertRaisesRegex(RuntimeError, "no ambos"):
+            module.parse_hyperparameter_sweep(
+                {
+                    "enabled": True,
+                    "parameters": {
+                        "hidden_irreps": ["10x0e + 10x1o + 10x2e"],
+                        "hidden_irreps_channels": [10],
+                    },
+                }
+            )
+        manual_plan = module.parse_training_plan(
+            [{"label": "manual", "reusable_dataset_ids": ["run_a"], "training_settings": {"max_epochs": 1}}]
+        )
+        with self.assertRaisesRegex(RuntimeError, "training_plan manual"):
+            module.validate_training_plan_sweep_sources(
+                manual_plan,
+                module.parse_hyperparameter_sweep(
+                    {"enabled": True, "parameters": {"max_epochs": [1]}}
+                ),
+            )
+
+    def test_hyperparameter_sweep_manifest_records_provenance(self) -> None:
+        module = self.load_pipeline_ui_module()
+        module.STRICT_COMPARISON_MODE = False
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.WORKSPACES_ROOT = root / "workspaces"
+            recipes = {
+                "md": [
+                    {
+                        "recipe_id": "md_100",
+                        "label": "MD 100",
+                        "blocks": [{"block_id": "md_100", "n_snapshots": 3}],
+                    }
+                ]
+            }
+            split_ratios = {"train": 1 / 3, "validation": 1 / 3, "test": 1 / 3}
+            recipe_info = module.dataset_recipes_to_execution_specs(
+                recipes,
+                selected_methods=["md"],
+                split_ratios=split_ratios,
+                random_cartesian_defaults={},
+            )
+            target = {"target_id": module.planned_dataset_target_id("md", "md_100")}
+            sweep = module.parse_hyperparameter_sweep(
+                {"enabled": True, "parameters": {"max_epochs": [1, 2]}}
+            )
+            plan = module.expand_hyperparameter_sweep_to_training_plan(
+                sweep,
+                run_mode="full_strict_pipeline",
+                dataset_targets=[target],
+            )
+
+            def fake_run_one(key, size, run_id, **kwargs):
+                metadata = kwargs.get("recipe_metadata") or {}
+                label = str(kwargs.get("dataset_label"))
+                return {
+                    "pipeline": key,
+                    "method_id": key,
+                    "dataset_label": label,
+                    "dataset_size": size,
+                    "returncode": 0,
+                    "result_dir": str(root / "fake_results" / label / str(kwargs.get("run_mode"))),
+                    "dataset_dir": str(root / "fake_datasets" / label / str(kwargs.get("run_mode"))),
+                    "dataset_sample_ids": [f"{key}-{label}-{size}"],
+                    "dataset_sample_hash": f"hash-{key}-{label}-{size}",
+                    "run_mode": kwargs.get("run_mode"),
+                    "pipeline_elapsed_seconds": 1.0,
+                    "predicted_hamiltonians": 1,
+                    "siesta_counts": {"launched": 0, "skipped_or_reused": size, "failed": 0, "total": size},
+                    "timing_breakdown": {"training_prediction_seconds": 1.0},
+                    "training_plan_index": metadata.get("training_plan_index"),
+                    "training_plan_label": metadata.get("training_plan_label"),
+                    "training_plan_settings": metadata.get("training_plan_settings"),
+                    "sweep_index": metadata.get("sweep_index"),
+                    "sweep_label": metadata.get("sweep_label"),
+                    "sweep_parameters": metadata.get("sweep_parameters"),
+                }
+
+            runner = module.ExperimentRunner()
+            runner._run_one = fake_run_one  # type: ignore[method-assign]
+            runner._started_at = 1.0
+            runner._run(
+                [],
+                [],
+                "sweep_manifest",
+                split_ratios=split_ratios,
+                selected_methods=["md"],
+                run_mode="full_strict_pipeline",
+                dataset_recipes_info=recipe_info,
+                training_plan=plan,
+                hyperparameter_sweep=sweep,
+            )
+            manifest = module.load_config(root / "results" / "sweep_manifest" / "experiment_manifest.yaml")
+            self.assertTrue(manifest["hyperparameter_sweep"]["enabled"])
+            self.assertEqual(manifest["hyperparameter_sweep_expanded_count"], 2)
+            self.assertEqual([item["sweep_index"] for item in manifest["training_plan"]], [1, 2])
+            self.assertEqual([run["sweep_index"] for run in manifest["runs"]], [1, 2])
+            self.assertEqual([run["sweep_parameters"]["max_epochs"] for run in manifest["runs"]], [1, 2])
+
     def test_compute_accelerator_validation_and_config_application(self) -> None:
         module = self.load_pipeline_ui_module()
         self.assertEqual(module.parse_compute_accelerator(None), "cpu")
@@ -867,6 +1086,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(RuntimeError, "misma multiplicidad"):
             module.parse_training_settings({"hidden_irreps": "32x0e + 24x1o"})
+        with self.assertRaisesRegex(RuntimeError, "paridad"):
+            module.parse_training_settings({"hidden_irreps": "32x0o + 32x1o"})
+        with self.assertRaisesRegex(RuntimeError, "aparece mas de una vez"):
+            module.parse_training_settings({"hidden_irreps": "32x0e + 32x0e"})
         with self.assertRaisesRegex(RuntimeError, "Irreps valido"):
             module.parse_training_settings({"hidden_irreps": "32 0e"})
 
@@ -2999,6 +3222,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "reusable_split_policy",
                 "training_plan",
                 "material_config",
+                "hyperparameter_sweep",
             ]
             self.assertEqual(len(started["args"]), len(arg_names))
             args = dict(zip(arg_names, started["args"]))
@@ -3013,6 +3237,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(args["reusable_split_policy"], "preserve_archived_splits")
             self.assertEqual(args["training_plan"], [])
             self.assertIsNone(args["material_config"])
+            self.assertEqual(args["hyperparameter_sweep"], {"enabled": False})
 
     def test_experiment_start_rejects_zero_selected_methods(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -3041,6 +3266,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="refresh-reusable-datasets"', index_html)
         self.assertIn('id="reusable-split-policy"', index_html)
         self.assertIn('id="training-plan-panel"', index_html)
+        self.assertIn('id="hyperparameter-sweep-panel"', index_html)
+        self.assertIn('id="sweep-enabled"', index_html)
+        self.assertIn('id="sweep-preview-nav"', index_html)
+        self.assertIn('data-sweep-include-index', app_js)
+        self.assertIn("excluded_indices", app_js)
+        self.assertIn("sweepExcludedIndices", app_js)
         self.assertIn('id="planned-dataset-target-panel"', index_html)
         self.assertIn('id="planned-dataset-target-list"', index_html)
         self.assertIn('id="add-training-plan-entry"', index_html)
@@ -3056,6 +3287,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('<option value="dos_mae_500_fermi_window">DOS MAE 500 Fermi window</option>', index_html)
         self.assertIn("METRIC_HELP", app_js)
         self.assertIn("PLOT_HELP_BY_ID", app_js)
+        self.assertIn("hyperparameterSweepPayload", app_js)
+        self.assertIn("hyperparameter_sweep: sweep", app_js)
         self.assertIn("CROSS_PLOT_HELP_BY_ID", app_js)
         self.assertIn('id="plot-deeph-mev"', index_html)
         self.assertIn('id="plot-deeph-mse"', index_html)
@@ -8882,7 +9115,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(args.train_method, method)
 
-    def test_cross_prediction_matrix_writer_partial_error_fails_even_if_output_exists(self) -> None:
+    def test_cross_prediction_matrix_writer_recovers_known_symmetric_edge_count_error(self) -> None:
         module = self.load_module_from_path(
             "predict_model_on_dataset_strict_writer",
             REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
@@ -8901,7 +9134,38 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     return self.output_file
 
                 def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
-                    raise ValueError(module.EDGE_LABEL_CONSUMPTION_ERROR)
+                    raise ValueError(f"{module.EDGE_LABEL_CONSUMPTION_ERROR}: consumed=180, total=155.")
+
+            class Batch:
+                num_graphs = 1
+
+                def get_example(self, _index):
+                    return object()
+
+            writer_cls = module.strict_matrix_writer_class(PartialWriterBase)
+            writer = writer_cls(output_file=output, splits=["predict"])
+            writer._on_batch_end("predict", object(), object(), object(), Batch(), 0, 0)
+
+    def test_cross_prediction_matrix_writer_fails_nonrecoverable_edge_count_error(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_strict_writer_nonrecoverable",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        with workspace_tempdir() as tmp:
+            output = Path(tmp) / "ML_prediction.HSX"
+            output.write_bytes(b"partial prediction")
+
+            class PartialWriterBase:
+                def __init__(self, output_file: Path, splits: list[str]) -> None:
+                    self.output_file = Path(output_file)
+                    self.splits = splits
+
+                def _get_out_file(self, _example, _trainer):
+                    return self.output_file
+
+                def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
+                    raise ValueError(f"{module.EDGE_LABEL_CONSUMPTION_ERROR}: consumed=155, total=180.")
 
             class Batch:
                 num_graphs = 1

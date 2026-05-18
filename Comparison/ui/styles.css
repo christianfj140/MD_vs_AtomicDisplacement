@@ -964,6 +964,19 @@ pre {
   margin-top: 0;
 }
 
+.split-grid .wide-field {
+  grid-column: span 2;
+}
+
+.checkbox-inline {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .random-dataset-controls {
   display: grid;
   gap: 12px;
@@ -1152,6 +1165,19 @@ pre {
 .cleanup-table code {
   overflow-wrap: anywhere;
   color: #6d3d42;
+}
+
+.sweep-preview-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.sweep-preview-nav .muted-text {
+  min-width: 90px;
+  text-align: center;
 }
 
 .reusable-dataset-panel {

@@ -3010,6 +3010,21 @@ def parse_optional_text(value: Any, name: str) -> str | None:
 
 
 HIDDEN_IRREPS_TERM_RE = re.compile(r"^(?:(\d+)\s*x\s*)?(\d+)\s*([eoEO])$")
+DEFAULT_HYPERPARAMETER_SWEEP_MAX_CONFIGS = 256
+HYPERPARAMETER_SWEEP_MODE = "cartesian"
+HYPERPARAMETER_SWEEP_PARAMETER_KEYS = {
+    "max_epochs",
+    "optim_lr",
+    "batch_size",
+    "loader_threads",
+    "loss",
+    "num_interactions",
+    "correlation",
+    "max_ell",
+    "hidden_irreps",
+    "hidden_irreps_channels",
+}
+HYPERPARAMETER_SWEEP_TRAINING_KEYS = HYPERPARAMETER_SWEEP_PARAMETER_KEYS - {"hidden_irreps_channels"}
 
 
 def parse_hidden_irreps_terms(value: str, name: str = "training_settings.hidden_irreps") -> list[dict[str, Any]]:
@@ -3038,6 +3053,22 @@ def expected_hidden_irreps(multiplier: int, max_ell: int) -> str:
         f"{multiplier}x{ell}{'e' if ell % 2 == 0 else 'o'}"
         for ell in range(max_ell + 1)
     )
+
+
+def build_hidden_irreps(channels: int, max_ell: int) -> str:
+    if int(channels) <= 0:
+        raise RuntimeError("hidden_irreps_channels debe ser un entero positivo.")
+    if int(max_ell) < 0:
+        raise RuntimeError("max_ell debe ser un entero >= 0 para generar hidden_irreps.")
+    return expected_hidden_irreps(int(channels), int(max_ell))
+
+
+def hidden_irreps_dimension(hidden_irreps: str) -> int:
+    terms = parse_hidden_irreps_terms(hidden_irreps)
+    dimension = sum(int(term["multiplier"]) * (2 * int(term["ell"]) + 1) for term in terms)
+    if dimension <= 0:
+        raise RuntimeError("hidden_irreps_dimension debe ser positiva.")
+    return dimension
 
 
 def validate_hidden_irreps(value: str, max_ell: int | None, name: str = "training_settings.hidden_irreps") -> None:
@@ -3104,6 +3135,283 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
     return settings
 
 
+def _parse_sweep_value_list(value: Any, key: str) -> list[Any]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        raw_values = [
+            item.strip()
+            for item in re.split(r"[\n,;]+", value)
+            if item.strip()
+        ]
+    elif isinstance(value, (list, tuple)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+    values: list[Any] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if raw in (None, ""):
+            continue
+        if key in {
+            "max_epochs",
+            "batch_size",
+            "loader_threads",
+            "num_interactions",
+            "correlation",
+            "hidden_irreps_channels",
+        }:
+            parsed = parse_optional_positive_int(raw, f"hyperparameter_sweep.parameters.{key}")
+        elif key == "max_ell":
+            parsed = parse_optional_nonnegative_int(raw, f"hyperparameter_sweep.parameters.{key}")
+        elif key == "optim_lr":
+            parsed = parse_optional_positive_float(raw, f"hyperparameter_sweep.parameters.{key}")
+        elif key in {"loss", "hidden_irreps"}:
+            parsed = parse_optional_text(raw, f"hyperparameter_sweep.parameters.{key}")
+        else:
+            raise RuntimeError(f"Parametro de sweep no soportado: {key}")
+        if parsed is None:
+            continue
+        marker = json.dumps(json_safe(parsed), sort_keys=True, ensure_ascii=False)
+        if marker not in seen:
+            seen.add(marker)
+            values.append(parsed)
+    return values
+
+
+def _parse_sweep_excluded_indices(value: Any) -> list[int]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        raw_values = [
+            item.strip()
+            for item in re.split(r"[\n,;]+", value)
+            if item.strip()
+        ]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+    indices: list[int] = []
+    seen: set[int] = set()
+    for raw in raw_values:
+        parsed = parse_optional_positive_int(raw, "hyperparameter_sweep.excluded_indices")
+        if parsed is None:
+            continue
+        if parsed not in seen:
+            seen.add(parsed)
+            indices.append(parsed)
+    return indices
+
+
+def parse_hyperparameter_sweep(value: Any) -> dict[str, Any]:
+    if value in (None, "", False):
+        return {"enabled": False}
+    if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "off"}:
+        return {"enabled": False}
+    if not isinstance(value, dict):
+        raise RuntimeError("hyperparameter_sweep debe ser un objeto.")
+    enabled = parse_bool(value.get("enabled"), False)
+    if not enabled:
+        return {"enabled": False}
+    mode = str(value.get("mode") or HYPERPARAMETER_SWEEP_MODE).strip().lower()
+    if mode != HYPERPARAMETER_SWEEP_MODE:
+        raise RuntimeError("hyperparameter_sweep.mode solo soporta 'cartesian'.")
+    label_prefix = parse_optional_text(value.get("label_prefix"), "hyperparameter_sweep.label_prefix") or "sweep"
+    max_configs = parse_optional_positive_int(
+        value.get("max_configs"),
+        "hyperparameter_sweep.max_configs",
+    ) or DEFAULT_HYPERPARAMETER_SWEEP_MAX_CONFIGS
+    raw_parameters = value.get("parameters") or {}
+    if not isinstance(raw_parameters, dict):
+        raise RuntimeError("hyperparameter_sweep.parameters debe ser un objeto.")
+    unknown = sorted(set(raw_parameters) - HYPERPARAMETER_SWEEP_PARAMETER_KEYS)
+    if unknown:
+        raise RuntimeError(f"Parametros de sweep no soportados: {', '.join(unknown)}.")
+    parameters: dict[str, list[Any]] = {}
+    for key in sorted(HYPERPARAMETER_SWEEP_PARAMETER_KEYS):
+        values = _parse_sweep_value_list(raw_parameters.get(key), key)
+        if values:
+            parameters[key] = values
+    if parameters.get("hidden_irreps") and parameters.get("hidden_irreps_channels"):
+        raise RuntimeError(
+            "Usa hidden_irreps o hidden_irreps_channels en el sweep, no ambos."
+        )
+    raw_excluded = value.get("excluded_indices")
+    if raw_excluded in (None, ""):
+        raw_excluded = value.get("excluded_config_indices")
+    excluded_indices = _parse_sweep_excluded_indices(raw_excluded)
+    return {
+        "enabled": True,
+        "mode": mode,
+        "label_prefix": label_prefix,
+        "max_configs": max_configs,
+        "parameters": parameters,
+        "excluded_indices": excluded_indices,
+    }
+
+
+def _format_sweep_label_value(value: Any) -> str:
+    if isinstance(value, float):
+        text = f"{value:.8g}"
+    else:
+        text = str(value)
+    return slugify_label(text, "v")
+
+
+def _sweep_label_parts(settings: dict[str, Any], sweep_parameters: dict[str, Any]) -> list[str]:
+    parts: list[str] = []
+    if "max_epochs" in sweep_parameters:
+        parts.append(f"ep{settings.get('max_epochs')}")
+    if "optim_lr" in sweep_parameters:
+        parts.append(f"lr{_format_sweep_label_value(settings.get('optim_lr'))}")
+    if "max_ell" in sweep_parameters:
+        parts.append(f"l{settings.get('max_ell')}")
+    if "hidden_irreps_channels" in sweep_parameters:
+        parts.append(f"c{sweep_parameters.get('hidden_irreps_channels')}")
+    elif "hidden_irreps" in sweep_parameters and settings.get("hidden_irreps"):
+        terms = parse_hidden_irreps_terms(str(settings["hidden_irreps"]))
+        channels = terms[0]["multiplier"] if terms else "x"
+        parts.append(f"c{channels}")
+    if "num_interactions" in sweep_parameters:
+        parts.append(f"i{settings.get('num_interactions')}")
+    if "correlation" in sweep_parameters:
+        parts.append(f"corr{settings.get('correlation')}")
+    if "batch_size" in sweep_parameters:
+        parts.append(f"b{settings.get('batch_size')}")
+    if "loader_threads" in sweep_parameters:
+        parts.append(f"w{settings.get('loader_threads')}")
+    if "loss" in sweep_parameters:
+        parts.append(f"loss{_format_sweep_label_value(settings.get('loss'))}")
+    return [part for part in parts if part and "None" not in part]
+
+
+def _unique_sweep_label(
+    raw_label: str,
+    payload: dict[str, Any],
+    used_labels: set[str],
+) -> str:
+    label = compact_dataset_label(raw_label, payload, max_length=48)
+    suffix = 2
+    while label in used_labels:
+        label = compact_dataset_label(f"{raw_label}_{suffix}", {**payload, "suffix": suffix}, max_length=48)
+        suffix += 1
+    used_labels.add(label)
+    return label
+
+
+def expand_hyperparameter_sweep_to_training_plan(
+    sweep: Any,
+    *,
+    base_training_settings: dict[str, Any] | None = None,
+    run_mode: str,
+    reusable_dataset_ids: list[str] | None = None,
+    dataset_targets: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    parsed = parse_hyperparameter_sweep(sweep)
+    if not parsed.get("enabled"):
+        return []
+    run_mode = parse_run_mode(run_mode)
+    if run_mode == DATASET_ONLY_RUN_MODE:
+        raise RuntimeError("hyperparameter_sweep no esta disponible con dataset_only.")
+    base_settings = parse_training_settings(base_training_settings)
+    parameters = dict(parsed.get("parameters") or {})
+    if not parameters:
+        raise RuntimeError("hyperparameter_sweep necesita al menos un parametro con valores.")
+    keys = sorted(parameters)
+    count = math.prod(len(parameters[key]) for key in keys)
+    excluded_indices = list(parsed.get("excluded_indices") or [])
+    excluded_set = set(excluded_indices)
+    out_of_range_exclusions = sorted(index for index in excluded_set if index > count)
+    if out_of_range_exclusions:
+        raise RuntimeError(
+            "hyperparameter_sweep.excluded_indices fuera de rango: "
+            + ", ".join(str(index) for index in out_of_range_exclusions[:10])
+        )
+    active_count = count - len(excluded_set)
+    if active_count <= 0:
+        raise RuntimeError("hyperparameter_sweep.excluded_indices excluye todas las configuraciones.")
+    max_configs = int(parsed.get("max_configs") or DEFAULT_HYPERPARAMETER_SWEEP_MAX_CONFIGS)
+    if active_count > max_configs:
+        raise RuntimeError(
+            f"hyperparameter_sweep genera {active_count} configuraciones activas "
+            f"({count} totales, {len(excluded_set)} excluidas), por encima del limite {max_configs}."
+        )
+    reusable_ids = parse_reusable_dataset_ids(reusable_dataset_ids)
+    targets = parse_dataset_targets(dataset_targets)
+    if run_mode_skips_dataset_generation(run_mode) and not reusable_ids:
+        raise RuntimeError("hyperparameter_sweep necesita reusable_dataset_ids en train_test_metrics_plots_only.")
+    if run_mode == FULL_STRICT_RUN_MODE and not targets:
+        raise RuntimeError("hyperparameter_sweep necesita dataset_targets en full_strict_pipeline.")
+
+    plan: list[dict[str, Any]] = []
+    used_labels: set[str] = set()
+    prefix = str(parsed.get("label_prefix") or "sweep")
+    for zero_index, combo in enumerate(itertools.product(*(parameters[key] for key in keys))):
+        cartesian_index = zero_index + 1
+        if cartesian_index in excluded_set:
+            continue
+        sweep_parameters = dict(zip(keys, combo))
+        raw_settings = dict(base_settings)
+        for key, value in sweep_parameters.items():
+            if key in HYPERPARAMETER_SWEEP_TRAINING_KEYS:
+                raw_settings[key] = value
+        if "hidden_irreps_channels" in sweep_parameters:
+            max_ell = raw_settings.get("max_ell")
+            if max_ell is None:
+                raise RuntimeError(
+                    "hidden_irreps_channels requiere max_ell en el sweep o en los controles de training."
+                )
+            raw_settings["hidden_irreps"] = build_hidden_irreps(
+                int(sweep_parameters["hidden_irreps_channels"]),
+                int(max_ell),
+            )
+        settings = parse_training_settings(raw_settings)
+        dimension = (
+            hidden_irreps_dimension(str(settings["hidden_irreps"]))
+            if settings.get("hidden_irreps") is not None
+            else None
+        )
+        display_label = "_".join(
+            [f"{prefix}{cartesian_index:03d}", *_sweep_label_parts(settings, sweep_parameters)]
+        )
+        label = _unique_sweep_label(
+            display_label,
+            {"index": cartesian_index, "settings": settings, "sweep_parameters": sweep_parameters},
+            used_labels,
+        )
+        plan_item: dict[str, Any] = {
+            "index": len(plan) + 1,
+            "label": label,
+            "display_label": display_label,
+            "training_settings": settings,
+            "reusable_dataset_ids": reusable_ids if run_mode_skips_dataset_generation(run_mode) else [],
+            "dataset_targets": targets if run_mode == FULL_STRICT_RUN_MODE else [],
+            "sweep_index": cartesian_index,
+            "sweep_label": label,
+            "sweep_parameters": sweep_parameters,
+        }
+        if dimension is not None:
+            plan_item["hidden_irreps_dimension"] = dimension
+        plan.append(plan_item)
+    validate_training_plan_for_run_mode(plan, run_mode)
+    return plan
+
+
+def validate_training_plan_sweep_sources(
+    training_plan: list[dict[str, Any]],
+    hyperparameter_sweep: dict[str, Any],
+) -> None:
+    if (
+        hyperparameter_sweep.get("enabled")
+        and training_plan
+        and not all(item.get("sweep_index") is not None for item in training_plan)
+    ):
+        raise RuntimeError(
+            "No mezcles hyperparameter_sweep con training_plan manual en la misma ejecucion."
+        )
+
+
 def parse_training_plan(value: Any) -> list[dict[str, Any]]:
     if value in (None, "", []):
         return []
@@ -3124,9 +3432,13 @@ def parse_training_plan(value: Any) -> list[dict[str, Any]]:
             raw_item.get("training_settings", raw_item.get("settings", {}))
         )
         raw_label = parse_optional_text(raw_item.get("label"), f"training_plan[{index}].label")
-        display_label = raw_label or f"Config {index + 1}"
+        raw_display_label = parse_optional_text(
+            raw_item.get("display_label"),
+            f"training_plan[{index}].display_label",
+        )
+        display_label = raw_display_label or raw_label or f"Config {index + 1}"
         base_label = compact_dataset_label(
-            display_label,
+            raw_label or display_label,
             {"index": index + 1, "training_settings": settings},
             max_length=48,
         )
@@ -3150,6 +3462,14 @@ def parse_training_plan(value: Any) -> list[dict[str, Any]]:
                 "dataset_targets": dataset_targets,
             }
         )
+        for metadata_key in (
+            "sweep_index",
+            "sweep_label",
+            "sweep_parameters",
+            "hidden_irreps_dimension",
+        ):
+            if metadata_key in raw_item:
+                plan[-1][metadata_key] = raw_item[metadata_key]
     return plan
 
 
@@ -5237,6 +5557,30 @@ def archived_run_metric_rows(result_dir: Path) -> dict[str, list[dict[str, Any]]
     }
 
 
+PLOT_METRIC_CSV_FILES = {
+    "sparse": "sparse_metrics.csv",
+    "spectral": "spectral_metrics.csv",
+    "dos": "dos_metrics.csv",
+    "sparse_sweep": "sparse_threshold_sweep.csv",
+    "dos_sweep": "dos_sigma_sweep.csv",
+    "matrix_spectrum": "matrix_spectrum_relationship.csv",
+    "orbital_pair_summary": "orbital_pair_summary.csv",
+}
+
+
+def archived_run_plot_metric_row_counts(result_dir: Path) -> dict[str, int]:
+    metrics_dir = result_dir / "metrics"
+    counts: dict[str, int] = {}
+    for key, filename in PLOT_METRIC_CSV_FILES.items():
+        rows = csv_data_row_count(metrics_dir / filename)
+        counts[key] = int(rows or 0)
+    return counts
+
+
+def archived_run_has_plot_metric_outputs(result_dir: Path) -> bool:
+    return any(count > 0 for count in archived_run_plot_metric_row_counts(result_dir).values())
+
+
 def archived_run_has_plot_metrics(result_dir: Path) -> bool:
     rows_by_metric = archived_run_metric_rows(result_dir)
     return any(rows for rows in rows_by_metric.values())
@@ -5326,6 +5670,10 @@ def plot_data_summary() -> dict[str, Any]:
                     "training_plan_display_label": manifest.get("training_plan_display_label"),
                     "training_plan_settings": manifest.get("training_plan_settings"),
                     "training_plan_source_dataset_label": manifest.get("training_plan_source_dataset_label"),
+                    "sweep_index": manifest.get("sweep_index"),
+                    "sweep_label": manifest.get("sweep_label"),
+                    "sweep_parameters": manifest.get("sweep_parameters"),
+                    "hidden_irreps_dimension": manifest.get("hidden_irreps_dimension"),
                     "recipe_id": manifest.get("recipe_id"),
                     "recipe_label": manifest.get("recipe_label"),
                     "block_id": manifest.get("block_id"),
@@ -5595,6 +5943,7 @@ class ExperimentRunner:
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
         training_plan: list[dict[str, Any]] | None = None,
         material: dict[str, Any] | None = None,
+        hyperparameter_sweep: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -5604,6 +5953,8 @@ class ExperimentRunner:
             reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
             training_plan = parse_training_plan(training_plan)
             validate_training_plan_for_run_mode(training_plan, run_mode)
+            hyperparameter_sweep = parse_hyperparameter_sweep(hyperparameter_sweep)
+            validate_training_plan_sweep_sources(training_plan, hyperparameter_sweep)
             material_config = parse_material_payload(material, required=material is not None)
             if material_config is not None:
                 validate_material_payload(material_config, required=True)
@@ -5684,6 +6035,7 @@ class ExperimentRunner:
                     reusable_split_policy,
                     training_plan,
                     material_config,
+                    hyperparameter_sweep,
                 ),
                 daemon=True,
             )
@@ -6273,6 +6625,7 @@ class ExperimentRunner:
         reusable_split_policy: str = PRESERVE_ARCHIVED_SPLITS,
         training_plan: list[dict[str, Any]] | None = None,
         material: dict[str, Any] | None = None,
+        hyperparameter_sweep: dict[str, Any] | None = None,
     ) -> None:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = normalize_selected_methods(selected_methods)
@@ -6280,6 +6633,8 @@ class ExperimentRunner:
         reusable_split_policy = parse_reusable_split_policy(reusable_split_policy)
         training_plan = parse_training_plan(training_plan)
         validate_training_plan_for_run_mode(training_plan, run_mode)
+        hyperparameter_sweep = parse_hyperparameter_sweep(hyperparameter_sweep)
+        validate_training_plan_sweep_sources(training_plan, hyperparameter_sweep)
         material_config = parse_material_payload(material, required=material is not None)
         material_validation = (
             validate_material_payload(material_config, required=True)
@@ -6326,6 +6681,10 @@ class ExperimentRunner:
             }
         manifest["reusable_split_policy"] = reusable_split_policy
         manifest["training_plan"] = training_plan
+        manifest["hyperparameter_sweep"] = hyperparameter_sweep
+        manifest["hyperparameter_sweep_expanded_count"] = (
+            len(training_plan) if hyperparameter_sweep.get("enabled") else 0
+        )
         experiment_root(run_id).mkdir(parents=True, exist_ok=True)
         if manifest.get("siesta_settings_warning"):
             manifest.setdefault("warnings", []).append(str(manifest["siesta_settings_warning"]))
@@ -7216,6 +7575,10 @@ class ExperimentRunner:
                 "training_plan_reusable_dataset_ids": list(plan_item.get("reusable_dataset_ids") or []),
                 "training_plan_dataset_targets": list(plan_item.get("dataset_targets") or []),
                 "training_plan_source_dataset_label": original_label,
+                "sweep_index": plan_item.get("sweep_index"),
+                "sweep_label": plan_item.get("sweep_label"),
+                "sweep_parameters": dict(plan_item.get("sweep_parameters") or {}),
+                "hidden_irreps_dimension": plan_item.get("hidden_irreps_dimension"),
             }
         )
         updated["label"] = self._training_plan_dataset_label(original_label, plan_item)
@@ -9462,6 +9825,10 @@ class ExperimentRunner:
             "training_plan_display_label": recipe_metadata.get("training_plan_display_label"),
             "training_plan_settings": recipe_metadata.get("training_plan_settings"),
             "training_plan_source_dataset_label": recipe_metadata.get("training_plan_source_dataset_label"),
+            "sweep_index": recipe_metadata.get("sweep_index"),
+            "sweep_label": recipe_metadata.get("sweep_label"),
+            "sweep_parameters": recipe_metadata.get("sweep_parameters"),
+            "hidden_irreps_dimension": recipe_metadata.get("hidden_irreps_dimension"),
             "recipe_set_hash": recipe_set_hash(recipe_metadata) if recipe_metadata else "",
             "generation_parameters_json": recipe_metadata.get("generation_parameters_json"),
             "predicted_hamiltonians": prediction_count,
@@ -10534,6 +10901,10 @@ class ExperimentRunner:
                         "train_training_plan_source_dataset_label": train_result.get(
                             "training_plan_source_dataset_label"
                         ),
+                        "train_sweep_index": train_result.get("sweep_index"),
+                        "train_sweep_label": train_result.get("sweep_label"),
+                        "train_sweep_parameters": train_result.get("sweep_parameters"),
+                        "train_hidden_irreps_dimension": train_result.get("hidden_irreps_dimension"),
                         "training_tag": train_result.get("training_tag"),
                         "training_index": train_result.get("training_index"),
                         "training_settings": train_result.get("training_settings"),
@@ -10543,6 +10914,10 @@ class ExperimentRunner:
                         "training_plan_source_dataset_label": train_result.get(
                             "training_plan_source_dataset_label"
                         ),
+                        "sweep_index": train_result.get("sweep_index"),
+                        "sweep_label": train_result.get("sweep_label"),
+                        "sweep_parameters": train_result.get("sweep_parameters"),
+                        "hidden_irreps_dimension": train_result.get("hidden_irreps_dimension"),
                         "md_dataset_size": dataset_size_by_method.get("md"),
                         "atom_dataset_size": dataset_size_by_method.get("siesta_fc_cartesian"),
                         "random_dataset_size": dataset_size_by_method.get("random_cartesian"),
@@ -10771,12 +11146,157 @@ def clear_generated_dataset_outputs(*, dry_run: bool = False) -> dict[str, Any]:
 def generated_dataset_output_records() -> dict[str, Any]:
     return {
         "targets": generated_dataset_records(REPO_ROOT),
+        "scope": "all_generated_artifacts",
         "roots": {
             "md_dataset": str(REPO_ROOT / "MD" / "dataset"),
             "atom_dataset": str(REPO_ROOT / "AtomDisplacement" / "dataset"),
             "comparison_workspaces": str(WORKSPACES_ROOT),
             "comparison_results": str(RESULTS_ROOT),
         },
+    }
+
+
+def cleanup_target_id(relative_path: str) -> str:
+    return hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:16]
+
+
+def relative_to_repo(path: Path) -> str:
+    candidate = path if path.is_absolute() else REPO_ROOT / path
+    try:
+        return candidate.resolve(strict=False).relative_to(REPO_ROOT.resolve(strict=False)).as_posix()
+    except ValueError:
+        return candidate.as_posix()
+
+
+def plot_metric_dataset_records(*, include_bytes: bool = False) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    groups = {
+        "md": RESULTS_ROOT / "results_md",
+        "siesta_fc_cartesian": RESULTS_ROOT / "results_atomdisp",
+        "random_cartesian": RESULTS_ROOT / "results_random_cartesian",
+    }
+    for method_id, root in groups.items():
+        if not root.exists():
+            continue
+        for manifest_path in archived_result_manifest_paths(root):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            result_dir = archived_manifest_result_dir(manifest, manifest_path)
+            metric_row_counts = archived_run_plot_metric_row_counts(result_dir)
+            metric_files = [key for key, count in metric_row_counts.items() if count > 0]
+            if not metric_files:
+                continue
+            try:
+                stat = result_dir.stat()
+            except OSError:
+                stat = None
+            relative = relative_to_repo(result_dir)
+            records.append(
+                {
+                    "id": cleanup_target_id(relative),
+                    "name": result_dir.name,
+                    "path": relative,
+                    "relative_path": relative,
+                    "kind": "plot_metric_run",
+                    "method": manifest.get("method_id") or method_id,
+                    "dataset_label": manifest.get("dataset_label") or result_dir.parent.name,
+                    "dataset_size": manifest.get("requested_dataset_size") or manifest.get("dataset_size"),
+                    "run_id": manifest.get("run_id") or result_dir.name.removeprefix("run_"),
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
+                    "bytes": directory_size_bytes(result_dir) if include_bytes else None,
+                    "metric_files": metric_files,
+                    "plot_metric_rows": sum(metric_row_counts.values()),
+                    "warning": (
+                        "Este elemento alimenta los plots. Al borrarlo desaparecera de los plots tras recargar."
+                    ),
+                }
+            )
+    return sorted(
+        records,
+        key=lambda item: (
+            str(item.get("method") or ""),
+            int(item.get("dataset_size") or 0),
+            str(item.get("dataset_label") or ""),
+            str(item.get("run_id") or ""),
+        ),
+    )
+
+
+def plot_metric_dataset_output_records() -> dict[str, Any]:
+    return {
+        "targets": plot_metric_dataset_records(),
+        "scope": "plot_metric_runs",
+        "roots": {
+            "md_results": str(RESULTS_ROOT / "results_md"),
+            "atom_results": str(RESULTS_ROOT / "results_atomdisp"),
+            "random_cartesian_results": str(RESULTS_ROOT / "results_random_cartesian"),
+        },
+    }
+
+
+def directory_size_bytes(path: Path) -> int:
+    if path.is_symlink() or not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def safe_remove_repo_target(relative_path: str) -> None:
+    if not relative_path:
+        raise RuntimeError("Registro de cleanup sin relative_path.")
+    repo_root = REPO_ROOT.resolve(strict=False)
+    target = (REPO_ROOT / relative_path).resolve(strict=False)
+    try:
+        target.relative_to(repo_root)
+    except ValueError as exc:
+        raise RuntimeError(f"Ruta de cleanup fuera del repositorio: {relative_path}") from exc
+    if target == repo_root:
+        raise RuntimeError(f"No se borra la raiz del repositorio: {relative_path}")
+    if target.is_symlink():
+        raise RuntimeError(f"No se borra un enlace simbolico: {relative_path}")
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+
+def clear_selected_plot_metric_dataset_outputs(
+    target_ids: list[str],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    records = plot_metric_dataset_records()
+    by_id = {str(record["id"]): record for record in records}
+    normalized_ids = list(dict.fromkeys(str(target_id) for target_id in target_ids if str(target_id).strip()))
+    unknown = [target_id for target_id in normalized_ids if target_id not in by_id]
+    if unknown:
+        raise RuntimeError(f"IDs de run de plots no reconocidos o ya borrados: {unknown}.")
+    selected = [by_id[target_id] for target_id in normalized_ids]
+    removed = [str(record["relative_path"]) for record in selected]
+    if not dry_run:
+        for record in selected:
+            safe_remove_repo_target(str(record["relative_path"]))
+    return {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "dry_run": dry_run,
+        "removed": removed,
+        "selected": selected,
+        "scope": "plot_metric_runs",
+        "preserved": [
+            "source datasets outside the selected plot-visible run dirs",
+            "Comparison/workspaces",
+            "code, configs and pseudopotentials",
+        ],
     }
 
 
@@ -10787,9 +11307,13 @@ def clear_selected_generated_dataset_outputs(
 ) -> dict[str, Any]:
     if all_status().get("running") or EXPERIMENT_RUNNER.status().get("running"):
         raise RuntimeError("No se pueden borrar datasets mientras hay pipelines o experimentos en ejecucion.")
+    plot_ids = {str(record["id"]) for record in plot_metric_dataset_records()}
+    normalized_ids = list(dict.fromkeys(str(target_id) for target_id in target_ids if str(target_id).strip()))
+    if normalized_ids and all(target_id in plot_ids for target_id in normalized_ids):
+        return clear_selected_plot_metric_dataset_outputs(normalized_ids, dry_run=dry_run)
     return cleanup_selected_generated_datasets(
         REPO_ROOT,
-        target_ids=target_ids,
+        target_ids=normalized_ids,
         dry_run=dry_run,
     )
 
@@ -11010,7 +11534,12 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/plots":
                 json_response(self, plot_data_summary())
             elif path == "/api/datasets/targets":
-                json_response(self, generated_dataset_output_records())
+                query = parse_qs(urlparse(self.path).query)
+                scope = str((query.get("scope") or ["plot_metrics"])[0] or "plot_metrics").strip()
+                if scope in {"all", "all_generated_artifacts"}:
+                    json_response(self, generated_dataset_output_records())
+                else:
+                    json_response(self, plot_metric_dataset_output_records())
             elif path == "/api/datasets/reusable":
                 json_response(self, EXPERIMENT_RUNNER.reusable_dataset_candidates_payload())
             elif path == "/api/atom-fc-config":
@@ -11094,11 +11623,14 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 run_mode = parse_run_mode(payload.get("run_mode"))
                 reusable_dataset_ids = parse_reusable_dataset_ids(payload.get("reusable_dataset_ids"))
                 training_plan = parse_training_plan(payload.get("training_plan"))
+                hyperparameter_sweep = parse_hyperparameter_sweep(payload.get("hyperparameter_sweep"))
+                validate_training_plan_sweep_sources(training_plan, hyperparameter_sweep)
                 if reusable_dataset_ids and not run_mode_skips_dataset_generation(run_mode):
                     raise RuntimeError(
                         "reusable_dataset_ids solo se puede usar con train_test_metrics_plots_only."
                     )
-                validate_training_plan_for_run_mode(training_plan, run_mode)
+                if training_plan:
+                    validate_training_plan_for_run_mode(training_plan, run_mode)
                 selected_pipeline_keys = pipeline_keys_for_methods(selected_methods)
                 method_options = payload.get("method_options") or {}
                 method_random_options = (
@@ -11286,6 +11818,37 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         if not selected_methods:
                             selected_methods = plan_methods
                     dataset_recipes_info["recipe_set_hash"] = recipe_set_hash(merged_recipes)
+                if hyperparameter_sweep.get("enabled"):
+                    raw_sweep_payload = payload.get("hyperparameter_sweep") or {}
+                    if not isinstance(raw_sweep_payload, dict):
+                        raw_sweep_payload = {}
+                    sweep_reusable_ids = parse_reusable_dataset_ids(
+                        raw_sweep_payload.get("reusable_dataset_ids")
+                    ) or list(effective_reusable_dataset_ids)
+                    sweep_dataset_targets = parse_dataset_targets(
+                        raw_sweep_payload.get("dataset_targets")
+                    )
+                    if run_mode == FULL_STRICT_RUN_MODE and not sweep_dataset_targets:
+                        planned_targets = EXPERIMENT_RUNNER._planned_dataset_targets_for_specs(
+                            md_specs=dataset_recipes_info.get("md_dataset_specs") or [],
+                            atom_specs=dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [],
+                            random_specs=dataset_recipes_info.get("random_cartesian_dataset_specs")
+                            or random_cartesian_options.get("_dataset_specs")
+                            or [],
+                            selected_methods=selected_methods,
+                        )
+                        sweep_dataset_targets = [
+                            EXPERIMENT_RUNNER._planned_dataset_target_public(target)
+                            for target in planned_targets
+                        ]
+                    training_plan = expand_hyperparameter_sweep_to_training_plan(
+                        hyperparameter_sweep,
+                        base_training_settings=training_settings,
+                        run_mode=run_mode,
+                        reusable_dataset_ids=sweep_reusable_ids,
+                        dataset_targets=sweep_dataset_targets,
+                    )
+                    validate_training_plan_for_run_mode(training_plan, run_mode)
                 json_response(
                     self,
                     EXPERIMENT_RUNNER.start(
@@ -11310,6 +11873,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         reusable_split_policy,
                         training_plan,
                         material_config,
+                        hyperparameter_sweep,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

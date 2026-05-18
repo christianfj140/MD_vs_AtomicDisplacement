@@ -323,6 +323,93 @@
               <small>
                 Usa la misma multiplicidad en todos los ell de hidden irreps, por ejemplo 32x0e + 32x1o + 32x2e + 32x3o. El número de componentes de matriz Hamiltonian queda bloqueado por el pipeline para evitar salidas spin-polarized incompatibles con referencias SIESTA no polarizadas.
               </small>
+              <section id="hyperparameter-sweep-panel" class="training-plan-panel">
+                <div class="panel-heading compact-heading">
+                  <div>
+                    <p class="eyebrow">Training sweep</p>
+                    <h3>Hyperparameter sweep</h3>
+                    <p class="field-help">
+                      Ejecuta el producto cartesiano de listas finitas usando el mismo camino interno de training plan.
+                    </p>
+                  </div>
+                  <label class="checkbox-inline">
+                    <input id="sweep-enabled" type="checkbox" />
+                    <span>Enable sweep</span>
+                  </label>
+                </div>
+                <div class="grid four split-grid">
+                  <label class="field">
+                    <span>Label prefix</span>
+                    <input id="sweep-label-prefix" type="text" value="sweep" />
+                  </label>
+                  <label class="field">
+                    <span>Max configs</span>
+                    <input id="sweep-max-configs" type="number" step="1" min="1" value="256" />
+                  </label>
+                  <label class="field">
+                    <span>Epochs list</span>
+                    <input id="sweep-max-epochs" type="text" placeholder="100, 200" />
+                  </label>
+                  <label class="field">
+                    <span>Learning rates</span>
+                    <input id="sweep-optim-lr" type="text" placeholder="0.005, 0.001" />
+                  </label>
+                  <label class="field">
+                    <span>Batch sizes</span>
+                    <input id="sweep-batch-size" type="text" placeholder="32, 64" />
+                  </label>
+                  <label class="field">
+                    <span>Loader threads</span>
+                    <input id="sweep-loader-threads" type="text" placeholder="4, 8, 12" />
+                  </label>
+                  <label class="field">
+                    <span>Interactions</span>
+                    <input id="sweep-num-interactions" type="text" placeholder="1, 2" />
+                  </label>
+                  <label class="field">
+                    <span>Correlation</span>
+                    <input id="sweep-correlation" type="text" placeholder="1, 2" />
+                  </label>
+                  <label class="field">
+                    <span>Max ell</span>
+                    <input id="sweep-max-ell" type="text" placeholder="2, 3" />
+                  </label>
+                  <label class="field">
+                    <span>Hidden irreps channels</span>
+                    <input id="sweep-hidden-irreps-channels" type="text" placeholder="10, 32" />
+                  </label>
+                  <label class="field wide-field">
+                    <span>Loss list</span>
+                    <textarea id="sweep-loss" rows="2" placeholder="graph2mat.metrics.block_type_mae"></textarea>
+                  </label>
+                  <label class="field wide-field">
+                    <span>Hidden irreps list</span>
+                    <textarea id="sweep-hidden-irreps" rows="2" placeholder="10x0e + 10x1o + 10x2e"></textarea>
+                  </label>
+                </div>
+                <div id="sweep-status" class="muted-text">Sweep disabled.</div>
+                <div id="sweep-preview-nav" class="sweep-preview-nav hidden">
+                  <button id="sweep-preview-first" type="button" class="mini-button">First</button>
+                  <button id="sweep-preview-prev" type="button" class="mini-button">Prev</button>
+                  <span id="sweep-preview-page" class="muted-text">Page 1 / 1</span>
+                  <button id="sweep-preview-next" type="button" class="mini-button">Next</button>
+                  <button id="sweep-preview-last" type="button" class="mini-button">Last</button>
+                </div>
+                <div class="cleanup-table-wrap">
+                  <table class="cleanup-table">
+                    <thead>
+                      <tr>
+                        <th>Run</th>
+                        <th>#</th>
+                        <th>Label</th>
+                        <th>Overrides</th>
+                        <th>Hidden dim</th>
+                      </tr>
+                    </thead>
+                    <tbody id="sweep-preview-list"></tbody>
+                  </table>
+                </div>
+              </section>
               <section id="training-plan-panel" class="training-plan-panel hidden">
                 <div class="panel-heading compact-heading">
                   <div>
@@ -808,18 +895,18 @@
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">Destructive actions</p>
-                <h3>Generated datasets</h3>
+                <h3>Plot result runs</h3>
                 <p class="field-help">
-                  Selecciona artefactos generados concretos. El borrado no toca codigo, configs ni pseudopotenciales.
+                  Lista solo los runs archivados que alimentan los plots actuales. El borrado no toca codigo, configs, pseudopotenciales, datasets fuente ni workspaces.
                 </p>
               </div>
               <div class="button-row">
-                <button id="refresh-dataset-targets" class="button secondary" type="button">Reload list</button>
+                <button id="refresh-dataset-targets" class="button secondary" type="button">Reload plot list</button>
                 <button id="delete-selected-datasets" class="button danger" type="button">Delete selected</button>
-                <button id="clear-datasets" class="button danger" type="button">Clear all generated</button>
+                <button id="clear-datasets" class="button danger" type="button">Delete all listed</button>
               </div>
             </div>
-            <div id="dataset-cleanup-status" class="muted-text">Loading generated dataset list...</div>
+            <div id="dataset-cleanup-status" class="muted-text">Loading plot-visible result runs...</div>
             <div class="cleanup-table-wrap">
               <table class="cleanup-table">
                 <thead>

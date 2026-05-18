@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import inspect
 import csv
+import re
 import sys
 import glob
 from pathlib import Path
@@ -37,6 +38,7 @@ from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
 SPLITS_DIR = DATASET_DIR / "splits"
 EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
+EDGE_LABEL_CONSUMPTION_PATTERN = re.compile(r"consumed=(\d+), total=(\d+)")
 
 
 def incomplete_prediction_error(exc: ValueError) -> RuntimeError:
@@ -46,8 +48,41 @@ def incomplete_prediction_error(exc: ValueError) -> RuntimeError:
     )
 
 
+def edge_label_consumption_counts(exc: ValueError) -> tuple[int, int] | None:
+    match = EDGE_LABEL_CONSUMPTION_PATTERN.search(str(exc))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def recoverable_edge_label_consumption_error(exc: ValueError) -> bool:
+    """Detect Graph2Mat's symmetric same-species edge accounting mismatch."""
+
+    if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
+        return False
+    counts = edge_label_consumption_counts(exc)
+    if counts is None:
+        return False
+    consumed, total = counts
+    return consumed > total
+
+
+def warn_recovered_edge_label_consumption(exc: ValueError, *, batch_idx: int | None = None) -> None:
+    suffix = f" batch={batch_idx}" if batch_idx is not None else ""
+    print(
+        "[WARN] Graph2Mat MatrixWriter reported an edge-label consumption "
+        f"mismatch{suffix}: {exc}. Continuing and validating all prediction "
+        "outputs after export.",
+        file=sys.stderr,
+    )
+
+
 class StrictMatrixWriter(MatrixWriter):
-    """MatrixWriter variant that fails closed on partial prediction export."""
+    """MatrixWriter variant that fails closed unless output validation can decide."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._warned_edge_label_consumption = False
 
     def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
         try:
@@ -55,6 +90,11 @@ class StrictMatrixWriter(MatrixWriter):
         except ValueError as exc:
             if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
                 raise
+            if recoverable_edge_label_consumption_error(exc):
+                if not self._warned_edge_label_consumption:
+                    warn_recovered_edge_label_consumption(exc, batch_idx=batch_idx)
+                    self._warned_edge_label_consumption = True
+                return None
             raise incomplete_prediction_error(exc) from exc
 
 
@@ -135,6 +175,14 @@ def expected_prediction_outputs(predict_structs: str, output_file: str) -> list[
     return outputs
 
 
+def clear_prediction_outputs(predict_structs: str, output_file: str) -> None:
+    for output in expected_prediction_outputs(predict_structs, output_file):
+        try:
+            output.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def validate_prediction_outputs(predict_structs: str, output_file: str) -> None:
     outputs = expected_prediction_outputs(predict_structs, output_file)
     if not outputs:
@@ -191,12 +239,16 @@ def main() -> int:
         callbacks=callbacks,
     )
 
+    clear_prediction_outputs(predict_structs, str(callbacks_config["output_file"]))
     try:
         trainer.predict(model, datamodule=datamodule, ckpt_path=str(TRAINING_DIR / ckpt_path))
     except ValueError as exc:
         if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
             raise
-        raise incomplete_prediction_error(exc) from exc
+        if recoverable_edge_label_consumption_error(exc):
+            warn_recovered_edge_label_consumption(exc)
+        else:
+            raise incomplete_prediction_error(exc) from exc
     validate_prediction_outputs(
         predict_structs,
         str(callbacks_config["output_file"]),

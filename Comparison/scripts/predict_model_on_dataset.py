@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -36,6 +37,7 @@ from torch_safe_globals import (
 allow_graph2mat_checkpoint_globals()
 
 EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
+EDGE_LABEL_CONSUMPTION_PATTERN = re.compile(r"consumed=(\d+), total=(\d+)")
 PREDICTION_OUTPUT_FILE = "ML_prediction.HSX"
 
 
@@ -44,6 +46,35 @@ def incomplete_prediction_error(exc: ValueError) -> RuntimeError:
         "Graph2Mat MatrixWriter reported incomplete prediction export: "
         f"{exc}. Existing output files are not accepted as proof of complete, "
         "sample-mapped Hamiltonian predictions."
+    )
+
+
+def edge_label_consumption_counts(exc: ValueError) -> tuple[int, int] | None:
+    match = EDGE_LABEL_CONSUMPTION_PATTERN.search(str(exc))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def recoverable_edge_label_consumption_error(exc: ValueError) -> bool:
+    """Detect Graph2Mat's symmetric same-species edge accounting mismatch."""
+
+    if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
+        return False
+    counts = edge_label_consumption_counts(exc)
+    if counts is None:
+        return False
+    consumed, total = counts
+    return consumed > total
+
+
+def warn_recovered_edge_label_consumption(exc: ValueError, *, batch_idx: int | None = None) -> None:
+    suffix = f" batch={batch_idx}" if batch_idx is not None else ""
+    print(
+        "[WARN] Graph2Mat MatrixWriter reported an edge-label consumption "
+        f"mismatch{suffix}: {exc}. Continuing and validating all prediction "
+        "outputs after export.",
+        file=sys.stderr,
     )
 
 
@@ -78,12 +109,21 @@ def reset_output_directory(path: Path) -> None:
 
 def strict_matrix_writer_class(matrix_writer_cls: type) -> type:
     class StrictMatrixWriter(matrix_writer_cls):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._warned_edge_label_consumption = False
+
         def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
             try:
                 return super()._on_batch_end(split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx)
             except ValueError as exc:
                 if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
                     raise
+                if recoverable_edge_label_consumption_error(exc):
+                    if not self._warned_edge_label_consumption:
+                        warn_recovered_edge_label_consumption(exc, batch_idx=batch_idx)
+                        self._warned_edge_label_consumption = True
+                    return None
                 raise incomplete_prediction_error(exc) from exc
 
     return StrictMatrixWriter
@@ -294,7 +334,10 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
     except ValueError as exc:
         if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
             raise
-        raise incomplete_prediction_error(exc) from exc
+        if recoverable_edge_label_consumption_error(exc):
+            warn_recovered_edge_label_consumption(exc)
+        else:
+            raise incomplete_prediction_error(exc) from exc
 
 
 def checkpoint_training_dir(checkpoint: Path) -> Path:
