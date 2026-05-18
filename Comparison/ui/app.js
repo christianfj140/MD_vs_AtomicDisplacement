@@ -5239,8 +5239,6 @@ async function boot() {
   updateReusableDatasetPanel();
   updateTrainingPlanPanel();
   await pollOnce();
-  await loadResults();
-  await loadDatasetTargets();
   state.polling = setInterval(pollOnce, POLL_INTERVAL_MS);
 }
 

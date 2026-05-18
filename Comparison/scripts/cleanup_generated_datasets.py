@@ -140,7 +140,7 @@ def _manifest_metadata(path: Path) -> dict[str, Any]:
     return {}
 
 
-def generated_dataset_records(repo_root: Path = REPO_ROOT) -> list[dict[str, Any]]:
+def generated_dataset_records(repo_root: Path = REPO_ROOT, *, include_bytes: bool = False) -> list[dict[str, Any]]:
     repo_root = repo_root.resolve()
     records: list[dict[str, Any]] = []
     for target in generated_dataset_targets(repo_root):
@@ -163,7 +163,7 @@ def generated_dataset_records(repo_root: Path = REPO_ROOT) -> list[dict[str, Any
                 "dataset_size": metadata.get("dataset_size"),
                 "run_id": metadata.get("run_id") or metadata.get("experiment_id"),
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
-                "bytes": _directory_size_bytes(target),
+                "bytes": _directory_size_bytes(target) if include_bytes else None,
                 "warning": (
                     "Borrar este artefacto fisico no edita recetas ni configuraciones; "
                     "puede dejar resultados historicos apuntando a una ruta eliminada."
