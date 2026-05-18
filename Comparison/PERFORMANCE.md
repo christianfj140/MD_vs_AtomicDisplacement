@@ -39,3 +39,7 @@ Si `gpu` se solicita explícitamente y CUDA no está disponible, el experimento 
   forma explicita hasta que exista una clave de hash completa.
 - No se cambian basis, SIESTA SCF settings, splits ni validaciones para ganar
   velocidad.
+- Los tiempos actuales son diagnosticos de pipeline. No implementan todavia un
+  benchmark DeepH-vs-DFT de escalado por tamano de sistema, que requeriria una
+  serie controlada de sistemas, protocolo de timing DFT/DeepH y normalizacion de
+  hardware.

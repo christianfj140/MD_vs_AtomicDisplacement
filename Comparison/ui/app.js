@@ -142,6 +142,90 @@ const METRIC_HELP = {
     purpose: "Ofrece una lectura robusta del error tipico porque promedia magnitudes absolutas sin cuadrarlas.",
     direction: "Menor es mejor.",
   },
+  mse_ref_eV2: {
+    label: "MSE ref",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\operatorname{mean}_{ij\\in R}|H^{pred}_{ij}-H^{ref}_{ij}|^2",
+    description: "Error cuadratico medio del Hamiltoniano en el soporte no nulo de referencia, con unidades eV^2.",
+    purpose: "Diagnostico DeepH-comparable para penalizar mas los errores grandes sin cambiar la politica de soporte sparse.",
+    direction: "Menor es mejor; no reemplaza las metricas espectrales primarias.",
+  },
+  mse_pred_eV2: {
+    label: "MSE pred",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\operatorname{mean}_{ij\\in P}|H^{pred}_{ij}-H^{ref}_{ij}|^2",
+    description: "Error cuadratico medio del Hamiltoniano en el soporte no nulo predicho, con unidades eV^2.",
+    purpose: "Ayuda a revisar errores donde el modelo predice acoplamientos activos.",
+    direction: "Menor es mejor; diagnostico secundario.",
+  },
+  mse_union_eV2: {
+    label: "MSE union",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\operatorname{mean}_{ij\\in R\\cup P}|H^{pred}_{ij}-H^{ref}_{ij}|^2",
+    description: "Error cuadratico medio del Hamiltoniano en la union de soportes referencia/prediccion, con unidades eV^2.",
+    purpose: "Resume valor y soporte sparse en una metrica cuadratica de matriz.",
+    direction: "Menor es mejor; diagnostico secundario.",
+  },
+  r2_ref: {
+    label: "R2 ref",
+    formula: "R^2=1-\\frac{\\sum|H^{pred}-H^{ref}|^2}{\\sum|H^{ref}-\\overline{H}^{ref}|^2}",
+    description: "Coeficiente de determinacion del Hamiltoniano en el soporte de referencia.",
+    purpose: "Complementa MAE/RMSE mostrando cuanta variacion del target queda explicada.",
+    direction: "Mayor es mejor; no esta disponible si el target es constante.",
+  },
+  r2_pred: {
+    label: "R2 pred",
+    formula: "R^2=1-\\frac{\\sum|H^{pred}-H^{ref}|^2}{\\sum|H^{ref}-\\overline{H}^{ref}|^2}",
+    description: "Coeficiente de determinacion del Hamiltoniano en el soporte predicho.",
+    purpose: "Diagnostica varianza explicada donde el modelo predice entradas activas.",
+    direction: "Mayor es mejor; no esta disponible si el target es constante.",
+  },
+  r2_union: {
+    label: "R2 union",
+    formula: "R^2=1-\\frac{\\sum|H^{pred}-H^{ref}|^2}{\\sum|H^{ref}-\\overline{H}^{ref}|^2}",
+    description: "Coeficiente de determinacion del Hamiltoniano en la union de soportes.",
+    purpose: "Complementa los errores sparse de union con una lectura de varianza explicada.",
+    direction: "Mayor es mejor; no esta disponible si el target es constante.",
+  },
+  mae_ref_meV: {
+    label: "MAE ref meV",
+    formula: "1000\\times \\operatorname{MAE}_{ref,eV}",
+    description: "Alias de MAE ref en meV para reportes estilo DeepH.",
+    purpose: "Cambia solo la unidad; la definicion y el soporte son los mismos que MAE ref en eV.",
+    direction: "Menor es mejor.",
+  },
+  rmse_ref_meV: {
+    label: "RMSE ref meV",
+    formula: "1000\\times \\operatorname{RMSE}_{ref,eV}",
+    description: "Alias de RMSE ref en meV para reportes estilo DeepH.",
+    purpose: "Cambia solo la unidad; la definicion y el soporte son los mismos que RMSE ref en eV.",
+    direction: "Menor es mejor.",
+  },
+  mae_pred_meV: {
+    label: "MAE pred meV",
+    formula: "1000\\times \\operatorname{MAE}_{pred,eV}",
+    description: "Alias de MAE pred en meV.",
+    purpose: "Facilita comparar magnitudes sin alterar la metrica base.",
+    direction: "Menor es mejor.",
+  },
+  rmse_pred_meV: {
+    label: "RMSE pred meV",
+    formula: "1000\\times \\operatorname{RMSE}_{pred,eV}",
+    description: "Alias de RMSE pred en meV.",
+    purpose: "Facilita comparar magnitudes sin alterar la metrica base.",
+    direction: "Menor es mejor.",
+  },
+  mae_union_meV: {
+    label: "MAE union meV",
+    formula: "1000\\times \\operatorname{MAE}_{union,eV}",
+    description: "Alias de MAE union en meV.",
+    purpose: "Reporta la misma metrica de union sparse en una escala mas comun para DeepH.",
+    direction: "Menor es mejor.",
+  },
+  rmse_union_meV: {
+    label: "RMSE union meV",
+    formula: "1000\\times \\operatorname{RMSE}_{union,eV}",
+    description: "Alias de RMSE union en meV.",
+    purpose: "Reporta la misma metrica de union sparse en una escala mas comun para DeepH.",
+    direction: "Menor es mejor.",
+  },
   support_f1: {
     label: "Support F1",
     formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s F_1^{(s)},\\quad F_1=\\frac{2\\,\\mathrm{precision}\\,\\mathrm{recall}}{\\mathrm{precision}+\\mathrm{recall}}",
@@ -155,6 +239,13 @@ const METRIC_HELP = {
     description: "Distancia Wasserstein-1 entre densidades de estados predicha y de referencia.",
     purpose: "Cuantifica cuanta masa espectral habria que desplazar en energia para transformar una DOS en la otra.",
     direction: "Menor es mejor; cero indica distribuciones DOS indistinguibles en esta metrica.",
+  },
+  dos_mae_500_fermi_window: {
+    label: "DOS MAE 500 Fermi window",
+    formula: "\\frac{1}{500}\\sum_{k=1}^{500}|D^{pred}(E_F+x_k)-D^{ref}(E_F+x_k)|,\\quad x_k\\in[-6,6]\\,eV",
+    description: "MAE entre DOS predicha y referencia en 500 puntos alrededor del Fermi de SIESTA.",
+    purpose: "Diagnostico DOS comparable con DeepH; requiere un Fermi real y no se sustituye si falta.",
+    direction: "Menor es mejor; no estima Fermi desde HOMO/LUMO.",
   },
   dos_ks_statistic: {
     label: "DOS KS statistic",
@@ -233,6 +324,34 @@ const PLOT_HELP_BY_ID = {
     purpose: "Ayuda a localizar compromisos: buen espectro, buena matriz, buen soporte sparse y coste razonable.",
     direction: "Verde es mejor dentro de cada columna; Support F1 invierte la escala porque ahi mayor es mejor.",
   },
+  "plot-deeph-mev": {
+    title: "DeepH-comparable matrix MAE/RMSE",
+    metric: "Hamiltonian MAE/RMSE in meV",
+    formula: "1000\\times m_{eV}\\quad\\text{en los mismos soportes sparse del repositorio}",
+    description: "Aliases en meV para MAE/RMSE del Hamiltoniano en soporte referencia y union.",
+    purpose: "Facilita comparar magnitudes con reportes estilo DeepH sin cambiar la definicion de soporte.",
+    direction: "Menor es mejor; son diagnosticos sobre la matriz raw/global del repositorio, no H' local transformado.",
+  },
+  "plot-deeph-mse": {
+    title: "DeepH-comparable matrix MSE",
+    metricKey: "mse_union_eV2",
+  },
+  "plot-deeph-r2": {
+    title: "Hamiltonian R2 diagnostics",
+    metricKey: "r2_union",
+  },
+  "plot-deeph-dos": {
+    title: "DOS MAE 500 Fermi window",
+    metricKey: "dos_mae_500_fermi_window",
+  },
+  "plot-orbital-pair": {
+    title: "Orbital-pair MAE heatmap",
+    metric: "mae_union_meV_mean by species pair and local orbital indices",
+    formula: "z_{ab}=\\operatorname{mean}_s(\\operatorname{MAE}_{union,meV}^{(s)}(a,b))",
+    description: "Heatmap diagnostico desde metrics/orbital_pair_summary.csv cuando existe.",
+    purpose: "Permite inspeccionar errores orbital-orbital estilo DeepH por species_pair e indices locales.",
+    direction: "Menor es mejor; diagnostico repo-compatible en la base Hamiltoniana raw/global, no metrica H' exacta ni winner primario.",
+  },
 };
 
 const CROSS_PLOT_HELP_BY_ID = {
@@ -265,7 +384,7 @@ const state = {
   pollingInFlight: false,
   pollingFailures: 0,
   lastPollingToastAt: 0,
-  plotsEnabled: false,
+  plotsEnabled: true,
   plotData: null,
   fcMaxPerDisplacement: null,
   experimentWasRunning: false,
@@ -2756,6 +2875,9 @@ async function loadResults() {
   const archived = results.archived || {};
   for (const pipeline of resultPipelines) {
     const items = archived[pipeline.key] || [];
+    const orbitalPairItems = items.filter((item) => item?.diagnostic_outputs?.orbital_pair_metrics?.exists);
+    const orbitalPairPath = orbitalPairItems[0]?.diagnostic_outputs?.orbital_pair_metrics?.path ||
+      `Comparison/results/${pipeline.resultsDir}/.../metrics/orbital_pair_metrics.csv`;
     const panel = document.createElement("section");
     panel.className = "panel result-row";
     panel.innerHTML = `
@@ -2764,7 +2886,9 @@ async function loadResults() {
         <h3>${pipeline.label}</h3>
       </div>
       <p><strong>${items.length}</strong> archived experiment runs</p>
+      <p><strong>Orbital-pair diagnostics:</strong> ${orbitalPairItems.length}/${items.length} runs</p>
       <code>Comparison/results/${pipeline.resultsDir}</code>
+      <code>${orbitalPairPath}</code>
     `;
     grid.appendChild(panel);
   }
@@ -3284,6 +3408,238 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
   renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
 }
 
+function renderR2Plot(id, runs) {
+  const metrics = [
+    { key: "r2_union", label: "R2 union" },
+    { key: "r2_ref", label: "R2 ref" },
+  ];
+  const traces = lineTraces(runs, "sparse", metrics);
+  const values = runs.flatMap((run) => metrics.map((metric) => metricValue(run, "sparse", metric.key))).filter((value) => value != null);
+  const yaxis = { title: "R2", gridcolor: "#edf1f4", zeroline: true };
+  if (values.length) {
+    const minValue = Math.min(...values);
+    const maxValue = Math.max(...values);
+    if (minValue >= 0.8 && maxValue <= 1.05) {
+      yaxis.range = [Math.max(0, minValue - 0.03), Math.min(1.05, Math.max(1.01, maxValue + 0.01))];
+    }
+  }
+  let layout = plotLayout("DeepH-comparable matrix R2", "R2", { yaxis });
+  const annotations = [];
+  const availabilityAnnotation = metricGapAnnotation(runs, "sparse", "r2_union");
+  if (availabilityAnnotation) annotations.push(availabilityAnnotation);
+  if (!traces.length) {
+    annotations.push(emptyPlotAnnotation("No hay R2 finito; puede ser no disponible para targets constantes."));
+  }
+  if (annotations.length) {
+    layout.annotations = annotations;
+    layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 74) };
+  }
+  layout = withFitSelector(layout, traces);
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function dosWindowUnavailableReasonAnnotation(runs) {
+  const counts = new Map();
+  for (const run of runs) {
+    for (const row of run.samples?.dos || []) {
+      const value = finiteNumber(row.dos_mae_500_fermi_window);
+      const available = String(row.dos_window_metric_available ?? "").trim().toLowerCase();
+      const markedUnavailable = ["false", "0", "no"].includes(available);
+      const reason = String(row.dos_window_unavailable_reason || "").trim();
+      if (value != null && !markedUnavailable) continue;
+      if (!markedUnavailable && !reason) continue;
+      const key = reason || "unavailable";
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  if (!counts.size) return null;
+  const pieces = Array.from(counts.entries())
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0])))
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .slice(0, 5);
+  return topPlotAnnotation(`DOS Fermi-window unavailable: ${pieces.join(" | ")}`, 1.22);
+}
+
+function renderDosFermiMaePlot(id, runs) {
+  const metrics = [{ key: "dos_mae_500_fermi_window", label: "DOS MAE 500 Fermi window" }];
+  const traces = lineTraces(runs, "dos", metrics);
+  let layout = plotLayout("DeepH-comparable DOS MAE", "DOS MAE");
+  const annotations = [];
+  const availabilityAnnotation = metricGapAnnotation(runs, "dos", "dos_mae_500_fermi_window");
+  if (availabilityAnnotation) annotations.push(availabilityAnnotation);
+  const reasonAnnotation = dosWindowUnavailableReasonAnnotation(runs);
+  if (reasonAnnotation) annotations.push(reasonAnnotation);
+  if (!traces.length) {
+    annotations.push(
+      emptyPlotAnnotation("No hay DOS_MAE_500_FermiWindow finito; revisa Fermi real y columnas DOS."),
+    );
+  }
+  if (annotations.length) {
+    layout.annotations = annotations;
+    layout.margin = { ...layout.margin, t: Math.max(layout.margin?.t || 46, 92) };
+  }
+  layout = withFitSelector(layout, traces);
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function orbitalPairAxisEntry(row, prefix) {
+  const species = String(row?.[`${prefix}_species`] || "").trim();
+  const index = row?.[`${prefix}_orbital_index`];
+  const indexText = index == null ? "" : String(index).replace(/\.0$/, "");
+  const label = String(row?.[`${prefix}_orbital_label`] || "").trim() || (indexText ? `orbital_${indexText}` : "orbital");
+  return {
+    key: `${species}|${indexText}|${label}`,
+    label: `${species ? `${species} ` : ""}${label}`,
+    species,
+    index: finiteNumber(index) ?? Number.POSITIVE_INFINITY,
+  };
+}
+
+function orbitalPairMetricValue(row) {
+  return finiteNumber(row.mae_union_meV_mean) ?? finiteNumber(row.mae_union_meV);
+}
+
+function orbitalPairRmseValue(row) {
+  return finiteNumber(row.rmse_union_eV_mean) ?? finiteNumber(row.rmse_union_eV);
+}
+
+function orbitalPairR2Value(row) {
+  return finiteNumber(row.r2_union_mean) ?? finiteNumber(row.r2_union);
+}
+
+function sortedOrbitalEntries(entriesByKey) {
+  return Array.from(entriesByKey.values()).sort(
+    (left, right) =>
+      left.species.localeCompare(right.species) ||
+      left.index - right.index ||
+      left.label.localeCompare(right.label),
+  );
+}
+
+function orbitalPairHeatmapChoices(runs) {
+  const choices = [];
+  for (const run of runs) {
+    const grouped = new Map();
+    for (const row of run.samples?.orbital_pair_summary || []) {
+      if (orbitalPairMetricValue(row) == null) continue;
+      const speciesPair = String(row.species_pair || `${row.row_species || "?"}-${row.col_species || "?"}`);
+      if (!grouped.has(speciesPair)) grouped.set(speciesPair, []);
+      grouped.get(speciesPair).push(row);
+    }
+    for (const [speciesPair, rows] of grouped.entries()) {
+      choices.push({
+        run,
+        speciesPair,
+        rows,
+        label: `${runDisplayLabel(run)} · ${speciesPair}`,
+      });
+    }
+  }
+  return choices;
+}
+
+function orbitalPairTrace(choice, visible) {
+  const rowEntries = new Map();
+  const colEntries = new Map();
+  for (const row of choice.rows) {
+    const rowEntry = orbitalPairAxisEntry(row, "row");
+    const colEntry = orbitalPairAxisEntry(row, "col");
+    rowEntries.set(rowEntry.key, rowEntry);
+    colEntries.set(colEntry.key, colEntry);
+  }
+  const yEntries = sortedOrbitalEntries(rowEntries);
+  const xEntries = sortedOrbitalEntries(colEntries);
+  const yIndex = new Map(yEntries.map((entry, index) => [entry.key, index]));
+  const xIndex = new Map(xEntries.map((entry, index) => [entry.key, index]));
+  const z = yEntries.map(() => xEntries.map(() => null));
+  const customdata = yEntries.map(() => xEntries.map(() => ""));
+  for (const row of choice.rows) {
+    const value = orbitalPairMetricValue(row);
+    if (value == null) continue;
+    const rowKey = orbitalPairAxisEntry(row, "row").key;
+    const colKey = orbitalPairAxisEntry(row, "col").key;
+    const y = yIndex.get(rowKey);
+    const x = xIndex.get(colKey);
+    if (y == null || x == null) continue;
+    z[y][x] = value;
+    const nSamples = row.n_samples ?? "-";
+    const nEntries = row.n_entries ?? "-";
+    const rmse = orbitalPairRmseValue(row);
+    const r2 = orbitalPairR2Value(row);
+    customdata[y][x] =
+      `species_pair ${choice.speciesPair}<br>` +
+      `samples ${nSamples}, entries ${nEntries}<br>` +
+      `RMSE ${rmse == null ? "No metric" : `${rmse.toPrecision(4)} eV`}<br>` +
+      `R2 ${r2 == null ? "No metric" : r2.toPrecision(4)}`;
+  }
+  return {
+    type: "heatmap",
+    name: choice.label,
+    visible,
+    z,
+    x: xEntries.map((entry) => entry.label),
+    y: yEntries.map((entry) => entry.label),
+    customdata,
+    colorscale: [
+      [0, "#e8f6f3"],
+      [0.5, "#f1c453"],
+      [1, "#b15c5f"],
+    ],
+    colorbar: { title: { text: "MAE<br>meV" } },
+    hoverongaps: false,
+    hovertemplate:
+      "row %{y}<br>col %{x}<br>MAE %{z:.4g} meV<br>%{customdata}<extra>%{fullData.name}</extra>",
+  };
+}
+
+function renderOrbitalPairHeatmap(id, runs) {
+  const choices = orbitalPairHeatmapChoices(runs);
+  if (!choices.length) {
+    const hasDiagnosticFile = runs.some((run) => run.diagnostic_outputs?.orbital_pair_summary?.exists);
+    const message = hasDiagnosticFile
+      ? "orbital_pair_summary.csv existe, pero no hay mae_union_meV_mean finito para dibujar."
+      : "No hay orbital_pair_summary.csv disponible; la salida orbital-pair sigue siendo diagnostica cuando se genere.";
+    renderEmptyPlot(id, "Orbital-pair MAE heatmap", message, "MAE meV");
+    return;
+  }
+  const traces = choices.map((choice, index) => orbitalPairTrace(choice, index === 0));
+  const titleFor = (choice) => `Orbital-pair MAE meV · ${choice.label}`;
+  const layout = {
+    ...plotLayout(titleFor(choices[0]), "MAE meV", {
+      xaxis: { title: "Column local orbital", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: "Row local orbital", gridcolor: "#edf1f4", zeroline: false, autorange: "reversed" },
+      margin: { l: 112, r: 32, t: choices.length > 1 ? 96 : 66, b: 96 },
+      annotations: [
+        topPlotAnnotation(
+          "Diagnostico desde orbital_pair_summary.csv; no participa en winner analysis ni representa H' local exacto.",
+          choices.length > 1 ? 1.18 : 1.08,
+          "#56616f",
+        ),
+      ],
+    }),
+  };
+  if (choices.length > 1) {
+    layout.updatemenus = [
+      {
+        type: "dropdown",
+        x: 1,
+        y: 1.18,
+        xanchor: "right",
+        yanchor: "top",
+        buttons: choices.map((choice, index) => ({
+          label: choice.label,
+          method: "update",
+          args: [
+            { visible: choices.map((_item, itemIndex) => itemIndex === index) },
+            { title: { text: titleFor(choice), x: 0.02, xanchor: "left", font: { size: 15 } } },
+          ],
+        })),
+      },
+    ];
+  }
+  renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
 function renderBoxPlot(id, runs) {
   const traces = [];
   const availability = [];
@@ -3758,6 +4114,11 @@ function selectedCrossMetric() {
   return document.getElementById("plot-cross-metric")?.value || CROSS_PLOT_METRIC_DEFAULT;
 }
 
+function metricHigherIsBetter(metric) {
+  const key = String(metric || "");
+  return key === "support_f1" || key.startsWith("r2_");
+}
+
 function crossMethodLabel(method) {
   return methodDisplayLabel(method);
 }
@@ -4153,6 +4514,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
   }
   const scientificStatus = experiment?.recommendation?.scientific_status;
   const means = groupedCrossMetrics(experiment?.metrics || [], metric);
+  const higherIsBetter = metricHigherIsBetter(metric);
   const methods = crossTrainMethods(experiment);
   const methodLabel = crossMethodLabel;
   const comboLabels = Array.from(new Set(means.map(crossDatasetComboLabel))).sort();
@@ -4165,7 +4527,9 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
     if (!candidates.length) return null;
     const available = candidates.filter((row) => row.metric_available);
     if (!available.length) return null;
-    const best = Math.min(...available.map((row) => row.mean));
+    const best = higherIsBetter
+      ? Math.max(...available.map((row) => row.mean))
+      : Math.min(...available.map((row) => row.mean));
     const winners = available.filter((row) => Math.abs(row.mean - best) < 1e-12);
     if (winners.length !== 1) return tieIndex;
     const index = methods.indexOf(winners[0].train_method);
@@ -4432,6 +4796,33 @@ function renderPlots(payload) {
   renderBoxPlot("plot-box", runs);
   renderScatterPlot("plot-scatter", runs);
   renderHeatmap("plot-heatmap", runs);
+  renderLinePlot(
+    "plot-deeph-mev",
+    runs,
+    "sparse",
+    [
+      { key: "mae_union_meV", label: "MAE union" },
+      { key: "rmse_union_meV", label: "RMSE union" },
+      { key: "mae_ref_meV", label: "MAE ref" },
+      { key: "rmse_ref_meV", label: "RMSE ref" },
+    ],
+    "DeepH-comparable matrix MAE/RMSE",
+    "meV",
+  );
+  renderLinePlot(
+    "plot-deeph-mse",
+    runs,
+    "sparse",
+    [
+      { key: "mse_union_eV2", label: "MSE union" },
+      { key: "mse_ref_eV2", label: "MSE ref" },
+    ],
+    "DeepH-comparable matrix MSE",
+    "MSE eV^2",
+  );
+  renderR2Plot("plot-deeph-r2", runs);
+  renderDosFermiMaePlot("plot-deeph-dos", runs);
+  renderOrbitalPairHeatmap("plot-orbital-pair", runs);
   renderLinePlot("plot-frontier", runs, "spectral", [{ key: "frontier_window_rmse_eV", label: "Frontier RMSE" }], "Frontier window", "RMSE eV");
   renderLinePlot("plot-aligned", runs, "spectral", [{ key: "align_global_rmse_eV", label: "Aligned global RMSE" }], "Spectral aligned RMSE", "RMSE eV");
   renderSensitivitySweeps("plot-sweeps", runs);

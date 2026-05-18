@@ -30,9 +30,52 @@ FERMI_WINDOW_EV = 2.0
 DOS_SIGMA_EV = 0.10
 DOS_SIGMA_SWEEP_EV = [0.05, 0.10, 0.20, 0.40]
 DOS_POINTS = 1000
+DOS_FERMI_WINDOW_POINTS = 500
+DOS_FERMI_WINDOW_MIN_EV = -6.0
+DOS_FERMI_WINDOW_MAX_EV = 6.0
+DOS_FERMI_WINDOW_ALIGNMENT = "reference_fermi_level"
 LOW_ENERGY_N_STATES = 10
 LOW_ENERGY_ALIGNMENT = "none"
 COMPLEX_IMAG_TOLERANCE = 1e-12
+MATRIX_METRIC_TARGET_SPACE = "raw_global_hamiltonian"
+ORBITAL_PAIR_METRIC_TARGET_SPACE = "raw_global_hamiltonian_orbital_basis"
+ORBITAL_PAIR_BASIS_SOURCE = "ion_xml_pao_degeneracy_generated_labels"
+DEEPH_COMPARABILITY_STATUS = {
+    "implemented_repo_compatible_metrics": [
+        "hamiltonian_mae_rmse_mse_r2_on_repository_supports",
+        "hamiltonian_mev_aliases",
+        "dos_mae_500_fermi_window_when_reference_fermi_exists",
+        "orbital_pair_metrics_csv_when_basis_mapping_exists",
+    ],
+    "caveats": [
+        "matrix_metrics_use_raw_global_hamiltonian_not_deeph_hprime",
+        "orbital_pair_metrics_use_repository_orbital_basis_not_deeph_local_hprime_blocks",
+        "dos_units_and_system_dimensionality_may_not_match_deeph_2d_examples",
+        "fermi_dependent_metrics_are_unavailable_when_siesta_fermi_is_missing",
+    ],
+    "future_work_not_implemented": {
+        "high_symmetry_kpath_band_structure": (
+            "requires explicit k-path input, k-resolved reference/predicted bands, "
+            "and validation against SIESTA band-structure outputs"
+        ),
+        "soc_complex_hamiltonians": (
+            "current compatibility gates reject complex Hamiltonians and unvalidated "
+            "spin-orbit or multi-component matrix semantics"
+        ),
+        "optical_berry_susceptibility_shift_current": (
+            "requires optical/Berry-response infrastructure, validated wavefunction "
+            "or velocity/dipole data, and material-specific scientific checks"
+        ),
+        "ensemble_uncertainty": (
+            "requires an explicit ensemble protocol and calibrated uncertainty "
+            "validation across independent model instances"
+        ),
+        "deeph_vs_dft_system_size_scaling": (
+            "requires controlled system-size series, DFT/DeepH timing protocol, "
+            "and hardware-normalized scaling analysis"
+        ),
+    },
+}
 PERIODIC_STRUCTURE_TYPES = {"bulk", "crystal", "periodic", "solid", "surface", "slab"}
 UNSUPPORTED_KPOINT_DIRECTIVES = {
     "kgrid_cutoff",
@@ -375,6 +418,7 @@ def evaluate_sample(
         "block": [],
         "species_pair": [],
         "distance_bin": [],
+        "orbital_pair": [],
         "structural_unavailable": [],
         "errors": [],
         "fatal_errors": [],
@@ -528,6 +572,7 @@ def evaluate_sample(
             rows["block"].extend(structural["block_rows"])
             rows["species_pair"].extend(structural["species_pair_rows"])
             rows["distance_bin"].extend(structural["distance_bin_rows"])
+            rows["orbital_pair"].extend(structural["orbital_pair_rows"])
         else:
             rows["structural_unavailable"].append({"sample": sample, "reason": structural["reason"]})
         if structural.get("distance_unavailable_reason"):
@@ -557,7 +602,11 @@ def evaluate_sample(
         fermi_level = reference.fermi_level
         fermi_source = reference.fermi_level_source or "unavailable"
         same_band_count = ref_eig.size == pred_eig.size
-        spectral_comparable = bool(reference.has_overlap and same_band_count and fermi_level is not None)
+        spectral_comparable = bool(
+            (reference.orthogonal or reference.has_overlap)
+            and same_band_count
+            and fermi_level is not None
+        )
         if fermi_level is None or not math.isfinite(fermi_level):
             sample_warnings.append(
                 append_issue(
@@ -567,7 +616,7 @@ def evaluate_sample(
                     kind="missing_fermi_level",
                     message=(
                         "SIESTA reference does not provide a Fermi level; "
-                        "near-Fermi, occupied-band, frontier, and gap metrics were left unavailable."
+                        "near-Fermi, occupied-band, frontier, gap, and fixed-window DOS metrics were left unavailable."
                     ),
                 )
             )
@@ -617,12 +666,13 @@ def evaluate_sample(
             }
         )
         dos_grid_rows, dos_metrics = dos_for_sample(ref_eig, pred_eig)
+        _dos_window_grid, dos_window_metrics = dos_fermi_window_metrics(ref_eig, pred_eig, fermi_level)
         write_csv(
             dos_root / f"{sample}.csv",
             ["energy_eV", "siesta_dos", "predicted_dos", "siesta_dos_normalized", "predicted_dos_normalized"],
             dos_grid_rows,
         )
-        rows["dos"].append({"sample": sample, **dos_metrics})
+        rows["dos"].append({"sample": sample, **dos_metrics, **dos_window_metrics})
         for sigma in DOS_SIGMA_SWEEP_EV:
             _grid_rows, sweep_metrics = dos_for_sample(ref_eig, pred_eig, sigma_ev=sigma)
             rows["dos_sweep"].append({"sample": sample, **sweep_metrics})
@@ -901,8 +951,30 @@ def mean_abs(values: list[complex]) -> float:
     return float(np.mean(np.abs(values))) if values else math.nan
 
 
+def mse(values: list[complex]) -> float:
+    return float(np.mean(np.abs(values) ** 2)) if values else math.nan
+
+
 def rmse(values: list[complex]) -> float:
     return float(np.sqrt(np.mean(np.abs(values) ** 2))) if values else math.nan
+
+
+def ev_to_mev(value: float) -> float:
+    return float(value) * 1000.0
+
+
+def r2_score(reference_values: list[complex], predicted_values: list[complex]) -> float:
+    if not reference_values:
+        return math.nan
+    reference_array = np.asarray(reference_values, dtype=complex)
+    predicted_array = np.asarray(predicted_values, dtype=complex)
+    if reference_array.size != predicted_array.size:
+        raise ValueError("R2 reference and prediction arrays must have the same size.")
+    numerator = float(np.sum(np.abs(predicted_array - reference_array) ** 2))
+    denominator = float(np.sum(np.abs(reference_array - np.mean(reference_array)) ** 2))
+    if denominator == 0.0:
+        return math.nan
+    return float(1.0 - numerator / denominator)
 
 
 def spearman_correlation(rows: list[dict[str, Any]], x_key: str, y_key: str) -> float:
@@ -933,15 +1005,30 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
     pred_support = set(pred_values)
     union_support = ref_support | pred_support
     intersection = ref_support & pred_support
+    ref_indices = sorted(ref_support)
+    pred_indices = sorted(pred_support)
+    union_indices = sorted(union_support)
 
     false_zeros = ref_support - pred_support
     false_nonzeros = pred_support - ref_support
-    deltas_ref = [pred_values.get(index, 0.0) - ref_values[index] for index in ref_support]
-    deltas_pred = [pred_values[index] - ref_values.get(index, 0.0) for index in pred_support]
+    deltas_ref = [pred_values.get(index, 0.0) - ref_values[index] for index in ref_indices]
+    deltas_pred = [pred_values[index] - ref_values.get(index, 0.0) for index in pred_indices]
     deltas_union = [
         pred_values.get(index, 0.0) - ref_values.get(index, 0.0)
-        for index in union_support
+        for index in union_indices
     ]
+    ref_targets_ref = [ref_values[index] for index in ref_indices]
+    pred_targets_ref = [pred_values.get(index, 0.0) for index in ref_indices]
+    ref_targets_pred = [ref_values.get(index, 0.0) for index in pred_indices]
+    pred_targets_pred = [pred_values[index] for index in pred_indices]
+    ref_targets_union = [ref_values.get(index, 0.0) for index in union_indices]
+    pred_targets_union = [pred_values.get(index, 0.0) for index in union_indices]
+    mae_ref = mean_abs(deltas_ref)
+    rmse_ref = rmse(deltas_ref)
+    mae_pred = mean_abs(deltas_pred)
+    rmse_pred = rmse(deltas_pred)
+    mae_union = mean_abs(deltas_union)
+    rmse_union = rmse(deltas_union)
     ref_fro = float(np.sqrt(sum(abs(value) ** 2 for value in ref_values.values())))
     ref_pattern_fro = float(np.sqrt(sum(abs(value) ** 2 for value in deltas_ref)))
     union_fro = float(np.sqrt(sum(abs(value) ** 2 for value in deltas_union)))
@@ -964,12 +1051,25 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "union_nnz": len(union_support),
         "ref_density": len(ref_support) / n_entries if n_entries else math.nan,
         "pred_density": len(pred_support) / n_entries if n_entries else math.nan,
-        "mae_ref_eV": mean_abs(deltas_ref),
-        "rmse_ref_eV": rmse(deltas_ref),
-        "mae_pred_eV": mean_abs(deltas_pred),
-        "rmse_pred_eV": rmse(deltas_pred),
-        "mae_union_eV": mean_abs(deltas_union),
-        "rmse_union_eV": rmse(deltas_union),
+        "matrix_metric_target_space": MATRIX_METRIC_TARGET_SPACE,
+        "mae_ref_eV": mae_ref,
+        "rmse_ref_eV": rmse_ref,
+        "mse_ref_eV2": mse(deltas_ref),
+        "r2_ref": r2_score(ref_targets_ref, pred_targets_ref),
+        "mae_ref_meV": ev_to_mev(mae_ref),
+        "rmse_ref_meV": ev_to_mev(rmse_ref),
+        "mae_pred_eV": mae_pred,
+        "rmse_pred_eV": rmse_pred,
+        "mse_pred_eV2": mse(deltas_pred),
+        "r2_pred": r2_score(ref_targets_pred, pred_targets_pred),
+        "mae_pred_meV": ev_to_mev(mae_pred),
+        "rmse_pred_meV": ev_to_mev(rmse_pred),
+        "mae_union_eV": mae_union,
+        "rmse_union_eV": rmse_union,
+        "mse_union_eV2": mse(deltas_union),
+        "r2_union": r2_score(ref_targets_union, pred_targets_union),
+        "mae_union_meV": ev_to_mev(mae_union),
+        "rmse_union_meV": ev_to_mev(rmse_union),
         "max_abs_error_union_eV": float(max((abs(value) for value in deltas_union), default=math.nan)),
         "relative_frobenius_ref": ref_pattern_fro / ref_fro if ref_fro else math.nan,
         "relative_frobenius_union": union_fro / ref_fro if ref_fro else math.nan,
@@ -1096,6 +1196,33 @@ def orbital_atom_map_from_basis(species: list[str], basis_counts: dict[str, int]
     return atom_by_orbital
 
 
+def orbital_records_from_basis(
+    species: list[str],
+    basis_counts: dict[str, int],
+    n_orbitals: int,
+) -> list[dict[str, Any]]:
+    missing = sorted({label for label in species if label not in basis_counts})
+    if missing:
+        raise RuntimeError(f"Missing .ion.xml basis for species: {', '.join(missing)}.")
+    records: list[dict[str, Any]] = []
+    for atom_index, label in enumerate(species):
+        for local_index in range(int(basis_counts[label])):
+            records.append(
+                {
+                    "atom_index": atom_index,
+                    "species": label,
+                    "local_orbital_index": local_index,
+                    "orbital_label": f"orbital_{local_index}",
+                }
+            )
+    if len(records) != n_orbitals:
+        raise RuntimeError(
+            "Basis-derived orbital count does not match Hamiltonian dimension: "
+            f"{len(records)} != {n_orbitals}."
+        )
+    return records
+
+
 def distance_bin(distance_ang: float) -> str:
     if distance_ang < 1.2:
         return "0-1.2"
@@ -1113,6 +1240,7 @@ def _empty_structural_metrics(reason: str) -> dict[str, Any]:
         "block_rows": [],
         "species_pair_rows": [],
         "distance_bin_rows": [],
+        "orbital_pair_rows": [],
         "warnings": [],
         "distance_unavailable_reason": "",
     }
@@ -1137,6 +1265,115 @@ def _finalize_groups(groups: dict[Any, list[dict[str, Any]]], row_builder) -> li
     return rows
 
 
+def _finalize_orbital_pair_groups(groups: dict[Any, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, entries in sorted(groups.items(), key=lambda item: tuple(str(part) for part in item[0])):
+        (
+            row_species,
+            col_species,
+            row_orbital_index,
+            col_orbital_index,
+            row_orbital_label,
+            col_orbital_label,
+        ) = key
+        species_pair = f"{row_species}-{col_species}"
+        deltas = [entry["delta"] for entry in entries]
+        ref_targets = [entry["ref_value"] for entry in entries]
+        pred_targets = [entry["pred_value"] for entry in entries]
+        rows.append(
+            {
+                "sample": entries[0]["sample"],
+                "row_species": row_species,
+                "col_species": col_species,
+                "species_pair": species_pair,
+                "row_orbital_index": row_orbital_index,
+                "col_orbital_index": col_orbital_index,
+                "row_orbital_label": row_orbital_label,
+                "col_orbital_label": col_orbital_label,
+                "n_entries": len(entries),
+                "mae_union_eV": mean_abs(deltas),
+                "mae_union_meV": ev_to_mev(mean_abs(deltas)),
+                "mse_union_eV2": mse(deltas),
+                "rmse_union_eV": rmse(deltas),
+                "r2_union": r2_score(ref_targets, pred_targets),
+                "max_abs_error_union_eV": float(max((abs(value) for value in deltas), default=math.nan)),
+                "mean_abs_ref_eV": mean_abs(ref_targets),
+                "mean_signed_error_eV": float(np.mean([float(np.real(value)) for value in deltas]))
+                if deltas
+                else math.nan,
+                "metric_target_space": ORBITAL_PAIR_METRIC_TARGET_SPACE,
+                "basis_source": ORBITAL_PAIR_BASIS_SOURCE,
+            }
+        )
+    return rows
+
+
+def orbital_pair_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            row.get("row_species"),
+            row.get("col_species"),
+            row.get("species_pair"),
+            row.get("row_orbital_index"),
+            row.get("col_orbital_index"),
+            row.get("row_orbital_label"),
+            row.get("col_orbital_label"),
+            row.get("metric_target_space"),
+            row.get("basis_source"),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    metric_names = [
+        "mae_union_eV",
+        "mae_union_meV",
+        "mse_union_eV2",
+        "rmse_union_eV",
+        "r2_union",
+        "max_abs_error_union_eV",
+        "mean_abs_ref_eV",
+        "mean_signed_error_eV",
+    ]
+    summary: list[dict[str, Any]] = []
+    for key, items in sorted(grouped.items(), key=lambda item: tuple(str(part) for part in item[0])):
+        (
+            row_species,
+            col_species,
+            species_pair,
+            row_orbital_index,
+            col_orbital_index,
+            row_orbital_label,
+            col_orbital_label,
+            metric_target_space,
+            basis_source,
+        ) = key
+        row: dict[str, Any] = {
+            "row_species": row_species,
+            "col_species": col_species,
+            "species_pair": species_pair,
+            "row_orbital_index": row_orbital_index,
+            "col_orbital_index": col_orbital_index,
+            "row_orbital_label": row_orbital_label,
+            "col_orbital_label": col_orbital_label,
+            "n_samples": len({str(item.get("sample")) for item in items}),
+            "n_entries": int(sum(int(item.get("n_entries") or 0) for item in items)),
+            "metric_target_space": metric_target_space,
+            "basis_source": basis_source,
+        }
+        for metric_name in metric_names:
+            values = [
+                float(item[metric_name])
+                for item in items
+                if isinstance(item.get(metric_name), (int, float)) and math.isfinite(float(item[metric_name]))
+            ]
+            row[f"{metric_name}_mean"] = float(np.mean(values)) if values else math.nan
+            row[f"{metric_name}_std"] = float(np.std(values)) if values else math.nan
+            row[f"{metric_name}_min"] = float(np.min(values)) if values else math.nan
+            row[f"{metric_name}_max"] = float(np.max(values)) if values else math.nan
+        summary.append(row)
+    return summary
+
+
 def structural_sparse_metrics(
     sample: str,
     reference: MatrixData,
@@ -1149,7 +1386,8 @@ def structural_sparse_metrics(
         raise RuntimeError("Missing or unreadable structure for structural metrics.")
     if reference.hamiltonian.shape != predicted.hamiltonian.shape or reference.hamiltonian.shape[0] != reference.hamiltonian.shape[1]:
         raise RuntimeError("Matrix shape mismatch for structural metrics.")
-    atom_by_orbital = orbital_atom_map_from_basis(species, basis_counts, reference.hamiltonian.shape[0])
+    orbital_records = orbital_records_from_basis(species, basis_counts, reference.hamiltonian.shape[0])
+    atom_by_orbital = [int(record["atom_index"]) for record in orbital_records]
     structure_type = structure_type_from_metadata(structure_path)
     periodic_distance_unsupported = structure_type in PERIODIC_STRUCTURE_TYPES
     structural_warnings: list[dict[str, Any]] = []
@@ -1175,10 +1413,13 @@ def structural_sparse_metrics(
     block_groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
     species_groups: dict[str, list[dict[str, Any]]] = {}
     distance_groups: dict[str, list[dict[str, Any]]] = {}
+    orbital_pair_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for row_index, col_index in sorted(set(ref_values) | set(pred_values)):
         row_atom = atom_by_orbital[row_index]
         col_atom = atom_by_orbital[col_index]
-        delta = pred_values.get((row_index, col_index), 0.0) - ref_values.get((row_index, col_index), 0.0)
+        ref_value = ref_values.get((row_index, col_index), 0.0)
+        pred_value = pred_values.get((row_index, col_index), 0.0)
+        delta = pred_value - ref_value
         distance = float(np.linalg.norm(coords[row_atom] - coords[col_atom])) if len(coords) else math.nan
         entry = {"delta": delta, "distance_ang": distance}
         block_groups.setdefault((row_atom, col_atom), []).append(entry)
@@ -1186,6 +1427,24 @@ def structural_sparse_metrics(
         species_groups.setdefault(species_pair, []).append(entry)
         if not periodic_distance_unsupported:
             distance_groups.setdefault(distance_bin(distance), []).append(entry)
+        row_record = orbital_records[row_index]
+        col_record = orbital_records[col_index]
+        orbital_pair_key = (
+            row_record["species"],
+            col_record["species"],
+            row_record["local_orbital_index"],
+            col_record["local_orbital_index"],
+            row_record["orbital_label"],
+            col_record["orbital_label"],
+        )
+        orbital_pair_groups.setdefault(orbital_pair_key, []).append(
+            {
+                "sample": sample,
+                "delta": delta,
+                "ref_value": ref_value,
+                "pred_value": pred_value,
+            }
+        )
 
     block_rows = _finalize_groups(
         block_groups,
@@ -1215,6 +1474,7 @@ def structural_sparse_metrics(
         "block_rows": block_rows,
         "species_pair_rows": species_rows,
         "distance_bin_rows": distance_rows,
+        "orbital_pair_rows": _finalize_orbital_pair_groups(orbital_pair_groups),
         "warnings": structural_warnings,
         "distance_unavailable_reason": distance_unavailable_reason,
     }
@@ -1537,6 +1797,63 @@ def dos_for_sample(reference: np.ndarray, predicted: np.ndarray, sigma_ev: float
     return rows, metrics
 
 
+def dos_fermi_window_metrics(
+    reference: np.ndarray,
+    predicted: np.ndarray,
+    fermi_level: float | None,
+    sigma_ev: float = DOS_SIGMA_EV,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    metrics: dict[str, Any] = {
+        "dos_window_min_eV": DOS_FERMI_WINDOW_MIN_EV,
+        "dos_window_max_eV": DOS_FERMI_WINDOW_MAX_EV,
+        "dos_window_points": DOS_FERMI_WINDOW_POINTS,
+        "dos_window_sigma_eV": sigma_ev,
+        "dos_window_alignment": DOS_FERMI_WINDOW_ALIGNMENT,
+    }
+    try:
+        fermi_value = float(fermi_level)
+    except (TypeError, ValueError):
+        metrics.update(
+            {
+                "dos_mae_500_fermi_window": math.nan,
+                "dos_window_metric_available": False,
+                "dos_window_unavailable_reason": "missing_fermi_level",
+            }
+        )
+        return np.asarray([], dtype=float), metrics
+    if not math.isfinite(fermi_value):
+        metrics.update(
+            {
+                "dos_mae_500_fermi_window": math.nan,
+                "dos_window_metric_available": False,
+                "dos_window_unavailable_reason": "missing_fermi_level",
+            }
+        )
+        return np.asarray([], dtype=float), metrics
+    if np.concatenate([reference, predicted]).size == 0:
+        metrics.update(
+            {
+                "dos_mae_500_fermi_window": math.nan,
+                "dos_window_metric_available": False,
+                "dos_window_unavailable_reason": "missing_eigenvalues",
+            }
+        )
+        return np.asarray([], dtype=float), metrics
+
+    relative_grid = np.linspace(DOS_FERMI_WINDOW_MIN_EV, DOS_FERMI_WINDOW_MAX_EV, DOS_FERMI_WINDOW_POINTS)
+    grid = fermi_value + relative_grid
+    reference_dos = gaussian_dos(reference, grid, sigma_ev)
+    predicted_dos = gaussian_dos(predicted, grid, sigma_ev)
+    metrics.update(
+        {
+            "dos_mae_500_fermi_window": mean_abs((predicted_dos - reference_dos).tolist()),
+            "dos_window_metric_available": True,
+            "dos_window_unavailable_reason": "",
+        }
+    )
+    return grid, metrics
+
+
 def summarize_numeric(rows: list[dict[str, Any]], skip: set[str]) -> dict[str, dict[str, float]]:
     values: dict[str, list[float]] = {}
     for row in rows:
@@ -1582,6 +1899,8 @@ def metric_availability(rows: list[dict[str, Any]], metrics: list[str]) -> dict[
             reason = "fermi_window_unavailable_or_empty"
         elif metric.startswith("frontier_window"):
             reason = "frontier_levels_unavailable"
+        elif metric == "dos_mae_500_fermi_window":
+            reason = "missing_fermi_level_or_eigenvalues"
         else:
             reason = "metric_unavailable_for_some_samples"
         availability[metric] = {
@@ -1625,9 +1944,14 @@ def matrix_spectrum_rows(
         rows.append(
             {
                 "sample": sparse_row["sample"],
+                "matrix_metric_target_space": sparse_row.get("matrix_metric_target_space"),
                 "mae_ref_eV": sparse_row.get("mae_ref_eV"),
                 "rmse_ref_eV": sparse_row.get("rmse_ref_eV"),
+                "mse_ref_eV2": sparse_row.get("mse_ref_eV2"),
+                "r2_ref": sparse_row.get("r2_ref"),
                 "rmse_union_eV": sparse_row.get("rmse_union_eV"),
+                "mse_union_eV2": sparse_row.get("mse_union_eV2"),
+                "r2_union": sparse_row.get("r2_union"),
                 "relative_frobenius_union": sparse_row.get("relative_frobenius_union"),
                 "support_f1": sparse_row.get("support_f1"),
                 "global_rmse_eV": spectral_row.get("global_rmse_eV"),
@@ -1706,6 +2030,7 @@ def extract(
     block_rows: list[dict[str, Any]] = []
     species_pair_rows: list[dict[str, Any]] = []
     distance_bin_rows: list[dict[str, Any]] = []
+    orbital_pair_rows: list[dict[str, Any]] = []
     structural_unavailable: list[dict[str, str]] = []
     structural_basis_error = ""
     errors: list[dict[str, Any]] = []
@@ -1740,6 +2065,7 @@ def extract(
         block_rows.extend(sample_rows["block"])
         species_pair_rows.extend(sample_rows["species_pair"])
         distance_bin_rows.extend(sample_rows["distance_bin"])
+        orbital_pair_rows.extend(sample_rows["orbital_pair"])
         structural_unavailable.extend(sample_rows["structural_unavailable"])
         errors.extend(sample_rows["errors"])
         fatal_errors.extend(sample_rows.get("fatal_errors", []))
@@ -1785,6 +2111,8 @@ def extract(
                 )
             )
 
+    orbital_pair_summary = orbital_pair_summary_rows(orbital_pair_rows)
+
     sparse_fields = [
         "sample",
         "n_orbitals",
@@ -1794,12 +2122,25 @@ def extract(
         "union_nnz",
         "ref_density",
         "pred_density",
+        "matrix_metric_target_space",
         "mae_ref_eV",
         "rmse_ref_eV",
+        "mse_ref_eV2",
+        "r2_ref",
+        "mae_ref_meV",
+        "rmse_ref_meV",
         "mae_pred_eV",
         "rmse_pred_eV",
+        "mse_pred_eV2",
+        "r2_pred",
+        "mae_pred_meV",
+        "rmse_pred_meV",
         "mae_union_eV",
         "rmse_union_eV",
+        "mse_union_eV2",
+        "r2_union",
+        "mae_union_meV",
+        "rmse_union_meV",
         "max_abs_error_union_eV",
         "relative_frobenius_ref",
         "relative_frobenius_union",
@@ -1877,9 +2218,14 @@ def extract(
     relationship_rows = matrix_spectrum_rows(sparse_rows, spectral_rows)
     relationship_fields = [
         "sample",
+        "matrix_metric_target_space",
         "mae_ref_eV",
         "rmse_ref_eV",
+        "mse_ref_eV2",
+        "r2_ref",
         "rmse_union_eV",
+        "mse_union_eV2",
+        "r2_union",
         "relative_frobenius_union",
         "support_f1",
         "global_rmse_eV",
@@ -1891,6 +2237,24 @@ def extract(
         "fermi_metric_available",
     ]
     dos_fields = [
+        "sample",
+        "dos_sigma_eV",
+        "dos_grid_points",
+        "energy_min_eV",
+        "energy_max_eV",
+        "dos_wasserstein_eV",
+        "dos_l1",
+        "dos_l2",
+        "dos_mae_500_fermi_window",
+        "dos_window_min_eV",
+        "dos_window_max_eV",
+        "dos_window_points",
+        "dos_window_sigma_eV",
+        "dos_window_alignment",
+        "dos_window_metric_available",
+        "dos_window_unavailable_reason",
+    ]
+    dos_sweep_fields = [
         "sample",
         "dos_sigma_eV",
         "dos_grid_points",
@@ -1943,6 +2307,55 @@ def extract(
         "max_abs_error_union_eV",
         "mean_distance_ang",
     ]
+    orbital_pair_fields = [
+        "sample",
+        "row_species",
+        "col_species",
+        "species_pair",
+        "row_orbital_index",
+        "col_orbital_index",
+        "row_orbital_label",
+        "col_orbital_label",
+        "n_entries",
+        "mae_union_eV",
+        "mae_union_meV",
+        "mse_union_eV2",
+        "rmse_union_eV",
+        "r2_union",
+        "max_abs_error_union_eV",
+        "mean_abs_ref_eV",
+        "mean_signed_error_eV",
+        "metric_target_space",
+        "basis_source",
+    ]
+    orbital_pair_summary_metric_fields = [
+        f"{metric_name}_{statistic}"
+        for metric_name in [
+            "mae_union_eV",
+            "mae_union_meV",
+            "mse_union_eV2",
+            "rmse_union_eV",
+            "r2_union",
+            "max_abs_error_union_eV",
+            "mean_abs_ref_eV",
+            "mean_signed_error_eV",
+        ]
+        for statistic in ["mean", "std", "min", "max"]
+    ]
+    orbital_pair_summary_fields = [
+        "row_species",
+        "col_species",
+        "species_pair",
+        "row_orbital_index",
+        "col_orbital_index",
+        "row_orbital_label",
+        "col_orbital_label",
+        "n_samples",
+        "n_entries",
+        "metric_target_space",
+        "basis_source",
+        *orbital_pair_summary_metric_fields,
+    ]
 
     write_csv(metrics_root / "sparse_metrics.csv", sparse_fields, sparse_rows)
     write_csv(metrics_root / "spectral_metrics.csv", spectral_fields, spectral_rows)
@@ -1952,14 +2365,45 @@ def extract(
     write_csv(metrics_root / "block_metrics.csv", block_fields, block_rows)
     write_csv(metrics_root / "species_pair_metrics.csv", species_pair_fields, species_pair_rows)
     write_csv(metrics_root / "distance_bin_metrics.csv", distance_bin_fields, distance_bin_rows)
+    write_csv(metrics_root / "orbital_pair_metrics.csv", orbital_pair_fields, orbital_pair_rows)
+    write_csv(metrics_root / "orbital_pair_summary.csv", orbital_pair_summary_fields, orbital_pair_summary)
     write_csv(eigen_root / "eigenvalue_metrics.csv", spectral_fields, spectral_rows)
     write_csv(eigen_root / "overlap_summary.csv", overlap_fields, overlap_rows)
-    write_csv(metrics_root / "dos_sigma_sweep.csv", dos_fields, dos_sweep_rows)
+    write_csv(metrics_root / "dos_sigma_sweep.csv", dos_sweep_fields, dos_sweep_rows)
 
     summary = {
         "sparse": summarize_numeric(sparse_rows, {"sample"}),
         "spectral": summarize_numeric(spectral_rows, {"sample", "overlap_source", "hamiltonian_symmetrized_for_spectrum"}),
         "dos": summarize_numeric(dos_rows, {"sample"}),
+        "orbital_pair": summarize_numeric(
+            orbital_pair_rows,
+            {
+                "sample",
+                "row_species",
+                "col_species",
+                "species_pair",
+                "row_orbital_index",
+                "col_orbital_index",
+                "row_orbital_label",
+                "col_orbital_label",
+                "metric_target_space",
+                "basis_source",
+            },
+        ),
+        "orbital_pair_summary": summarize_numeric(
+            orbital_pair_summary,
+            {
+                "row_species",
+                "col_species",
+                "species_pair",
+                "row_orbital_index",
+                "col_orbital_index",
+                "row_orbital_label",
+                "col_orbital_label",
+                "metric_target_space",
+                "basis_source",
+            },
+        ),
         "matrix_spectrum": matrix_spectrum_summary(relationship_rows),
         "metric_availability": {
             **metric_availability(
@@ -1975,13 +2419,25 @@ def extract(
             ),
             **metric_availability(
                 sparse_rows,
-                ["relative_frobenius_union", "mae_ref_eV", "support_f1"],
+                [
+                    "relative_frobenius_union",
+                    "mae_ref_eV",
+                    "mse_ref_eV2",
+                    "r2_ref",
+                    "mse_union_eV2",
+                    "r2_union",
+                    "support_f1",
+                ],
             ),
             **metric_availability(
                 dos_rows,
-                ["dos_wasserstein_eV"],
+                ["dos_wasserstein_eV", "dos_mae_500_fermi_window"],
             ),
         },
+        "orbital_pair_metric_availability": metric_availability(
+            orbital_pair_rows,
+            ["mae_union_eV", "mse_union_eV2", "rmse_union_eV", "r2_union"],
+        ),
     }
     severe_warnings = [
         issue
@@ -2003,18 +2459,30 @@ def extract(
         "structural_basis_orbital_counts": basis_counts,
         "structural_basis_error": structural_basis_error,
         "structural_metrics_error": bool(structural_basis_error or structural_unavailable),
-        "structural_metrics_available": bool(block_rows or species_pair_rows or distance_bin_rows),
+        "structural_metrics_available": bool(block_rows or species_pair_rows or distance_bin_rows or orbital_pair_rows),
         "structural_metrics_samples": len(
             {
                 str(row.get("sample"))
-                for row in block_rows
+                for row in [*block_rows, *species_pair_rows, *distance_bin_rows, *orbital_pair_rows]
             }
         ),
+        "orbital_pair_metrics_available": bool(orbital_pair_rows),
+        "orbital_pair_metrics_samples": len({str(row.get("sample")) for row in orbital_pair_rows}),
+        "orbital_pair_metric_target_space": ORBITAL_PAIR_METRIC_TARGET_SPACE,
+        "orbital_pair_basis_source": ORBITAL_PAIR_BASIS_SOURCE,
         "structural_metrics_unavailable": structural_unavailable,
         "support_threshold": SUPPORT_THRESHOLD,
         "fermi_window_eV": FERMI_WINDOW_EV,
         "dos_sigma_eV": DOS_SIGMA_EV,
         "dos_sigma_sweep_eV": DOS_SIGMA_SWEEP_EV,
+        "dos_fermi_window": {
+            "points": DOS_FERMI_WINDOW_POINTS,
+            "relative_energy_min_eV": DOS_FERMI_WINDOW_MIN_EV,
+            "relative_energy_max_eV": DOS_FERMI_WINDOW_MAX_EV,
+            "sigma_eV": DOS_SIGMA_EV,
+            "alignment": DOS_FERMI_WINDOW_ALIGNMENT,
+            "requires_real_siesta_fermi_level": True,
+        },
         "low_energy": {
             "enabled": low_energy_enabled,
             "n_states": low_energy_n_states,
@@ -2030,6 +2498,11 @@ def extract(
         "errors": errors,
         "metric_compatibility": {
             "sparse_matrix_metrics_material_agnostic": True,
+            "matrix_metric_target_space": MATRIX_METRIC_TARGET_SPACE,
+            "orbital_pair_metric_target_space": ORBITAL_PAIR_METRIC_TARGET_SPACE,
+            "orbital_pair_basis_source": ORBITAL_PAIR_BASIS_SOURCE,
+            "deeph_hprime_transform_applied": False,
+            "deeph_orbital_hprime_transform_applied": False,
             "complex_hamiltonians_supported": False,
             "spin_polarized_supported": False,
             "kpoint_sampled_supported": False,
@@ -2037,6 +2510,7 @@ def extract(
             "nonorthogonal_spectral_requires_reference_overlap": True,
             "structural_metrics_require_basis_species_coverage": True,
         },
+        "deeph_comparability_status": DEEPH_COMPARABILITY_STATUS,
         "summary": summary,
         "recommendation_metric_policy": {
             "primary_metric_priority": RECOMMENDATION_PRIMARY_METRIC_PRIORITY,
@@ -2053,6 +2527,8 @@ def extract(
             "block_metrics": str(metrics_root / "block_metrics.csv"),
             "species_pair_metrics": str(metrics_root / "species_pair_metrics.csv"),
             "distance_bin_metrics": str(metrics_root / "distance_bin_metrics.csv"),
+            "orbital_pair_metrics": str(metrics_root / "orbital_pair_metrics.csv"),
+            "orbital_pair_summary": str(metrics_root / "orbital_pair_summary.csv"),
             "eigenvalues_siesta": str(eigen_root / "siesta"),
             "eigenvalues_predicted": str(eigen_root / "predicted"),
             "band_errors": str(eigen_root / "band_errors"),

@@ -1227,6 +1227,16 @@ pre {
   min-height: 430px;
 }
 
+.plot-section-heading {
+  grid-column: 1 / -1;
+  margin: 4px 0 -4px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .plot-info-bubble {
   position: absolute;
   top: 10px;

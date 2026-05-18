@@ -4593,6 +4593,13 @@ CROSS_PLOT_AVAILABILITY_METRICS = [
     "global_rmse_eV",
     "relative_frobenius_union",
     "mae_ref_eV",
+    "mse_ref_eV2",
+    "mse_union_eV2",
+    "r2_ref",
+    "r2_union",
+    "mae_ref_meV",
+    "rmse_ref_meV",
+    "dos_mae_500_fermi_window",
 ]
 
 
@@ -4640,7 +4647,10 @@ def run_metric_gap_diagnostics(runs: list[dict[str, Any]]) -> list[dict[str, Any
             ("spectral", "low_energy_rmse_eV"),
             ("spectral", "frontier_window_rmse_eV"),
             ("sparse", "relative_frobenius_union"),
+            ("sparse", "mse_union_eV2"),
+            ("sparse", "r2_union"),
             ("dos", "dos_wasserstein_eV"),
+            ("dos", "dos_mae_500_fermi_window"),
         ]
         metrics = []
         for group, metric in metric_groups:
@@ -5187,6 +5197,32 @@ def archived_manifest_result_dir(manifest: dict[str, Any], manifest_path: Path) 
     return result_dir
 
 
+def csv_data_row_count(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return max(0, sum(1 for _line in handle) - 1)
+    except OSError:
+        return None
+
+
+def archived_run_diagnostic_outputs(result_dir: Path) -> dict[str, dict[str, Any]]:
+    metrics_dir = result_dir / "metrics"
+    outputs: dict[str, dict[str, Any]] = {}
+    for key, path in {
+        "orbital_pair_metrics": metrics_dir / "orbital_pair_metrics.csv",
+        "orbital_pair_summary": metrics_dir / "orbital_pair_summary.csv",
+    }.items():
+        outputs[key] = {
+            "path": str(path),
+            "exists": path.exists(),
+            "rows": csv_data_row_count(path),
+            "diagnostic_only": True,
+        }
+    return outputs
+
+
 def archived_run_metric_rows(result_dir: Path) -> dict[str, list[dict[str, Any]]]:
     metrics_dir = result_dir / "metrics"
     return {
@@ -5196,6 +5232,7 @@ def archived_run_metric_rows(result_dir: Path) -> dict[str, list[dict[str, Any]]
         "sparse_sweep": read_csv_rows(metrics_dir / "sparse_threshold_sweep.csv"),
         "dos_sweep": read_csv_rows(metrics_dir / "dos_sigma_sweep.csv"),
         "matrix_spectrum": read_csv_rows(metrics_dir / "matrix_spectrum_relationship.csv"),
+        "orbital_pair_summary": read_csv_rows(metrics_dir / "orbital_pair_summary.csv"),
     }
 
 
@@ -5229,6 +5266,8 @@ def plot_data_summary() -> dict[str, Any]:
             sparse_sweep_rows = metric_rows["sparse_sweep"]
             dos_sweep_rows = metric_rows["dos_sweep"]
             relationship_rows = metric_rows["matrix_spectrum"]
+            orbital_pair_summary_rows = metric_rows["orbital_pair_summary"]
+            diagnostic_outputs = archived_run_diagnostic_outputs(result_dir)
             errors = manifest.get("errors", [])
             if not isinstance(errors, list):
                 errors = []
@@ -5305,6 +5344,7 @@ def plot_data_summary() -> dict[str, Any]:
                         "sparse_sweep": numeric_means(sparse_sweep_rows),
                         "dos_sweep": numeric_means(dos_sweep_rows),
                         "matrix_spectrum": numeric_means(relationship_rows),
+                        "orbital_pair_summary": numeric_means(orbital_pair_summary_rows),
                     },
                     "samples": {
                         "sparse": sparse_rows,
@@ -5313,6 +5353,7 @@ def plot_data_summary() -> dict[str, Any]:
                         "sparse_sweep": sparse_sweep_rows,
                         "dos_sweep": dos_sweep_rows,
                         "matrix_spectrum": relationship_rows,
+                        "orbital_pair_summary": orbital_pair_summary_rows,
                     },
                     "diagnostics": metric_diagnostics(
                         spectral_rows,
@@ -5327,6 +5368,7 @@ def plot_data_summary() -> dict[str, Any]:
                         ),
                     },
                     "summary": manifest.get("summary", {}),
+                    "diagnostic_outputs": diagnostic_outputs,
                 }
             )
     runs.sort(key=lambda item: (item["pipeline"], item["dataset_size"], item["run_id"]))
@@ -10825,7 +10867,10 @@ def archived_results_summary() -> dict[str, Any]:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            summary[key].append(manifest)
+            result_dir = archived_manifest_result_dir(manifest, manifest_path)
+            item = dict(manifest)
+            item["diagnostic_outputs"] = archived_run_diagnostic_outputs(result_dir)
+            summary[key].append(item)
     return summary
 
 

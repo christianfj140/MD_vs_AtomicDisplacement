@@ -713,7 +713,7 @@
             </div>
             <div class="button-row">
               <label class="toggle-field">
-                <input id="show-plots" type="checkbox" />
+                <input id="show-plots" type="checkbox" checked />
                 <span>Show plots</span>
               </label>
               <button id="refresh-results" class="button secondary">Refresh</button>
@@ -746,15 +746,23 @@
                       <dd>Relative matrix error on the Hamiltonian; useful for overall matrix fidelity.</dd>
                       <dt>MAE ref</dt>
                       <dd>Mean absolute Hamiltonian error on SIESTA reference support.</dd>
+                      <dt>MSE / meV aliases</dt>
+                      <dd>Hamiltonian matrix diagnostics on the same sparse supports; MSE is eV^2 and meV aliases are unit conversions.</dd>
+                      <dt>Hamiltonian R2</dt>
+                      <dd>Complementary matrix diagnostic; higher is better and unavailable for constant targets.</dd>
                       <dt>Support F1</dt>
                       <dd>Overlap between predicted and reference non-zero matrix support; higher is better.</dd>
                       <dt>DOS W1</dt>
                       <dd>Wasserstein distance between density-of-states curves; useful for spectral-shape comparison.</dd>
+                      <dt>DOS MAE 500 Fermi window</dt>
+                      <dd>DeepH-comparable DOS diagnostic on 500 points in [-6,+6] eV around a real SIESTA Fermi level.</dd>
+                      <dt>Orbital-pair diagnostics</dt>
+                      <dd>CSV diagnostics at metrics/orbital_pair_metrics.csv; use MAE meV by species pair and local orbital indices, not as an exact DeepH H' winner metric.</dd>
                       <dt>Time</dt>
                       <dd>Total pipeline wall time; useful to trade accuracy against compute cost.</dd>
                     </dl>
                     <p>
-                      Cross plots reuse the selected cross metric. Lower is better except Support F1.
+                      Cross plots reuse the selected cross metric. Lower is better except Support F1 and R2 metrics.
                     </p>
                   </div>
                 </details>
@@ -775,6 +783,13 @@
                     <option value="global_rmse_eV">Global RMSE</option>
                     <option value="relative_frobenius_union">Relative Frobenius</option>
                     <option value="mae_ref_eV">Sparse MAE on ref</option>
+                    <option value="mse_ref_eV2">Sparse MSE on ref</option>
+                    <option value="mse_union_eV2">Sparse MSE union</option>
+                    <option value="r2_ref">Sparse R2 on ref</option>
+                    <option value="r2_union">Sparse R2 union</option>
+                    <option value="mae_ref_meV">Sparse MAE ref meV</option>
+                    <option value="rmse_ref_meV">Sparse RMSE ref meV</option>
+                    <option value="dos_mae_500_fermi_window">DOS MAE 500 Fermi window</option>
                   </select>
                 </label>
                 <span id="plots-status" class="muted-text">Plots disabled</span>
@@ -793,6 +808,12 @@
               <div id="plot-scatter" class="plot-card wide"></div>
               <div id="plot-sweeps" class="plot-card full"></div>
               <div id="plot-heatmap" class="plot-card full"></div>
+              <div class="plot-section-heading">DeepH-comparable metrics</div>
+              <div id="plot-deeph-mev" class="plot-card wide"></div>
+              <div id="plot-deeph-mse" class="plot-card wide"></div>
+              <div id="plot-deeph-r2" class="plot-card wide"></div>
+              <div id="plot-deeph-dos" class="plot-card wide"></div>
+              <div id="plot-orbital-pair" class="plot-card full"></div>
               <div id="plot-cross-heatmap" class="plot-card full"></div>
               <div id="plot-learning" class="plot-card wide"></div>
               <div id="plot-compute" class="plot-card wide"></div>

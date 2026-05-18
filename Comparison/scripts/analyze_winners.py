@@ -151,7 +151,40 @@ METADATA_COLUMNS = {
     "overlap_source",
     "hamiltonian_symmetrized_for_spectrum",
     "fermi_level_source",
+    "matrix_metric_target_space",
+    "dos_window_min_eV",
+    "dos_window_max_eV",
+    "dos_window_points",
+    "dos_window_sigma_eV",
+    "dos_window_alignment",
+    "dos_window_metric_available",
+    "dos_window_unavailable_reason",
     "status",
+}
+P0_MATRIX_MSE_METRICS = {
+    "mse_pred_eV2",
+    "mse_ref_eV2",
+    "mse_union_eV2",
+}
+P0_MATRIX_R2_METRICS = {
+    "r2_pred",
+    "r2_ref",
+    "r2_union",
+}
+P0_MATRIX_MEV_ALIAS_METRICS = {
+    "mae_pred_meV",
+    "mae_ref_meV",
+    "mae_union_meV",
+    "rmse_pred_meV",
+    "rmse_ref_meV",
+    "rmse_union_meV",
+}
+P0_DOS_FERMI_WINDOW_METRICS = {
+    "dos_mae_500_fermi_window",
+}
+HIGHER_IS_BETTER_METRICS = {
+    "support_f1",
+    *P0_MATRIX_R2_METRICS,
 }
 ERROR_METRICS = {
     "global_mae_eV",
@@ -182,6 +215,10 @@ ERROR_METRICS = {
     "dos_wasserstein_eV",
     "dos_l1",
     "dos_l2",
+    *P0_MATRIX_MSE_METRICS,
+    *P0_MATRIX_R2_METRICS,
+    *P0_MATRIX_MEV_ALIAS_METRICS,
+    *P0_DOS_FERMI_WINDOW_METRICS,
 }
 
 RECOMMENDATION_PRIMARY_METRIC_PRIORITY = [
@@ -207,6 +244,7 @@ FERMI_WINDOW_PRIMARY_METRICS = {
     "fermi_window_mae_eV",
     "align_fermi_rmse_eV",
     "align_fermi_mae_eV",
+    *P0_DOS_FERMI_WINDOW_METRICS,
 }
 DIAGNOSTIC_ONLY_PRIMARY_METRICS = {
     "global_rmse_eV",
@@ -222,6 +260,9 @@ DIAGNOSTIC_ONLY_PRIMARY_METRICS = {
     "weighted_false_nonzeros_eV",
     "hermiticity_error",
     "antihermitian_norm",
+    *P0_MATRIX_MSE_METRICS,
+    *P0_MATRIX_R2_METRICS,
+    *P0_MATRIX_MEV_ALIAS_METRICS,
 }
 METRIC_POLICY_JUSTIFICATION_COLUMNS = (
     "primary_metric_justification",
@@ -620,6 +661,9 @@ def metric_policy_diagnostics(
         "missing_required_cells": missing_primary_metric_cells,
         "missing_required_cell_count": len(missing_primary_metric_cells),
         "fermi_level_sources": fermi_sources,
+        "metric_direction": "lower_is_better"
+        if metric_lower_is_better(primary_metric)
+        else "higher_is_better",
         "fermi_window_complete_and_justified": (
             primary_metric in FERMI_WINDOW_PRIMARY_METRICS
             and not missing_primary_metric_cells
@@ -633,6 +677,13 @@ def metric_policy_diagnostics(
 
 def finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def metric_lower_is_better(metric: Any, *, default_lower_is_better: bool = True) -> bool:
+    metric_name = str(metric or "")
+    if metric_name in HIGHER_IS_BETTER_METRICS:
+        return False
+    return default_lower_is_better
 
 
 def metric_columns(rows: list[dict[str, Any]]) -> list[str]:
@@ -766,7 +817,23 @@ def normalize_context_value(value: Any) -> Any:
     if value in (None, "", False):
         return None
     if isinstance(value, (dict, list)):
+        if not value:
+            return None
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped in ("{}", "[]"):
+            return None
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(parsed, (dict, list)):
+                    if not parsed:
+                        return None
+                    return json.dumps(parsed, ensure_ascii=False, sort_keys=True)
     if finite(value):
         number = float(value)
         return int(number) if number.is_integer() else number
@@ -1000,6 +1067,7 @@ def compare_methods(
         key=comparable_sort_key,
     )
     for experiment_id, md_dataset_size, atom_dataset_size, context_key, seed, epoch, test_set, metric in comparable:
+        metric_lower = metric_lower_is_better(metric, default_lower_is_better=lower_is_better)
         md_keys = [
             key
             for key in means
@@ -1054,9 +1122,10 @@ def compare_methods(
                     "percent_improvement_atom_vs_md": percent_improvement(
                         md_mean,
                         atom_mean,
-                        lower_is_better=lower_is_better,
+                        lower_is_better=metric_lower,
                     ),
-                    "winner": winner_for(md_mean, atom_mean, lower_is_better=lower_is_better),
+                    "winner": winner_for(md_mean, atom_mean, lower_is_better=metric_lower),
+                    "lower_is_better": metric_lower,
                 }
                 for timing_col, value in timing_means.get(md_key, {}).items():
                     row[f"md_{timing_col}"] = value
@@ -1297,6 +1366,7 @@ def rank_nway_methods(
     scope_records: list[dict[str, Any]] = []
     for key, rows_for_scope in sorted(grouped.items(), key=lambda item: tuple(str(part) for part in item[0])):
         experiment_id, context_key, seed, epoch, test_set, metric = key
+        metric_lower = metric_lower_is_better(metric, default_lower_is_better=lower_is_better)
         expected_for_scope = sorted(
             expected_methods.get((experiment_id, context_key, epoch, metric), set())
         )
@@ -1305,7 +1375,7 @@ def rank_nway_methods(
         ordered = sorted(
             rows_for_scope,
             key=lambda row: (
-                float(row["mean"]) if lower_is_better else -float(row["mean"]),
+                float(row["mean"]) if metric_lower else -float(row["mean"]),
                 str(row.get("method")),
             ),
         )
@@ -1356,7 +1426,7 @@ def rank_nway_methods(
             ranked_row["rank_signature"] = rank_signature
             ranked_row["leader_methods"] = ",".join(leader_methods)
             ranked_row["leader_tie"] = len(leader_methods) > 1
-            ranked_row["lower_is_better"] = lower_is_better
+            ranked_row["lower_is_better"] = metric_lower
             ranked_row["scientific_status"] = "nway_ranking_diagnostic_only"
             ranked_rows.append(ranked_row)
         scope_records.append(
@@ -1778,6 +1848,7 @@ def build_pairwise_vs_baseline(
     pair_rows: list[dict[str, Any]] = []
     for key, rows_for_scope in sorted(grouped.items(), key=lambda item: tuple(str(part) for part in item[0])):
         experiment_id, context_key, seed, epoch, test_set, metric = key
+        metric_lower = metric_lower_is_better(metric, default_lower_is_better=lower_is_better)
         baseline_rows = [row for row in rows_for_scope if row.get("method") == baseline_method]
         challenger_rows = [
             row
@@ -1797,7 +1868,7 @@ def build_pairwise_vs_baseline(
                     challenger_method,
                     baseline_mean,
                     challenger_mean,
-                    lower_is_better=lower_is_better,
+                    lower_is_better=metric_lower,
                 )
                 pair_row = {
                         "experiment_id": experiment_id,
@@ -1827,7 +1898,7 @@ def build_pairwise_vs_baseline(
                         "percent_improvement_challenger_vs_baseline": percent_improvement_vs_baseline(
                             baseline_mean,
                             challenger_mean,
-                            lower_is_better=lower_is_better,
+                            lower_is_better=metric_lower,
                         ),
                         "winner": winner,
                         "seed": seed,
@@ -1854,7 +1925,7 @@ def build_pairwise_vs_baseline(
                         "challenger_n_rows": challenger.get("n_rows"),
                         "baseline_n_seeds": baseline.get("n_seeds"),
                         "challenger_n_seeds": challenger.get("n_seeds"),
-                        "lower_is_better": lower_is_better,
+                        "lower_is_better": metric_lower,
                         "baseline_warning_status": baseline.get("warning_status"),
                         "challenger_warning_status": challenger.get("warning_status"),
                         "warning_status": pairwise_warning_status(baseline, challenger),

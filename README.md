@@ -225,11 +225,18 @@ Los artefactos importantes quedan bajo `Comparison/results/`:
 - `metrics/spectral_metrics.csv`
 - `metrics/dos_metrics.csv`
 - `metrics/matrix_spectrum_relationship.csv`
+- `metrics/orbital_pair_metrics.csv`
+- `metrics/orbital_pair_summary.csv`
 
 La recomendacion final solo debe tratarse como robusta cuando el manifest no
 contiene warnings severos de leakage, settings, checkpoint, presupuesto,
 metrica primaria incompleta o reproducibilidad, y hay suficientes seeds para el
 criterio configurado. Experimentos de una sola seed son exploratorios.
+
+Los CSV `orbital_pair_*` son diagnosticos para comparar mapas orbital-orbital
+tipo DeepH: usa `mae_union_meV` por `species_pair`, `row_orbital_index` y
+`col_orbital_index`. No son metricas H' locales exactas ni cambian los winners
+por defecto.
 
 ## Datasets y recetas
 
@@ -432,6 +439,10 @@ node --check Comparison/ui/app.js
   diagnostico exploratorio.
 - Las metricas dependientes de Fermi solo son autoritativas si SIESTA proporciona
   un Fermi level real.
+- Las metricas comparables con DeepH son analogos del repositorio sobre la base
+  Hamiltoniana archivada. No reproducen todavia H' local, k-path bands,
+  SOC/complejos, optica/Berry/shift-current, incertidumbre de ensembles ni
+  escalado DeepH-vs-DFT por tamano de sistema; ver `Comparison/METRICS.md`.
 - La cache experimental global sigue desactivada hasta tener claves de hash
   completas para datasets, entrenamiento, prediccion y metricas.
 - Los scripts standalone pueden omitir validaciones que la ruta `Comparison`

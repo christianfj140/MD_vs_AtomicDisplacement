@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -60,6 +61,26 @@ def synthetic_fdf(path: Path, *, structure_type: str | None = None, kpoints: boo
         )
 
 
+def synthetic_h_fdf(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "SystemLabel h2",
+                "%block ChemicalSpeciesLabel",
+                "1 1 H",
+                "%endblock ChemicalSpeciesLabel",
+                "%block AtomicCoordinatesAndAtomicSpecies",
+                "0.0 0.0 0.0 1",
+                "1.0 0.0 0.0 1",
+                "%endblock AtomicCoordinatesAndAtomicSpecies",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 class MetricsMaterialCompatibilityTests(unittest.TestCase):
     def setUp(self) -> None:
         try:
@@ -107,6 +128,196 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
         self.assertEqual(structural["warnings"], [])
         self.assertTrue(structural["distance_bin_rows"])
         self.assertIn("Si-C", {row["species_pair"] for row in structural["species_pair_rows"]})
+
+    def test_orbital_pair_metrics_group_same_species_local_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fdf = Path(tmp) / "sample" / "RUN.fdf"
+            synthetic_h_fdf(fdf)
+            reference = self.matrix_data(
+                [
+                    [1.0, 0.0, 2.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [3.0, 0.0, 4.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ]
+            )
+            predicted = self.matrix_data(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [5.0, 0.0, 4.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ]
+            )
+
+            structural = self.module.structural_sparse_metrics(
+                "sample",
+                reference,
+                predicted,
+                fdf,
+                {"H": 2},
+            )
+
+        rows = structural["orbital_pair_rows"]
+        required_columns = {
+            "sample",
+            "row_species",
+            "col_species",
+            "species_pair",
+            "row_orbital_index",
+            "col_orbital_index",
+            "row_orbital_label",
+            "col_orbital_label",
+            "n_entries",
+            "mae_union_eV",
+            "mae_union_meV",
+            "mse_union_eV2",
+            "rmse_union_eV",
+            "r2_union",
+            "max_abs_error_union_eV",
+            "mean_abs_ref_eV",
+            "mean_signed_error_eV",
+            "metric_target_space",
+            "basis_source",
+        }
+        self.assertTrue(rows)
+        self.assertTrue(required_columns.issubset(rows[0]))
+        target = next(
+            row
+            for row in rows
+            if row["row_species"] == "H"
+            and row["col_species"] == "H"
+            and row["row_orbital_index"] == 0
+            and row["col_orbital_index"] == 0
+        )
+        self.assertEqual(target["n_entries"], 4)
+        self.assertEqual(target["row_orbital_label"], "orbital_0")
+        self.assertEqual(target["col_orbital_label"], "orbital_0")
+        self.assertAlmostEqual(target["mae_union_eV"], 1.0)
+        self.assertAlmostEqual(target["mae_union_meV"], 1000.0)
+        self.assertAlmostEqual(target["mse_union_eV2"], 2.0)
+        self.assertAlmostEqual(target["rmse_union_eV"], math.sqrt(2.0))
+        self.assertAlmostEqual(target["r2_union"], -0.6)
+        self.assertAlmostEqual(target["max_abs_error_union_eV"], 2.0)
+        self.assertAlmostEqual(target["mean_abs_ref_eV"], 2.5)
+        self.assertAlmostEqual(target["mean_signed_error_eV"], 0.0)
+        self.assertEqual(target["metric_target_space"], self.module.ORBITAL_PAIR_METRIC_TARGET_SPACE)
+        self.assertEqual(target["basis_source"], self.module.ORBITAL_PAIR_BASIS_SOURCE)
+        self.assertTrue(structural["block_rows"])
+        self.assertTrue(structural["species_pair_rows"])
+        self.assertTrue(structural["distance_bin_rows"])
+        self.assertEqual(
+            set(structural["species_pair_rows"][0]),
+            {
+                "sample",
+                "species_pair",
+                "n_entries",
+                "mae_union_eV",
+                "rmse_union_eV",
+                "max_abs_error_union_eV",
+                "mean_distance_ang",
+            },
+        )
+
+    def test_orbital_pair_metrics_keep_same_local_index_species_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fdf = Path(tmp) / "sample" / "RUN.fdf"
+            synthetic_fdf(fdf)
+            reference = self.matrix_data(
+                [
+                    [1.0, 0.5, 0.7],
+                    [0.0, 2.0, 0.0],
+                    [0.2, 0.0, 3.0],
+                ]
+            )
+            predicted = self.matrix_data(
+                [
+                    [1.1, 0.4, 0.0],
+                    [0.0, 2.2, 0.0],
+                    [0.5, 0.0, 2.8],
+                ]
+            )
+
+            structural = self.module.structural_sparse_metrics(
+                "sample",
+                reference,
+                predicted,
+                fdf,
+                {"Si": 2, "C": 1},
+            )
+
+        keys = {
+            (
+                row["row_species"],
+                row["col_species"],
+                row["row_orbital_index"],
+                row["col_orbital_index"],
+            )
+            for row in structural["orbital_pair_rows"]
+        }
+        self.assertIn(("Si", "Si", 0, 0), keys)
+        self.assertIn(("Si", "Si", 1, 1), keys)
+        self.assertIn(("Si", "C", 0, 0), keys)
+        self.assertIn(("C", "Si", 0, 0), keys)
+        self.assertIn(("C", "C", 0, 0), keys)
+
+    def test_orbital_pair_summary_aggregates_by_species_and_local_pair(self) -> None:
+        rows = [
+            {
+                "sample": "a",
+                "row_species": "H",
+                "col_species": "H",
+                "species_pair": "H-H",
+                "row_orbital_index": 0,
+                "col_orbital_index": 0,
+                "row_orbital_label": "orbital_0",
+                "col_orbital_label": "orbital_0",
+                "n_entries": 4,
+                "mae_union_eV": 1.0,
+                "mae_union_meV": 1000.0,
+                "mse_union_eV2": 2.0,
+                "rmse_union_eV": 2.0,
+                "r2_union": 0.5,
+                "max_abs_error_union_eV": 3.0,
+                "mean_abs_ref_eV": 4.0,
+                "mean_signed_error_eV": -1.0,
+                "metric_target_space": self.module.ORBITAL_PAIR_METRIC_TARGET_SPACE,
+                "basis_source": self.module.ORBITAL_PAIR_BASIS_SOURCE,
+            },
+            {
+                "sample": "b",
+                "row_species": "H",
+                "col_species": "H",
+                "species_pair": "H-H",
+                "row_orbital_index": 0,
+                "col_orbital_index": 0,
+                "row_orbital_label": "orbital_0",
+                "col_orbital_label": "orbital_0",
+                "n_entries": 2,
+                "mae_union_eV": 3.0,
+                "mae_union_meV": 3000.0,
+                "mse_union_eV2": 6.0,
+                "rmse_union_eV": 4.0,
+                "r2_union": 1.0,
+                "max_abs_error_union_eV": 5.0,
+                "mean_abs_ref_eV": 6.0,
+                "mean_signed_error_eV": 1.0,
+                "metric_target_space": self.module.ORBITAL_PAIR_METRIC_TARGET_SPACE,
+                "basis_source": self.module.ORBITAL_PAIR_BASIS_SOURCE,
+            },
+        ]
+
+        summary = self.module.orbital_pair_summary_rows(rows)
+
+        self.assertEqual(len(summary), 1)
+        row = summary[0]
+        self.assertEqual(row["n_samples"], 2)
+        self.assertEqual(row["n_entries"], 6)
+        self.assertAlmostEqual(row["mae_union_eV_mean"], 2.0)
+        self.assertAlmostEqual(row["mae_union_eV_std"], 1.0)
+        self.assertAlmostEqual(row["mae_union_eV_min"], 1.0)
+        self.assertAlmostEqual(row["mae_union_eV_max"], 3.0)
+        self.assertAlmostEqual(row["r2_union_mean"], 0.75)
 
     def test_missing_basis_species_fails_structural_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,4 +403,3 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -43,6 +43,65 @@ The UI endpoint `/api/plots` reads those archived CSV files from `results_md`,
 absolute path from another OS, the UI falls back to the archive directory beside
 the manifest.
 
+The Results tab includes a "DeepH-comparable" diagnostic plot group when the
+corresponding archived columns exist:
+
+- Matrix MAE/RMSE in meV from `mae_union_meV`, `rmse_union_meV`,
+  `mae_ref_meV`, and `rmse_ref_meV` in `metrics/sparse_metrics.csv`
+  (lower is better).
+- Matrix MSE from `mse_union_eV2` and `mse_ref_eV2` in
+  `metrics/sparse_metrics.csv` (lower is better; units are eV^2).
+- Matrix R2 from `r2_union` and `r2_ref` in `metrics/sparse_metrics.csv`
+  (higher is better; unavailable for constant targets).
+- DeepH-style DOS MAE from `dos_mae_500_fermi_window` in
+  `metrics/dos_metrics.csv`; unavailable rows preserve
+  `dos_window_unavailable_reason` rather than being treated as zero.
+- Orbital-pair MAE heatmaps from `metrics/orbital_pair_summary.csv` using
+  `mae_union_meV_mean` grouped by `species_pair`, `row_orbital_index`, and
+  `col_orbital_index`. The full per-sample CSV remains
+  `metrics/orbital_pair_metrics.csv`.
+
+These plots are diagnostics for comparing repository outputs with DeepH-style
+reports. They do not change winner defaults and do not imply exact DeepH H'
+local-coordinate equivalence.
+
+## DeepH Comparability Status
+
+The repository exposes DeepH-comparable diagnostics, not a complete
+reproduction of every DeepH benchmark. `metrics/manifest.json` records the same
+policy under `deeph_comparability_status`.
+
+Implemented repo-compatible analogues:
+
+- Hamiltonian MAE/RMSE/MSE/R2 in `metrics/sparse_metrics.csv` on the repository
+  reference, prediction, and union sparse supports.
+- meV aliases for Hamiltonian MAE/RMSE, computed as `1000 * eV`.
+- `dos_mae_500_fermi_window` in `metrics/dos_metrics.csv` when the SIESTA
+  reference provides a real finite Fermi level.
+- Orbital-pair CSV diagnostics in `metrics/orbital_pair_metrics.csv` and
+  `metrics/orbital_pair_summary.csv` when structure and `.ion.xml` basis
+  coverage are available.
+
+Caveats:
+
+- Matrix and orbital-pair metrics use the repository's raw/global Hamiltonian
+  basis. They are not exact DeepH local-coordinate H' metrics unless a future
+  validated H' transformation is implemented.
+- DOS window and units are repository DOS diagnostics and may not be physically
+  identical to DeepH's 2D material examples.
+- Fermi-dependent metrics are unavailable, not estimated, when SIESTA does not
+  provide a real finite Fermi level.
+
+Future work not implemented in this repository phase:
+
+| Area | Why it is future work |
+| --- | --- |
+| True high-symmetry k-path band structures | Requires explicit k-path input, k-resolved reference/predicted bands, and validation against SIESTA band-structure outputs. Current metric-time gates reject k-point sampled inputs for this strict comparison path. |
+| SOC/complex Hamiltonians | Current compatibility gates reject complex Hamiltonians and unvalidated spin-orbit or multi-component matrix semantics. |
+| Optical response, Berry quantities, electric susceptibility and shift current | Requires optical/Berry-response infrastructure, validated wavefunction or velocity/dipole data, and material-specific scientific checks. |
+| Ensemble uncertainty | Requires an explicit ensemble protocol and calibrated reliability validation across independent model instances. |
+| DeepH-vs-DFT scaling by system size | Requires controlled system-size series, DFT/DeepH timing protocol, and hardware-normalized scaling analysis. |
+
 ## Sparse Matrix Metrics
 
 The sparse Hamiltonian metrics are computed using a support threshold of
@@ -59,6 +118,20 @@ Reported metrics include:
 - `mae_ref_eV`, `rmse_ref_eV`: errors on SIESTA non-zero entries.
 - `mae_pred_eV`, `rmse_pred_eV`: errors on predicted non-zero entries.
 - `mae_union_eV`, `rmse_union_eV`: errors on the union support.
+- `mse_ref_eV2`, `mse_pred_eV2`, `mse_union_eV2`: mean squared Hamiltonian
+  error on the same support domains as the corresponding MAE/RMSE metrics.
+  Units are eV^2.
+- `r2_ref`, `r2_pred`, `r2_union`: coefficient of determination on the same
+  support domains. R2 is complementary to absolute error metrics and is left
+  unavailable when the reference target has zero variance or no comparable
+  entries.
+- `mae_*_meV`, `rmse_*_meV`: meV aliases for the existing eV MAE/RMSE metrics,
+  computed as `1000 * *_eV`.
+- `matrix_metric_target_space`: currently `raw_global_hamiltonian`, meaning the
+  repository compares the archived global SIESTA Hamiltonian matrix against the
+  predicted matrix. These metrics are DeepH-comparable scalar diagnostics, but
+  they are not exact DeepH local-coordinate H' block metrics unless a future
+  validated H' transformation is implemented.
 - `relative_frobenius_ref`: Frobenius error on the SIESTA support, normalized by
   the SIESTA Frobenius norm.
 - `relative_frobenius_union`: Frobenius error on the union support, normalized
@@ -79,6 +152,28 @@ species basis using the angular degeneracy `2*l+1`:
 - `metrics/species_pair_metrics.csv`: errors grouped by species pair.
 - `metrics/distance_bin_metrics.csv`: errors grouped into `0-1.2`,
   `1.2-2.0`, `2.0-4.0`, and `>4.0 Ang` bins.
+- `metrics/orbital_pair_metrics.csv`: heatmap-ready Hamiltonian errors grouped
+  by sample, row/column species, and row/column local orbital index.
+- `metrics/orbital_pair_summary.csv`: cross-sample count/mean/std/min/max
+  summaries for the orbital-pair metrics.
+
+Orbital-pair rows report union-support `mae_union_eV`, `mae_union_meV`,
+`mse_union_eV2`, `rmse_union_eV`, `r2_union`, `max_abs_error_union_eV`,
+`mean_abs_ref_eV`, and `mean_signed_error_eV`. The target space is
+`raw_global_hamiltonian_orbital_basis`: this is the repository Hamiltonian
+basis, not DeepH's local-coordinate H' block representation. The `.ion.xml`
+parser currently uses reliably available PAO counts only, so orbital labels are
+stable generated labels such as `orbital_0`; species columns are part of the key
+so local index `0` for different species is never merged.
+
+For a DeepH-style orbital-orbital heatmap diagnostic, filter
+`metrics/orbital_pair_metrics.csv` to one `sample` and `species_pair`, then
+pivot `mae_union_meV` by `row_orbital_index` and `col_orbital_index`.
+`metrics/orbital_pair_summary.csv` provides cross-sample summaries with the
+same grouping keys. These files are discoverable in `metrics/manifest.json`
+under `outputs.orbital_pair_metrics` and `outputs.orbital_pair_summary`, and
+the UI lists their archive paths when present. They remain diagnostic only and
+are not primary winner metrics.
 
 If the basis is missing, cannot be parsed, lacks a species present in `RUN.fdf`,
 or its orbital count does not match the Hamiltonian dimension, the metrics
@@ -159,13 +254,13 @@ electronic spectrum. Spectral metrics must be evaluated explicitly, and matrix
 level and spectral errors should both be inspected before drawing physical
 conclusions.
 
-Important: near-Fermi, occupied-band, and gap metrics require a real Fermi level
-read from the SIESTA reference file. The evaluator does not estimate or infer a
-Fermi level. If SIESTA does not provide one, those metrics are left unavailable,
-`fermi_level_source` is set to `unavailable`, and the manifest records a
-nonfatal `missing_fermi_level` warning for that sample. This warning still
-blocks winner claims whenever the unavailable Fermi-dependent metric is the
-selected primary metric.
+Important: near-Fermi, occupied-band, gap, and fixed-window DOS metrics require
+a real Fermi level read from the SIESTA reference file. The evaluator does not
+estimate or infer a Fermi level. If SIESTA does not provide one, those metrics
+are left unavailable, `fermi_level_source` is set to `unavailable`, and the
+manifest records a nonfatal `missing_fermi_level` warning for that sample. This
+warning still blocks winner claims whenever the unavailable Fermi-dependent
+metric is the selected primary metric.
 
 Metric-time compatibility gates require identical Hamiltonian shapes and a
 single supported matrix component. Complex Hamiltonian values are preserved
@@ -180,10 +275,21 @@ eigenvalues using `sigma = 0.10 eV` and a 1000-point energy grid. It reports:
 - `dos_wasserstein_eV`: 1D transport distance between normalized DOS curves.
 - `dos_l1`: L1 distance between normalized DOS curves.
 - `dos_l2`: L2 distance between normalized DOS curves.
+- `dos_mae_500_fermi_window`: MAE between raw Gaussian-broadened predicted and
+  reference DOS values on exactly 500 points from `fermi_level - 6 eV` to
+  `fermi_level + 6 eV`, aligned to the SIESTA reference Fermi level and using
+  the default `sigma = 0.10 eV`.
 
 Sensitivity diagnostics are written to `metrics/dos_sigma_sweep.csv` for sigma
 values `[0.05, 0.10, 0.20, 0.40] eV`. The purpose is to avoid conclusions driven
 by one arbitrary broadening parameter.
+
+The fixed Fermi-window DOS metric is a repository-compatible analogue of
+DeepH's DOS MAE benchmark, not a claim of identical physical units or exact
+DeepH equivalence for molecular or H2O-only systems. If the reference SIESTA
+Fermi level is missing or non-finite, the metric is written as unavailable
+(`NaN`) with `dos_window_unavailable_reason = missing_fermi_level`; the
+evaluator does not estimate Fermi from HOMO/LUMO.
 
 ## Matrix-Spectrum Relationship
 
@@ -194,7 +300,8 @@ physically meaningful spectral improvements.
 Per sample it records:
 
 - `relative_frobenius_union`
-- `mae_ref_eV`, `rmse_ref_eV`, `rmse_union_eV`
+- `mae_ref_eV`, `rmse_ref_eV`, `mse_ref_eV2`, `r2_ref`
+- `rmse_union_eV`, `mse_union_eV2`, `r2_union`
 - `support_f1`
 - `global_rmse_eV`
 - `low_energy_rmse_eV`
@@ -219,6 +326,16 @@ Matrix error alone should not be treated as the final answer. A lower matrix
 MAE can still fail to improve frontier eigenvalues, gap, or DOS, so the report
 keeps matrix, spectral, near-Fermi, DOS, and matrix-spectrum relationship
 metrics separate.
+
+The DeepH-comparable additions (`mse_*_eV2`, `r2_*`, meV MAE/RMSE aliases,
+`dos_mae_500_fermi_window`, and the orbital-pair CSV diagnostics) are
+repository-compatible analogues on the archived Hamiltonian/DOS space. Scalar
+matrix and DOS additions flow into cross-evaluation reports when present.
+Orbital-pair CSVs are higher-cardinality auxiliary diagnostics and are listed
+as output artifacts rather than folded into `cross_evaluation_metrics.csv`.
+Matrix MSE/R2/meV aliases are diagnostic or secondary winner metrics, while the
+fixed-window DOS MAE remains Fermi-dependent and must not be substituted when
+unavailable.
 
 For physical conclusions the UI/winner analysis uses the selected primary metric
 authoritatively and does not silently substitute another metric when the primary

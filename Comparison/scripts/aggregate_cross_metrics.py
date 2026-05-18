@@ -61,6 +61,15 @@ def json_text(value: Any) -> str:
     return json.dumps(normalize_method_mapping(value if value is not None else {}), sort_keys=True, ensure_ascii=False)
 
 
+def optional_json_text(value: Any) -> str | None:
+    if value in (None, "", False):
+        return None
+    if isinstance(value, (dict, list)) and not value:
+        return None
+    text = json_text(value)
+    return None if text in ("{}", "[]", "") else text
+
+
 def canonical_manifest_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(manifest)
     if normalized.get("train_method") not in (None, ""):
@@ -427,14 +436,14 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "train_generation_parameters_json": manifest.get("train_generation_parameters_json"),
                 "train_training_tag": manifest.get("train_training_tag") or manifest.get("training_tag"),
                 "train_training_index": manifest.get("train_training_index") or manifest.get("training_index"),
-                "train_training_settings": json_text(
+                "train_training_settings": optional_json_text(
                     manifest.get("train_training_settings") or manifest.get("training_settings")
                 ),
                 "train_training_plan_index": manifest.get("train_training_plan_index")
                 or manifest.get("training_plan_index"),
                 "train_training_plan_label": manifest.get("train_training_plan_label")
                 or manifest.get("training_plan_label"),
-                "train_training_plan_settings": json_text(
+                "train_training_plan_settings": optional_json_text(
                     manifest.get("train_training_plan_settings")
                     or manifest.get("training_plan_settings")
                 ),
@@ -444,10 +453,10 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 or manifest.get("training_plan_source_dataset_label"),
                 "training_tag": manifest.get("training_tag"),
                 "training_index": manifest.get("training_index"),
-                "training_settings": json_text(manifest.get("training_settings")),
+                "training_settings": optional_json_text(manifest.get("training_settings")),
                 "training_plan_index": manifest.get("training_plan_index"),
                 "training_plan_label": manifest.get("training_plan_label"),
-                "training_plan_settings": json_text(manifest.get("training_plan_settings")),
+                "training_plan_settings": optional_json_text(manifest.get("training_plan_settings")),
                 "training_plan_source_dataset_label": manifest.get("training_plan_source_dataset_label"),
                 "md_dataset_size": manifest.get("md_dataset_size"),
                 "atom_dataset_size": manifest.get("atom_dataset_size"),

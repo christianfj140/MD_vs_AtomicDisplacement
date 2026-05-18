@@ -2976,17 +2976,43 @@ class ComparisonWorkflowTests(unittest.TestCase):
             finally:
                 module.threading.Thread = original_thread
             self.assertEqual(status["run_id"], runner._run_id)
-            tail = started["args"][-10:]
-            self.assertEqual(tail[0], "gpu")
-            self.assertEqual(tail[1], ["random_cartesian"])
-            self.assertEqual(tail[2], "full_strict_pipeline")
-            self.assertEqual(tail[3], {"n_structures": 3})
-            self.assertEqual(tail[4]["compute_accelerator"], "gpu")
-            self.assertEqual(tail[5], {})
-            self.assertIsNone(tail[6])
-            self.assertIn("recipes", tail[7])
-            self.assertEqual(tail[8], "preserve_archived_splits")
-            self.assertEqual(tail[9], [])
+            arg_names = [
+                "md_sizes",
+                "atom_sizes",
+                "run_id",
+                "fc_dataset_specs",
+                "atom_dataset_specs",
+                "split_ratios",
+                "random_seed",
+                "split_mode",
+                "test_sets",
+                "primary_metric",
+                "compute_budget_mode",
+                "compute_accelerator",
+                "selected_methods",
+                "run_mode",
+                "random_cartesian_options",
+                "performance_settings",
+                "training_settings",
+                "venv_activate_path",
+                "dataset_recipes_info",
+                "reusable_split_policy",
+                "training_plan",
+                "material_config",
+            ]
+            self.assertEqual(len(started["args"]), len(arg_names))
+            args = dict(zip(arg_names, started["args"]))
+            self.assertEqual(args["compute_accelerator"], "gpu")
+            self.assertEqual(args["selected_methods"], ["random_cartesian"])
+            self.assertEqual(args["run_mode"], "full_strict_pipeline")
+            self.assertEqual(args["random_cartesian_options"], {"n_structures": 3})
+            self.assertEqual(args["performance_settings"]["compute_accelerator"], "gpu")
+            self.assertEqual(args["training_settings"], {})
+            self.assertIsNone(args["venv_activate_path"])
+            self.assertIn("recipes", args["dataset_recipes_info"])
+            self.assertEqual(args["reusable_split_policy"], "preserve_archived_splits")
+            self.assertEqual(args["training_plan"], [])
+            self.assertIsNone(args["material_config"])
 
     def test_experiment_start_rejects_zero_selected_methods(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -2998,6 +3024,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
         styles_css = (REPO_ROOT / "Comparison" / "ui" / "styles.css").read_text(encoding="utf-8")
+        pipeline_ui = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
         self.assertIn('value="md"', index_html)
         self.assertIn('value="siesta_fc_cartesian"', index_html)
         self.assertIn('value="random_cartesian"', index_html)
@@ -3007,6 +3034,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('class="tab active" data-view="experiment"', index_html)
         self.assertIn('id="view-run" class="view"', index_html)
         self.assertIn('id="view-experiment" class="view active"', index_html)
+        self.assertIn('id="show-plots" type="checkbox" checked', index_html)
         self.assertIn('value="train_test_metrics_plots_only"', index_html)
         self.assertIn('id="reusable-dataset-panel"', index_html)
         self.assertIn('id="reusable-dataset-list"', index_html)
@@ -3020,9 +3048,20 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("Metric guide", index_html)
         self.assertIn("Low-energy RMSE", index_html)
         self.assertIn("DOS W1", index_html)
+        self.assertIn("Hamiltonian R2", index_html)
+        self.assertIn("DOS MAE 500 Fermi window", index_html)
+        self.assertIn("DeepH-comparable metrics", index_html)
+        self.assertIn('<option value="mse_ref_eV2">Sparse MSE on ref</option>', index_html)
+        self.assertIn('<option value="r2_ref">Sparse R2 on ref</option>', index_html)
+        self.assertIn('<option value="dos_mae_500_fermi_window">DOS MAE 500 Fermi window</option>', index_html)
         self.assertIn("METRIC_HELP", app_js)
         self.assertIn("PLOT_HELP_BY_ID", app_js)
         self.assertIn("CROSS_PLOT_HELP_BY_ID", app_js)
+        self.assertIn('id="plot-deeph-mev"', index_html)
+        self.assertIn('id="plot-deeph-mse"', index_html)
+        self.assertIn('id="plot-deeph-r2"', index_html)
+        self.assertIn('id="plot-deeph-dos"', index_html)
+        self.assertIn('id="plot-orbital-pair"', index_html)
         self.assertIn("installPlotInfoBubble", app_js)
         self.assertIn("plotInfoFor", app_js)
         self.assertIn("plot-info-bubble", app_js)
@@ -3036,10 +3075,25 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn(r"\\frac{2\\,\\mathrm{precision}\\,\\mathrm{recall}}", app_js)
         self.assertIn(r"\\operatorname{mean}_{\\text{finite rows}}", app_js)
         self.assertIn("DOS Wasserstein-1", app_js)
+        self.assertIn("dos_mae_500_fermi_window", app_js)
+        self.assertIn("mse_ref_eV2", app_js)
+        self.assertIn("r2_ref", app_js)
+        self.assertIn("plot-deeph-mev", app_js)
+        self.assertIn("plot-deeph-mse", app_js)
+        self.assertIn("plot-deeph-r2", app_js)
+        self.assertIn("plot-deeph-dos", app_js)
+        self.assertIn("plot-orbital-pair", app_js)
+        self.assertIn("plotsEnabled: true", app_js)
+        self.assertIn("orbital_pair_summary", pipeline_ui)
+        self.assertIn("metricHigherIsBetter", app_js)
         self.assertIn("Support F1", app_js)
+        self.assertIn('"dos_mae_500_fermi_window"', pipeline_ui)
+        self.assertIn('"mse_union_eV2"', pipeline_ui)
+        self.assertIn('"r2_union"', pipeline_ui)
         self.assertIn(".plot-info-bubble", styles_css)
         self.assertIn(".plot-info-popover", styles_css)
         self.assertIn(".plot-info-formula", styles_css)
+        self.assertIn(".plot-section-heading", styles_css)
         self.assertNotIn('id="random-cartesian-n-structures"', index_html)
         self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
@@ -3313,6 +3367,221 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 results["random_cartesian"]["prediction_glob"],
                 "AtomDisplacement/dataset/RandomCartesian_steps/*/ML_prediction.HSX",
             )
+
+    def test_orbital_pair_diagnostic_outputs_are_discoverable_without_loading_rows(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            old_dir = module.RESULTS_ROOT / "results_md" / "dataset_3" / "run_old"
+            new_dir = module.RESULTS_ROOT / "results_md" / "dataset_4" / "run_new"
+            for result_dir, run_id, size in ((old_dir, "old", 3), (new_dir, "new", 4)):
+                metrics_dir = result_dir / "metrics"
+                metrics_dir.mkdir(parents=True)
+                write_csv(
+                    metrics_dir / "sparse_metrics.csv",
+                    [{"sample": "sample_1", "relative_frobenius_union": "0.25"}],
+                )
+                write_csv(
+                    metrics_dir / "spectral_metrics.csv",
+                    [{"sample": "sample_1", "low_energy_rmse_eV": "0.4"}],
+                )
+                (result_dir / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "pipeline": "md",
+                            "method_id": "md",
+                            "run_id": run_id,
+                            "result_dir": str(result_dir),
+                            "dataset_size": size,
+                            "requested_dataset_size": size,
+                            "dataset_label": f"dataset_{size}",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            write_csv(
+                new_dir / "metrics" / "orbital_pair_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "row_species": "H",
+                        "col_species": "H",
+                        "species_pair": "H-H",
+                        "row_orbital_index": "0",
+                        "col_orbital_index": "0",
+                        "mae_union_meV": "12.5",
+                    }
+                ],
+            )
+            write_csv(
+                new_dir / "metrics" / "orbital_pair_summary.csv",
+                [
+                    {
+                        "row_species": "H",
+                        "col_species": "H",
+                        "species_pair": "H-H",
+                        "row_orbital_index": "0",
+                        "col_orbital_index": "0",
+                        "mae_union_meV_mean": "12.5",
+                    }
+                ],
+            )
+
+            plots = module.plot_data_summary()
+            runs = {run["run_id"]: run for run in plots["runs"]}
+            self.assertFalse(runs["old"]["diagnostic_outputs"]["orbital_pair_metrics"]["exists"])
+            self.assertTrue(runs["new"]["diagnostic_outputs"]["orbital_pair_metrics"]["exists"])
+            self.assertEqual(runs["new"]["diagnostic_outputs"]["orbital_pair_metrics"]["rows"], 1)
+            self.assertEqual(runs["new"]["diagnostic_outputs"]["orbital_pair_summary"]["rows"], 1)
+            self.assertNotIn("orbital_pair", runs["new"]["samples"])
+            self.assertEqual(len(runs["new"]["samples"]["orbital_pair_summary"]), 1)
+            self.assertAlmostEqual(
+                runs["new"]["samples"]["orbital_pair_summary"][0]["mae_union_meV_mean"],
+                12.5,
+                places=12,
+            )
+            self.assertEqual(runs["old"]["samples"]["orbital_pair_summary"], [])
+
+            archived = module.archived_results_summary()["md"]
+            archived_by_run = {item["run_id"]: item for item in archived}
+            self.assertTrue(archived_by_run["new"]["diagnostic_outputs"]["orbital_pair_metrics"]["exists"])
+            self.assertFalse(archived_by_run["old"]["diagnostic_outputs"]["orbital_pair_metrics"]["exists"])
+            results = module.result_summary()
+            results_by_run = {item["run_id"]: item for item in results["archived"]["md"]}
+            self.assertTrue(results_by_run["new"]["diagnostic_outputs"]["orbital_pair_summary"]["exists"])
+
+    def test_deeph_like_plot_payload_exposes_metric_columns(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            result_dir = module.RESULTS_ROOT / "results_md" / "dataset_4" / "run_deeph"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "sparse_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "mae_union_meV": "8.0",
+                        "rmse_union_meV": "10.0",
+                        "mae_ref_meV": "7.0",
+                        "rmse_ref_meV": "9.0",
+                        "mse_union_eV2": "0.0001",
+                        "mse_ref_eV2": "0.000081",
+                        "r2_union": "0.97",
+                        "r2_ref": "0.98",
+                    }
+                ],
+            )
+            write_csv(
+                metrics_dir / "spectral_metrics.csv",
+                [{"sample": "sample_1", "low_energy_rmse_eV": "0.2"}],
+            )
+            write_csv(
+                metrics_dir / "dos_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "dos_mae_500_fermi_window": "0.04",
+                        "dos_window_metric_available": "True",
+                        "dos_window_points": "500",
+                        "dos_window_min_eV": "-6.0",
+                        "dos_window_max_eV": "6.0",
+                        "dos_window_sigma_eV": "0.1",
+                        "dos_window_unavailable_reason": "",
+                    }
+                ],
+            )
+            write_csv(
+                metrics_dir / "orbital_pair_summary.csv",
+                [
+                    {
+                        "row_species": "H",
+                        "col_species": "O",
+                        "species_pair": "H-O",
+                        "row_orbital_index": "0",
+                        "col_orbital_index": "1",
+                        "row_orbital_label": "orbital_0",
+                        "col_orbital_label": "orbital_1",
+                        "n_samples": "1",
+                        "n_entries": "2",
+                        "mae_union_meV_mean": "12.5",
+                        "rmse_union_eV_mean": "0.014",
+                        "r2_union_mean": "0.91",
+                    }
+                ],
+            )
+            (result_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "pipeline": "md",
+                        "method_id": "md",
+                        "run_id": "deeph",
+                        "result_dir": str(result_dir),
+                        "dataset_size": 4,
+                        "requested_dataset_size": 4,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plots = module.plot_data_summary()
+            run = plots["runs"][0]
+            self.assertAlmostEqual(run["means"]["sparse"]["mae_union_meV"], 8.0, places=12)
+            self.assertAlmostEqual(run["means"]["sparse"]["mse_union_eV2"], 0.0001, places=12)
+            self.assertAlmostEqual(run["means"]["sparse"]["r2_union"], 0.97, places=12)
+            self.assertAlmostEqual(run["means"]["dos"]["dos_mae_500_fermi_window"], 0.04, places=12)
+            self.assertEqual(run["samples"]["dos"][0]["dos_window_points"], 500.0)
+            self.assertEqual(run["samples"]["orbital_pair_summary"][0]["species_pair"], "H-O")
+            self.assertAlmostEqual(
+                run["samples"]["orbital_pair_summary"][0]["mae_union_meV_mean"],
+                12.5,
+                places=12,
+            )
+
+    def test_deeph_like_plot_payload_preserves_missing_dos_reason(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            result_dir = module.RESULTS_ROOT / "results_md" / "dataset_3" / "run_missing_fermi"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "sparse_metrics.csv",
+                [{"sample": "sample_1", "mae_ref_eV": "0.001"}],
+            )
+            write_csv(
+                metrics_dir / "dos_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "dos_window_metric_available": "False",
+                        "dos_window_unavailable_reason": "missing_fermi_level",
+                    }
+                ],
+            )
+            (result_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "pipeline": "md",
+                        "method_id": "md",
+                        "run_id": "missing_fermi",
+                        "result_dir": str(result_dir),
+                        "dataset_size": 3,
+                        "requested_dataset_size": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plots = module.plot_data_summary()
+            run = plots["runs"][0]
+            self.assertNotIn("dos_mae_500_fermi_window", run["means"]["dos"])
+            self.assertEqual(run["samples"]["dos"][0]["dos_window_metric_available"], "False")
+            self.assertEqual(run["samples"]["dos"][0]["dos_window_unavailable_reason"], "missing_fermi_level")
 
     def test_retraining_runs_get_incremental_training_tags_for_plots(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -5017,6 +5286,124 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 },
             )
 
+    def test_cross_aggregation_preserves_p0_metric_columns_and_old_runs(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            cross_root = root / "cross"
+            new_dir = cross_root / "md__on__test_md"
+            old_dir = cross_root / "siesta_fc_cartesian__on__test_md"
+            for result_dir in (new_dir, old_dir):
+                (result_dir / "metrics").mkdir(parents=True)
+
+            write_csv(
+                new_dir / "metrics" / "sparse_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "mae_ref_eV": "0.001",
+                        "mse_ref_eV2": "0.000004",
+                        "r2_ref": "0.98",
+                        "mae_ref_meV": "1.0",
+                        "rmse_ref_meV": "2.0",
+                        "matrix_metric_target_space": "raw_global_hamiltonian",
+                    }
+                ],
+            )
+            write_csv(
+                new_dir / "metrics" / "spectral_metrics.csv",
+                [{"sample": "sample_1", "low_energy_rmse_eV": "0.2"}],
+            )
+            write_csv(
+                new_dir / "metrics" / "dos_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "dos_wasserstein_eV": "0.3",
+                        "dos_mae_500_fermi_window": "0.04",
+                        "dos_window_metric_available": "True",
+                        "dos_window_unavailable_reason": "",
+                    }
+                ],
+            )
+            write_csv(
+                new_dir / "metrics" / "orbital_pair_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "row_species": "H",
+                        "col_species": "H",
+                        "species_pair": "H-H",
+                        "row_orbital_index": "0",
+                        "col_orbital_index": "0",
+                        "mae_union_meV": "1.0",
+                    }
+                ],
+            )
+            write_csv(
+                new_dir / "metrics" / "orbital_pair_summary.csv",
+                [
+                    {
+                        "row_species": "H",
+                        "col_species": "H",
+                        "species_pair": "H-H",
+                        "row_orbital_index": "0",
+                        "col_orbital_index": "0",
+                        "mae_union_meV_mean": "1.0",
+                    }
+                ],
+            )
+            write_csv(
+                old_dir / "metrics" / "sparse_metrics.csv",
+                [{"sample": "sample_1", "mae_ref_eV": "0.002"}],
+            )
+            write_csv(
+                old_dir / "metrics" / "spectral_metrics.csv",
+                [{"sample": "sample_1", "low_energy_rmse_eV": "0.4"}],
+            )
+            for result_dir, method in ((new_dir, "md"), (old_dir, "siesta_fc_cartesian")):
+                (result_dir / "cross_evaluation_manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "train_method": method,
+                            "test_set": "test_md",
+                            "dataset_size": 3,
+                            "seed": 42,
+                            "model_checkpoint": f"{method}.ckpt",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_p0",
+                "--cross-root",
+                str(cross_root),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "cross_evaluation_metrics.csv").open(encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+                fieldnames = list(reader.fieldnames or [])
+            self.assertIn("mse_ref_eV2", fieldnames)
+            self.assertIn("r2_ref", fieldnames)
+            self.assertIn("mae_ref_meV", fieldnames)
+            self.assertIn("dos_mae_500_fermi_window", fieldnames)
+            self.assertNotIn("orbital_pair_metrics", fieldnames)
+            self.assertNotIn("mae_union_meV_mean", fieldnames)
+            new_row = next(row for row in rows if row["train_method"] == "md")
+            old_row = next(row for row in rows if row["train_method"] == "siesta_fc_cartesian")
+            self.assertEqual(new_row["mse_ref_eV2"], "4e-06")
+            self.assertEqual(new_row["r2_ref"], "0.98")
+            self.assertEqual(new_row["dos_mae_500_fermi_window"], "0.04")
+            self.assertEqual(old_row["mse_ref_eV2"], "")
+            self.assertEqual(old_row["dos_mae_500_fermi_window"], "")
+
     def test_cross_aggregation_rejects_duplicate_sample_ids_and_propagates_evaluator_errors(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
@@ -6421,6 +6808,131 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertNotEqual(recommendation["scientific_status"], "robust_comparison")
             self.assertIn(recommendation["scientific_status"], {"exploratory", "exploratory_only"})
             self.assertEqual(recommendation["nway_consensus_leader"], "random_cartesian")
+
+    def test_winner_analysis_p0_matrix_metrics_are_diagnostic_with_r2_direction(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method in ("md", "siesta_fc_cartesian"):
+                    for test_set in ("test_md", "test_siesta_fc_cartesian", "test_mixed"):
+                        rows.append(
+                            {
+                                "experiment_id": "exp_p0_matrix",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "dataset_size_by_method": json.dumps({"md": 10, "siesta_fc_cartesian": 10}),
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "mse_ref_eV2": "0.4" if method == "md" else "0.1",
+                                "r2_ref": "0.2" if method == "md" else "0.9",
+                            }
+                        )
+            write_csv(metrics, rows)
+
+            mse_result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary_mse"),
+                "--primary-metric",
+                "mse_ref_eV2",
+            )
+            self.assertEqual(mse_result.returncode, 0, mse_result.stderr + mse_result.stdout)
+            mse_recommendation = json.loads((root / "summary_mse" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(mse_recommendation["primary_metric_policy_status"], "diagnostic_only_metric")
+            self.assertEqual(mse_recommendation["primary_metric_recommendation_role"], "diagnostic_only")
+            self.assertEqual(mse_recommendation["metric_policy"]["metric_direction"], "lower_is_better")
+            self.assertFalse(mse_recommendation["robust_primary_metric_allowed"])
+
+            r2_result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary_r2"),
+                "--primary-metric",
+                "r2_ref",
+            )
+            self.assertEqual(r2_result.returncode, 0, r2_result.stderr + r2_result.stdout)
+            r2_recommendation = json.loads((root / "summary_r2" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(r2_recommendation["primary_metric_policy_status"], "diagnostic_only_metric")
+            self.assertEqual(r2_recommendation["metric_policy"]["metric_direction"], "higher_is_better")
+            with (root / "summary_r2" / "winner_by_dataset_size.csv").open(encoding="utf-8") as handle:
+                pair_rows = [row for row in csv.DictReader(handle) if row["metric"] == "r2_ref"]
+            self.assertTrue(pair_rows)
+            self.assertEqual({row["lower_is_better"] for row in pair_rows}, {"False"})
+            self.assertEqual({row["winner"] for row in pair_rows}, {"siesta_fc_cartesian"})
+
+    def test_winner_analysis_dos_fermi_window_mae_missing_is_not_substituted(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            rows = []
+            for seed in ("1", "2", "3"):
+                for method in ("md", "siesta_fc_cartesian"):
+                    for test_set in ("test_md", "test_siesta_fc_cartesian", "test_mixed"):
+                        rows.append(
+                            {
+                                "experiment_id": "exp_p0_dos_missing",
+                                "train_method": method,
+                                "test_set": test_set,
+                                "dataset_size_by_method": json.dumps({"md": 10, "siesta_fc_cartesian": 10}),
+                                "seed": seed,
+                                "model_checkpoint": f"{method}_{seed}.ckpt",
+                                "low_energy_rmse_eV": "0.1" if method == "md" else "0.2",
+                                "dos_wasserstein_eV": "0.1" if method == "md" else "0.2",
+                                "dos_window_metric_available": "False",
+                                "dos_window_unavailable_reason": "missing_fermi_level",
+                            }
+                        )
+            write_csv(metrics, rows)
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "dos_mae_500_fermi_window",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((root / "summary" / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "insufficient_primary_metric")
+            self.assertEqual(recommendation["primary_metric_policy_status"], "missing_required_metric")
+            self.assertIsNone(recommendation["winner"])
+            self.assertIn("dos_mae_500_fermi_window", recommendation["metric_policy"]["primary_metric"])
+            self.assertGreater(recommendation["metric_policy"]["missing_required_cell_count"], 0)
+
+            present_metrics = root / "cross_evaluation_metrics_present.csv"
+            present_rows = [
+                {
+                    **row,
+                    "dos_mae_500_fermi_window": "0.1" if row["train_method"] == "md" else "0.2",
+                    "dos_window_metric_available": "True",
+                    "dos_window_unavailable_reason": "",
+                }
+                for row in rows
+            ]
+            write_csv(present_metrics, present_rows)
+            present_result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(present_metrics),
+                "--output-dir",
+                str(root / "summary_present"),
+                "--primary-metric",
+                "dos_mae_500_fermi_window",
+            )
+            self.assertEqual(present_result.returncode, 0, present_result.stderr + present_result.stdout)
+            present_recommendation = json.loads(
+                (root / "summary_present" / "recommendation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(present_recommendation["primary_metric_policy_status"], "fermi_window_metric_unjustified")
+            self.assertEqual(present_recommendation["primary_metric_recommendation_role"], "fermi_window_conditional")
+            self.assertFalse(present_recommendation["robust_primary_metric_allowed"])
 
     def test_final_recommendation_robust_random_cartesian_winner(self) -> None:
         with workspace_tempdir() as tmp:
@@ -9162,13 +9674,152 @@ class ComparisonWorkflowTests(unittest.TestCase):
 
     def test_structural_metric_outputs_are_part_of_metrics_manifest_schema(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py").read_text(encoding="utf-8")
+        metrics_doc = (REPO_ROOT / "Comparison" / "METRICS.md").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("block_metrics.csv", script)
         self.assertIn("species_pair_metrics.csv", script)
         self.assertIn("distance_bin_metrics.csv", script)
+        self.assertIn("orbital_pair_metrics.csv", script)
+        self.assertIn("orbital_pair_summary.csv", script)
         self.assertIn("structural_metrics_available", script)
+        self.assertIn("orbital_pair_metrics_available", script)
+        self.assertIn("ORBITAL_PAIR_METRIC_TARGET_SPACE", script)
+        self.assertIn("ORBITAL_PAIR_BASIS_SOURCE", script)
         self.assertIn("basis_orbital_counts", script)
         self.assertIn("Basis files are required", script)
         self.assertIn("2 * angular_momentum + 1", script)
+        for text in (metrics_doc, readme):
+            self.assertIn("metrics/orbital_pair_metrics.csv", text)
+            self.assertIn("metrics/orbital_pair_summary.csv", text)
+            self.assertIn("mae_union_meV", text)
+        self.assertIn("row_orbital_index", metrics_doc)
+        self.assertIn("col_orbital_index", metrics_doc)
+        self.assertIn("not DeepH's local-coordinate H' block representation", metrics_doc)
+
+    def test_sparse_deeph_comparable_metric_outputs_are_part_of_schema(self) -> None:
+        script = (REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py").read_text(encoding="utf-8")
+        for column in (
+            "mse_ref_eV2",
+            "mse_pred_eV2",
+            "mse_union_eV2",
+            "r2_ref",
+            "r2_pred",
+            "r2_union",
+            "mae_ref_meV",
+            "rmse_ref_meV",
+            "mae_pred_meV",
+            "rmse_pred_meV",
+            "mae_union_meV",
+            "rmse_union_meV",
+            "matrix_metric_target_space",
+        ):
+            self.assertIn(column, script)
+        self.assertIn('MATRIX_METRIC_TARGET_SPACE = "raw_global_hamiltonian"', script)
+
+    def test_deeph_comparability_status_documents_future_work(self) -> None:
+        script = (REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py").read_text(encoding="utf-8")
+        metrics_doc = (REPO_ROOT / "Comparison" / "METRICS.md").read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        performance_doc = (REPO_ROOT / "Comparison" / "PERFORMANCE.md").read_text(encoding="utf-8")
+
+        self.assertIn("DEEPH_COMPARABILITY_STATUS", script)
+        self.assertIn("deeph_comparability_status", script)
+        for key in (
+            "high_symmetry_kpath_band_structure",
+            "soc_complex_hamiltonians",
+            "optical_berry_susceptibility_shift_current",
+            "ensemble_uncertainty",
+            "deeph_vs_dft_system_size_scaling",
+        ):
+            self.assertIn(key, script)
+        for phrase in (
+            "DeepH Comparability Status",
+            "Implemented repo-compatible analogues",
+            "Future work not implemented",
+            "True high-symmetry k-path band structures",
+            "SOC/complex Hamiltonians",
+            "Optical response, Berry quantities, electric susceptibility and shift current",
+            "Ensemble uncertainty",
+            "DeepH-vs-DFT scaling by system size",
+            "not exact DeepH local-coordinate H' metrics",
+        ):
+            self.assertIn(phrase, metrics_doc)
+        self.assertIn("No reproducen todavia H' local", readme)
+        self.assertIn("benchmark DeepH-vs-DFT de escalado", performance_doc)
+
+    def test_dos_fermi_window_outputs_are_part_of_schema_and_policy(self) -> None:
+        script = (REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py").read_text(encoding="utf-8")
+        metrics_doc = (REPO_ROOT / "Comparison" / "METRICS.md").read_text(encoding="utf-8")
+        for column in (
+            "dos_mae_500_fermi_window",
+            "dos_window_min_eV",
+            "dos_window_max_eV",
+            "dos_window_points",
+            "dos_window_sigma_eV",
+            "dos_window_alignment",
+            "dos_window_metric_available",
+            "dos_window_unavailable_reason",
+        ):
+            self.assertIn(column, script)
+        self.assertIn("DOS_FERMI_WINDOW_POINTS = 500", script)
+        self.assertIn("DOS_FERMI_WINDOW_MIN_EV = -6.0", script)
+        self.assertIn("DOS_FERMI_WINDOW_MAX_EV = 6.0", script)
+        self.assertIn('DOS_FERMI_WINDOW_ALIGNMENT = "reference_fermi_level"', script)
+        self.assertIn("requires_real_siesta_fermi_level", script)
+        self.assertIn("dos_sweep_fields", script)
+        self.assertIn('write_csv(metrics_root / "dos_metrics.csv", dos_fields, dos_rows)', script)
+        self.assertIn('write_csv(metrics_root / "dos_sigma_sweep.csv", dos_sweep_fields, dos_sweep_rows)', script)
+        self.assertIn("DeepH's DOS MAE benchmark", metrics_doc)
+        self.assertIn("does not estimate Fermi", metrics_doc)
+
+    def test_dos_fermi_window_metrics_fixed_grid_and_missing_fermi(self) -> None:
+        import math
+        try:
+            import numpy as np
+            import scipy  # noqa: F401
+            import sisl  # noqa: F401
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_dos_window_test")
+        reference = np.asarray([-1.0, 0.0, 1.0], dtype=float)
+        predicted = np.asarray([-1.0, 0.0, 1.0], dtype=float)
+        grid, metrics = module.dos_fermi_window_metrics(reference, predicted, 2.0)
+
+        self.assertEqual(grid.size, 500)
+        self.assertAlmostEqual(float(grid[0]), -4.0)
+        self.assertAlmostEqual(float(grid[-1]), 8.0)
+        self.assertEqual(metrics["dos_window_points"], 500)
+        self.assertEqual(metrics["dos_window_min_eV"], -6.0)
+        self.assertEqual(metrics["dos_window_max_eV"], 6.0)
+        self.assertEqual(metrics["dos_window_sigma_eV"], module.DOS_SIGMA_EV)
+        self.assertEqual(metrics["dos_window_alignment"], "reference_fermi_level")
+        self.assertTrue(metrics["dos_window_metric_available"])
+        self.assertEqual(metrics["dos_window_unavailable_reason"], "")
+        self.assertAlmostEqual(metrics["dos_mae_500_fermi_window"], 0.0)
+
+        _different_grid, different_metrics = module.dos_fermi_window_metrics(
+            reference,
+            np.asarray([-0.5, 0.6, 1.4], dtype=float),
+            2.0,
+        )
+        self.assertTrue(math.isfinite(different_metrics["dos_mae_500_fermi_window"]))
+        self.assertGreater(different_metrics["dos_mae_500_fermi_window"], 0.0)
+
+        missing_grid, missing_metrics = module.dos_fermi_window_metrics(reference, predicted, None)
+        self.assertEqual(missing_grid.size, 0)
+        self.assertTrue(np.isnan(missing_metrics["dos_mae_500_fermi_window"]))
+        self.assertFalse(missing_metrics["dos_window_metric_available"])
+        self.assertEqual(missing_metrics["dos_window_unavailable_reason"], "missing_fermi_level")
+
+        adaptive_rows, adaptive_metrics = module.dos_for_sample(reference, np.asarray([-0.5, 0.6, 1.4], dtype=float))
+        self.assertEqual(len(adaptive_rows), module.DOS_POINTS)
+        self.assertEqual(adaptive_metrics["dos_grid_points"], module.DOS_POINTS)
+        for key in ("dos_wasserstein_eV", "dos_l1", "dos_l2"):
+            self.assertIn(key, adaptive_metrics)
+            self.assertTrue(math.isfinite(adaptive_metrics[key]))
+        self.assertIn("siesta_dos_normalized", adaptive_rows[0])
+        self.assertIn("predicted_dos_normalized", adaptive_rows[0])
 
     def test_sparse_metrics_exact_perturbation_and_support_failures(self) -> None:
         import math
@@ -9197,15 +9848,42 @@ class ComparisonWorkflowTests(unittest.TestCase):
         exact = module.sparse_metrics("exact", reference, matrix_data([[1.0, 2.0], [0.0, 4.0]]))
         self.assertEqual(exact["mae_union_eV"], 0.0)
         self.assertEqual(exact["rmse_union_eV"], 0.0)
+        self.assertEqual(exact["mse_union_eV2"], 0.0)
+        self.assertEqual(exact["r2_ref"], 1.0)
+        self.assertEqual(exact["r2_pred"], 1.0)
+        self.assertEqual(exact["r2_union"], 1.0)
         self.assertEqual(exact["support_f1"], 1.0)
+        self.assertEqual(exact["matrix_metric_target_space"], "raw_global_hamiltonian")
 
         perturbed = module.sparse_metrics("perturbed", reference, matrix_data([[1.5, 0.0], [3.0, 4.0]]))
         self.assertEqual(perturbed["false_zeros"], 1)
         self.assertEqual(perturbed["false_nonzeros"], 1)
         self.assertAlmostEqual(perturbed["weighted_false_zeros_eV"], 2.0)
         self.assertAlmostEqual(perturbed["weighted_false_nonzeros_eV"], 3.0)
+        self.assertAlmostEqual(perturbed["mae_ref_eV"], (0.5 + 2.0 + 0.0) / 3.0)
+        self.assertAlmostEqual(perturbed["rmse_ref_eV"], math.sqrt((0.5**2 + 2.0**2 + 0.0**2) / 3.0))
         self.assertAlmostEqual(perturbed["mae_union_eV"], (0.5 + 2.0 + 3.0) / 4.0)
         self.assertAlmostEqual(perturbed["rmse_union_eV"], math.sqrt((0.5**2 + 2.0**2 + 3.0**2) / 4.0))
+        self.assertAlmostEqual(perturbed["mse_ref_eV2"], (0.5**2 + 2.0**2 + 0.0**2) / 3.0)
+        self.assertAlmostEqual(perturbed["mse_pred_eV2"], (0.5**2 + 3.0**2 + 0.0**2) / 3.0)
+        self.assertAlmostEqual(perturbed["mse_union_eV2"], (0.5**2 + 2.0**2 + 3.0**2 + 0.0**2) / 4.0)
+        self.assertAlmostEqual(perturbed["mse_union_eV2"], perturbed["rmse_union_eV"] ** 2)
+        self.assertAlmostEqual(perturbed["r2_ref"], 5.0 / 56.0)
+        self.assertAlmostEqual(perturbed["r2_pred"], -7.0 / 104.0)
+        self.assertAlmostEqual(perturbed["r2_union"], -18.0 / 35.0)
+        self.assertAlmostEqual(perturbed["mae_ref_meV"], 1000.0 * perturbed["mae_ref_eV"])
+        self.assertAlmostEqual(perturbed["rmse_ref_meV"], 1000.0 * perturbed["rmse_ref_eV"])
+        self.assertAlmostEqual(perturbed["mae_pred_meV"], 1000.0 * perturbed["mae_pred_eV"])
+        self.assertAlmostEqual(perturbed["rmse_pred_meV"], 1000.0 * perturbed["rmse_pred_eV"])
+        self.assertAlmostEqual(perturbed["mae_union_meV"], 1000.0 * perturbed["mae_union_eV"])
+        self.assertAlmostEqual(perturbed["rmse_union_meV"], 1000.0 * perturbed["rmse_union_eV"])
+
+        constant_target = module.sparse_metrics(
+            "constant",
+            matrix_data([[2.0, 2.0], [0.0, 0.0]]),
+            matrix_data([[2.0, 1.0], [0.0, 0.0]]),
+        )
+        self.assertTrue(math.isnan(constant_target["r2_ref"]))
 
         non_hermitian = module.sparse_metrics("nonhermitian", reference, matrix_data([[1.0, 5.0], [0.0, 4.0]]))
         self.assertGreater(non_hermitian["hermiticity_pred"], 0.0)
@@ -9346,6 +10024,56 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(status["reference_kind"], ".TSHS")
             self.assertEqual(status["reference_sha256"], module.file_sha256(ref_path))
             self.assertEqual(rows["fatal_errors"], [])
+
+    def test_orthogonal_spectral_metrics_are_comparable_without_overlap(self) -> None:
+        try:
+            import numpy as np
+            from scipy import sparse
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
+
+        module = self.load_metrics_module("evaluate_hamiltonian_metrics_orthogonal_comparable_test")
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            pred_dir = root / "predicted" / "sample_1"
+            ref_dir = root / "siesta" / "sample_1"
+            pred_dir.mkdir(parents=True)
+            ref_dir.mkdir(parents=True)
+            (pred_dir / "ML_prediction.HSX").write_bytes(b"prediction")
+            (ref_dir / "siesta.TSHS").write_bytes(b"reference")
+
+            def fake_read_matrix(path: Path):
+                values = [0.0, 1.0, 2.0]
+                return module.MatrixData(
+                    path=path,
+                    hamiltonian=sparse.diags(values, format="csr"),
+                    overlap=None,
+                    own_eigenvalues=np.asarray(values, dtype=float),
+                    fermi_level=0.5,
+                    fermi_level_source="siesta_file",
+                    orthogonal=True,
+                    has_overlap=False,
+                    overlap_error=None,
+                )
+
+            original = module.read_matrix
+            module.read_matrix = fake_read_matrix
+            try:
+                rows = module.evaluate_sample(
+                    "sample_1",
+                    pred_dir,
+                    ref_dir,
+                    root,
+                    {},
+                    low_energy_enabled=False,
+                    low_energy_n_states=2,
+                    low_energy_alignment="none",
+                )
+            finally:
+                module.read_matrix = original
+
+            self.assertTrue(rows["spectral"][0]["spectral_comparable"])
+            self.assertFalse(rows["spectral"][0]["reference_has_overlap"])
 
     def test_md_post_siesta_run_fdf_timestamp_is_warning_only(self) -> None:
         try:
