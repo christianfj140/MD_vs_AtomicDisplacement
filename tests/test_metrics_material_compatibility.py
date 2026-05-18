@@ -400,6 +400,28 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
         self.assertEqual(issues[0]["kind"], "unsupported_kpoint_sampling")
         self.assertEqual(issues[0]["severity"], "fatal")
 
+    def test_gamma_monkhorst_pack_structure_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fdf = Path(tmp) / "sample" / "RUN.fdf"
+            fdf.parent.mkdir(parents=True)
+            fdf.write_text(
+                "\n".join(
+                    [
+                        "%block kgrid_Monkhorst_Pack",
+                        " 1  0  0  0.0",
+                        " 0  1  0  0.0",
+                        " 0  0  1  0.0",
+                        "%endblock kgrid_Monkhorst_Pack",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            issues = self.module.unsupported_kpoint_issues("sample", fdf)
+
+        self.assertEqual(issues, [])
+
 
 if __name__ == "__main__":
     unittest.main()

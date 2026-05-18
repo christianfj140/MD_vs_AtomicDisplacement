@@ -83,6 +83,7 @@ UNSUPPORTED_KPOINT_DIRECTIVES = {
     "kgrid_monkhorst_pack",
     "kgrid.monkhorstpack",
 }
+KGRID_MONKHORST_PACK_DIRECTIVES = {"kgrid_monkhorst_pack", "kgrid.monkhorstpack"}
 RECOMMENDATION_PRIMARY_METRIC_PRIORITY = [
     "low_energy_rmse_eV",
     "frontier_window_rmse_eV",
@@ -254,12 +255,69 @@ def _strip_fdf_comment(line: str) -> str:
     return line.split("#", 1)[0].strip()
 
 
+def _unsupported_kpoint_issue(sample: str, structure_path: Path, directive: str) -> dict[str, Any]:
+    return {
+        "sample": sample,
+        "kind": "unsupported_kpoint_sampling",
+        "severity": "fatal",
+        "error": (
+            "K-point sampled Hamiltonian metrics are not implemented by this "
+            "evaluator; only gamma/single-matrix comparisons are supported."
+        ),
+        "structure_path": str(structure_path),
+        "directive": directive,
+    }
+
+
+def _float_token(value: str) -> float | None:
+    try:
+        return float(value.replace("d", "e").replace("D", "E"))
+    except ValueError:
+        return None
+
+
+def _is_gamma_monkhorst_pack_rows(rows: list[str]) -> bool:
+    matrix: list[list[float]] = []
+    for row in rows:
+        values = [_float_token(token) for token in row.split()]
+        if len(values) < 4 or any(value is None for value in values[:4]):
+            return False
+        matrix.append([float(value) for value in values[:4] if value is not None])
+    if len(matrix) != 3:
+        return False
+    expected = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ]
+    return all(
+        math.isclose(matrix[row][col], expected[row][col], rel_tol=0.0, abs_tol=1e-12)
+        for row in range(3)
+        for col in range(4)
+    )
+
+
+def _is_gamma_monkhorst_pack_inline(tokens: list[str]) -> bool:
+    values = [_float_token(token) for token in tokens]
+    if not values or any(value is None for value in values):
+        return False
+    numeric = [float(value) for value in values if value is not None]
+    if len(numeric) == 3:
+        return all(math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-12) for value in numeric)
+    if len(numeric) >= 6:
+        return all(math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-12) for value in numeric[:3]) and all(
+            math.isclose(value, 0.0, rel_tol=0.0, abs_tol=1e-12) for value in numeric[3:6]
+        )
+    return False
+
+
 def unsupported_kpoint_issues(sample: str, structure_path: Path) -> list[dict[str, Any]]:
     """Detect k-point sampling forms this evaluator does not validate."""
     if not structure_path.exists():
         return []
     issues: list[dict[str, Any]] = []
-    in_kgrid_block = False
+    kgrid_block_name: str | None = None
+    kgrid_block_rows: list[str] = []
     try:
         lines = structure_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError as exc:
@@ -281,40 +339,30 @@ def unsupported_kpoint_issues(sample: str, structure_path: Path) -> list[dict[st
         key = parts[0] if parts else ""
         if lower.startswith("%block"):
             block_name = parts[1] if len(parts) > 1 else ""
-            in_kgrid_block = block_name in UNSUPPORTED_KPOINT_DIRECTIVES
-            if in_kgrid_block:
-                issues.append(
-                    {
-                        "sample": sample,
-                        "kind": "unsupported_kpoint_sampling",
-                        "severity": "fatal",
-                        "error": (
-                            "K-point sampled Hamiltonian metrics are not implemented by this "
-                            "evaluator; only gamma/single-matrix comparisons are supported."
-                        ),
-                        "structure_path": str(structure_path),
-                        "directive": block_name,
-                    }
-                )
+            if block_name in KGRID_MONKHORST_PACK_DIRECTIVES:
+                kgrid_block_name = block_name
+                kgrid_block_rows = []
+            elif block_name in UNSUPPORTED_KPOINT_DIRECTIVES:
+                issues.append(_unsupported_kpoint_issue(sample, structure_path, block_name))
             continue
         if lower.startswith("%endblock"):
-            in_kgrid_block = False
+            if kgrid_block_name is not None and not _is_gamma_monkhorst_pack_rows(kgrid_block_rows):
+                issues.append(_unsupported_kpoint_issue(sample, structure_path, kgrid_block_name))
+            kgrid_block_name = None
+            kgrid_block_rows = []
             continue
-        if in_kgrid_block or key in UNSUPPORTED_KPOINT_DIRECTIVES:
-            issues.append(
-                {
-                    "sample": sample,
-                    "kind": "unsupported_kpoint_sampling",
-                    "severity": "fatal",
-                    "error": (
-                        "K-point sampled Hamiltonian metrics are not implemented by this "
-                        "evaluator; only gamma/single-matrix comparisons are supported."
-                    ),
-                    "structure_path": str(structure_path),
-                    "directive": key,
-                }
-            )
+        if kgrid_block_name is not None:
+            kgrid_block_rows.append(clean)
+            continue
+        if key in KGRID_MONKHORST_PACK_DIRECTIVES:
+            if not _is_gamma_monkhorst_pack_inline(parts[1:]):
+                issues.append(_unsupported_kpoint_issue(sample, structure_path, key))
             break
+        if key in UNSUPPORTED_KPOINT_DIRECTIVES:
+            issues.append(_unsupported_kpoint_issue(sample, structure_path, key))
+            break
+    if kgrid_block_name is not None and not _is_gamma_monkhorst_pack_rows(kgrid_block_rows):
+        issues.append(_unsupported_kpoint_issue(sample, structure_path, kgrid_block_name))
     return issues
 
 
