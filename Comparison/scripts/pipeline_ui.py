@@ -18,6 +18,7 @@ import select
 import secrets
 import shutil
 import shlex
+import socket
 import string
 import subprocess
 import sys
@@ -11341,6 +11342,22 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def ui_display_urls(host: str, port: int) -> list[str]:
+    host_text = str(host or "").strip()
+    if host_text not in {"", "0.0.0.0", "::"}:
+        return [f"http://{host_text}:{port}"]
+    hosts = ["127.0.0.1"]
+    try:
+        hosts.extend(
+            address
+            for address in socket.gethostbyname_ex(socket.gethostname())[2]
+            if address and not address.startswith("127.")
+        )
+    except OSError:
+        pass
+    return [f"http://{address}:{port}" for address in dict.fromkeys(hosts)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Serve the combined comparison pipeline UI.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -11348,7 +11365,9 @@ def main() -> int:
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), ComparisonUIHandler)
-    print(f"Comparison Pipeline UI listening on http://{args.host}:{args.port}")
+    print(f"Comparison Pipeline UI listening on {args.host}:{args.port}")
+    for url in ui_display_urls(args.host, args.port):
+        print(f"Open: {url}")
     print(f"Repo root: {REPO_ROOT}")
     try:
         server.serve_forever()
