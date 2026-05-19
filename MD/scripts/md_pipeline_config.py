@@ -27,7 +27,10 @@ if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
 from siesta_run_fdf import md_common_settings, render_common_run_fdf, render_md_layer
-from graph2mat_material_config import load_graph2mat_config_provenance
+from graph2mat_material_config import (
+    load_graph2mat_config_provenance,
+    resolve_matrix_component_policy,
+)
 
 
 def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -74,6 +77,9 @@ def validate_config(config: dict[str, Any]) -> None:
         raise RuntimeError("md.species debe contener al menos una especie.")
     if not md["atoms"]:
         raise RuntimeError("md.atoms debe contener al menos un átomo.")
+    training_data = config.get("training", {}).get("data", {})
+    if isinstance(training_data, dict):
+        resolve_matrix_component_policy(training_data, context="training.data")
 
 
 def config_dir(config: dict[str, Any]) -> Path:

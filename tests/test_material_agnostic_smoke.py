@@ -57,6 +57,8 @@ class MaterialAgnosticSmokeTests(unittest.TestCase):
         self.assertEqual(case["generic_random_cartesian"]["generated_structures"], 3)
         self.assertTrue(case["generic_random_cartesian"]["deterministic"])
         self.assertEqual(case["graph2mat_config"]["matrix_target"], "hamiltonian")
+        self.assertEqual(case["graph2mat_config"]["matrix_component_policy"], "h_only")
+        self.assertEqual(case["graph2mat_config"]["n_matrix_components"], 1)
         self.assertEqual(case["material_provenance"]["material_label"], "h2o")
         self.assertTrue((self.root / "smoke" / "h2o" / "smoke_manifest.json").exists())
 
@@ -74,6 +76,7 @@ class MaterialAgnosticSmokeTests(unittest.TestCase):
         self.assertEqual(case["generic_cartesian"]["generated_structures"], 12)
         self.assertEqual(case["generic_random_cartesian"]["split_strategy"], "grouped_family_round_robin")
         self.assertIn("material_basis/*.ion.xml", case["graph2mat_config"]["basis_files"])
+        self.assertEqual(case["graph2mat_config"]["matrix_component_policy"], "h_only")
         self.assertEqual(case["material_provenance"]["material_label"], "sic")
         self.assertIn("fdf_sha256", case["material_provenance"])
 

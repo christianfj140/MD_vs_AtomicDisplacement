@@ -1,0 +1,6 @@
+material:
+  label: graphene
+  fdf: materials/graphene/RUN.fdf
+  pseudopotential_dir: materials/graphene/pseudos
+  basis_dir: materials/graphene/basis
+  structure_type: crystal

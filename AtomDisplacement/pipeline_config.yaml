@@ -13,7 +13,7 @@ paths:
   run_summary_name: run_summary.json
   collected_json_name: water_atom_displacement_dataset.json
   collected_csv_name: water_atom_displacement_summary.csv
-  venv_activate: ${REPO_ROOT}/.venv/bin/activate
+  venv_activate: /home/christian/graph2mat-env/bin/activate
 material:
   preset: h2o
 atomic_displacement:
@@ -229,7 +229,8 @@ training:
     out_matrix: hamiltonian
     symmetric_matrix: true
     sub_point_matrix: false
-    n_matrix_components: 2
+    matrix_component_policy: h_only
+    n_matrix_components: 1
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     runs_json: runs.json
     val_runs: ../dataset/validation_samples/*/RUN.fdf
@@ -272,7 +273,8 @@ testing:
     sub_point_matrix: false
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     store_in_memory: true
-    n_matrix_components: 2
+    matrix_component_policy: h_only
+    n_matrix_components: 1
   callbacks:
     plot_matrix_error: true
     show_plot: false
@@ -287,7 +289,8 @@ prediction:
     basis_files: ../dataset/FC_steps/basis/*.ion.xml
     predict_structs: ../dataset/FC_steps/*/RUN.fdf
     store_in_memory: true
-    n_matrix_components: 2
+    matrix_component_policy: h_only
+    n_matrix_components: 1
   callbacks:
     matrix_writer: true
     output_file: ML_prediction.HSX

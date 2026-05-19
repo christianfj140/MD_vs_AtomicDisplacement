@@ -22,7 +22,11 @@ from torch_safe_globals import (
 allow_graph2mat_checkpoint_globals()
 
 from md_pipeline_config import command, config_dir, load_pipeline_config, paths, resolve_checkpoint
-from graph2mat_material_config import apply_material_graph2mat_config
+from graph2mat_material_config import (
+    apply_material_graph2mat_config,
+    resolve_matrix_component_policy,
+    validate_model_matrix_component_policy,
+)
 
 _PIPELINE_CONFIG = load_pipeline_config()
 apply_torch_float32_matmul_precision(
@@ -171,10 +175,22 @@ def main() -> int:
         "predict_structs": str(prediction["predict_structs"]),
         "store_in_memory": bool(training_data.get("store_in_memory", True)),
     }
+    matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
+        training_data,
+        context="training.data",
+    )
+    validate_model_matrix_component_policy(
+        model,
+        matrix_component_policy=matrix_component_policy,
+        n_matrix_components=n_matrix_components,
+        context="MD prediction",
+    )
     if "batch_size" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["batch_size"] = 1
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
-        datamodule_kwargs["n_matrix_components"] = int(training_data.get("n_matrix_components", 2))
+        datamodule_kwargs["n_matrix_components"] = n_matrix_components
+    if "matrix_component_policy" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["matrix_component_policy"] = matrix_component_policy
     if "loader_threads" in inspect.signature(MatrixDataModule).parameters and training_data.get("loader_threads") is not None:
         datamodule_kwargs["loader_threads"] = int(training_data["loader_threads"])
     datamodule = MatrixDataModule(**datamodule_kwargs)

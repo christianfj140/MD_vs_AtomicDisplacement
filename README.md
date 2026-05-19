@@ -356,7 +356,16 @@ mantienen los puntos reales y añaden lineas de ajuste por serie:
 - el ajuste lineal se muestra por defecto;
 - el menu dentro de cada plot permite cambiar a ajuste cuadratico o ocultar el
   ajuste;
-- no se dibujan lineas que conecten punto a punto los scatter reales.
+- no se dibujan lineas que conecten punto a punto los scatter reales;
+- cuando existe procedencia de material, las etiquetas/hover de los plots
+  muestran el material y el selector `Material` permite filtrar por `All
+  materials`, `h2o`, `sic` u otros labels archivados.
+
+Si se muestran varios grupos de compatibilidad de material, la UI marca esos
+plots como diagnosticos: no deben interpretarse como un benchmark agrupado. Las
+comparaciones robustas requieren hashes compatibles de material, basis,
+pseudopotenciales y ajustes SIESTA; los runs antiguos sin procedencia aparecen
+como `unknown material`.
 
 Debajo de los plots hay una seccion destructiva para datasets generados. Permite
 listar artefactos, seleccionar uno o varios y borrar solo esos, o borrar todos

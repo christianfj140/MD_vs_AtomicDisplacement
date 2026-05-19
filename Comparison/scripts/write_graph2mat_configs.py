@@ -17,7 +17,10 @@ SHARED_DIR = REPO_ROOT / "shared"
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
-from graph2mat_material_config import apply_material_graph2mat_config
+from graph2mat_material_config import (
+    apply_material_graph2mat_config,
+    resolve_matrix_component_policy,
+)
 
 MD_CONFIG = REPO_ROOT / "MD" / "pipeline_config.yaml"
 FC_CONFIG = REPO_ROOT / "AtomDisplacement" / "pipeline_config.yaml"
@@ -107,6 +110,8 @@ def force_shared_hyperparams(
         "out_matrix",
         "symmetric_matrix",
         "sub_point_matrix",
+        "matrix_component_policy",
+        "n_matrix_components",
         "batch_size",
         "store_in_memory",
     ):
@@ -119,7 +124,13 @@ def force_shared_hyperparams(
 
 def validate_config(block: dict[str, Any], label: str) -> None:
     data = block.get("data", {})
-    required = ("out_matrix", "symmetric_matrix", "basis_files")
+    required = (
+        "out_matrix",
+        "symmetric_matrix",
+        "basis_files",
+        "matrix_component_policy",
+        "n_matrix_components",
+    )
     missing = [key for key in required if key not in data]
     if missing:
         raise RuntimeError(f"{label}: faltan claves data requeridas: {missing}")
@@ -127,6 +138,7 @@ def validate_config(block: dict[str, Any], label: str) -> None:
         raise RuntimeError(f"{label}: data.out_matrix debe ser 'hamiltonian'")
     if not bool(data["symmetric_matrix"]):
         raise RuntimeError(f"{label}: data.symmetric_matrix debe ser True")
+    resolve_matrix_component_policy(data, context=f"{label}.data")
 
 
 def write_config(path: Path, block: dict[str, Any]) -> None:

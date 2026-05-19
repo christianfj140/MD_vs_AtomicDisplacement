@@ -90,11 +90,25 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
             self.skipTest(f"scientific Python dependency unavailable: {exc.name}")
         self.module = load_metrics_module()
 
-    def matrix_data(self, values, *, overlap=None, orthogonal=True, component_count=1, spin_kind=None):
+    def matrix_data(
+        self,
+        values,
+        *,
+        overlap=None,
+        orthogonal=True,
+        component_count=1,
+        spin_kind=None,
+        components=None,
+    ):
         import numpy as np
         from scipy import sparse
 
         matrix = sparse.csr_matrix(values)
+        component_matrices = (
+            tuple(sparse.csr_matrix(component) for component in components)
+            if components is not None
+            else ()
+        )
         return self.module.MatrixData(
             path=Path("synthetic.HSX"),
             hamiltonian=matrix,
@@ -107,6 +121,7 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
             overlap_error=None if overlap is not None else "missing overlap",
             component_count=component_count,
             spin_kind=spin_kind,
+            components=component_matrices,
         )
 
     def test_non_h2o_structural_metrics_pass_with_matching_basis(self) -> None:
@@ -388,6 +403,161 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
             self.module.matrix_compatibility_errors("valid", valid_nonorthogonal, valid_predicted),
             [],
         )
+
+    def test_matrix_semantics_records_h_only_and_reference_overlap_policy(self) -> None:
+        from scipy import sparse
+
+        reference = self.matrix_data(
+            [[1.0, 0.0], [0.0, 2.0]],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            spin_kind="Spin{unpolarized}",
+        )
+        predicted = self.matrix_data(
+            [[1.1, 0.0], [0.0, 2.1]],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            spin_kind="Spin{unpolarized}",
+        )
+
+        semantics = self.module.matrix_semantics_fields(
+            reference,
+            predicted,
+            target_component_policy="h_only",
+        )
+
+        self.assertEqual(semantics["target_component_policy"], "h_only")
+        self.assertEqual(semantics["reference_component_count"], 1)
+        self.assertEqual(semantics["prediction_component_count"], 1)
+        self.assertEqual(semantics["reference_spin_kind"], "Spin{unpolarized}")
+        self.assertEqual(semantics["prediction_spin_kind"], "Spin{unpolarized}")
+        self.assertEqual(semantics["overlap_source"], "siesta_reference")
+        self.assertFalse(semantics["prediction_own_overlap_used"])
+        self.assertFalse(semantics["graph2mat_auxiliary_component_ignored"])
+        self.assertTrue(semantics["prediction_self_contained_hsx_safe"])
+        self.assertEqual(semantics["prediction_self_contained_hsx_unsafe_reason"], "")
+        self.assertAlmostEqual(semantics["prediction_overlap_relative_frobenius_vs_reference"], 0.0)
+
+    def test_graph2mat_auxiliary_prediction_is_severe_and_not_self_contained(self) -> None:
+        from scipy import sparse
+
+        reference = self.matrix_data(
+            [[1.0, 0.0], [0.0, 2.0]],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            component_count=1,
+            spin_kind="Spin{unpolarized}",
+            components=[[[1.0, 0.0], [0.0, 2.0]]],
+        )
+        predicted = self.matrix_data(
+            [[1.1, 0.0], [0.0, 2.1]],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            component_count=2,
+            spin_kind="Spin{polarized}",
+            components=[
+                [[1.1, 0.0], [0.0, 2.1]],
+                [[9.0, 0.0], [0.0, 9.0]],
+            ],
+        )
+
+        errors = self.module.matrix_compatibility_errors(
+            "graph2mat_auxiliary",
+            reference,
+            predicted,
+            target_component_policy="h_only",
+        )
+        self.assertNotIn("target_component_policy_mismatch", {error["kind"] for error in errors})
+        self.assertNotIn("unsupported_matrix_components", {error["kind"] for error in errors})
+        self.assertNotIn("spin_state_mismatch", {error["kind"] for error in errors})
+
+        warnings = self.module.matrix_compatibility_warnings(
+            "graph2mat_auxiliary",
+            reference,
+            predicted,
+        )
+        auxiliary_warning = next(
+            warning for warning in warnings if warning["kind"] == "graph2mat_auxiliary_component_ignored"
+        )
+        self.assertEqual(auxiliary_warning["severity"], "severe")
+
+        semantics = self.module.matrix_semantics_fields(
+            reference,
+            predicted,
+            target_component_policy="h_only",
+        )
+        self.assertTrue(semantics["graph2mat_auxiliary_component_ignored"])
+        self.assertFalse(semantics["prediction_self_contained_hsx_safe"])
+        self.assertEqual(
+            semantics["prediction_self_contained_hsx_unsafe_reason"],
+            "graph2mat_auxiliary_component_ignored",
+        )
+
+        component_rows = self.module.component_channel_metrics(
+            "graph2mat_auxiliary",
+            reference,
+            predicted,
+            semantics,
+        )
+        self.assertEqual(len(component_rows), 2)
+        self.assertTrue(component_rows[0]["component_metric_available"])
+        self.assertEqual(component_rows[0]["component_role"], "hamiltonian")
+        self.assertFalse(component_rows[1]["component_metric_available"])
+        self.assertEqual(component_rows[1]["component_role"], "auxiliary")
+        self.assertEqual(component_rows[1]["component_unavailable_reason"], "missing_reference_component")
+
+    def test_prediction_overlap_mismatch_warns_and_marks_hsx_unsafe(self) -> None:
+        from scipy import sparse
+
+        reference = self.matrix_data(
+            [[1.0, 0.0], [0.0, 2.0]],
+            orthogonal=False,
+            overlap=sparse.eye(2, format="csr"),
+            spin_kind="Spin{unpolarized}",
+        )
+        predicted = self.matrix_data(
+            [[1.1, 0.0], [0.0, 2.1]],
+            orthogonal=False,
+            overlap=2.0 * sparse.eye(2, format="csr"),
+            spin_kind="Spin{unpolarized}",
+        )
+
+        semantics = self.module.matrix_semantics_fields(
+            reference,
+            predicted,
+            target_component_policy="h_only",
+        )
+        self.assertEqual(semantics["overlap_source"], "siesta_reference")
+        self.assertFalse(semantics["prediction_own_overlap_used"])
+        self.assertGreater(semantics["prediction_overlap_relative_frobenius_vs_reference"], 0.0)
+        self.assertFalse(semantics["prediction_self_contained_hsx_safe"])
+        self.assertEqual(
+            semantics["prediction_self_contained_hsx_unsafe_reason"],
+            "prediction_overlap_mismatch",
+        )
+
+        warnings = self.module.matrix_compatibility_warnings("overlap_mismatch", reference, predicted)
+        mismatch_warning = next(warning for warning in warnings if warning["kind"] == "prediction_overlap_mismatch")
+        self.assertEqual(mismatch_warning["severity"], "severe")
+        self.assertFalse(mismatch_warning["prediction_own_overlap_used"])
+
+    def test_h_only_policy_rejects_unexpected_multicomponent_prediction(self) -> None:
+        reference = self.matrix_data([[1.0, 0.0], [0.0, 2.0]], component_count=1)
+        predicted = self.matrix_data(
+            [[1.1, 0.0], [0.0, 2.1]],
+            component_count=2,
+            spin_kind="Spin{unpolarized}",
+        )
+
+        errors = self.module.matrix_compatibility_errors(
+            "unexpected_multicomponent",
+            reference,
+            predicted,
+            target_component_policy="h_only",
+        )
+
+        self.assertIn("target_component_policy_mismatch", {error["kind"] for error in errors})
+        self.assertIn("unsupported_matrix_components", {error["kind"] for error in errors})
 
     def test_kpoint_sampled_structure_is_fatal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -21,7 +21,11 @@ allow_graph2mat_checkpoint_globals()
 
 from atom_displacement_utils import DATASET_DIR, PIPELINE_CONFIG, TRAINING_DIR, completed_sample_dirs, resolve_ckpt_rel_path
 from pipeline_config_utils import config_dir, write_checkpoint_manifest
-from graph2mat_material_config import apply_material_graph2mat_config
+from graph2mat_material_config import (
+    apply_material_graph2mat_config,
+    resolve_matrix_component_policy,
+    validate_model_matrix_component_policy,
+)
 
 apply_torch_float32_matmul_precision(
     PIPELINE_CONFIG.get("training", {}).get("torch_float32_matmul_precision")
@@ -143,8 +147,20 @@ def main() -> int:
         "test_runs": test_run,
         "store_in_memory": bool(data["store_in_memory"]),
     }
+    matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
+        data,
+        context="testing.data",
+    )
+    validate_model_matrix_component_policy(
+        model,
+        matrix_component_policy=matrix_component_policy,
+        n_matrix_components=n_matrix_components,
+        context="AtomDisplacement testing",
+    )
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
-        datamodule_kwargs["n_matrix_components"] = int(data.get("n_matrix_components", 2))
+        datamodule_kwargs["n_matrix_components"] = n_matrix_components
+    if "matrix_component_policy" in inspect.signature(MatrixDataModule).parameters:
+        datamodule_kwargs["matrix_component_policy"] = matrix_component_policy
     loader_threads = PIPELINE_CONFIG.get("training", {}).get("data", {}).get("loader_threads")
     if "loader_threads" in inspect.signature(MatrixDataModule).parameters and loader_threads is not None:
         datamodule_kwargs["loader_threads"] = int(loader_threads)

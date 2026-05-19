@@ -3,7 +3,8 @@ data:
   out_matrix: hamiltonian
   symmetric_matrix: true
   sub_point_matrix: false
-  n_matrix_components: 2
+  matrix_component_policy: h_only
+  n_matrix_components: 1
   basis_files: ../AtomDisplacement/dataset/material_basis/*.ion.xml
   val_runs: ../AtomDisplacement/dataset/validation_samples/*/RUN.fdf
   batch_size: 10

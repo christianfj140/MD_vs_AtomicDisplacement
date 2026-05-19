@@ -295,7 +295,17 @@
                 </label>
                 <label class="field">
                   <span>Loss</span>
-                  <input id="training-loss" type="text" value="graph2mat.metrics.block_type_mae" />
+                  <input id="training-loss" type="text" value="graph2mat.metrics.block_type_mae" list="training-loss-options" />
+                  <datalist id="training-loss-options">
+                    <option value="graph2mat.metrics.block_type_mae"></option>
+                    <option value="graph2mat.metrics.block_type_mse"></option>
+                    <option value="graph2mat.metrics.block_type_huber"></option>
+                    <option value="graph2mat.metrics.coefficient_space_mse"></option>
+                  </datalist>
+                </label>
+                <label class="field">
+                  <span>Loss kwargs JSON</span>
+                  <input id="training-loss-kwargs" type="text" placeholder='{"beta": 0.01}' />
                 </label>
                 <label class="field">
                   <span>Interactions</span>
@@ -380,7 +390,11 @@
                   </label>
                   <label class="field wide-field">
                     <span>Loss list</span>
-                    <textarea id="sweep-loss" rows="2" placeholder="graph2mat.metrics.block_type_mae"></textarea>
+                    <textarea id="sweep-loss" rows="2" placeholder="graph2mat.metrics.block_type_mae&#10;graph2mat.metrics.block_type_mse"></textarea>
+                  </label>
+                  <label class="field wide-field">
+                    <span>Loss kwargs list</span>
+                    <textarea id="sweep-loss-kwargs" rows="2" placeholder='{}&#10;{"beta": 0.01}'></textarea>
                   </label>
                   <label class="field wide-field">
                     <span>Hidden irreps list</span>
@@ -861,6 +875,12 @@
                     <option value="mae_ref_meV">Sparse MAE ref meV</option>
                     <option value="rmse_ref_meV">Sparse RMSE ref meV</option>
                     <option value="dos_mae_500_fermi_window">DOS MAE 500 Fermi window</option>
+                  </select>
+                </label>
+                <label class="field inline-field">
+                  <span>Material</span>
+                  <select id="plot-material-filter">
+                    <option value="all" selected>All materials</option>
                   </select>
                 </label>
                 <span id="plots-status" class="muted-text">Plots disabled</span>

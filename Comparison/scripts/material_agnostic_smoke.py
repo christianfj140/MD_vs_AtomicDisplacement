@@ -141,6 +141,8 @@ def graph2mat_config(material_config: dict[str, Any]) -> dict[str, Any]:
             "data": {
                 "out_matrix": "hamiltonian",
                 "symmetric_matrix": True,
+                "matrix_component_policy": "h_only",
+                "n_matrix_components": 1,
                 "basis_files": "unset",
                 "train_runs": "../dataset/splits/train/*/RUN.fdf",
                 "val_runs": "../dataset/splits/validation/*/RUN.fdf",
@@ -152,6 +154,8 @@ def graph2mat_config(material_config: dict[str, Any]) -> dict[str, Any]:
             "data": {
                 "out_matrix": "hamiltonian",
                 "symmetric_matrix": True,
+                "matrix_component_policy": "h_only",
+                "n_matrix_components": 1,
                 "basis_files": "unset",
                 "test_runs": "../dataset/splits/test/*/RUN.fdf",
             }
@@ -160,6 +164,8 @@ def graph2mat_config(material_config: dict[str, Any]) -> dict[str, Any]:
             "data": {
                 "out_matrix": "hamiltonian",
                 "symmetric_matrix": True,
+                "matrix_component_policy": "h_only",
+                "n_matrix_components": 1,
                 "basis_files": "unset",
             }
         },
@@ -366,6 +372,8 @@ def run_material_case(
             "basis_files": graph2mat["basis_files"],
             "provenance_path": graph2mat["provenance_path"],
             "matrix_target": graph2mat["provenance"]["graph2mat"]["matrix_target"],
+            "matrix_component_policy": graph2mat["provenance"]["graph2mat"]["matrix_component_policy"],
+            "n_matrix_components": graph2mat["provenance"]["graph2mat"]["n_matrix_components"],
             "split_hashes": graph2mat["split_hashes"],
         },
         "material_provenance": provenance,

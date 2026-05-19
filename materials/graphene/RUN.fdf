@@ -1,0 +1,59 @@
+SystemName graphene
+SystemLabel graphene
+
+NumberOfSpecies 1
+NumberOfAtoms 6
+
+%block ChemicalSpeciesLabel
+  1 6 C
+%endblock ChemicalSpeciesLabel
+
+%block PS.Lmax
+  C 2
+%endblock PS.Lmax
+
+PAO.BasisType split
+PAO.BasisSize SZP
+PAO.SplitNorm 0.15
+PAO.EnergyShift 275 meV
+
+LatticeConstant 1.0 Ang
+%block LatticeVectors
+  6.5025  3.75422012541  0.0
+  2.1675 -1.25140670847  0.0
+  0.0     0.0           14.45
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+  0.00000 0.00000 0.00000 1
+  1.44500 0.00000 0.00000 1
+  2.16750 1.25141 0.00000 1
+  3.61250 1.25141 0.00000 1
+  4.33500 2.50281 0.00000 1
+  5.78000 2.50281 0.00000 1
+%endblock AtomicCoordinatesAndAtomicSpecies
+
+%block kgrid_Monkhorst_Pack
+  6 0 0 0.0
+  0 6 0 0.0
+  0 0 1 0.0
+%endblock kgrid_Monkhorst_Pack
+
+MeshCutoff 250 Ry
+XC.functional LDA
+XC.authors PZ
+SolutionMethod diagon
+
+ElectronicTemperature 300 K
+OccupationFunction FD
+MinSCFIterations 3
+MaxSCFIterations 200
+SCF.Mixer.Weight 0.1
+SCF.Mixer.History 6
+SCF.DM.Tolerance 0.0001
+DM.UseSaveDM F
+
+WriteForces T
+SaveHS T
+XML.Write T

@@ -18,6 +18,7 @@ import scipy.linalg
 import scipy.stats
 from scipy import sparse
 import sisl
+import yaml
 
 from reference_selection import REFERENCE_SELECTION_POLICY
 from reference_selection import choose_reference_matrix
@@ -37,9 +38,24 @@ DOS_FERMI_WINDOW_ALIGNMENT = "reference_fermi_level"
 LOW_ENERGY_N_STATES = 10
 LOW_ENERGY_ALIGNMENT = "none"
 COMPLEX_IMAG_TOLERANCE = 1e-12
+OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD = 1e-6
 MATRIX_METRIC_TARGET_SPACE = "raw_global_hamiltonian"
 ORBITAL_PAIR_METRIC_TARGET_SPACE = "raw_global_hamiltonian_orbital_basis"
 ORBITAL_PAIR_BASIS_SOURCE = "ion_xml_pao_degeneracy_generated_labels"
+MATRIX_SEMANTIC_FIELDS = [
+    "target_component_policy",
+    "reference_component_count",
+    "prediction_component_count",
+    "reference_spin_kind",
+    "prediction_spin_kind",
+    "overlap_source",
+    "prediction_own_overlap_used",
+    "prediction_overlap_relative_frobenius_vs_reference",
+    "prediction_overlap_check_threshold",
+    "graph2mat_auxiliary_component_ignored",
+    "prediction_self_contained_hsx_safe",
+    "prediction_self_contained_hsx_unsafe_reason",
+]
 DEEPH_COMPARABILITY_STATUS = {
     "implemented_repo_compatible_metrics": [
         "hamiltonian_mae_rmse_mse_r2_on_repository_supports",
@@ -116,6 +132,7 @@ class MatrixData:
     sha256: str | None = None
     component_count: int = 1
     spin_kind: str | None = None
+    components: tuple[sparse.csr_matrix, ...] = ()
 
 
 def json_safe(value: Any) -> Any:
@@ -226,6 +243,45 @@ def result_method_id_from_path(result_dir: Path) -> str:
     if "results_atomdisp" in parts:
         return "siesta_fc_cartesian"
     return ""
+
+
+def _nested_mapping_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = payload
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def target_component_policy_from_result(result_dir: Path) -> str:
+    for path in (
+        result_dir / "pipeline_config.yaml",
+        result_dir / "manifest.json",
+        result_dir / "metrics" / "manifest.json",
+    ):
+        if not path.exists():
+            continue
+        try:
+            if path.suffix.lower() in {".yaml", ".yml"}:
+                payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, yaml.YAMLError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for nested_path in (
+            ("training", "data", "matrix_component_policy"),
+            ("prediction", "data", "matrix_component_policy"),
+            ("testing", "data", "matrix_component_policy"),
+            ("graph2mat_config_provenance", "graph2mat", "matrix_component_policy"),
+            ("metric_compatibility", "target_component_policy"),
+        ):
+            value = _nested_mapping_value(payload, nested_path)
+            if value not in (None, ""):
+                return str(value)
+    return "unknown"
 
 
 def sample_structure_metadata(structure_path: Path) -> dict[str, Any]:
@@ -452,6 +508,7 @@ def evaluate_sample(
     basis_counts: dict[str, int],
     *,
     method_id: str = "",
+    target_component_policy: str = "unknown",
     low_energy_enabled: bool,
     low_energy_n_states: int,
     low_energy_alignment: str,
@@ -463,6 +520,7 @@ def evaluate_sample(
         "overlap": [],
         "sparse_sweep": [],
         "dos_sweep": [],
+        "component": [],
         "block": [],
         "species_pair": [],
         "distance_bin": [],
@@ -560,6 +618,12 @@ def evaluate_sample(
         )
         return rows
 
+    semantics = matrix_semantics_fields(
+        reference,
+        predicted,
+        target_component_policy=target_component_policy,
+    )
+
     for kind, data in (("siesta", reference), ("predicted", predicted)):
         rows["overlap"].append(
             {
@@ -573,10 +637,18 @@ def evaluate_sample(
                 "has_overlap": data.has_overlap,
                 "overlap_error": data.overlap_error,
                 "fermi_level_eV": data.fermi_level,
+                **semantics,
             }
         )
 
-    compatibility_errors = matrix_compatibility_errors(sample, reference, predicted)
+    rows["component"].extend(component_channel_metrics(sample, reference, predicted, semantics))
+
+    compatibility_errors = matrix_compatibility_errors(
+        sample,
+        reference,
+        predicted,
+        target_component_policy=target_component_policy,
+    )
     compatibility_warnings = matrix_compatibility_warnings(sample, reference, predicted)
     if compatibility_warnings:
         rows["warnings"].extend(compatibility_warnings)
@@ -597,7 +669,7 @@ def evaluate_sample(
         return rows
 
     try:
-        rows["sparse"].append(sparse_metrics(sample, reference, predicted))
+        rows["sparse"].append({**sparse_metrics(sample, reference, predicted), **semantics})
         rows["sparse_sweep"].extend(sparse_threshold_sweep_metrics(sample, reference, predicted))
     except Exception as exc:
         issue = append_issue(rows, "fatal_errors", sample=sample, kind="sparse_metrics", message=str(exc))
@@ -705,11 +777,11 @@ def evaluate_sample(
                 "sample": sample,
                 "siesta_bands": int(ref_eig.size),
                 "predicted_bands": int(pred_eig.size),
-                "overlap_source": "siesta_reference",
                 "spectral_comparable": spectral_comparable,
                 "same_band_count": same_band_count,
                 "reference_has_overlap": reference.has_overlap,
                 "hamiltonian_symmetrized_for_spectrum": True,
+                **semantics,
                 **spectral_metrics,
             }
         )
@@ -765,6 +837,9 @@ def read_matrix(path: Path) -> MatrixData:
     hamiltonian_obj = sile.read_hamiltonian()
     component_count = infer_component_count(hamiltonian_obj)
     hamiltonian = hamiltonian_obj.tocsr(0)
+    components = [hamiltonian]
+    for component_index in range(1, component_count):
+        components.append(hamiltonian_obj.tocsr(component_index))
     overlap = None
     has_overlap = False
     overlap_error = None
@@ -797,10 +872,17 @@ def read_matrix(path: Path) -> MatrixData:
         sha256=file_sha256(path),
         component_count=component_count,
         spin_kind=str(getattr(hamiltonian_obj, "spin", "")) or None,
+        components=tuple(components),
     )
 
 
-def matrix_compatibility_errors(sample: str, reference: MatrixData, predicted: MatrixData) -> list[dict[str, Any]]:
+def matrix_compatibility_errors(
+    sample: str,
+    reference: MatrixData,
+    predicted: MatrixData,
+    *,
+    target_component_policy: str = "unknown",
+) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     if reference.hamiltonian.shape != predicted.hamiltonian.shape:
         errors.append(
@@ -850,6 +932,23 @@ def matrix_compatibility_errors(sample: str, reference: MatrixData, predicted: M
                 "kind": "unsupported_matrix_components",
                 "error": f"Unsupported reference matrix component count: {reference.component_count}.",
                 "component_count": reference.component_count,
+            }
+        )
+    if (
+        target_component_policy == "h_only"
+        and predicted.component_count != 1
+        and not graph2mat_auxiliary_prediction
+    ):
+        errors.append(
+            {
+                "sample": sample,
+                "kind": "target_component_policy_mismatch",
+                "error": (
+                    "Expected H-only prediction semantics, but the prediction "
+                    f"container reports {predicted.component_count} Hamiltonian components."
+                ),
+                "target_component_policy": target_component_policy,
+                "prediction_component_count": predicted.component_count,
             }
         )
     if predicted.component_count != 1 and not graph2mat_auxiliary_prediction:
@@ -956,27 +1055,191 @@ def unsupported_spin_kind(spin_kind: str | None) -> bool:
 
 
 def matrix_compatibility_warnings(sample: str, reference: MatrixData, predicted: MatrixData) -> list[dict[str, Any]]:
-    if not is_graph2mat_auxiliary_prediction(reference, predicted):
-        return []
-    return [
-        {
-            "sample": sample,
-            "kind": "graph2mat_auxiliary_component_ignored",
-            "error": (
-                "Graph2Mat wrote a non-orthogonal prediction container with two matrix components. "
-                "Metrics compare Hamiltonian component 0 only; the auxiliary predicted overlap/spin-like "
-                "component is ignored, and spectral metrics use the SIESTA reference overlap."
-            ),
-            "reference_components": reference.component_count,
-            "predicted_components": predicted.component_count,
-            "reference_spin": reference.spin_kind,
-            "predicted_spin": predicted.spin_kind,
-        }
-    ]
+    warnings: list[dict[str, Any]] = []
+    if is_graph2mat_auxiliary_prediction(reference, predicted):
+        warnings.append(
+            {
+                "sample": sample,
+                "kind": "graph2mat_auxiliary_component_ignored",
+                "severity": "severe",
+                "error": (
+                    "Graph2Mat wrote a non-orthogonal prediction container with two matrix components. "
+                    "Metrics compare Hamiltonian component 0 only; the auxiliary predicted overlap/spin-like "
+                    "component is ignored, and spectral metrics use the SIESTA reference overlap."
+                ),
+                "reference_components": reference.component_count,
+                "predicted_components": predicted.component_count,
+                "reference_spin": reference.spin_kind,
+                "predicted_spin": predicted.spin_kind,
+            }
+        )
+    diagnostics = overlap_diagnostics(reference, predicted)
+    value = diagnostics["prediction_overlap_relative_frobenius_vs_reference"]
+    if isinstance(value, float) and math.isfinite(value) and value > OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD:
+        warnings.append(
+            {
+                "sample": sample,
+                "kind": "prediction_overlap_mismatch",
+                "severity": "severe",
+                "error": (
+                    "Prediction-owned overlap differs from the SIESTA reference overlap. "
+                    "Spectral metrics use S_ref; the prediction HSX is not safe as a "
+                    "standalone generalized-eigenproblem input."
+                ),
+                "prediction_overlap_relative_frobenius_vs_reference": value,
+                "overlap_source": diagnostics["overlap_source"],
+                "prediction_own_overlap_used": diagnostics["prediction_own_overlap_used"],
+                "prediction_self_contained_hsx_safe": diagnostics["prediction_self_contained_hsx_safe"],
+            }
+        )
+    return warnings
 
 
 def sparse_norm(matrix: sparse.spmatrix) -> float:
     return float(np.sqrt(np.abs(matrix).power(2).sum()))
+
+
+def relative_sparse_frobenius(delta: sparse.spmatrix, reference: sparse.spmatrix) -> float:
+    denominator = sparse_norm(reference)
+    if denominator == 0.0:
+        return math.nan
+    return sparse_norm(delta) / denominator
+
+
+def overlap_diagnostics(reference: MatrixData, predicted: MatrixData) -> dict[str, Any]:
+    overlap_source = "siesta_reference" if reference.overlap is not None else "none_standard_eigenproblem"
+    rel_diff = math.nan
+    unavailable_reason = ""
+    if reference.overlap is None:
+        unavailable_reason = "reference_overlap_unavailable"
+    elif predicted.overlap is None:
+        unavailable_reason = "missing_prediction_overlap"
+    elif predicted.overlap.shape != reference.overlap.shape:
+        unavailable_reason = "prediction_overlap_shape_mismatch"
+    else:
+        rel_diff = relative_sparse_frobenius(predicted.overlap - reference.overlap, reference.overlap)
+        if math.isfinite(rel_diff) and rel_diff > OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD:
+            unavailable_reason = "prediction_overlap_mismatch"
+
+    auxiliary_ignored = is_graph2mat_auxiliary_prediction(reference, predicted)
+    prediction_safe = True
+    if reference.overlap is not None:
+        prediction_safe = (
+            predicted.overlap is not None
+            and predicted.overlap.shape == reference.overlap.shape
+            and math.isfinite(rel_diff)
+            and rel_diff <= OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD
+            and not auxiliary_ignored
+        )
+    return {
+        "overlap_source": overlap_source,
+        "prediction_own_overlap_used": False,
+        "prediction_overlap_relative_frobenius_vs_reference": rel_diff,
+        "prediction_overlap_check_threshold": OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD,
+        "prediction_self_contained_hsx_safe": prediction_safe,
+        "prediction_self_contained_hsx_unsafe_reason": (
+            "graph2mat_auxiliary_component_ignored" if auxiliary_ignored else unavailable_reason
+        ),
+    }
+
+
+def matrix_semantics_fields(
+    reference: MatrixData,
+    predicted: MatrixData,
+    *,
+    target_component_policy: str,
+) -> dict[str, Any]:
+    auxiliary_ignored = is_graph2mat_auxiliary_prediction(reference, predicted)
+    return {
+        "target_component_policy": target_component_policy,
+        "reference_component_count": int(reference.component_count),
+        "prediction_component_count": int(predicted.component_count),
+        "reference_spin_kind": reference.spin_kind,
+        "prediction_spin_kind": predicted.spin_kind,
+        "graph2mat_auxiliary_component_ignored": auxiliary_ignored,
+        **overlap_diagnostics(reference, predicted),
+    }
+
+
+def matrix_components(data: MatrixData) -> tuple[sparse.csr_matrix, ...]:
+    return data.components or (data.hamiltonian,)
+
+
+def component_channel_metrics(
+    sample: str,
+    reference: MatrixData,
+    predicted: MatrixData,
+    semantics: dict[str, Any],
+) -> list[dict[str, Any]]:
+    reference_components = matrix_components(reference)
+    prediction_components = matrix_components(predicted)
+    rows: list[dict[str, Any]] = []
+    for index in range(max(len(reference_components), len(prediction_components))):
+        ref_available = index < len(reference_components)
+        pred_available = index < len(prediction_components)
+        channel_role = "hamiltonian" if index == 0 else "auxiliary"
+        row: dict[str, Any] = {
+            "sample": sample,
+            "component_index": index,
+            "component_role": channel_role,
+            "reference_component_available": ref_available,
+            "prediction_component_available": pred_available,
+            **semantics,
+        }
+        if ref_available and pred_available:
+            ref_matrix = reference_components[index]
+            pred_matrix = prediction_components[index]
+            if ref_matrix.shape == pred_matrix.shape:
+                ref_values = csr_value_dict(ref_matrix, SUPPORT_THRESHOLD)
+                pred_values = csr_value_dict(pred_matrix, SUPPORT_THRESHOLD)
+                union = sorted(set(ref_values) | set(pred_values))
+                deltas = [pred_values.get(key, 0.0) - ref_values.get(key, 0.0) for key in union]
+                row.update(
+                    {
+                        "component_shape": list(ref_matrix.shape),
+                        "component_mae_eV": mean_abs(deltas),
+                        "component_rmse_eV": rmse(deltas),
+                        "component_mse_eV2": mse(deltas),
+                        "component_max_abs_error_eV": float(
+                            max((abs(value) for value in deltas), default=math.nan)
+                        ),
+                        "component_n_entries": len(union),
+                        "component_metric_available": True,
+                        "component_unavailable_reason": "",
+                    }
+                )
+            else:
+                row.update(
+                    {
+                        "component_shape": None,
+                        "component_mae_eV": math.nan,
+                        "component_rmse_eV": math.nan,
+                        "component_mse_eV2": math.nan,
+                        "component_max_abs_error_eV": math.nan,
+                        "component_n_entries": 0,
+                        "component_metric_available": False,
+                        "component_unavailable_reason": "component_shape_mismatch",
+                    }
+                )
+        else:
+            row.update(
+                {
+                    "component_shape": None,
+                    "component_mae_eV": math.nan,
+                    "component_rmse_eV": math.nan,
+                    "component_mse_eV2": math.nan,
+                    "component_max_abs_error_eV": math.nan,
+                    "component_n_entries": 0,
+                    "component_metric_available": False,
+                    "component_unavailable_reason": (
+                        "missing_reference_component"
+                        if pred_available
+                        else "missing_prediction_component"
+                    ),
+                }
+            )
+        rows.append(row)
+    return rows
 
 
 def hermiticity_defect(matrix: sparse.csr_matrix) -> float:
@@ -1993,6 +2256,7 @@ def matrix_spectrum_rows(
             {
                 "sample": sparse_row["sample"],
                 "matrix_metric_target_space": sparse_row.get("matrix_metric_target_space"),
+                **{field: sparse_row.get(field) for field in MATRIX_SEMANTIC_FIELDS},
                 "mae_ref_eV": sparse_row.get("mae_ref_eV"),
                 "rmse_ref_eV": sparse_row.get("rmse_ref_eV"),
                 "mse_ref_eV2": sparse_row.get("mse_ref_eV2"),
@@ -2068,6 +2332,7 @@ def extract(
     sample_names = sorted(set(prediction_dirs) | set(reference_dirs))
     basis_dirs = find_basis_dirs(result_dir)
     method_id = result_method_id(result_dir)
+    target_component_policy = target_component_policy_from_result(result_dir)
 
     sparse_rows: list[dict[str, Any]] = []
     spectral_rows: list[dict[str, Any]] = []
@@ -2075,6 +2340,7 @@ def extract(
     overlap_rows: list[dict[str, Any]] = []
     sparse_sweep_rows: list[dict[str, Any]] = []
     dos_sweep_rows: list[dict[str, Any]] = []
+    component_rows: list[dict[str, Any]] = []
     block_rows: list[dict[str, Any]] = []
     species_pair_rows: list[dict[str, Any]] = []
     distance_bin_rows: list[dict[str, Any]] = []
@@ -2110,6 +2376,7 @@ def extract(
         overlap_rows.extend(sample_rows["overlap"])
         sparse_sweep_rows.extend(sample_rows["sparse_sweep"])
         dos_sweep_rows.extend(sample_rows["dos_sweep"])
+        component_rows.extend(sample_rows["component"])
         block_rows.extend(sample_rows["block"])
         species_pair_rows.extend(sample_rows["species_pair"])
         distance_bin_rows.extend(sample_rows["distance_bin"])
@@ -2133,6 +2400,7 @@ def extract(
                     result_dir,
                     basis_counts,
                     method_id=method_id,
+                    target_component_policy=target_component_policy,
                     low_energy_enabled=low_energy_enabled,
                     low_energy_n_states=low_energy_n_states,
                     low_energy_alignment=low_energy_alignment,
@@ -2153,6 +2421,7 @@ def extract(
                     result_dir,
                     basis_counts,
                     method_id=method_id,
+                    target_component_policy=target_component_policy,
                     low_energy_enabled=low_energy_enabled,
                     low_energy_n_states=low_energy_n_states,
                     low_energy_alignment=low_energy_alignment,
@@ -2161,6 +2430,7 @@ def extract(
 
     orbital_pair_summary = orbital_pair_summary_rows(orbital_pair_rows)
 
+    semantic_fields = MATRIX_SEMANTIC_FIELDS
     sparse_fields = [
         "sample",
         "n_orbitals",
@@ -2171,6 +2441,7 @@ def extract(
         "ref_density",
         "pred_density",
         "matrix_metric_target_space",
+        *semantic_fields,
         "mae_ref_eV",
         "rmse_ref_eV",
         "mse_ref_eV2",
@@ -2209,7 +2480,7 @@ def extract(
         "sample",
         "siesta_bands",
         "predicted_bands",
-        "overlap_source",
+        *semantic_fields,
         "spectral_comparable",
         "same_band_count",
         "reference_has_overlap",
@@ -2267,6 +2538,7 @@ def extract(
     relationship_fields = [
         "sample",
         "matrix_metric_target_space",
+        *semantic_fields,
         "mae_ref_eV",
         "rmse_ref_eV",
         "mse_ref_eV2",
@@ -2320,10 +2592,27 @@ def extract(
         "n_bands",
         "hamiltonian_components",
         "spin_kind",
+        *semantic_fields,
         "orthogonal",
         "has_overlap",
         "overlap_error",
         "fermi_level_eV",
+    ]
+    component_fields = [
+        "sample",
+        "component_index",
+        "component_role",
+        "reference_component_available",
+        "prediction_component_available",
+        "component_shape",
+        "component_metric_available",
+        "component_unavailable_reason",
+        "component_n_entries",
+        "component_mae_eV",
+        "component_rmse_eV",
+        "component_mse_eV2",
+        "component_max_abs_error_eV",
+        *semantic_fields,
     ]
     block_fields = [
         "sample",
@@ -2410,6 +2699,7 @@ def extract(
     write_csv(metrics_root / "dos_metrics.csv", dos_fields, dos_rows)
     write_csv(metrics_root / "matrix_spectrum_relationship.csv", relationship_fields, relationship_rows)
     write_csv(metrics_root / "sparse_threshold_sweep.csv", sparse_sweep_fields, sparse_sweep_rows)
+    write_csv(metrics_root / "component_channel_metrics.csv", component_fields, component_rows)
     write_csv(metrics_root / "block_metrics.csv", block_fields, block_rows)
     write_csv(metrics_root / "species_pair_metrics.csv", species_pair_fields, species_pair_rows)
     write_csv(metrics_root / "distance_bin_metrics.csv", distance_bin_fields, distance_bin_rows)
@@ -2420,9 +2710,22 @@ def extract(
     write_csv(metrics_root / "dos_sigma_sweep.csv", dos_sweep_fields, dos_sweep_rows)
 
     summary = {
-        "sparse": summarize_numeric(sparse_rows, {"sample"}),
-        "spectral": summarize_numeric(spectral_rows, {"sample", "overlap_source", "hamiltonian_symmetrized_for_spectrum"}),
+        "sparse": summarize_numeric(sparse_rows, {"sample", *semantic_fields}),
+        "spectral": summarize_numeric(
+            spectral_rows,
+            {"sample", "hamiltonian_symmetrized_for_spectrum", *semantic_fields},
+        ),
         "dos": summarize_numeric(dos_rows, {"sample"}),
+        "component_channel": summarize_numeric(
+            component_rows,
+            {
+                "sample",
+                "component_role",
+                "component_shape",
+                "component_unavailable_reason",
+                *semantic_fields,
+            },
+        ),
         "orbital_pair": summarize_numeric(
             orbital_pair_rows,
             {
@@ -2500,6 +2803,8 @@ def extract(
         "sparse_samples": len(sparse_rows),
         "dos_samples": len(dos_rows),
         "overlap_entries": len(overlap_rows),
+        "component_channel_entries": len(component_rows),
+        "target_component_policy": target_component_policy,
         "reference_selection_policy": REFERENCE_SELECTION_POLICY,
         "sample_status": sample_status,
         "structural_metrics_basis_required": True,
@@ -2547,6 +2852,11 @@ def extract(
         "metric_compatibility": {
             "sparse_matrix_metrics_material_agnostic": True,
             "matrix_metric_target_space": MATRIX_METRIC_TARGET_SPACE,
+            "target_component_policy": target_component_policy,
+            "target_semantics_fields": semantic_fields,
+            "prediction_own_overlap_used_for_spectra": False,
+            "nonorthogonal_spectral_overlap_source": "siesta_reference",
+            "prediction_self_contained_hsx_safe_required": True,
             "orbital_pair_metric_target_space": ORBITAL_PAIR_METRIC_TARGET_SPACE,
             "orbital_pair_basis_source": ORBITAL_PAIR_BASIS_SOURCE,
             "deeph_hprime_transform_applied": False,
@@ -2572,6 +2882,7 @@ def extract(
             "spectral_metrics": str(metrics_root / "spectral_metrics.csv"),
             "dos_metrics": str(metrics_root / "dos_metrics.csv"),
             "matrix_spectrum_relationship": str(metrics_root / "matrix_spectrum_relationship.csv"),
+            "component_channel_metrics": str(metrics_root / "component_channel_metrics.csv"),
             "block_metrics": str(metrics_root / "block_metrics.csv"),
             "species_pair_metrics": str(metrics_root / "species_pair_metrics.csv"),
             "distance_bin_metrics": str(metrics_root / "distance_bin_metrics.csv"),

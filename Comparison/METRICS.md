@@ -41,7 +41,16 @@ analysis treats the comparison as not scientifically valid.
 The UI endpoint `/api/plots` reads those archived CSV files from `results_md`,
 `results_atomdisp`, and `results_random_cartesian`. If a manifest contains an
 absolute path from another OS, the UI falls back to the archive directory beside
-the manifest.
+the manifest. When material provenance is present, `/api/plots` also exposes
+compact material metadata (`material_label`, `material_species`,
+`material_atom_count`, `material_identity_hash`, `material_compatibility_hash`,
+and `material_display_label`) for archived runs and cross-evaluation rows.
+
+Results plots are material-aware diagnostics. The UI shows material labels in
+run labels and hover text, offers an `All materials` filter, and warns when
+multiple material compatibility groups are visible. Material-mixed plots are
+useful for inspection only; robust scientific comparisons require compatible
+material hashes, basis files, pseudopotentials, and SIESTA settings.
 
 The Results tab includes a "DeepH-comparable" diagnostic plot group when the
 corresponding archived columns exist:
@@ -132,6 +141,15 @@ Reported metrics include:
   predicted matrix. These metrics are DeepH-comparable scalar diagnostics, but
   they are not exact DeepH local-coordinate H' block metrics unless a future
   validated H' transformation is implemented.
+- Target-semantics columns are repeated in sparse, spectral, overlap, and
+  matrix-spectrum outputs: `target_component_policy`,
+  `reference_component_count`, `prediction_component_count`,
+  `reference_spin_kind`, `prediction_spin_kind`, `overlap_source`,
+  `prediction_own_overlap_used`,
+  `prediction_overlap_relative_frobenius_vs_reference`,
+  `graph2mat_auxiliary_component_ignored`, and
+  `prediction_self_contained_hsx_safe`. These fields make H-only versus
+  multi-component or ambiguous spin-container predictions explicit in the CSVs.
 - `relative_frobenius_ref`: Frobenius error on the SIESTA support, normalized by
   the SIESTA Frobenius norm.
 - `relative_frobenius_union`: Frobenius error on the union support, normalized
@@ -143,6 +161,12 @@ Reported metrics include:
 - `metrics/sparse_threshold_sweep.csv`: sensitivity table at thresholds
   `1e-12`, `1e-10`, `1e-8`, `1e-6` with `mae_union_eV` and `rmse_union_eV`.
   This is a robustness diagnostic; it should not replace the canonical table.
+- `metrics/component_channel_metrics.csv`: per-channel diagnostics for
+  containers that expose multiple matrix components. Component 0 is treated as
+  the Hamiltonian channel. Auxiliary channels are reported separately when both
+  reference and prediction channels exist, or marked unavailable when the
+  reference has no corresponding auxiliary target. Auxiliary-channel rows are
+  never mixed into the main Hamiltonian MAE/RMSE/R2 metrics.
 
 Diagnostic structural metrics are written from the real SIESTA/Graph2Mat basis.
 The evaluator requires archived `.ion.xml` files and counts PAOs from each
@@ -194,6 +218,17 @@ Eigenvalues are computed by diagonalizing the symmetrized Hamiltonian. When the
 SIESTA overlap is available, the prediction is diagonalized using the SIESTA
 reference overlap so both spectra are compared in the same generalized
 eigenproblem.
+
+For non-orthogonal matrices, `overlap_source` is `siesta_reference` and
+`prediction_own_overlap_used` is `false`. A prediction-owned overlap is checked
+only as a safety diagnostic for using the predicted HSX as a standalone
+generalized-eigenproblem input. If it differs from `S_ref`, the evaluator emits
+a severe `prediction_overlap_mismatch` warning, records
+`prediction_self_contained_hsx_safe=false`, and still computes spectra with the
+reference overlap. Known Graph2Mat auxiliary two-component prediction containers
+for an unpolarized reference are allowed only as a severe diagnostic case:
+component 0 is used as H, the auxiliary component is ignored for the main
+metrics, and spectra still use `S_ref`.
 
 Reported metrics include:
 

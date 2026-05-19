@@ -19,6 +19,13 @@ from material_presets import resolve_material_bundle
 
 GRAPH2MAT_BASIS_EXTENSION = ".ion.xml"
 PROVENANCE_FILE_NAME = "config_provenance.json"
+DEFAULT_MATRIX_COMPONENT_POLICY = "h_only"
+VALID_MATRIX_COMPONENT_POLICIES = {
+    "h_only",
+    "spin_h_only",
+    "raw_components",
+    "h_and_overlap",
+}
 
 
 def _relpath(path: Path, start: Path) -> str:
@@ -106,6 +113,96 @@ def copy_graph2mat_basis_files(
     return copied
 
 
+def resolve_matrix_component_policy(
+    data: dict[str, Any],
+    *,
+    context: str,
+) -> tuple[str, int]:
+    policy = str(data.get("matrix_component_policy") or "").strip()
+    if not policy:
+        raise RuntimeError(
+            f"{context}.matrix_component_policy is required. Use "
+            f"{DEFAULT_MATRIX_COMPONENT_POLICY!r} with n_matrix_components=1 for H-only targets."
+        )
+    if policy not in VALID_MATRIX_COMPONENT_POLICIES:
+        raise RuntimeError(
+            f"{context}.matrix_component_policy={policy!r} is not supported. "
+            f"Expected one of {sorted(VALID_MATRIX_COMPONENT_POLICIES)}."
+        )
+
+    raw_components = data.get("n_matrix_components")
+    if raw_components in (None, ""):
+        raise RuntimeError(
+            f"{context}.n_matrix_components is required for "
+            f"matrix_component_policy={policy!r}."
+        )
+    try:
+        n_components = int(raw_components)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{context}.n_matrix_components must be an integer; got {raw_components!r}."
+        ) from exc
+    if n_components <= 0:
+        raise RuntimeError(f"{context}.n_matrix_components must be positive.")
+    if policy == "h_only" and n_components != 1:
+        raise RuntimeError(
+            f"{context}: matrix_component_policy='h_only' requires "
+            f"n_matrix_components=1, got {n_components}."
+        )
+    if policy == "h_and_overlap" and n_components != 2:
+        raise RuntimeError(
+            f"{context}: matrix_component_policy='h_and_overlap' requires "
+            f"n_matrix_components=2, got {n_components}."
+        )
+    return policy, n_components
+
+
+def _mapping_value(mapping: Any, key: str) -> Any:
+    if isinstance(mapping, dict):
+        return mapping.get(key)
+    get = getattr(mapping, "get", None)
+    if callable(get):
+        return get(key)
+    return getattr(mapping, key, None)
+
+
+def validate_model_matrix_component_policy(
+    model: Any,
+    *,
+    matrix_component_policy: str,
+    n_matrix_components: int,
+    context: str,
+) -> None:
+    hparams = getattr(model, "hparams", None)
+    if hparams is None:
+        return
+    expected_policy = _mapping_value(hparams, "matrix_component_policy")
+    expected_n = _mapping_value(hparams, "n_matrix_components")
+    data_hparams = _mapping_value(hparams, "data")
+    if expected_policy in (None, "") and data_hparams is not None:
+        expected_policy = _mapping_value(data_hparams, "matrix_component_policy")
+    if expected_n in (None, "") and data_hparams is not None:
+        expected_n = _mapping_value(data_hparams, "n_matrix_components")
+
+    if expected_policy not in (None, "") and str(expected_policy) != matrix_component_policy:
+        raise RuntimeError(
+            f"{context}: requested matrix_component_policy={matrix_component_policy!r} "
+            f"does not match checkpoint policy {expected_policy!r}."
+        )
+    if expected_n not in (None, ""):
+        try:
+            expected_n_int = int(expected_n)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"{context}: checkpoint n_matrix_components is not an integer: {expected_n!r}."
+            ) from exc
+        if expected_n_int != int(n_matrix_components):
+            raise RuntimeError(
+                f"{context}: requested n_matrix_components={n_matrix_components} "
+                f"does not match checkpoint n_matrix_components={expected_n_int}."
+            )
+
+
 def apply_material_graph2mat_config(
     config: dict[str, Any],
     *,
@@ -142,13 +239,21 @@ def apply_material_graph2mat_config(
                 "Only Graph2Mat data.out_matrix='hamiltonian' is supported by this "
                 f"benchmark material-aware config path; got {matrix_target!r}."
             )
+        matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
+            training_data,
+            context="training.data",
+        )
     else:
         matrix_target = "hamiltonian"
+        matrix_component_policy = DEFAULT_MATRIX_COMPONENT_POLICY
+        n_matrix_components = 1
 
     return {
         "material": resolved.to_manifest_dict(),
         "graph2mat": {
             "matrix_target": matrix_target,
+            "matrix_component_policy": matrix_component_policy,
+            "n_matrix_components": n_matrix_components,
             "basis_files": basis_glob,
             "basis_files_target_dir": str(target_dir),
             "basis_files_by_species": copied_basis,

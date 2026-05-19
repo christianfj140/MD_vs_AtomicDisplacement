@@ -161,9 +161,10 @@ function canonicalDisplayText(value) {
     .replace(/\brandom_cartesian\b/g, "Random Cartesian");
 }
 
-const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
+const DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate";
 const PRIMARY_METRIC_DEFAULT = "low_energy_rmse_eV";
 const CROSS_PLOT_METRIC_DEFAULT = "low_energy_rmse_eV";
+const UNKNOWN_MATERIAL_LABEL = "unknown material";
 const LOG_POLL_LIMIT = 2000;
 const POLL_INTERVAL_MS = 1200;
 const POLL_ERROR_TOAST_INTERVAL_MS = 30000;
@@ -1036,6 +1037,7 @@ function trainingSettings() {
     batch_size: optionalPositiveInteger("training-batch-size", "Training batch size"),
     loader_threads: optionalPositiveInteger("training-loader-threads", "Training loader threads"),
     loss: optionalTextInput("training-loss"),
+    loss_kwargs: optionalJsonObjectInput("training-loss-kwargs", "Loss kwargs JSON"),
     num_interactions: optionalPositiveInteger("training-num-interactions", "Model interactions"),
     correlation: optionalPositiveInteger("training-correlation", "Model correlation"),
     max_ell: optionalNumberInput("training-max-ell", "Model max ell", { integer: true, min: 0 }),
@@ -1049,7 +1051,10 @@ function trainingSettings() {
 function trainingSettingsSummary(settings) {
   const entries = Object.entries(settings || {});
   if (!entries.length) return "defaults";
-  return entries.map(([key, value]) => `${key}=${value}`).join(", ");
+  return entries.map(([key, value]) => {
+    const text = value && typeof value === "object" ? JSON.stringify(value) : value;
+    return `${key}=${text}`;
+  }).join(", ");
 }
 
 function splitSweepList(value) {
@@ -1075,6 +1080,33 @@ function parseSweepTextList(id) {
   return splitSweepList(inputValue(id));
 }
 
+function parseJsonObject(raw, label) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${label}: JSON invalido.`);
+  }
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error(`${label}: debe ser un objeto JSON.`);
+  }
+  return parsed;
+}
+
+function optionalJsonObjectInput(id, label) {
+  return parseJsonObject(inputValue(id), label);
+}
+
+function parseSweepJsonObjectList(id, label) {
+  return String(inputValue(id) || "")
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => parseJsonObject(item, label));
+}
+
 function hiddenIrrepsDimension(raw) {
   const terms = parseHiddenIrrepsTerms(raw);
   return terms.reduce((total, term) => total + term.mul * (2 * term.ell + 1), 0);
@@ -1090,6 +1122,7 @@ function sweepParametersFromControls() {
   setIfAny("batch_size", parseSweepNumberList("sweep-batch-size", "Sweep batch size", { integer: true, min: 1 }));
   setIfAny("loader_threads", parseSweepNumberList("sweep-loader-threads", "Sweep loader threads", { integer: true, min: 1 }));
   setIfAny("loss", parseSweepTextList("sweep-loss"));
+  setIfAny("loss_kwargs", parseSweepJsonObjectList("sweep-loss-kwargs", "Sweep loss kwargs"));
   setIfAny(
     "num_interactions",
     parseSweepNumberList("sweep-num-interactions", "Sweep interactions", { integer: true, min: 1 }),
@@ -2330,9 +2363,150 @@ function pipelineLabel(key) {
   return resultPipelines.find((item) => item.key === key)?.label || methodDisplayLabel(key);
 }
 
+function parseJsonObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isKnownMaterialLabel(label) {
+  const text = String(label || "").trim();
+  return Boolean(text) && text !== UNKNOWN_MATERIAL_LABEL;
+}
+
+function materialDisplayLabel(item) {
+  if (typeof item === "string") return item.trim() || UNKNOWN_MATERIAL_LABEL;
+  const label = item?.material_display_label || item?.material_label || item?.material_preset || "";
+  if (!isKnownMaterialLabel(label)) return UNKNOWN_MATERIAL_LABEL;
+  return String(label);
+}
+
+function runMaterialLabel(run) {
+  return materialDisplayLabel(run);
+}
+
+function rowMaterialLabels(row) {
+  const labels = new Set();
+  const addLabel = (value) => {
+    if (isKnownMaterialLabel(value)) labels.add(String(value));
+  };
+  addLabel(row?.material_display_label);
+  addLabel(row?.material_label);
+  for (const value of Object.values(parseJsonObject(row?.material_label_by_method))) {
+    addLabel(value);
+  }
+  if (!labels.size) labels.add(UNKNOWN_MATERIAL_LABEL);
+  return Array.from(labels).sort();
+}
+
+function rowMaterialDisplayLabel(row) {
+  const labels = rowMaterialLabels(row);
+  if (labels.length <= 2) return labels.join(", ");
+  return `${labels.slice(0, 2).join(", ")} +${labels.length - 2}`;
+}
+
+function materialContextText(item) {
+  const label = materialDisplayLabel(item);
+  const structureType = typeof item === "object" ? item?.material_structure_type : "";
+  const structure = isKnownMaterialLabel(label) && structureType ? ` (${structureType})` : "";
+  return `material ${label}${structure}`;
+}
+
+function rowMaterialContextText(row) {
+  return `material ${rowMaterialDisplayLabel(row)}`;
+}
+
+function availableMaterialLabels(payload) {
+  const labels = new Set();
+  let hasUnknown = false;
+  const addLabel = (value) => {
+    if (isKnownMaterialLabel(value)) labels.add(String(value));
+    else hasUnknown = true;
+  };
+  for (const run of payload?.runs || []) addLabel(runMaterialLabel(run));
+  for (const experiment of payload?.cross_experiments || []) {
+    for (const label of experiment?.material_summary?.material_display_labels || []) addLabel(label);
+    for (const row of experiment?.metrics || []) {
+      for (const label of rowMaterialLabels(row)) addLabel(label);
+    }
+  }
+  const ordered = Array.from(labels).sort((a, b) => a.localeCompare(b));
+  if (hasUnknown) ordered.push(UNKNOWN_MATERIAL_LABEL);
+  return ordered;
+}
+
+function selectedPlotMaterial() {
+  return document.getElementById("plot-material-filter")?.value || "all";
+}
+
+function materialSelectionMatches(labels, selection = selectedPlotMaterial()) {
+  if (selection === "all") return true;
+  return labels.includes(selection);
+}
+
+function filterRunsByMaterial(runs) {
+  const selection = selectedPlotMaterial();
+  if (selection === "all") return runs || [];
+  return (runs || []).filter((run) => materialSelectionMatches([runMaterialLabel(run)], selection));
+}
+
+function filterCrossExperimentByMaterial(experiment) {
+  const selection = selectedPlotMaterial();
+  if (!experiment || selection === "all") return experiment;
+  const metrics = (experiment.metrics || []).filter((row) =>
+    materialSelectionMatches(rowMaterialLabels(row), selection),
+  );
+  const hashes = new Set(
+    metrics
+      .map((row) => row.material_compatibility_hash || Object.values(parseJsonObject(row.material_compatibility_hash_by_method)).sort().join(","))
+      .filter(Boolean),
+  );
+  return {
+    ...experiment,
+    metrics,
+    material_filter: selection,
+    material_summary: {
+      ...(experiment.material_summary || {}),
+      material_display_labels: [selection],
+      material_compatibility_hashes: Array.from(hashes).sort(),
+      mixed_materials: hashes.size > 1,
+    },
+  };
+}
+
+function syncMaterialFilterOptions(payload) {
+  const select = document.getElementById("plot-material-filter");
+  if (!select) return;
+  const previous = select.value || "all";
+  const labels = availableMaterialLabels(payload);
+  select.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "All materials";
+  select.appendChild(all);
+  for (const label of labels) {
+    const option = document.createElement("option");
+    option.value = label;
+    option.textContent = label;
+    select.appendChild(option);
+  }
+  select.value = previous === "all" || labels.includes(previous) ? previous : "all";
+}
+
 function runDisplayLabel(run) {
   const detail = run?.training_tag || run?.dataset_label || run?.recipe_id || run?.run_id || "";
-  return `${pipelineLabel(run?.pipeline || run?.label)} ${run?.dataset_size ?? ""}${detail ? ` · ${detail}` : ""}`;
+  const size = run?.dataset_size ?? "";
+  const material = runMaterialLabel(run);
+  return [
+    `${pipelineLabel(run?.pipeline || run?.label)} ${size}`.trim(),
+    isKnownMaterialLabel(material) ? material : "",
+    detail,
+  ].filter(Boolean).join(" · ");
 }
 
 function slugPart(value) {
@@ -3462,7 +3636,7 @@ function sampleMetricValuesAny(run, group, metrics) {
 function missingFermiSummary(runs) {
   const pieces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelineLabel(pipeline);
+    const label = groupedRunLabel(pipeline, items);
     const missing = items.reduce(
       (sum, run) => sum + Number(run.diagnostics?.missing_fermi_level_samples || 0),
       0,
@@ -3492,8 +3666,13 @@ function runTrainingGroupLabel(run) {
 function groupedRunLabel(groupKey, items) {
   const first = items?.[0] || {};
   const pipeline = String(first.pipeline || groupKey).split("||")[0];
-  const trainingLabel = groupKey.includes("||") ? groupKey.split("||").slice(1).join("||") : "";
-  return trainingLabel ? `${pipelineLabel(pipeline)} · ${trainingLabel}` : pipelineLabel(pipeline);
+  const trainingLabel = runTrainingGroupLabel(first);
+  const material = runMaterialLabel(first);
+  return [
+    pipelineLabel(pipeline),
+    isKnownMaterialLabel(material) ? material : "",
+    trainingLabel,
+  ].filter(Boolean).join(" · ");
 }
 
 function groupedRuns(runs, options = {}) {
@@ -3501,7 +3680,12 @@ function groupedRuns(runs, options = {}) {
   const includeTrainingContext = Boolean(options.includeTrainingContext);
   for (const run of runs) {
     const trainingContext = includeTrainingContext ? runTrainingGroupLabel(run) : "";
-    const key = trainingContext ? `${run.pipeline}||${trainingContext}` : run.pipeline;
+    const material = runMaterialLabel(run);
+    const key = [
+      run.pipeline,
+      isKnownMaterialLabel(material) ? `material=${material}` : "",
+      trainingContext ? `training=${trainingContext}` : "",
+    ].filter(Boolean).join("||");
     if (!groups.has(key)) {
       groups.set(key, []);
     }
@@ -3520,7 +3704,11 @@ function lineTraces(runs, group, metrics) {
     const label = groupedRunLabel(groupKey, items);
     for (const metric of metrics) {
       const points = items
-        .map((run) => ({ x: run.dataset_size, y: metricValue(run, group, metric.key), text: run.training_tag || run.run_id }))
+        .map((run) => ({
+          x: run.dataset_size,
+          y: metricValue(run, group, metric.key),
+          text: [run.training_tag || run.run_id || "", materialContextText(run)].filter(Boolean).join(" · "),
+        }))
         .filter((point) => point.y != null);
       if (!points.length) continue;
       const name = metrics.length > 1 ? `${label} · ${metric.label}` : label;
@@ -3846,7 +4034,7 @@ function metricAvailabilityByPipeline(runs, group, metric) {
     const finite = items.reduce((sum, run) => sum + sampleMetricValues(run, group, metric).length, 0);
     return {
       pipeline,
-      label: pipelineLabel(pipeline),
+      label: groupedRunLabel(pipeline, items),
       runs: items.length,
       total,
       finite,
@@ -4077,6 +4265,7 @@ function orbitalPairTrace(choice, visible) {
     const r2 = orbitalPairR2Value(row);
     customdata[y][x] =
       `species_pair ${choice.speciesPair}<br>` +
+      `${materialContextText(choice.run)}<br>` +
       `samples ${nSamples}, entries ${nEntries}<br>` +
       `RMSE ${rmse == null ? "No metric" : `${rmse.toPrecision(4)} eV`}<br>` +
       `R2 ${r2 == null ? "No metric" : r2.toPrecision(4)}`;
@@ -4147,6 +4336,36 @@ function renderOrbitalPairHeatmap(id, runs) {
     ];
   }
   renderPlot(id, traces, layout, { responsive: true, displaylogo: false });
+}
+
+function combinedCrossMaterialSummary(experiments) {
+  const labels = new Set();
+  const hashes = new Set();
+  const warnings = [];
+  let hasUnknown = false;
+  let mixed = false;
+  for (const experiment of experiments || []) {
+    const summary = experiment?.material_summary || {};
+    for (const label of summary.material_display_labels || summary.material_labels || []) {
+      if (isKnownMaterialLabel(label)) labels.add(String(label));
+    }
+    for (const hash of summary.material_compatibility_hashes || []) {
+      if (hash) hashes.add(String(hash));
+    }
+    for (const warning of summary.material_compatibility_warnings || []) {
+      if (warning && !warnings.includes(warning)) warnings.push(warning);
+    }
+    hasUnknown = hasUnknown || Boolean(summary.has_unknown_material);
+    mixed = mixed || Boolean(summary.mixed_materials);
+  }
+  if (!labels.size && hasUnknown) labels.add(UNKNOWN_MATERIAL_LABEL);
+  return {
+    material_display_labels: Array.from(labels).sort(),
+    material_compatibility_hashes: Array.from(hashes).sort(),
+    material_compatibility_warnings: warnings,
+    has_unknown_material: hasUnknown,
+    mixed_materials: mixed || hashes.size > 1 || (!hashes.size && labels.size > 1),
+  };
 }
 
 function renderBoxPlot(id, runs) {
@@ -4276,7 +4495,7 @@ function renderScatterPlot(id, runs) {
   const traces = [];
   let traceIndex = 0;
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelineLabel(pipeline);
+    const label = groupedRunLabel(pipeline, items);
     const x = [];
     const y = [];
     const text = [];
@@ -4314,6 +4533,7 @@ function renderScatterPlot(id, runs) {
             : "no disponible";
         text.push(
           `dataset_${run.dataset_size} - sample ${row.sample}<br>` +
+            `${materialContextText(run)}<br>` +
             `Fermi source: ${row.fermi_level_source || "unknown"}<br>` +
             `Fermi RMSE: ${fermiValue}<br>` +
             `Frontier RMSE: ${frontierValue}`,
@@ -4471,7 +4691,7 @@ function renderHeatmap(id, runs) {
 function renderSensitivitySweeps(id, runs) {
   const traces = [];
   for (const [pipeline, items] of groupedRuns(runs)) {
-    const label = pipelineLabel(pipeline);
+    const label = groupedRunLabel(pipeline, items);
     const sparseSweepRows = items.flatMap((run) => run.samples?.sparse_sweep || []);
     const dosSweepRows = items.flatMap((run) => run.samples?.dos_sweep || []);
     const sparseByThreshold = new Map();
@@ -4589,6 +4809,7 @@ function selectedCrossExperimentSet(payload) {
   }
   if (!selected.length) selected = [experiments[experiments.length - 1]];
   const latest = selected[selected.length - 1];
+  const materialSummary = combinedCrossMaterialSummary(selected);
   const metrics = selected.flatMap((experiment) =>
     (experiment.metrics || []).map((row) => ({
       ...row,
@@ -4599,15 +4820,23 @@ function selectedCrossExperimentSet(payload) {
   return {
     ...latest,
     metrics,
+    plot_warnings: selected.flatMap((experiment) =>
+      (experiment.plot_warnings || []).map((warning) => ({
+        ...warning,
+        experiment_id: warning.experiment_id || experiment.experiment_id,
+      })),
+    ),
     source_experiments: selected.map((experiment) => ({
       experiment_id: experiment.experiment_id,
       rows: (experiment.metrics || []).length,
       outputs: experiment.outputs,
       compatibility_group_id: experiment.compatibility_group_id,
       compatibility: experiment.compatibility,
+      material_summary: experiment.material_summary,
     })),
     multi_experiment_available: experiments.length > 1,
     isolation_warning: isolationWarning,
+    material_summary: materialSummary,
   };
 }
 
@@ -4680,8 +4909,16 @@ function groupedCrossMetrics(rows, metric) {
     const trainTrainingTag = row.train_training_tag || row.training_tag || "";
     const trainTrainingPlanLabel = row.train_training_plan_label || row.training_plan_label || "";
     const trainTrainingPlanSettings = row.train_training_plan_settings || row.training_plan_settings || "";
+    const materialLabels = rowMaterialLabels(row).join(", ");
+    const materialIdentityHash = row.material_identity_hash || Object.values(parseJsonObject(row.material_identity_hash_by_method)).sort().join(",");
+    const materialCompatibilityHash = row.material_compatibility_hash || Object.values(parseJsonObject(row.material_compatibility_hash_by_method)).sort().join(",");
+    const materialWarning = row.material_compatibility_warning || "";
     const key = [
       row.experiment_id,
+      materialLabels,
+      materialIdentityHash,
+      materialCompatibilityHash,
+      materialWarning,
       row.recipe_set_hash,
       row.md_recipe_set_hash,
       row.atom_recipe_set_hash,
@@ -4716,6 +4953,10 @@ function groupedCrossMetrics(rows, metric) {
         train_training_plan_settings: trainTrainingPlanSettings,
         train_method: trainMethod,
         test_set: testSet,
+        material_label: materialLabels || UNKNOWN_MATERIAL_LABEL,
+        material_identity_hash: materialIdentityHash,
+        material_compatibility_hash: materialCompatibilityHash,
+        material_compatibility_warning: materialWarning,
         values: [],
         times: [],
         n_total: 0,
@@ -4745,6 +4986,10 @@ function groupedCrossMetrics(rows, metric) {
     train_training_plan_settings: group.train_training_plan_settings,
     train_method: group.train_method,
     test_set: group.test_set,
+    material_label: group.material_label,
+    material_identity_hash: group.material_identity_hash,
+    material_compatibility_hash: group.material_compatibility_hash,
+    material_compatibility_warning: group.material_compatibility_warning,
     mean: group.values.length
       ? group.values.reduce((sum, value) => sum + value, 0) / group.values.length
       : null,
@@ -4761,7 +5006,9 @@ function groupedCrossMetrics(rows, metric) {
 
 function crossDatasetComboLabel(row) {
   const trainingLabel = row.train_training_tag || row.train_training_plan_label || "";
+  const material = isKnownMaterialLabel(row.material_label) ? `material ${row.material_label}` : "";
   return [
+    material,
     row.md_dataset_size != null ? `MD ${row.md_dataset_size}` : "",
     row.atom_dataset_size != null ? `FC Cartesian ${row.atom_dataset_size}` : "",
     row.random_dataset_size != null ? `Random Cartesian ${row.random_dataset_size}` : "",
@@ -4835,13 +5082,14 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
     trainMethods.map((method) => {
       const row = means.find((item) => crossSizeLabel(item) === label && item.train_method === method);
       if (!row) {
-        return { label, method: crossMethodLabel(method), valueText: "No row", availability: "0/0" };
+        return { label, method: crossMethodLabel(method), valueText: "No row", availability: "0/0", material: UNKNOWN_MATERIAL_LABEL };
       }
       return {
         label,
         method: crossMethodLabel(method),
         valueText: row.metric_available ? row.mean.toPrecision(4) : "No metric",
         availability: metricAvailabilityLabel(row),
+        material: row.material_label || UNKNOWN_MATERIAL_LABEL,
       };
     }),
   );
@@ -4882,6 +5130,7 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
       hoverongaps: false,
       hovertemplate:
         "%{customdata.label}<br>%{customdata.method}<br>" +
+        "material: %{customdata.material}<br>" +
         `${metric}: %{customdata.valueText}<br>` +
         "finite rows: %{customdata.availability}<extra></extra>",
     }],
@@ -5057,6 +5306,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
       winner: z[rowIndex][colIndex] == null ? "No metric" : labels.get(z[rowIndex][colIndex]),
       testSet: testSetDisplayLabel(testSet),
       combo,
+      material: Array.from(new Set(candidates.map((row) => row.material_label || UNKNOWN_MATERIAL_LABEL))).join(", "),
       values: values.join("; "),
     };
   }));
@@ -5118,7 +5368,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
       colorscale,
       colorbar: { tickvals: Array.from(labels.keys()), ticktext: Array.from(labels.values()) },
       hovertemplate:
-        "%{customdata.combo}<br>%{customdata.testSet}<br>winner: %{customdata.winner}<br>%{customdata.values}<extra></extra>",
+        "%{customdata.combo}<br>%{customdata.testSet}<br>material: %{customdata.material}<br>winner: %{customdata.winner}<br>%{customdata.values}<extra></extra>",
     }],
     layout,
     { responsive: true, displaylogo: false },
@@ -5177,7 +5427,39 @@ function warningKey(warning) {
   ].join("||");
 }
 
-function plotWarningEntriesForPayload(payload, crossExperiment) {
+function visibleMaterialWarning(runs, crossExperiment) {
+  const runHashes = new Set(
+    (runs || [])
+      .map((run) => run.material_compatibility_hash)
+      .filter((value) => value != null && value !== ""),
+  );
+  const runLabels = new Set(
+    (runs || [])
+      .map(runMaterialLabel)
+      .filter(isKnownMaterialLabel),
+  );
+  const summary = crossExperiment?.material_summary || {};
+  const crossHashes = new Set(summary.material_compatibility_hashes || []);
+  const mixed = Boolean(summary.mixed_materials) ||
+    runHashes.size > 1 ||
+    crossHashes.size > 1 ||
+    (!runHashes.size && !crossHashes.size && runLabels.size > 1);
+  if (!mixed) return null;
+  return {
+    severity: "warning",
+    code: "mixed_material_groups",
+    scientific_status: "scientifically_inconclusive",
+    message: "Multiple material groups are shown; interpret plots as diagnostics, not a pooled benchmark.",
+    details: {
+      run_material_labels: Array.from(runLabels).sort(),
+      run_material_compatibility_hashes: Array.from(runHashes).sort(),
+      cross_material_labels: summary.material_display_labels || summary.material_labels || [],
+      cross_material_compatibility_hashes: Array.from(crossHashes).sort(),
+    },
+  };
+}
+
+function plotWarningEntriesForPayload(payload, crossExperiment, visibleRuns = null) {
   const warnings = [];
   const seen = new Set();
   const addWarning = (warning, experimentId = "") => {
@@ -5212,6 +5494,7 @@ function plotWarningEntriesForPayload(payload, crossExperiment) {
       );
     }
   }
+  addWarning(visibleMaterialWarning(visibleRuns || payload?.runs || [], crossExperiment));
   for (const warning of payload?.plot_warnings || []) {
     if (!crossExperiment || warning.experiment_id === crossExperiment.experiment_id || warning.code === "visualization_compatibility") {
       addWarning(warning);
@@ -5220,10 +5503,10 @@ function plotWarningEntriesForPayload(payload, crossExperiment) {
   return warnings;
 }
 
-function renderPlotWarnings(payload, crossExperiment) {
+function renderPlotWarnings(payload, crossExperiment, visibleRuns = null) {
   const banner = document.getElementById("plot-warnings");
   if (!banner) return;
-  const warnings = plotWarningEntriesForPayload(payload, crossExperiment);
+  const warnings = plotWarningEntriesForPayload(payload, crossExperiment, visibleRuns);
   banner.replaceChildren();
   banner.classList.toggle("hidden", warnings.length === 0);
   if (!warnings.length) return;
@@ -5267,25 +5550,29 @@ function renderPlots(payload) {
     renderPlotWarnings(payload, null);
     return;
   }
-  const runs = payload?.runs || [];
-  const crossExperiment = selectedCrossExperimentSet(payload);
+  syncMaterialFilterOptions(payload);
+  const allRuns = payload?.runs || [];
+  const runs = filterRunsByMaterial(allRuns);
+  const materialFilter = selectedPlotMaterial();
+  const crossExperiment = filterCrossExperimentByMaterial(selectedCrossExperimentSet(payload));
   const crossMetric = selectedCrossMetric(crossExperiment);
   const primaryMetric = primaryCrossMetric(crossExperiment);
   const recommendation = crossExperiment?.recommendation;
-  renderPlotWarnings(payload, crossExperiment);
+  renderPlotWarnings(payload, crossExperiment, runs);
   const crossRows = crossExperiment?.metrics?.length || 0;
   const crossSources = crossExperiment?.source_experiments?.length || 0;
   const isolationText = crossExperiment?.isolation_warning ? ` | ${canonicalDisplayText(crossExperiment.isolation_warning)}` : "";
+  const materialFilterText = materialFilter === "all" ? "all materials" : materialFilter;
   const blockerText = recommendation ? recommendationBlockers(recommendation).slice(0, 6).join(" | ") : "";
   const crossMissingText = !crossExperiment ? crossUnavailableMessage(payload) : "";
   const plotScientificStatus = crossExperiment?.plot_scientific_status || recommendation?.scientific_status || "unknown";
   const crossText = recommendation?.status
-    ? ` | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${plotScientificStatus} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${canonicalDisplayText(recommendation.reason || "")}${isolationText}`
+    ? ` | material: ${materialFilterText} | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${plotScientificStatus} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${canonicalDisplayText(recommendation.reason || "")}${isolationText}`
     : crossMissingText
       ? ` | cross: ${crossMissingText}`
     : "";
   status.textContent = runs.length
-    ? `${runs.length} runs con metricas${missingFermiSummary(runs)}`
+    ? `${runs.length}/${allRuns.length} runs con metricas${missingFermiSummary(runs)}`
     : "No hay metricas archivadas";
   status.textContent += crossText;
   renderLinePlot(
@@ -5667,6 +5954,7 @@ function setupEvents() {
     "training-batch-size",
     "training-loader-threads",
     "training-loss",
+    "training-loss-kwargs",
     "training-num-interactions",
     "training-correlation",
   ].forEach((id) => {
@@ -5681,6 +5969,7 @@ function setupEvents() {
     "sweep-batch-size",
     "sweep-loader-threads",
     "sweep-loss",
+    "sweep-loss-kwargs",
     "sweep-num-interactions",
     "sweep-correlation",
     "sweep-max-ell",
@@ -5757,6 +6046,12 @@ function setupEvents() {
     }
   });
   document.getElementById("plot-cross-metric")?.addEventListener("change", () => {
+    if (state.plotsEnabled) {
+      renderPlots(state.plotData);
+      schedulePlotResize();
+    }
+  });
+  document.getElementById("plot-material-filter")?.addEventListener("change", () => {
     if (state.plotsEnabled) {
       renderPlots(state.plotData);
       schedulePlotResize();

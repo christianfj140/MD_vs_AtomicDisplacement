@@ -29,9 +29,16 @@ from typing import Any
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
 sys.path.insert(0, str(TORCH_COMPAT_DIR))
+SHARED_DIR = Path(__file__).resolve().parents[2] / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
 from torch_safe_globals import (
     allow_graph2mat_checkpoint_globals,
     apply_torch_float32_matmul_precision,
+)
+from graph2mat_material_config import (
+    resolve_matrix_component_policy,
+    validate_model_matrix_component_policy,
 )
 
 allow_graph2mat_checkpoint_globals()
@@ -320,7 +327,27 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
         "store_in_memory": bool(args.store_in_memory),
     }
     if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters and args.n_matrix_components:
-        datamodule_kwargs["n_matrix_components"] = int(args.n_matrix_components)
+        matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
+            {
+                "matrix_component_policy": args.matrix_component_policy,
+                "n_matrix_components": args.n_matrix_components,
+            },
+            context="prediction CLI",
+        )
+        datamodule_kwargs["n_matrix_components"] = n_matrix_components
+        if "matrix_component_policy" in inspect.signature(MatrixDataModule).parameters:
+            datamodule_kwargs["matrix_component_policy"] = matrix_component_policy
+        validate_model_matrix_component_policy(
+            model,
+            matrix_component_policy=matrix_component_policy,
+            n_matrix_components=n_matrix_components,
+            context="cross prediction",
+        )
+    elif "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
+        raise RuntimeError(
+            "--n-matrix-components and --matrix-component-policy are required "
+            "when Graph2Mat exposes explicit matrix components."
+        )
     if "batch_size" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["batch_size"] = 1
     if "loader_threads" in inspect.signature(MatrixDataModule).parameters and args.loader_threads is not None:
@@ -395,6 +422,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--store-in-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--accelerator", default="cpu")
     parser.add_argument("--n-matrix-components", type=int, default=None)
+    parser.add_argument(
+        "--matrix-component-policy",
+        choices=["h_only", "spin_h_only", "raw_components", "h_and_overlap"],
+        default=None,
+    )
     parser.add_argument("--loader-threads", type=int, default=None)
     parser.add_argument("--torch-float32-matmul-precision", choices=["high", "medium"], default=None)
     parser.add_argument("--patch-graph2mat-basis-loading", action="store_true")

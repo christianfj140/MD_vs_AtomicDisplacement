@@ -50,6 +50,7 @@ from method_registry import (
 )
 from material_provenance import (
     MATERIAL_FLAT_FIELDS,
+    MATERIAL_MAP_FIELDS,
     flatten_material_provenance,
     material_compatibility_warning,
     material_maps_from_manifest,
@@ -78,7 +79,7 @@ LOG_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
 METRIC_VERSION = "2026-05-08.frontier-window-v1"
-DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
+DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -1842,6 +1843,12 @@ def resolve_venv_activate_from_command(command: str) -> str:
         and not text.startswith("${GRAPH2MAT_VENV}")
     ):
         text = "${REPO_ROOT}/" + text
+    resolved_text = os.path.expandvars(text.replace("${REPO_ROOT}", str(REPO_ROOT)))
+    resolved_path = Path(resolved_text).expanduser()
+    legacy_missing_default = REPO_ROOT / ".venv" / "bin" / "activate"
+    graph2mat_env = Path("/home/christian/graph2mat-env/bin/activate")
+    if resolved_path == legacy_missing_default and not resolved_path.exists() and graph2mat_env.exists():
+        return str(graph2mat_env)
     return text
 
 
@@ -3009,6 +3016,25 @@ def parse_optional_text(value: Any, name: str) -> str | None:
     return text
 
 
+def parse_optional_json_object(value: Any, name: str) -> dict[str, Any] | None:
+    if value in (None, "", "null"):
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        raise RuntimeError(f"{name} debe ser un objeto JSON.")
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{name} debe ser un objeto JSON valido.") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{name} debe ser un objeto JSON.")
+    return parsed
+
+
 HIDDEN_IRREPS_TERM_RE = re.compile(r"^(?:(\d+)\s*x\s*)?(\d+)\s*([eoEO])$")
 DEFAULT_HYPERPARAMETER_SWEEP_MAX_CONFIGS = 256
 HYPERPARAMETER_SWEEP_MODE = "cartesian"
@@ -3018,6 +3044,7 @@ HYPERPARAMETER_SWEEP_PARAMETER_KEYS = {
     "batch_size",
     "loader_threads",
     "loss",
+    "loss_kwargs",
     "num_interactions",
     "correlation",
     "max_ell",
@@ -3127,6 +3154,12 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
         parsed_text = parse_optional_text(raw.get(key), f"training_settings.{key}")
         if parsed_text is not None:
             settings[key] = parsed_text
+    loss_kwargs = parse_optional_json_object(
+        raw.get("loss_kwargs"),
+        "training_settings.loss_kwargs",
+    )
+    if loss_kwargs is not None:
+        settings["loss_kwargs"] = loss_kwargs
     if settings.get("hidden_irreps") is not None:
         validate_hidden_irreps(
             str(settings["hidden_irreps"]),
@@ -3138,6 +3171,31 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
 def _parse_sweep_value_list(value: Any, key: str) -> list[Any]:
     if value in (None, "", []):
         return []
+    if key == "loss_kwargs":
+        if isinstance(value, str):
+            raw_values = [
+                item.strip()
+                for item in value.splitlines()
+                if item.strip()
+            ]
+        elif isinstance(value, (list, tuple)):
+            raw_values = list(value)
+        else:
+            raw_values = [value]
+        values = []
+        seen = set()
+        for raw in raw_values:
+            parsed = parse_optional_json_object(
+                raw,
+                "hyperparameter_sweep.parameters.loss_kwargs",
+            )
+            if parsed is None:
+                continue
+            marker = json.dumps(json_safe(parsed), sort_keys=True, ensure_ascii=False)
+            if marker not in seen:
+                seen.add(marker)
+                values.append(parsed)
+        return values
     if isinstance(value, str):
         raw_values = [
             item.strip()
@@ -3168,6 +3226,11 @@ def _parse_sweep_value_list(value: Any, key: str) -> list[Any]:
             parsed = parse_optional_positive_float(raw, f"hyperparameter_sweep.parameters.{key}")
         elif key in {"loss", "hidden_irreps"}:
             parsed = parse_optional_text(raw, f"hyperparameter_sweep.parameters.{key}")
+        elif key == "loss_kwargs":
+            parsed = parse_optional_json_object(
+                raw,
+                f"hyperparameter_sweep.parameters.{key}",
+            )
         else:
             raise RuntimeError(f"Parametro de sweep no soportado: {key}")
         if parsed is None:
@@ -3494,6 +3557,10 @@ def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str
     for key in ("loss", "hidden_irreps"):
         if settings.get(key) is not None:
             model[key] = str(settings[key])
+    if settings.get("loss_kwargs") is not None:
+        model["loss_kwargs"] = dict(settings["loss_kwargs"])
+    if str(settings.get("loss") or "").endswith((".coefficient_space_mse", ".coefficient_space_mae")):
+        model["return_coefficients"] = True
     if model.get("hidden_irreps") is not None and model.get("max_ell") is not None:
         validate_hidden_irreps(
             str(model["hidden_irreps"]),
@@ -4690,6 +4757,21 @@ def copy_pseudopotentials(source_dir: Path, destination_dir: Path) -> int:
     return len(psf_files)
 
 
+def copy_material_pseudopotentials(config: dict[str, Any], destination_dir: Path) -> int:
+    resolved = resolve_material_bundle(
+        config,
+        base_dir=REPO_ROOT,
+        allow_legacy_default=True,
+        allow_absolute_paths=True,
+    )
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for _label, source in sorted(resolved.validated.pseudopotentials.items()):
+        shutil.copy2(source, destination_dir / source.name)
+        count += 1
+    return count
+
+
 def copy_relaxed_basis(source_dir: Path, destination_dir: Path) -> dict[str, int]:
     basis_files = sorted(source_dir.glob("*.ion.xml"))
     if not basis_files:
@@ -4852,6 +4934,148 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
             rows.append(parsed)
     derive_frontier_metrics(rows)
     return rows
+
+
+PLOT_MATERIAL_FIELDS = (
+    "material_label",
+    "material_source",
+    "material_preset",
+    "material_structure_type",
+    "material_species",
+    "material_atom_count",
+    "material_identity_hash",
+    "material_compatibility_hash",
+)
+
+
+def nonempty_material_value(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def plot_material_display_label(material: dict[str, Any]) -> str:
+    label = material.get("material_label") or material.get("material_preset")
+    if nonempty_material_value(label):
+        return str(label)
+    return "unknown material"
+
+
+def plot_material_metadata(*sources: Any) -> dict[str, Any]:
+    material = flatten_material_provenance(
+        *(source for source in sources if isinstance(source, dict))
+    )
+    payload = {field: material.get(field) for field in PLOT_MATERIAL_FIELDS}
+    payload["material_display_label"] = plot_material_display_label(material)
+    return payload
+
+
+def parse_json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        return {}
+    text = value.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def append_unique_string(values: list[str], value: Any) -> None:
+    if not nonempty_material_value(value):
+        return
+    text = str(value)
+    if text not in values:
+        values.append(text)
+
+
+def merge_string_mapping(target: dict[str, str], value: Any) -> None:
+    for key, item in parse_json_mapping(value).items():
+        if nonempty_material_value(key) and nonempty_material_value(item):
+            target.setdefault(str(key), str(item))
+
+
+def cross_material_summary(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
+    labels: list[str] = []
+    identity_hashes: list[str] = []
+    compatibility_hashes: list[str] = []
+    warnings: list[str] = []
+    label_by_method: dict[str, str] = {}
+    identity_hash_by_method: dict[str, str] = {}
+    compatibility_hash_by_method: dict[str, str] = {}
+    rows_with_material = 0
+
+    manifest_material = flatten_material_provenance(
+        manifest.get("material_provenance") if isinstance(manifest.get("material_provenance"), dict) else {},
+        manifest,
+    )
+    append_unique_string(labels, manifest_material.get("material_label"))
+    append_unique_string(identity_hashes, manifest_material.get("material_identity_hash"))
+    append_unique_string(compatibility_hashes, manifest_material.get("material_compatibility_hash"))
+    manifest_maps = material_maps_from_manifest(manifest)
+    merge_string_mapping(label_by_method, manifest_maps.get("material_label_by_method"))
+    merge_string_mapping(identity_hash_by_method, manifest_maps.get("material_identity_hash_by_method"))
+    merge_string_mapping(compatibility_hash_by_method, manifest_maps.get("material_compatibility_hash_by_method"))
+
+    for row in rows:
+        row_material_known = any(
+            nonempty_material_value(row.get(field))
+            for field in ("material_label", "material_identity_hash", "material_compatibility_hash")
+        )
+        append_unique_string(labels, row.get("material_label"))
+        append_unique_string(identity_hashes, row.get("material_identity_hash"))
+        append_unique_string(compatibility_hashes, row.get("material_compatibility_hash"))
+        append_unique_string(warnings, row.get("material_compatibility_warning"))
+        for field in MATERIAL_MAP_FIELDS:
+            mapping = parse_json_mapping(row.get(field))
+            if mapping:
+                row_material_known = True
+            if field == "material_label_by_method":
+                merge_string_mapping(label_by_method, mapping)
+            elif field == "material_identity_hash_by_method":
+                merge_string_mapping(identity_hash_by_method, mapping)
+            elif field == "material_compatibility_hash_by_method":
+                merge_string_mapping(compatibility_hash_by_method, mapping)
+        if row_material_known:
+            rows_with_material += 1
+
+    for value in label_by_method.values():
+        append_unique_string(labels, value)
+    for value in identity_hash_by_method.values():
+        append_unique_string(identity_hashes, value)
+    for value in compatibility_hash_by_method.values():
+        append_unique_string(compatibility_hashes, value)
+
+    warning = material_compatibility_warning(manifest_maps)
+    append_unique_string(warnings, warning)
+
+    labels = sorted(labels)
+    identity_hashes = sorted(identity_hashes)
+    compatibility_hashes = sorted(compatibility_hashes)
+    has_unknown_material = bool(rows) and rows_with_material < len(rows) and not manifest_material
+    mixed_materials = (
+        len(compatibility_hashes) > 1
+        or bool(warnings)
+        or (not compatibility_hashes and len(labels) > 1)
+    )
+    display_labels = labels[:] if labels else []
+    if has_unknown_material:
+        append_unique_string(display_labels, "unknown material")
+
+    return {
+        "material_labels": labels,
+        "material_display_labels": sorted(display_labels),
+        "material_identity_hashes": identity_hashes,
+        "material_compatibility_hashes": compatibility_hashes,
+        "material_label_by_method": dict(sorted(label_by_method.items())),
+        "material_identity_hash_by_method": dict(sorted(identity_hash_by_method.items())),
+        "material_compatibility_hash_by_method": dict(sorted(compatibility_hash_by_method.items())),
+        "material_compatibility_warnings": sorted(warnings),
+        "has_unknown_material": has_unknown_material,
+        "mixed_materials": mixed_materials,
+    }
 
 
 def finite_number(value: Any) -> float | None:
@@ -5629,6 +5853,13 @@ def plot_data_summary() -> dict[str, Any]:
             warnings = metric_manifest.get("warnings", [])
             if not isinstance(warnings, list):
                 warnings = []
+            material_payload = plot_material_metadata(
+                manifest.get("material_provenance") if isinstance(manifest.get("material_provenance"), dict) else {},
+                manifest.get("material_validation") if isinstance(manifest.get("material_validation"), dict) else {},
+                manifest,
+                metric_manifest.get("material_provenance") if isinstance(metric_manifest.get("material_provenance"), dict) else {},
+                metric_manifest,
+            )
             runs.append(
                 {
                     "pipeline": key,
@@ -5680,6 +5911,7 @@ def plot_data_summary() -> dict[str, Any]:
                     "block_label": manifest.get("block_label"),
                     "recipe_set_hash": manifest.get("recipe_set_hash"),
                     "dataset_recipe": manifest.get("dataset_recipe", {}),
+                    **material_payload,
                     "pipeline_elapsed_seconds": manifest.get("pipeline_elapsed_seconds"),
                     "means": {
                         "run": {
@@ -5740,6 +5972,7 @@ def plot_data_summary() -> dict[str, Any]:
                 manifest = load_config(manifest_path)
             except Exception as exc:
                 manifest = {"error": str(exc)}
+        material_summary = cross_material_summary(rows, manifest)
         compatibility = {
             "metric_version": manifest.get("metric_version"),
             "molecule_system_name": manifest.get("molecule_system_name"),
@@ -5747,6 +5980,12 @@ def plot_data_summary() -> dict[str, Any]:
             "model_config_hash": manifest.get("model_config_hash"),
             "test_sets": manifest.get("test_sets"),
             "selected_methods": manifest.get("selected_methods"),
+            "material_labels": material_summary.get("material_labels"),
+            "material_identity_hashes": material_summary.get("material_identity_hashes"),
+            "material_compatibility_hashes": material_summary.get("material_compatibility_hashes"),
+            "material_label_by_method": material_summary.get("material_label_by_method"),
+            "material_identity_hash_by_method": material_summary.get("material_identity_hash_by_method"),
+            "material_compatibility_hash_by_method": material_summary.get("material_compatibility_hash_by_method"),
         }
         compatibility_group_id = stable_payload_hash(compatibility, length=16)
         outputs = {
@@ -5764,6 +6003,15 @@ def plot_data_summary() -> dict[str, Any]:
             manifest=manifest,
             outputs=outputs,
         )
+        if material_summary.get("mixed_materials"):
+            warning_entry(
+                plot_warnings,
+                code="mixed_material_groups",
+                severity=("error" if material_summary.get("material_compatibility_warnings") else "warning"),
+                status="scientifically_inconclusive",
+                message="Multiple material groups are shown; interpret plots as diagnostics, not a pooled benchmark.",
+                details=material_summary,
+            )
         cross_experiments.append(
             {
                 "experiment_id": experiment_dir.name,
@@ -5773,6 +6021,7 @@ def plot_data_summary() -> dict[str, Any]:
                 "manifest": manifest,
                 "compatibility": compatibility,
                 "compatibility_group_id": compatibility_group_id,
+                "material_summary": material_summary,
                 "methods": plot_validity["methods"],
                 "test_sets": plot_validity["test_sets"],
                 "plot_scientific_status": plot_validity["scientific_status"],
@@ -8740,7 +8989,7 @@ class ExperimentRunner:
         temperature_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
         dataset_dir = workspace / "dataset"
-        pseudo_count = copy_pseudopotentials(PIPELINES["md"].root / "dataset", dataset_dir)
+        pseudo_count = copy_material_pseudopotentials(config, dataset_dir)
         ratios = split_ratios or split_ratios_from_config(config)
         counts, reserved_gap_frames = md_split_counts_for_mode(
             size,
@@ -9984,13 +10233,27 @@ class ExperimentRunner:
                 return str(python)
         return sys.executable
 
-    def _n_matrix_components_for_result(self, config: dict[str, Any]) -> int | None:
+    def _n_matrix_components_for_result(self, config: dict[str, Any]) -> int:
         for section in ("prediction", "testing", "training"):
             data = config.get(section, {}).get("data", {})
             value = data.get("n_matrix_components")
             if value not in (None, ""):
                 return int(value)
-        return None
+        raise RuntimeError(
+            "Missing Graph2Mat data.n_matrix_components in prediction/testing/training config; "
+            "cannot run cross prediction safely."
+        )
+
+    def _matrix_component_policy_for_result(self, config: dict[str, Any]) -> str:
+        for section in ("prediction", "testing", "training"):
+            data = config.get(section, {}).get("data", {})
+            value = data.get("matrix_component_policy")
+            if value not in (None, ""):
+                return str(value)
+        raise RuntimeError(
+            "Missing Graph2Mat data.matrix_component_policy in prediction/testing/training config; "
+            "cannot run cross prediction safely."
+        )
 
     def _prepare_cross_result_dir(
         self,
@@ -10185,6 +10448,7 @@ class ExperimentRunner:
                     train_config = load_config(Path(str(train_result["result_dir"])) / "pipeline_config.yaml")
                     train_python = self._python_for_result(train_result, train_config)
                     n_matrix_components = self._n_matrix_components_for_result(train_config)
+                    matrix_component_policy = self._matrix_component_policy_for_result(train_config)
                     for test_set in test_sets:
                         test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                         if not test_manifest.exists():
@@ -10226,8 +10490,14 @@ class ExperimentRunner:
                                 .get("accelerator", "cpu")
                             ),
                         ]
-                        if n_matrix_components is not None:
-                            predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                        predict_command.extend(
+                            [
+                                "--matrix-component-policy",
+                                matrix_component_policy,
+                                "--n-matrix-components",
+                                str(n_matrix_components),
+                            ]
+                        )
                         loader_threads = (
                             train_config.get("training", {})
                             .get("data", {})
@@ -10722,6 +10992,7 @@ class ExperimentRunner:
                 train_config = load_config(Path(str(train_result["result_dir"])) / "pipeline_config.yaml")
                 train_python = self._python_for_result(train_result, train_config)
                 n_matrix_components = self._n_matrix_components_for_result(train_config)
+                matrix_component_policy = self._matrix_component_policy_for_result(train_config)
                 for test_set in test_sets:
                     test_manifest = pair_common_dir / test_set / "test_manifest.csv"
                     test_method = test_set.removeprefix("test_")
@@ -10767,8 +11038,14 @@ class ExperimentRunner:
                             .get("accelerator", "cpu")
                         ),
                     ]
-                    if n_matrix_components is not None:
-                        predict_command.extend(["--n-matrix-components", str(n_matrix_components)])
+                    predict_command.extend(
+                        [
+                            "--matrix-component-policy",
+                            matrix_component_policy,
+                            "--n-matrix-components",
+                            str(n_matrix_components),
+                        ]
+                    )
                     loader_threads = (
                         train_config.get("training", {})
                         .get("data", {})

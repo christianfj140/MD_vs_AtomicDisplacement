@@ -78,6 +78,8 @@ class Graph2MatMaterialConfigTests(unittest.TestCase):
                 "data": {
                     "out_matrix": "hamiltonian",
                     "symmetric_matrix": True,
+                    "matrix_component_policy": "h_only",
+                    "n_matrix_components": 1,
                     "basis_files": "old",
                     "train_runs": "../dataset/splits/train/*/RUN.fdf",
                     "val_runs": "../dataset/splits/validation/*/RUN.fdf",
@@ -89,6 +91,8 @@ class Graph2MatMaterialConfigTests(unittest.TestCase):
                 "data": {
                     "out_matrix": "hamiltonian",
                     "symmetric_matrix": True,
+                    "matrix_component_policy": "h_only",
+                    "n_matrix_components": 1,
                     "basis_files": "old",
                 }
             },
@@ -96,6 +100,8 @@ class Graph2MatMaterialConfigTests(unittest.TestCase):
                 "data": {
                     "out_matrix": "hamiltonian",
                     "symmetric_matrix": True,
+                    "matrix_component_policy": "h_only",
+                    "n_matrix_components": 1,
                     "basis_files": "old",
                 }
             },
@@ -136,6 +142,8 @@ class Graph2MatMaterialConfigTests(unittest.TestCase):
         self.assertEqual(sorted(provenance["graph2mat"]["basis_files_by_species"]), ["C", "Si"])
         self.assertIn("../dataset/splits/train_manifest.csv", provenance["graph2mat"]["split_file_sha256"])
         self.assertEqual(provenance["graph2mat"]["matrix_target"], "hamiltonian")
+        self.assertEqual(provenance["graph2mat"]["matrix_component_policy"], "h_only")
+        self.assertEqual(provenance["graph2mat"]["n_matrix_components"], 1)
 
     def test_missing_basis_file_fails_clearly(self) -> None:
         (self.root / "materials" / "sic" / "basis" / "C.ion.xml").unlink()
@@ -202,7 +210,16 @@ class Graph2MatMaterialConfigTests(unittest.TestCase):
         dataset_dir = self.root / "dataset"
         training_dir = self.root / "training"
         training_dir.mkdir()
-        config = {"material": {"preset": "h2o"}, "training": {"data": {"out_matrix": "hamiltonian"}}}
+        config = {
+            "material": {"preset": "h2o"},
+            "training": {
+                "data": {
+                    "out_matrix": "hamiltonian",
+                    "matrix_component_policy": "h_only",
+                    "n_matrix_components": 1,
+                }
+            },
+        }
 
         provenance = apply_material_graph2mat_config(
             config,

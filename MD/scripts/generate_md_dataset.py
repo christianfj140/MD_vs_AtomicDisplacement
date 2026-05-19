@@ -525,6 +525,21 @@ def xv_geometry_signature(xv_path: Path) -> tuple[str, ...]:
     )
 
 
+def md_step_xv_path(step_dir: Path) -> Path:
+    preferred = step_dir / "siesta.XV"
+    if preferred.exists():
+        return preferred
+    candidates = sorted(step_dir.glob("*.XV"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise RuntimeError(
+            f"Missing per-step XV geometry: expected {preferred} or a single *.XV in {step_dir}"
+        )
+    names = ", ".join(path.name for path in candidates)
+    raise RuntimeError(f"Ambiguous per-step XV geometry in {step_dir}: {names}")
+
+
 def refresh_md_step_geometries(config: dict) -> None:
     pipeline_paths = paths(config)
     steps_dir = pipeline_paths["dataset_dir"] / "MD_steps"
@@ -539,17 +554,15 @@ def refresh_md_step_geometries(config: dict) -> None:
     xv_signatures: set[tuple[str, ...]] = set()
     for step_dir in step_dirs:
         run_fdf_path = step_dir / "RUN.fdf"
-        xv_path = step_dir / "siesta.XV"
         if not run_fdf_path.exists():
             raise RuntimeError(f"Missing per-step RUN.fdf: {run_fdf_path}")
-        if not xv_path.exists():
-            raise RuntimeError(f"Missing per-step siesta.XV geometry: {xv_path}")
+        xv_path = md_step_xv_path(step_dir)
         xv_signatures.add(xv_geometry_signature(xv_path))
         rewrite_run_fdf_from_xv(run_fdf_path, xv_path)
         metadata = read_sample_metadata(step_dir)
         metadata.update(
             {
-                "run_fdf_geometry_source": "siesta.XV",
+                "run_fdf_geometry_source": xv_path.name,
                 "run_fdf_rewritten_from_xv": True,
                 "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
             }
@@ -644,7 +657,10 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
                 "type_of_run": block.get("type_of_run", config["md"].get("type_of_run", "Verlet")),
                 "source_run_fdf": str(block_dir / "RUN.fdf"),
                 "source_run_out": str(block_dir / "RUN.out"),
-                "run_fdf_geometry_source": "siesta.XV",
+                "run_fdf_geometry_source": read_sample_metadata(source_sample).get(
+                    "run_fdf_geometry_source",
+                    "XV",
+                ),
                 "run_fdf_rewritten_from_xv": True,
                 "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
             }

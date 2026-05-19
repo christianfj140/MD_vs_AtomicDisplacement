@@ -4,7 +4,8 @@ data:
   out_matrix: hamiltonian
   symmetric_matrix: true
   sub_point_matrix: false
-  n_matrix_components: 2
+  matrix_component_policy: h_only
+  n_matrix_components: 1
   basis_files: ../MD/dataset/material_basis/*.ion.xml
   train_runs: ../MD/dataset/splits/train/*/RUN.fdf
   val_runs: ../MD/dataset/splits/validation/*/RUN.fdf

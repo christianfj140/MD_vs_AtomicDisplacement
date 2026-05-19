@@ -28,7 +28,10 @@ if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
 from siesta_run_fdf import render_common_run_fdf, render_fc_layer
-from graph2mat_material_config import load_graph2mat_config_provenance
+from graph2mat_material_config import (
+    load_graph2mat_config_provenance,
+    resolve_matrix_component_policy,
+)
 
 
 def load_pipeline_config(config_path: Path | None = None) -> dict[str, Any]:
@@ -72,6 +75,10 @@ def validate_config(config: dict[str, Any]) -> None:
     force_constants = config["structure"].get("force_constants", {})
     if force_constants and int(force_constants.get("first_atom", 1)) <= 0:
         raise RuntimeError("structure.force_constants.first_atom debe ser mayor que cero.")
+    for section_name in ("training", "testing", "prediction"):
+        data = config.get(section_name, {}).get("data", {})
+        if isinstance(data, dict):
+            resolve_matrix_component_policy(data, context=f"{section_name}.data")
 
 
 def config_dir(config: dict[str, Any]) -> Path:
