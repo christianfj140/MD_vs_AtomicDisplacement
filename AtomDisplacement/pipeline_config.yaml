@@ -13,7 +13,7 @@ paths:
   run_summary_name: run_summary.json
   collected_json_name: water_atom_displacement_dataset.json
   collected_csv_name: water_atom_displacement_summary.csv
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${REPO_ROOT}/.venv/bin/activate
 material:
   preset: h2o
 atomic_displacement:

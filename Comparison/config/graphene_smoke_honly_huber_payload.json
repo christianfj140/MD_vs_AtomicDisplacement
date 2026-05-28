@@ -1,0 +1,79 @@
+{
+  "material": {
+    "mode": "preset",
+    "preset": "graphene"
+  },
+  "selected_methods": [
+    "md"
+  ],
+  "md_sizes": [
+    20
+  ],
+  "run_mode": "full_strict_pipeline",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "split_mode": "blocked_with_gap",
+  "test_sets": [
+    "test_md"
+  ],
+  "primary_metric": "low_energy_rmse_eV",
+  "compute_budget_mode": "equal_sample_count",
+  "compute_accelerator": "gpu",
+  "performance": {
+    "preset": "single_run_debug",
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 1,
+    "max_parallel_metric_jobs": 4,
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 4,
+    "torch_num_threads": 4,
+    "compute_accelerator": "gpu",
+    "batch_size": 8,
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "error_policy": "fail_fast",
+    "torch_float32_matmul_precision": "high"
+  },
+  "training_settings": {
+    "seed_everything": 0,
+    "max_epochs": 5,
+    "optim_lr": 0.005,
+    "batch_size": 4,
+    "loader_threads": 2,
+    "num_interactions": 1,
+    "correlation": 1,
+    "max_ell": 2,
+    "hidden_irreps": "10x0e + 10x1o + 10x2e",
+    "loss": "graph2mat.core.data.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.01
+    },
+    "data": {
+      "out_matrix": "hamiltonian",
+      "matrix_component_policy": "h_only",
+      "n_matrix_components": 1,
+      "symmetric_matrix": true
+    },
+    "benchmark_metadata": {
+      "benchmark_method_id": "graphene_smoke_default_huber_0p01_honly",
+      "architecture": "default_mace_graph2mat",
+      "readout": "default",
+      "diagnostic_only": false,
+      "seed": 0,
+      "loss": "graph2mat.core.data.metrics.block_type_huber",
+      "loss_kwargs": {
+        "beta": 0.01
+      },
+      "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+    }
+  },
+  "venv_activate_command": "source /home/christian/repositorios/MD_vs_AtomicDisplacement/.venv/bin/activate"
+}

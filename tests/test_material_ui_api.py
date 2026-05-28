@@ -99,6 +99,68 @@ class MaterialUiApiTests(unittest.TestCase):
         self.assertEqual(sorted(payload["pseudopotentials"]), ["C", "Si"])
         self.assertEqual(sorted(payload["basis_files"]), ["C.ion.xml", "Si.ion.xml"])
 
+    def test_material_validation_allows_ghost_species_without_pseudo(self) -> None:
+        bundle = self.write_bundle()
+        fdf_path = self.root / bundle["fdf"]
+        fdf_path.write_text(
+            "\n".join(
+                [
+                    "SystemName graphene",
+                    "NumberOfAtoms 2",
+                    "NumberOfSpecies 2",
+                    "%block ChemicalSpeciesLabel",
+                    "1 6 C",
+                    "2 -1 Ghost-H",
+                    "%endblock ChemicalSpeciesLabel",
+                    "%block AtomicCoordinatesAndAtomicSpecies",
+                    "0.0 0.0 0.0 1",
+                    "1.0 1.0 1.0 1",
+                    "%endblock AtomicCoordinatesAndAtomicSpecies",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.root / bundle["pseudopotential_dir"] / "Si.psf").unlink()
+
+        payload = self.module.material_validation_response(bundle, base_dir=self.root)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual([item["label"] for item in payload["species"]], ["C", "Ghost-H"])
+        self.assertEqual(sorted(payload["pseudopotentials"]), ["C"])
+
+    def test_material_validation_copies_optional_ghost_pseudo_when_present(self) -> None:
+        bundle = self.write_bundle()
+        fdf_path = self.root / bundle["fdf"]
+        fdf_path.write_text(
+            "\n".join(
+                [
+                    "SystemName graphene",
+                    "NumberOfAtoms 2",
+                    "NumberOfSpecies 2",
+                    "%block ChemicalSpeciesLabel",
+                    "1 6 C",
+                    "2 -1 Ghost-H",
+                    "%endblock ChemicalSpeciesLabel",
+                    "%block AtomicCoordinatesAndAtomicSpecies",
+                    "0.0 0.0 0.0 1",
+                    "1.0 1.0 1.0 1",
+                    "%endblock AtomicCoordinatesAndAtomicSpecies",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.root / bundle["pseudopotential_dir"] / "Si.psf").unlink()
+        (self.root / bundle["pseudopotential_dir"] / "Ghost-H.psf").write_text(
+            "ghost pseudo\n", encoding="utf-8"
+        )
+
+        payload = self.module.material_validation_response(bundle, base_dir=self.root)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(sorted(payload["pseudopotentials"]), ["C", "Ghost-H"])
+
     def test_invalid_material_does_not_fallback_to_h2o(self) -> None:
         payload = self.module.material_validation_response(
             {
@@ -166,6 +228,22 @@ class MaterialUiApiTests(unittest.TestCase):
         self.assertIn("/api/material/presets", app_js)
         self.assertIn("/api/material/validate", app_js)
         self.assertIn('elif path == "/api/material/validate"', backend)
+
+    def test_ui_contains_deeph_comparison_mode(self) -> None:
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
+
+        self.assertIn('value="deeph_comparison"', index_html)
+        self.assertIn('value="graph2mat_deeph_comparison"', index_html)
+        self.assertIn('id="deeph-comparison-panel"', index_html)
+        self.assertIn('id="deeph-graph2mat-result-dirs"', index_html)
+        self.assertIn('id="deeph-graph2mat-candidate-summary"', index_html)
+        self.assertIn("deephComparisonPayload", app_js)
+        self.assertIn("graph2mat_result_dirs", app_js)
+        self.assertIn("graph2mat_candidate_summary_csv", app_js)
+        self.assertIn("start_deeph_comparison", backend)
+        self.assertIn("GRAPH2MAT_DEEPH_RUN_MODE", backend)
 
 
 if __name__ == "__main__":

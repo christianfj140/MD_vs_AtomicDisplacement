@@ -39,10 +39,14 @@ LOW_ENERGY_N_STATES = 10
 LOW_ENERGY_ALIGNMENT = "none"
 COMPLEX_IMAG_TOLERANCE = 1e-12
 OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD = 1e-6
+METRICS_SCHEMA_VERSION = "h_only_sref_v2"
+METRICS_PROVENANCE_GENERATION = "post_h_only_sref_prediction_safety"
 MATRIX_METRIC_TARGET_SPACE = "raw_global_hamiltonian"
 ORBITAL_PAIR_METRIC_TARGET_SPACE = "raw_global_hamiltonian_orbital_basis"
 ORBITAL_PAIR_BASIS_SOURCE = "ion_xml_pao_degeneracy_generated_labels"
 MATRIX_SEMANTIC_FIELDS = [
+    "metrics_schema_version",
+    "metrics_provenance_generation",
     "target_component_policy",
     "reference_component_count",
     "prediction_component_count",
@@ -135,6 +139,21 @@ class MatrixData:
     components: tuple[sparse.csr_matrix, ...] = ()
 
 
+@dataclass(frozen=True)
+class MonkhorstPackKGrid:
+    mesh: tuple[int, int, int] | None
+    shifts: tuple[float, float, float] | None
+    is_gamma_only: bool
+    source_directive: str | None
+    fractional_kpoints: tuple[tuple[float, float, float], ...] = ()
+    weights: tuple[float, ...] = ()
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and self.mesh is not None and self.shifts is not None
+
+
 def json_safe(value: Any) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
@@ -151,10 +170,58 @@ def json_safe(value: Any) -> Any:
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    extra_fields = sorted(
+        {
+            str(key)
+            for row in rows
+            for key in row
+            if str(key) not in fieldnames
+        }
+    )
+    csv_fields = [*fieldnames, *extra_fields]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=csv_fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def existing_metric_output_files(result_dir: Path) -> list[Path]:
+    files: list[Path] = []
+    for name in ("metrics", "eigenvalues", "dos"):
+        root = result_dir / name
+        if not root.exists():
+            continue
+        files.extend(path for path in root.rglob("*") if path.is_file())
+    return sorted(files)
+
+
+def ensure_metric_outputs_can_be_written(result_dir: Path, *, overwrite: bool) -> None:
+    existing = existing_metric_output_files(result_dir)
+    if not existing:
+        return
+    if overwrite:
+        for path in existing:
+            path.unlink()
+        for name in ("metrics", "eigenvalues", "dos"):
+            root = result_dir / name
+            if root.exists():
+                for path in sorted(
+                    (item for item in root.rglob("*") if item.is_dir()),
+                    key=lambda item: len(item.parts),
+                    reverse=True,
+                ):
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+        return
+    preview = ", ".join(str(path.relative_to(result_dir)) for path in existing[:5])
+    extra = "" if len(existing) <= 5 else f", ... ({len(existing)} files)"
+    raise RuntimeError(
+        "Refusing to overwrite existing Hamiltonian metric outputs. "
+        "Pass --overwrite only when intentionally re-evaluating post-H-only/S_ref metrics. "
+        f"Existing files: {preview}{extra}"
+    )
 
 
 def sample_dirs(root: Path) -> dict[str, Path]:
@@ -332,6 +399,155 @@ def _float_token(value: str) -> float | None:
         return None
 
 
+def _kgrid_error(source_directive: str | None, error: str) -> MonkhorstPackKGrid:
+    return MonkhorstPackKGrid(
+        mesh=None,
+        shifts=None,
+        is_gamma_only=False,
+        source_directive=source_directive,
+        error=error,
+    )
+
+
+def _positive_int_from_float(value: float) -> int | None:
+    if not math.isfinite(value):
+        return None
+    rounded = int(round(value))
+    if rounded <= 0:
+        return None
+    if not math.isclose(value, float(rounded), rel_tol=0.0, abs_tol=1e-12):
+        return None
+    return rounded
+
+
+def _normalize_fractional_kpoint(value: float) -> float:
+    wrapped = ((value + 0.5) % 1.0) - 0.5
+    return 0.0 if math.isclose(wrapped, 0.0, rel_tol=0.0, abs_tol=1e-12) else wrapped
+
+
+def _monkhorst_pack_axis_points(n_points: int, shift: float) -> list[float]:
+    return [
+        _normalize_fractional_kpoint(((index + 0.5) / n_points) - 0.5 + shift)
+        for index in range(n_points)
+    ]
+
+
+def _monkhorst_pack_points(
+    mesh: tuple[int, int, int],
+    shifts: tuple[float, float, float],
+) -> tuple[tuple[float, float, float], ...]:
+    axes = [
+        _monkhorst_pack_axis_points(mesh[index], shifts[index])
+        for index in range(3)
+    ]
+    return tuple((kx, ky, kz) for kx in axes[0] for ky in axes[1] for kz in axes[2])
+
+
+def _monkhorst_pack_grid(
+    mesh: tuple[int, int, int],
+    shifts: tuple[float, float, float],
+    source_directive: str,
+) -> MonkhorstPackKGrid:
+    points = _monkhorst_pack_points(mesh, shifts)
+    weight = 1.0 / len(points)
+    gamma = (
+        mesh == (1, 1, 1)
+        and all(math.isclose(shift, 0.0, rel_tol=0.0, abs_tol=1e-12) for shift in shifts)
+    )
+    return MonkhorstPackKGrid(
+        mesh=mesh,
+        shifts=shifts,
+        is_gamma_only=gamma,
+        source_directive=source_directive,
+        fractional_kpoints=points,
+        weights=tuple(weight for _ in points),
+    )
+
+
+def _parse_monkhorst_pack_rows(rows: list[str], source_directive: str) -> MonkhorstPackKGrid:
+    matrix: list[list[float]] = []
+    for row in rows:
+        values = [_float_token(token) for token in row.split()]
+        if len(values) < 4 or any(value is None for value in values[:4]):
+            return _kgrid_error(source_directive, "malformed_monkhorst_pack_row")
+        matrix.append([float(value) for value in values[:4] if value is not None])
+    if len(matrix) != 3:
+        return _kgrid_error(source_directive, "malformed_monkhorst_pack_block_row_count")
+
+    mesh_values: list[int] = []
+    shifts: list[float] = []
+    for row_index, row in enumerate(matrix):
+        for col_index, value in enumerate(row[:3]):
+            if row_index == col_index:
+                mesh_value = _positive_int_from_float(value)
+                if mesh_value is None:
+                    return _kgrid_error(source_directive, "invalid_monkhorst_pack_mesh")
+                mesh_values.append(mesh_value)
+            elif not math.isclose(value, 0.0, rel_tol=0.0, abs_tol=1e-12):
+                return _kgrid_error(source_directive, "unsupported_non_diagonal_monkhorst_pack")
+        shifts.append(row[3])
+    return _monkhorst_pack_grid(
+        (mesh_values[0], mesh_values[1], mesh_values[2]),
+        (shifts[0], shifts[1], shifts[2]),
+        source_directive,
+    )
+
+
+def _parse_monkhorst_pack_inline(tokens: list[str], source_directive: str) -> MonkhorstPackKGrid:
+    values = [_float_token(token) for token in tokens]
+    if not values or any(value is None for value in values):
+        return _kgrid_error(source_directive, "malformed_inline_monkhorst_pack")
+    numeric = [float(value) for value in values if value is not None]
+    if len(numeric) == 3:
+        shifts = (0.0, 0.0, 0.0)
+    elif len(numeric) >= 6:
+        shifts = (numeric[3], numeric[4], numeric[5])
+    else:
+        return _kgrid_error(source_directive, "malformed_inline_monkhorst_pack")
+    mesh_values = [_positive_int_from_float(value) for value in numeric[:3]]
+    if any(value is None for value in mesh_values):
+        return _kgrid_error(source_directive, "invalid_monkhorst_pack_mesh")
+    mesh = tuple(int(value) for value in mesh_values if value is not None)
+    return _monkhorst_pack_grid((mesh[0], mesh[1], mesh[2]), shifts, source_directive)
+
+
+def parse_monkhorst_pack_kgrid(structure_path: Path) -> MonkhorstPackKGrid | None:
+    """Parse a SIESTA Monkhorst-Pack k-grid from an FDF file, if present."""
+    if not structure_path.exists():
+        return None
+    kgrid_block_name: str | None = None
+    kgrid_block_rows: list[str] = []
+    try:
+        lines = structure_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError as exc:
+        return _kgrid_error(None, str(exc))
+    for raw_line in lines:
+        clean = _strip_fdf_comment(raw_line)
+        if not clean:
+            continue
+        lower = clean.lower()
+        parts = lower.split()
+        key = parts[0] if parts else ""
+        if lower.startswith("%block"):
+            block_name = parts[1] if len(parts) > 1 else ""
+            if block_name in KGRID_MONKHORST_PACK_DIRECTIVES:
+                kgrid_block_name = block_name
+                kgrid_block_rows = []
+            continue
+        if lower.startswith("%endblock"):
+            if kgrid_block_name is not None:
+                return _parse_monkhorst_pack_rows(kgrid_block_rows, kgrid_block_name)
+            continue
+        if kgrid_block_name is not None:
+            kgrid_block_rows.append(clean)
+            continue
+        if key in KGRID_MONKHORST_PACK_DIRECTIVES:
+            return _parse_monkhorst_pack_inline(clean.split()[1:], key)
+    if kgrid_block_name is not None:
+        return _kgrid_error(kgrid_block_name, "unterminated_monkhorst_pack_block")
+    return None
+
+
 def _is_gamma_monkhorst_pack_rows(rows: list[str]) -> bool:
     matrix: list[list[float]] = []
     for row in rows:
@@ -500,6 +716,382 @@ def stale_reference_issue(
     return None
 
 
+def empty_sample_rows() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "sparse": [],
+        "spectral": [],
+        "dos": [],
+        "overlap": [],
+        "sparse_sweep": [],
+        "dos_sweep": [],
+        "component": [],
+        "block": [],
+        "species_pair": [],
+        "distance_bin": [],
+        "orbital_pair": [],
+        "kpoint_kpoints": [],
+        "kpoint_matrix": [],
+        "kpoint_spectral": [],
+        "kpoint_dos": [],
+        "structural_unavailable": [],
+        "errors": [],
+        "fatal_errors": [],
+        "warnings": [],
+        "sample_status": [],
+    }
+
+
+def evaluate_kpoint_sample(
+    sample: str,
+    predicted_path: Path,
+    reference_path: Path,
+    result_dir: Path,
+    kgrid: MonkhorstPackKGrid,
+    *,
+    target_component_policy: str,
+    low_energy_enabled: bool,
+    low_energy_n_states: int,
+    low_energy_alignment: str,
+) -> dict[str, list[dict[str, Any]]]:
+    rows = empty_sample_rows()
+    sample_errors: list[dict[str, Any]] = []
+    sample_warnings: list[dict[str, Any]] = []
+    if not kgrid.ok or kgrid.mesh is None or kgrid.shifts is None:
+        issue = append_issue(
+            rows,
+            "fatal_errors",
+            sample=sample,
+            kind="kpoint_grid_parse",
+            message=kgrid.error or "Missing or invalid Monkhorst-Pack k-grid.",
+        )
+        rows["errors"].append(issue)
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=[issue],
+                warnings=[],
+            )
+        )
+        return rows
+
+    try:
+        reference = read_matrix(reference_path)
+        predicted = read_matrix(predicted_path)
+        reference_obj = sisl.get_sile(str(reference_path)).read_hamiltonian()
+        predicted_obj = sisl.get_sile(str(predicted_path)).read_hamiltonian()
+    except Exception as exc:
+        issue = append_issue(rows, "fatal_errors", sample=sample, kind="read_matrix", message=str(exc))
+        rows["errors"].append(issue)
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=[issue],
+                warnings=[],
+            )
+        )
+        return rows
+
+    semantics = matrix_semantics_fields(
+        reference,
+        predicted,
+        target_component_policy=target_component_policy,
+    )
+    for kind, data in (("siesta", reference), ("predicted", predicted)):
+        rows["overlap"].append(
+            {
+                "sample": sample,
+                "kind": kind,
+                "matrix_path": str(data.path),
+                "n_bands": int(data.hamiltonian.shape[0]),
+                "hamiltonian_components": int(data.component_count),
+                "spin_kind": data.spin_kind,
+                "orthogonal": data.orthogonal,
+                "has_overlap": data.has_overlap,
+                "overlap_error": data.overlap_error,
+                "fermi_level_eV": data.fermi_level,
+                **semantics,
+            }
+        )
+
+    compatibility_errors = matrix_compatibility_errors(
+        sample,
+        reference,
+        predicted,
+        target_component_policy=target_component_policy,
+    )
+    compatibility_warnings = matrix_compatibility_warnings(sample, reference, predicted)
+    if compatibility_warnings:
+        rows["warnings"].extend(compatibility_warnings)
+        sample_warnings.extend(compatibility_warnings)
+    if compatibility_errors:
+        rows["fatal_errors"].extend(compatibility_errors)
+        rows["errors"].extend(compatibility_errors)
+        sample_errors.extend(compatibility_errors)
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=sample_errors,
+                warnings=sample_warnings,
+            )
+        )
+        return rows
+
+    mesh = tuple(int(value) for value in kgrid.mesh)
+    shifts = tuple(float(value) for value in kgrid.shifts)
+    fermi_level = reference.fermi_level
+    fermi_source = reference.fermi_level_source or "unavailable"
+    if fermi_level is not None and not math.isfinite(float(fermi_level)):
+        fermi_level = None
+        fermi_source = "unavailable"
+    if fermi_level is None:
+        warning = append_issue(
+            rows,
+            "warnings",
+            sample=sample,
+            kind="missing_fermi_level",
+            message=(
+                "SIESTA reference does not provide a Fermi level; near-Fermi, "
+                "occupied-band, frontier, gap, and fixed-window DOS metrics were left unavailable."
+            ),
+        )
+        sample_warnings.append(warning)
+
+    per_k_spectral: list[dict[str, Any]] = []
+    all_ref_eigenvalues: list[np.ndarray] = []
+    all_pred_eigenvalues: list[np.ndarray] = []
+    all_band_weights: list[np.ndarray] = []
+    for k_index, kpoint in enumerate(kgrid.fractional_kpoints):
+        weight = float(kgrid.weights[k_index])
+        k_label = f"{sample}_k{k_index:04d}"
+        k_metadata = {
+            "sample": sample,
+            "k_index": k_index,
+            "k_label": k_label,
+            "kx": float(kpoint[0]),
+            "ky": float(kpoint[1]),
+            "kz": float(kpoint[2]),
+            "k_weight": weight,
+            "kpoint_mesh": list(mesh),
+            "kpoint_shifts": list(shifts),
+            "kpoint_source": kgrid.source_directive or "",
+        }
+        rows["kpoint_kpoints"].append(k_metadata)
+        try:
+            ref_h_k = kpoint_hamiltonian_matrix(reference_obj, list(kpoint))
+            pred_h_k = kpoint_hamiltonian_matrix(predicted_obj, list(kpoint))
+            ref_s_k = kpoint_overlap_matrix(reference_obj, list(kpoint))
+            matrix_metrics = complex_matrix_error_metrics(ref_h_k, pred_h_k)
+            ref_eig = complex_generalized_eigenvalues(ref_h_k, ref_s_k)
+            pred_eig = complex_generalized_eigenvalues(pred_h_k, ref_s_k)
+            write_csv(
+                result_dir / "eigenvalues" / "siesta" / f"{k_label}.csv",
+                ["band", "eigenvalue_eV"],
+                eigenvalue_rows(ref_eig),
+            )
+            write_csv(
+                result_dir / "eigenvalues" / "predicted" / f"{k_label}.csv",
+                ["band", "eigenvalue_eV"],
+                eigenvalue_rows(pred_eig),
+            )
+            band_rows, spectral_metrics = eigen_error_metrics(
+                ref_eig,
+                pred_eig,
+                fermi_level,
+                fermi_source,
+            )
+            if low_energy_enabled:
+                spectral_metrics.update(
+                    low_energy_metrics_from_eigenvalues(
+                        ref_eig,
+                        pred_eig,
+                        n_states=low_energy_n_states,
+                        alignment=low_energy_alignment,
+                    )
+                )
+            write_csv(
+                result_dir / "eigenvalues" / "kpoint_band_errors" / f"{k_label}.csv",
+                ["band", "siesta_eV", "predicted_eV", "error_eV", "abs_error_eV", "siesta_minus_fermi_eV"],
+                band_rows,
+            )
+            rows["kpoint_matrix"].append(
+                {
+                    **k_metadata,
+                    "row_type": "per_k",
+                    "n_orbitals": int(ref_h_k.shape[0]),
+                    "n_entries": int(ref_h_k.size),
+                    "h_mae_eV": matrix_metrics["mae_eV"],
+                    "h_rmse_eV": matrix_metrics["rmse_eV"],
+                    "h_mse_eV2": matrix_metrics["mse_eV2"],
+                    "h_max_abs_error_eV": matrix_metrics["max_abs_error_eV"],
+                    "relative_frobenius": matrix_metrics["relative_frobenius"],
+                    "hermiticity_ref": matrix_metrics["reference_hermiticity"],
+                    "hermiticity_pred": matrix_metrics["prediction_hermiticity"],
+                    "uses_reference_overlap_k": True,
+                    **semantics,
+                }
+            )
+            per_k_spectral.append(
+                {
+                    **k_metadata,
+                    "n_compared_bands": spectral_metrics.get("n_compared_bands"),
+                    "same_band_count": ref_eig.size == pred_eig.size,
+                    "reference_has_overlap": ref_s_k is not None,
+                    "hamiltonian_symmetrized_for_spectrum": True,
+                    **spectral_metrics,
+                    **semantics,
+                }
+            )
+            all_ref_eigenvalues.append(np.asarray(ref_eig, dtype=float))
+            all_pred_eigenvalues.append(np.asarray(pred_eig, dtype=float))
+            all_band_weights.append(np.full(ref_eig.size, weight, dtype=float))
+        except Exception as exc:
+            issue = append_issue(
+                rows,
+                "fatal_errors",
+                sample=sample,
+                kind="kpoint_metrics",
+                message=f"k-index {k_index} failed: {exc}",
+            )
+            rows["errors"].append(issue)
+            sample_errors.append(issue)
+
+    if sample_errors:
+        rows["sample_status"].append(
+            sample_status_row(
+                sample,
+                prediction_path=predicted_path,
+                reference_path=reference_path,
+                errors=sample_errors,
+                warnings=sample_warnings,
+            )
+        )
+        return rows
+
+    matrix_per_k = [row for row in rows["kpoint_matrix"] if row.get("row_type") == "per_k"]
+    rows["kpoint_matrix"].append(
+        {
+            "sample": sample,
+            "k_index": "",
+            "k_label": f"{sample}_weighted",
+            "kx": math.nan,
+            "ky": math.nan,
+            "kz": math.nan,
+            "k_weight": 1.0,
+            "kpoint_mesh": list(mesh),
+            "kpoint_shifts": list(shifts),
+            "kpoint_source": kgrid.source_directive or "",
+            "row_type": "weighted_sample",
+            "n_orbitals": int(reference.hamiltonian.shape[0]),
+            "n_entries": int(reference.hamiltonian.shape[0] * reference.hamiltonian.shape[1]),
+            "h_mae_eV": weighted_metric_mean(matrix_per_k, "h_mae_eV"),
+            "h_rmse_eV": weighted_metric_rmse(matrix_per_k, "h_rmse_eV"),
+            "h_mse_eV2": weighted_metric_mean(matrix_per_k, "h_mse_eV2"),
+            "h_max_abs_error_eV": max(
+                (float(row["h_max_abs_error_eV"]) for row in matrix_per_k if math.isfinite(float(row["h_max_abs_error_eV"]))),
+                default=math.nan,
+            ),
+            "relative_frobenius": weighted_metric_mean(matrix_per_k, "relative_frobenius"),
+            "hermiticity_ref": weighted_metric_mean(matrix_per_k, "hermiticity_ref"),
+            "hermiticity_pred": weighted_metric_mean(matrix_per_k, "hermiticity_pred"),
+            "uses_reference_overlap_k": True,
+            **semantics,
+        }
+    )
+    rows["kpoint_spectral"].append(
+        {
+            "sample": sample,
+            "kpoint_count": len(kgrid.fractional_kpoints),
+            "kpoint_mesh": list(mesh),
+            "kpoint_shifts": list(shifts),
+            "kpoint_source": kgrid.source_directive or "",
+            "siesta_bands": int(all_ref_eigenvalues[0].size) if all_ref_eigenvalues else 0,
+            "predicted_bands": int(all_pred_eigenvalues[0].size) if all_pred_eigenvalues else 0,
+            "spectral_comparable": bool(per_k_spectral),
+            "same_band_count": all(bool(row.get("same_band_count")) for row in per_k_spectral),
+            "reference_has_overlap": any(bool(row.get("reference_has_overlap")) for row in per_k_spectral),
+            "hamiltonian_symmetrized_for_spectrum": True,
+            "uses_reference_overlap_k": True,
+            "n_compared_bands": weighted_metric_mean(per_k_spectral, "n_compared_bands"),
+            "fermi_ref_eV": fermi_level,
+            "fermi_level_source": fermi_source,
+            "fermi_metric_available": fermi_level is not None,
+            "global_mae_eV": weighted_metric_mean(per_k_spectral, "global_mae_eV"),
+            "global_rmse_eV": weighted_metric_rmse(per_k_spectral, "global_rmse_eV"),
+            "global_max_abs_error_eV": max(
+                (float(row["global_max_abs_error_eV"]) for row in per_k_spectral if math.isfinite(float(row["global_max_abs_error_eV"]))),
+                default=math.nan,
+            ),
+            "global_mean_signed_error_eV": weighted_metric_mean(per_k_spectral, "global_mean_signed_error_eV"),
+            "occupied_bands": weighted_metric_mean(per_k_spectral, "occupied_bands"),
+            "occupied_metric_available": any(bool(row.get("occupied_metric_available")) for row in per_k_spectral),
+            "occupied_mae_eV": weighted_metric_mean(per_k_spectral, "occupied_mae_eV"),
+            "occupied_rmse_eV": weighted_metric_rmse(per_k_spectral, "occupied_rmse_eV"),
+            "fermi_window_eV": FERMI_WINDOW_EV,
+            "fermi_window_bands": weighted_metric_mean(per_k_spectral, "fermi_window_bands"),
+            "fermi_window_metric_available": any(bool(row.get("fermi_window_metric_available")) for row in per_k_spectral),
+            "fermi_window_mae_eV": weighted_metric_mean(per_k_spectral, "fermi_window_mae_eV"),
+            "fermi_window_rmse_eV": weighted_metric_rmse(per_k_spectral, "fermi_window_rmse_eV"),
+            "frontier_window_bands": weighted_metric_mean(per_k_spectral, "frontier_window_bands"),
+            "frontier_metric_available": any(bool(row.get("frontier_metric_available")) for row in per_k_spectral),
+            "frontier_window_mae_eV": weighted_metric_mean(per_k_spectral, "frontier_window_mae_eV"),
+            "frontier_window_rmse_eV": weighted_metric_rmse(per_k_spectral, "frontier_window_rmse_eV"),
+            "gap_abs_error_eV": weighted_metric_mean(per_k_spectral, "gap_abs_error_eV"),
+            "low_energy_requested_states": low_energy_n_states,
+            "low_energy_n_states": weighted_metric_mean(per_k_spectral, "low_energy_n_states"),
+            "low_energy_mae_eV": weighted_metric_mean(per_k_spectral, "low_energy_mae_eV"),
+            "low_energy_rmse_eV": weighted_metric_rmse(per_k_spectral, "low_energy_rmse_eV"),
+            "low_energy_max_abs_error_eV": max(
+                (float(row["low_energy_max_abs_error_eV"]) for row in per_k_spectral if math.isfinite(float(row["low_energy_max_abs_error_eV"]))),
+                default=math.nan,
+            ),
+            "low_energy_alignment": low_energy_alignment,
+            "low_energy_aligned_rmse_eV": weighted_metric_rmse(per_k_spectral, "low_energy_aligned_rmse_eV"),
+            "low_energy_overlap_used": True,
+            "low_energy_overlap_required": True,
+            "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+            "low_energy_warning": "",
+            **semantics,
+        }
+    )
+    if all_ref_eigenvalues and all_pred_eigenvalues and all_band_weights:
+        ref_flat = np.concatenate(all_ref_eigenvalues)
+        pred_flat = np.concatenate(all_pred_eigenvalues)
+        weights_flat = np.concatenate(all_band_weights)
+    else:
+        ref_flat = np.asarray([], dtype=float)
+        pred_flat = np.asarray([], dtype=float)
+        weights_flat = np.asarray([], dtype=float)
+    rows["kpoint_dos"].append(
+        {
+            "sample": sample,
+            "kpoint_count": len(kgrid.fractional_kpoints),
+            "kpoint_mesh": list(mesh),
+            "kpoint_shifts": list(shifts),
+            "kpoint_source": kgrid.source_directive or "",
+            "weighted_eigenvalue_count": int(ref_flat.size),
+            "fermi_level_source": fermi_source,
+            **semantics,
+            **kpoint_weighted_dos_metrics(ref_flat, pred_flat, weights_flat, fermi_level),
+        }
+    )
+    rows["sample_status"].append(
+        sample_status_row(
+            sample,
+            prediction_path=predicted_path,
+            reference_path=reference_path,
+            errors=sample_errors,
+            warnings=sample_warnings,
+        )
+    )
+    return rows
+
+
 def evaluate_sample(
     sample: str,
     prediction_dir: Path | None,
@@ -512,25 +1104,9 @@ def evaluate_sample(
     low_energy_enabled: bool,
     low_energy_n_states: int,
     low_energy_alignment: str,
+    enable_kpoint_metrics: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    rows: dict[str, list[dict[str, Any]]] = {
-        "sparse": [],
-        "spectral": [],
-        "dos": [],
-        "overlap": [],
-        "sparse_sweep": [],
-        "dos_sweep": [],
-        "component": [],
-        "block": [],
-        "species_pair": [],
-        "distance_bin": [],
-        "orbital_pair": [],
-        "structural_unavailable": [],
-        "errors": [],
-        "fatal_errors": [],
-        "warnings": [],
-        "sample_status": [],
-    }
+    rows = empty_sample_rows()
     sample_errors: list[dict[str, Any]] = []
     sample_warnings: list[dict[str, Any]] = []
     predicted_path = find_prediction(prediction_dir) if prediction_dir is not None else None
@@ -582,6 +1158,33 @@ def evaluate_sample(
             rows["fatal_errors"].append(stale_issue)
             sample_errors.append(stale_issue)
     structure_path = result_dir / "structures" / sample / "RUN.fdf"
+    kgrid = parse_monkhorst_pack_kgrid(structure_path)
+    if (
+        enable_kpoint_metrics
+        and kgrid is not None
+        and kgrid.ok
+        and not kgrid.is_gamma_only
+        and predicted_path is not None
+        and reference_path is not None
+        and not sample_errors
+    ):
+        kpoint_rows = evaluate_kpoint_sample(
+            sample,
+            predicted_path,
+            reference_path,
+            result_dir,
+            kgrid,
+            target_component_policy=target_component_policy,
+            low_energy_enabled=low_energy_enabled,
+            low_energy_n_states=low_energy_n_states,
+            low_energy_alignment=low_energy_alignment,
+        )
+        if sample_warnings:
+            kpoint_rows["warnings"] = [*sample_warnings, *kpoint_rows["warnings"]]
+            if kpoint_rows["sample_status"]:
+                current = kpoint_rows["sample_status"][0].get("warnings") or []
+                kpoint_rows["sample_status"][0]["warnings"] = [*sample_warnings, *current]
+        return kpoint_rows
     for issue in unsupported_kpoint_issues(sample, structure_path):
         rows["fatal_errors"].append(issue)
         sample_errors.append(issue)
@@ -792,7 +1395,15 @@ def evaluate_sample(
             ["energy_eV", "siesta_dos", "predicted_dos", "siesta_dos_normalized", "predicted_dos_normalized"],
             dos_grid_rows,
         )
-        rows["dos"].append({"sample": sample, **dos_metrics, **dos_window_metrics})
+        rows["dos"].append(
+            {
+                "sample": sample,
+                "fermi_level_source": fermi_source,
+                **semantics,
+                **dos_metrics,
+                **dos_window_metrics,
+            }
+        )
         for sigma in DOS_SIGMA_SWEEP_EV:
             _grid_rows, sweep_metrics = dos_for_sample(ref_eig, pred_eig, sigma_ev=sigma)
             rows["dos_sweep"].append({"sample": sample, **sweep_metrics})
@@ -1151,6 +1762,8 @@ def matrix_semantics_fields(
 ) -> dict[str, Any]:
     auxiliary_ignored = is_graph2mat_auxiliary_prediction(reference, predicted)
     return {
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "metrics_provenance_generation": METRICS_PROVENANCE_GENERATION,
         "target_component_policy": target_component_policy,
         "reference_component_count": int(reference.component_count),
         "prediction_component_count": int(predicted.component_count),
@@ -1178,10 +1791,22 @@ def component_channel_metrics(
         ref_available = index < len(reference_components)
         pred_available = index < len(prediction_components)
         channel_role = "hamiltonian" if index == 0 else "auxiliary"
+        policy = str(semantics.get("target_component_policy") or "")
+        official_h_channel = index == 0
         row: dict[str, Any] = {
             "sample": sample,
             "component_index": index,
             "component_role": channel_role,
+            "component_target_label": "H" if official_h_channel else "auxiliary_non_target",
+            "component_units": "eV" if official_h_channel else "auxiliary_or_dimensionless",
+            "component_is_official_hamiltonian_target": official_h_channel,
+            "component_in_official_h_only_loss": policy == "h_only" and official_h_channel,
+            "component_in_official_sparse_h_metric": official_h_channel,
+            "component_channel_warning": (
+                ""
+                if official_h_channel
+                else "Auxiliary/non-target channel is reported separately and is not mixed into official H metrics."
+            ),
             "reference_component_available": ref_available,
             "prediction_component_available": pred_available,
             **semantics,
@@ -1363,6 +1988,9 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "ref_density": len(ref_support) / n_entries if n_entries else math.nan,
         "pred_density": len(pred_support) / n_entries if n_entries else math.nan,
         "matrix_metric_target_space": MATRIX_METRIC_TARGET_SPACE,
+        "h_matrix_metric_independent_of_training_loss": True,
+        "h_matrix_component_index": 0,
+        "h_matrix_target_label": "H",
         "mae_ref_eV": mae_ref,
         "rmse_ref_eV": rmse_ref,
         "mse_ref_eV2": mse(deltas_ref),
@@ -1377,6 +2005,10 @@ def sparse_metrics(sample: str, reference: MatrixData, predicted: MatrixData) ->
         "rmse_pred_meV": ev_to_mev(rmse_pred),
         "mae_union_eV": mae_union,
         "rmse_union_eV": rmse_union,
+        "h_matrix_mae_eV": mae_union,
+        "h_matrix_rmse_eV": rmse_union,
+        "h_matrix_mae_meV": ev_to_mev(mae_union),
+        "h_matrix_rmse_meV": ev_to_mev(rmse_union),
         "mse_union_eV2": mse(deltas_union),
         "r2_union": r2_score(ref_targets_union, pred_targets_union),
         "mae_union_meV": ev_to_mev(mae_union),
@@ -1792,22 +2424,102 @@ def structural_sparse_metrics(
 
 
 def symmetrized_dense(matrix: sparse.csr_matrix) -> np.ndarray:
-    dense = matrix.toarray()
+    return symmetrized_hermitian_dense(matrix)
+
+
+def dense_matrix_array(matrix: Any) -> np.ndarray:
+    dense = matrix.toarray() if sparse.issparse(matrix) else np.asarray(matrix)
+    if dense.ndim != 2 or dense.shape[0] != dense.shape[1]:
+        raise ValueError(f"Expected a square matrix, got shape {dense.shape}.")
+    return np.asarray(dense)
+
+
+def symmetrized_hermitian_dense(matrix: Any) -> np.ndarray:
+    dense = dense_matrix_array(matrix)
     return np.asarray((dense + dense.conj().T) / 2.0)
+
+
+def complex_hermiticity_defect(matrix: Any) -> float:
+    dense = dense_matrix_array(matrix)
+    denominator = float(np.linalg.norm(dense, ord="fro"))
+    if denominator == 0.0:
+        return math.nan
+    return float(np.linalg.norm(dense - dense.conj().T, ord="fro") / denominator)
+
+
+def complex_relative_frobenius(delta: Any, reference: Any) -> float:
+    dense_delta = dense_matrix_array(delta)
+    dense_reference = dense_matrix_array(reference)
+    denominator = float(np.linalg.norm(dense_reference, ord="fro"))
+    if denominator == 0.0:
+        return math.nan
+    return float(np.linalg.norm(dense_delta, ord="fro") / denominator)
+
+
+def complex_matrix_error_metrics(reference: Any, predicted: Any) -> dict[str, Any]:
+    ref = dense_matrix_array(reference)
+    pred = dense_matrix_array(predicted)
+    if ref.shape != pred.shape:
+        raise ValueError(f"Matrix shapes differ: {ref.shape} vs {pred.shape}.")
+    delta = pred - ref
+    abs_delta = np.abs(delta)
+    return {
+        "n_entries": int(delta.size),
+        "mae_eV": float(np.mean(abs_delta)) if delta.size else math.nan,
+        "rmse_eV": float(np.sqrt(np.mean(abs_delta**2))) if delta.size else math.nan,
+        "mse_eV2": float(np.mean(abs_delta**2)) if delta.size else math.nan,
+        "max_abs_error_eV": float(np.max(abs_delta)) if delta.size else math.nan,
+        "relative_frobenius": complex_relative_frobenius(delta, ref),
+        "reference_hermiticity": complex_hermiticity_defect(ref),
+        "prediction_hermiticity": complex_hermiticity_defect(pred),
+    }
+
+
+def kpoint_hamiltonian_matrix(hamiltonian_obj: Any, kpoint: tuple[float, float, float] | list[float]) -> np.ndarray:
+    h_k = getattr(hamiltonian_obj, "Hk", None)
+    if not callable(h_k):
+        raise RuntimeError("Hamiltonian object does not expose Hk(k); cannot construct H(k).")
+    return dense_matrix_array(h_k(kpoint, format="array"))
+
+
+def kpoint_overlap_matrix(hamiltonian_obj: Any, kpoint: tuple[float, float, float] | list[float]) -> np.ndarray | None:
+    if bool(getattr(hamiltonian_obj, "orthogonal", False)):
+        return None
+    s_k = getattr(hamiltonian_obj, "Sk", None)
+    if not callable(s_k):
+        raise RuntimeError("Non-orthogonal reference requires S(k), but the object does not expose Sk(k).")
+    overlap = dense_matrix_array(s_k(kpoint, format="array"))
+    if overlap.size == 0:
+        raise RuntimeError("Non-orthogonal reference returned an empty S(k) matrix.")
+    return overlap
+
+
+def complex_generalized_eigenvalues(hamiltonian: Any, overlap: Any | None = None) -> np.ndarray:
+    dense_h = symmetrized_hermitian_dense(hamiltonian)
+    if overlap is None:
+        return np.asarray(np.linalg.eigvalsh(dense_h), dtype=float)
+    dense_s = symmetrized_hermitian_dense(overlap)
+    return np.asarray(
+        scipy.linalg.eigh(dense_h, dense_s, eigvals_only=True, check_finite=False),
+        dtype=float,
+    )
+
+
+def kpoint_eigenvalues_with_reference_overlap(
+    hamiltonian_obj: Any,
+    reference_hamiltonian_obj: Any,
+    kpoint: tuple[float, float, float] | list[float],
+) -> np.ndarray:
+    h_k = kpoint_hamiltonian_matrix(hamiltonian_obj, kpoint)
+    s_ref_k = kpoint_overlap_matrix(reference_hamiltonian_obj, kpoint)
+    return complex_generalized_eigenvalues(h_k, s_ref_k)
 
 
 def generalized_eigenvalues(
     hamiltonian: sparse.csr_matrix,
     overlap: sparse.csr_matrix | None,
 ) -> np.ndarray:
-    dense_h = symmetrized_dense(hamiltonian)
-    if overlap is None:
-        return np.linalg.eigvalsh(dense_h)
-    dense_s = symmetrized_dense(overlap)
-    return np.asarray(
-        scipy.linalg.eigh(dense_h, dense_s, eigvals_only=True, check_finite=False),
-        dtype=float,
-    )
+    return complex_generalized_eigenvalues(hamiltonian, overlap)
 
 
 def validate_low_energy_config(n_states: int, alignment: str) -> tuple[int, str]:
@@ -2165,6 +2877,170 @@ def dos_fermi_window_metrics(
     return grid, metrics
 
 
+def weighted_metric_mean(rows: list[dict[str, Any]], metric: str, weight_key: str = "k_weight") -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for row in rows:
+        try:
+            value = float(row.get(metric))
+            weight = float(row.get(weight_key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and math.isfinite(weight) and weight > 0:
+            numerator += weight * value
+            denominator += weight
+    return numerator / denominator if denominator > 0 else math.nan
+
+
+def weighted_metric_rmse(rows: list[dict[str, Any]], metric: str, weight_key: str = "k_weight") -> float:
+    numerator = 0.0
+    denominator = 0.0
+    for row in rows:
+        try:
+            value = float(row.get(metric))
+            weight = float(row.get(weight_key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and math.isfinite(weight) and weight > 0:
+            numerator += weight * value**2
+            denominator += weight
+    return math.sqrt(numerator / denominator) if denominator > 0 else math.nan
+
+
+def low_energy_metrics_from_eigenvalues(
+    reference: np.ndarray,
+    predicted: np.ndarray,
+    *,
+    n_states: int,
+    alignment: str,
+) -> dict[str, Any]:
+    n_states, alignment = validate_low_energy_config(n_states, alignment)
+    metadata = {
+        "low_energy_requested_states": n_states,
+        "low_energy_alignment": alignment,
+        "low_energy_overlap_used": True,
+        "low_energy_overlap_required": True,
+        "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+        "low_energy_warning": "",
+    }
+    count = min(n_states, reference.size, predicted.size)
+    if count <= 0:
+        return {
+            **metadata,
+            "low_energy_n_states": None,
+            "low_energy_mae_eV": math.nan,
+            "low_energy_rmse_eV": math.nan,
+            "low_energy_max_abs_error_eV": math.nan,
+            "low_energy_aligned_rmse_eV": math.nan,
+            "low_energy_warning": "low-energy eigenvalues unavailable: no common states to compare.",
+        }
+    ref_low = np.sort(np.asarray(reference, dtype=float))[:count]
+    pred_low = np.sort(np.asarray(predicted, dtype=float))[:count]
+    delta = pred_low - ref_low
+    aligned_rmse = math.nan
+    if alignment == "global_shift":
+        shift = float(np.mean(ref_low - pred_low))
+        aligned_delta = (pred_low + shift) - ref_low
+        aligned_rmse = float(np.sqrt(np.mean(aligned_delta**2)))
+    return {
+        **metadata,
+        "low_energy_n_states": int(count),
+        "low_energy_mae_eV": float(np.mean(np.abs(delta))),
+        "low_energy_rmse_eV": float(np.sqrt(np.mean(delta**2))),
+        "low_energy_max_abs_error_eV": float(np.max(np.abs(delta))),
+        "low_energy_aligned_rmse_eV": aligned_rmse,
+    }
+
+
+def gaussian_dos_weighted(
+    values: np.ndarray,
+    weights: np.ndarray,
+    grid: np.ndarray,
+    sigma: float,
+) -> np.ndarray:
+    prefactor = 1.0 / (sigma * np.sqrt(2.0 * np.pi))
+    dos = np.zeros_like(grid, dtype=float)
+    for value, weight in zip(values, weights, strict=False):
+        dos += float(weight) * prefactor * np.exp(-0.5 * ((grid - value) / sigma) ** 2)
+    return dos
+
+
+def kpoint_weighted_dos_metrics(
+    reference: np.ndarray,
+    predicted: np.ndarray,
+    weights: np.ndarray,
+    fermi_level: float | None,
+    sigma_ev: float = DOS_SIGMA_EV,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "dos_sigma_eV": sigma_ev,
+        "dos_grid_points": DOS_POINTS,
+        "dos_window_min_eV": DOS_FERMI_WINDOW_MIN_EV,
+        "dos_window_max_eV": DOS_FERMI_WINDOW_MAX_EV,
+        "dos_window_points": DOS_FERMI_WINDOW_POINTS,
+        "dos_window_sigma_eV": sigma_ev,
+        "dos_window_alignment": DOS_FERMI_WINDOW_ALIGNMENT,
+    }
+    combined = np.concatenate([reference, predicted])
+    if combined.size == 0:
+        metrics.update(
+            {
+                "energy_min_eV": math.nan,
+                "energy_max_eV": math.nan,
+                "dos_wasserstein_eV": math.nan,
+                "dos_l1": math.nan,
+                "dos_l2": math.nan,
+                "dos_mae_500_fermi_window": math.nan,
+                "dos_window_metric_available": False,
+                "dos_window_unavailable_reason": "missing_eigenvalues",
+            }
+        )
+        return metrics
+    margin = max(5.0 * sigma_ev, 0.05 * float(np.ptp(combined) if combined.size > 1 else 1.0))
+    energy_min = float(np.min(combined) - margin)
+    energy_max = float(np.max(combined) + margin)
+    grid = np.linspace(energy_min, energy_max, DOS_POINTS)
+    dx = float(grid[1] - grid[0]) if grid.size > 1 else 1.0
+    ref_dos = gaussian_dos_weighted(reference, weights, grid, sigma_ev)
+    pred_dos = gaussian_dos_weighted(predicted, weights, grid, sigma_ev)
+    ref_norm = normalized_density(ref_dos, dx)
+    pred_norm = normalized_density(pred_dos, dx)
+    metrics.update(
+        {
+            "energy_min_eV": energy_min,
+            "energy_max_eV": energy_max,
+            "dos_wasserstein_eV": wasserstein_from_grid(ref_dos, pred_dos, dx),
+            "dos_l1": float(np.sum(np.abs(ref_norm - pred_norm)) * dx),
+            "dos_l2": float(np.sqrt(np.sum((ref_norm - pred_norm) ** 2) * dx)),
+        }
+    )
+    try:
+        fermi_value = float(fermi_level)
+    except (TypeError, ValueError):
+        fermi_value = math.nan
+    if not math.isfinite(fermi_value):
+        metrics.update(
+            {
+                "dos_mae_500_fermi_window": math.nan,
+                "dos_window_metric_available": False,
+                "dos_window_unavailable_reason": "missing_fermi_level",
+            }
+        )
+        return metrics
+    relative_grid = np.linspace(DOS_FERMI_WINDOW_MIN_EV, DOS_FERMI_WINDOW_MAX_EV, DOS_FERMI_WINDOW_POINTS)
+    window_grid = fermi_value + relative_grid
+    ref_window = gaussian_dos_weighted(reference, weights, window_grid, sigma_ev)
+    pred_window = gaussian_dos_weighted(predicted, weights, window_grid, sigma_ev)
+    metrics.update(
+        {
+            "dos_mae_500_fermi_window": mean_abs((pred_window - ref_window).tolist()),
+            "dos_window_metric_available": True,
+            "dos_window_unavailable_reason": "",
+        }
+    )
+    return metrics
+
+
 def summarize_numeric(rows: list[dict[str, Any]], skip: set[str]) -> dict[str, dict[str, float]]:
     values: dict[str, list[float]] = {}
     for row in rows:
@@ -2221,6 +3097,76 @@ def metric_availability(rows: list[dict[str, Any]], metrics: list[str]) -> dict[
             "metric_unavailable_reason": reason,
         }
     return availability
+
+
+def _semantic_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+def prediction_artifact_safety_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize whether predicted HSX artifacts are standalone-safe."""
+
+    sample_rows: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        sample = str(row.get("sample") or "")
+        if not sample or "prediction_self_contained_hsx_safe" not in row:
+            continue
+        sample_rows.setdefault(sample, row)
+
+    safe_samples: set[str] = set()
+    unsafe_samples: set[str] = set()
+    auxiliary_samples: set[str] = set()
+    overlap_mismatch_samples: set[str] = set()
+    unsafe_reasons: dict[str, int] = {}
+    for sample, row in sample_rows.items():
+        safe = _semantic_bool(row.get("prediction_self_contained_hsx_safe"))
+        reason = str(row.get("prediction_self_contained_hsx_unsafe_reason") or "").strip()
+        if safe:
+            safe_samples.add(sample)
+        else:
+            unsafe_samples.add(sample)
+            unsafe_reasons[reason or "unspecified"] = unsafe_reasons.get(reason or "unspecified", 0) + 1
+        if _semantic_bool(row.get("graph2mat_auxiliary_component_ignored")):
+            auxiliary_samples.add(sample)
+        try:
+            overlap_rel = float(row.get("prediction_overlap_relative_frobenius_vs_reference"))
+        except (TypeError, ValueError):
+            overlap_rel = math.nan
+        if math.isfinite(overlap_rel) and overlap_rel > OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD:
+            overlap_mismatch_samples.add(sample)
+
+    unsafe_reason = ""
+    if unsafe_samples:
+        unsafe_reason = (
+            "ML_prediction.HSX is not a validated standalone generalized-eigenproblem input for "
+            "all compared samples; official spectra use the SIESTA reference overlap."
+        )
+    return {
+        "official_spectral_overlap_policy": "use_siesta_reference_overlap_for_nonorthogonal_predictions",
+        "overlap_source_for_official_spectra": "siesta_reference_when_available",
+        "prediction_own_overlap_used_for_spectra": False,
+        "prediction_overlap_validation_tolerance": OVERLAP_RELATIVE_FROBENIUS_WARNING_THRESHOLD,
+        "samples_with_prediction_semantics": len(sample_rows),
+        "prediction_self_contained_hsx_safe_samples": len(safe_samples),
+        "prediction_self_contained_hsx_unsafe_samples": len(unsafe_samples),
+        "prediction_self_contained_hsx_unsafe_reasons": unsafe_reasons,
+        "graph2mat_auxiliary_component_ignored_samples": len(auxiliary_samples),
+        "prediction_overlap_mismatch_samples": len(overlap_mismatch_samples),
+        "prediction_artifacts_standalone_safe": (
+            None if not sample_rows else len(unsafe_samples) == 0
+        ),
+        "unsafe_sample_ids": sorted(unsafe_samples)[:50],
+        "standalone_hsx_unsafe_reason": unsafe_reason,
+        "standalone_hsx_caveat": (
+            "Do not use ML_prediction.HSX as a standalone Hamiltonian+overlap container unless "
+            "prediction_self_contained_hsx_safe is true for the sample. Official spectral metrics "
+            "use S_ref, not prediction-owned overlap."
+        ),
+    }
 
 
 def pearson_correlation(rows: list[dict[str, Any]], x_key: str, y_key: str) -> float:
@@ -2317,6 +3263,8 @@ def extract(
     low_energy_n_states: int = LOW_ENERGY_N_STATES,
     low_energy_alignment: str = LOW_ENERGY_ALIGNMENT,
     workers: int = 1,
+    enable_kpoint_metrics: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     low_energy_n_states, low_energy_alignment = validate_low_energy_config(
         low_energy_n_states,
@@ -2327,6 +3275,7 @@ def extract(
     eigen_root = result_dir / "eigenvalues"
     metrics_root = result_dir / "metrics"
     dos_root = result_dir / "dos"
+    ensure_metric_outputs_can_be_written(result_dir, overwrite=overwrite)
     prediction_dirs = sample_dirs(prediction_root)
     reference_dirs = sample_dirs(reference_root)
     sample_names = sorted(set(prediction_dirs) | set(reference_dirs))
@@ -2345,6 +3294,10 @@ def extract(
     species_pair_rows: list[dict[str, Any]] = []
     distance_bin_rows: list[dict[str, Any]] = []
     orbital_pair_rows: list[dict[str, Any]] = []
+    kpoint_kpoint_rows: list[dict[str, Any]] = []
+    kpoint_matrix_rows: list[dict[str, Any]] = []
+    kpoint_spectral_rows: list[dict[str, Any]] = []
+    kpoint_dos_rows: list[dict[str, Any]] = []
     structural_unavailable: list[dict[str, str]] = []
     structural_basis_error = ""
     errors: list[dict[str, Any]] = []
@@ -2381,6 +3334,10 @@ def extract(
         species_pair_rows.extend(sample_rows["species_pair"])
         distance_bin_rows.extend(sample_rows["distance_bin"])
         orbital_pair_rows.extend(sample_rows["orbital_pair"])
+        kpoint_kpoint_rows.extend(sample_rows["kpoint_kpoints"])
+        kpoint_matrix_rows.extend(sample_rows["kpoint_matrix"])
+        kpoint_spectral_rows.extend(sample_rows["kpoint_spectral"])
+        kpoint_dos_rows.extend(sample_rows["kpoint_dos"])
         structural_unavailable.extend(sample_rows["structural_unavailable"])
         errors.extend(sample_rows["errors"])
         fatal_errors.extend(sample_rows.get("fatal_errors", []))
@@ -2404,6 +3361,7 @@ def extract(
                     low_energy_enabled=low_energy_enabled,
                     low_energy_n_states=low_energy_n_states,
                     low_energy_alignment=low_energy_alignment,
+                    enable_kpoint_metrics=enable_kpoint_metrics,
                 ): index
                 for index, sample in enumerate(sample_names)
             }
@@ -2425,6 +3383,7 @@ def extract(
                     low_energy_enabled=low_energy_enabled,
                     low_energy_n_states=low_energy_n_states,
                     low_energy_alignment=low_energy_alignment,
+                    enable_kpoint_metrics=enable_kpoint_metrics,
                 )
             )
 
@@ -2454,8 +3413,15 @@ def extract(
         "r2_pred",
         "mae_pred_meV",
         "rmse_pred_meV",
+        "h_matrix_metric_independent_of_training_loss",
+        "h_matrix_component_index",
+        "h_matrix_target_label",
         "mae_union_eV",
         "rmse_union_eV",
+        "h_matrix_mae_eV",
+        "h_matrix_rmse_eV",
+        "h_matrix_mae_meV",
+        "h_matrix_rmse_meV",
         "mse_union_eV2",
         "r2_union",
         "mae_union_meV",
@@ -2534,6 +3500,115 @@ def extract(
         "low_energy_solver",
         "low_energy_warning",
     ]
+    kpoint_kpoint_fields = [
+        "sample",
+        "k_index",
+        "k_label",
+        "kx",
+        "ky",
+        "kz",
+        "k_weight",
+        "kpoint_mesh",
+        "kpoint_shifts",
+        "kpoint_source",
+    ]
+    kpoint_matrix_fields = [
+        "sample",
+        "row_type",
+        "k_index",
+        "k_label",
+        "kx",
+        "ky",
+        "kz",
+        "k_weight",
+        "kpoint_mesh",
+        "kpoint_shifts",
+        "kpoint_source",
+        "n_orbitals",
+        "n_entries",
+        "h_mae_eV",
+        "h_rmse_eV",
+        "h_mse_eV2",
+        "h_max_abs_error_eV",
+        "relative_frobenius",
+        "hermiticity_ref",
+        "hermiticity_pred",
+        "uses_reference_overlap_k",
+        *semantic_fields,
+    ]
+    kpoint_spectral_fields = [
+        "sample",
+        "kpoint_count",
+        "kpoint_mesh",
+        "kpoint_shifts",
+        "kpoint_source",
+        "siesta_bands",
+        "predicted_bands",
+        *semantic_fields,
+        "spectral_comparable",
+        "same_band_count",
+        "reference_has_overlap",
+        "hamiltonian_symmetrized_for_spectrum",
+        "uses_reference_overlap_k",
+        "n_compared_bands",
+        "fermi_ref_eV",
+        "fermi_level_source",
+        "fermi_metric_available",
+        "global_mae_eV",
+        "global_rmse_eV",
+        "global_max_abs_error_eV",
+        "global_mean_signed_error_eV",
+        "occupied_bands",
+        "occupied_metric_available",
+        "occupied_mae_eV",
+        "occupied_rmse_eV",
+        "fermi_window_eV",
+        "fermi_window_bands",
+        "fermi_window_metric_available",
+        "fermi_window_mae_eV",
+        "fermi_window_rmse_eV",
+        "frontier_window_bands",
+        "frontier_metric_available",
+        "frontier_window_mae_eV",
+        "frontier_window_rmse_eV",
+        "gap_abs_error_eV",
+        "low_energy_requested_states",
+        "low_energy_n_states",
+        "low_energy_mae_eV",
+        "low_energy_rmse_eV",
+        "low_energy_max_abs_error_eV",
+        "low_energy_alignment",
+        "low_energy_aligned_rmse_eV",
+        "low_energy_overlap_used",
+        "low_energy_overlap_required",
+        "low_energy_solver",
+        "low_energy_warning",
+    ]
+    kpoint_dos_fields = [
+        "sample",
+        "kpoint_count",
+        "kpoint_mesh",
+        "kpoint_shifts",
+        "kpoint_source",
+        "weighted_eigenvalue_count",
+        "fermi_level_source",
+        *semantic_fields,
+        "dos_sigma_eV",
+        "dos_grid_points",
+        "energy_min_eV",
+        "energy_max_eV",
+        "dos_wasserstein_eV",
+        "dos_l1",
+        "dos_l2",
+        "dos_mae_500_fermi_window",
+        "dos_window_min_eV",
+        "dos_window_max_eV",
+        "dos_window_points",
+        "dos_window_sigma_eV",
+        "dos_window_alignment",
+        "dos_window_metric_available",
+        "dos_window_unavailable_reason",
+    ]
     relationship_rows = matrix_spectrum_rows(sparse_rows, spectral_rows)
     relationship_fields = [
         "sample",
@@ -2558,6 +3633,8 @@ def extract(
     ]
     dos_fields = [
         "sample",
+        "fermi_level_source",
+        *semantic_fields,
         "dos_sigma_eV",
         "dos_grid_points",
         "energy_min_eV",
@@ -2602,6 +3679,12 @@ def extract(
         "sample",
         "component_index",
         "component_role",
+        "component_target_label",
+        "component_units",
+        "component_is_official_hamiltonian_target",
+        "component_in_official_h_only_loss",
+        "component_in_official_sparse_h_metric",
+        "component_channel_warning",
         "reference_component_available",
         "prediction_component_available",
         "component_shape",
@@ -2697,6 +3780,9 @@ def extract(
     write_csv(metrics_root / "sparse_metrics.csv", sparse_fields, sparse_rows)
     write_csv(metrics_root / "spectral_metrics.csv", spectral_fields, spectral_rows)
     write_csv(metrics_root / "dos_metrics.csv", dos_fields, dos_rows)
+    write_csv(metrics_root / "kpoint_matrix_metrics.csv", kpoint_matrix_fields, kpoint_matrix_rows)
+    write_csv(metrics_root / "kpoint_spectral_metrics.csv", kpoint_spectral_fields, kpoint_spectral_rows)
+    write_csv(metrics_root / "kpoint_dos_metrics.csv", kpoint_dos_fields, kpoint_dos_rows)
     write_csv(metrics_root / "matrix_spectrum_relationship.csv", relationship_fields, relationship_rows)
     write_csv(metrics_root / "sparse_threshold_sweep.csv", sparse_sweep_fields, sparse_sweep_rows)
     write_csv(metrics_root / "component_channel_metrics.csv", component_fields, component_rows)
@@ -2706,6 +3792,7 @@ def extract(
     write_csv(metrics_root / "orbital_pair_metrics.csv", orbital_pair_fields, orbital_pair_rows)
     write_csv(metrics_root / "orbital_pair_summary.csv", orbital_pair_summary_fields, orbital_pair_summary)
     write_csv(eigen_root / "eigenvalue_metrics.csv", spectral_fields, spectral_rows)
+    write_csv(eigen_root / "kpoints.csv", kpoint_kpoint_fields, kpoint_kpoint_rows)
     write_csv(eigen_root / "overlap_summary.csv", overlap_fields, overlap_rows)
     write_csv(metrics_root / "dos_sigma_sweep.csv", dos_sweep_fields, dos_sweep_rows)
 
@@ -2715,7 +3802,34 @@ def extract(
             spectral_rows,
             {"sample", "hamiltonian_symmetrized_for_spectrum", *semantic_fields},
         ),
-        "dos": summarize_numeric(dos_rows, {"sample"}),
+        "dos": summarize_numeric(dos_rows, {"sample", "fermi_level_source", *semantic_fields}),
+        "kpoint_matrix": summarize_numeric(
+            kpoint_matrix_rows,
+            {
+                "sample",
+                "row_type",
+                "k_label",
+                "kpoint_mesh",
+                "kpoint_shifts",
+                "kpoint_source",
+                *semantic_fields,
+            },
+        ),
+        "kpoint_spectral": summarize_numeric(
+            kpoint_spectral_rows,
+            {
+                "sample",
+                "kpoint_mesh",
+                "kpoint_shifts",
+                "kpoint_source",
+                "hamiltonian_symmetrized_for_spectrum",
+                *semantic_fields,
+            },
+        ),
+        "kpoint_dos": summarize_numeric(
+            kpoint_dos_rows,
+            {"sample", "kpoint_mesh", "kpoint_shifts", "kpoint_source", "fermi_level_source", *semantic_fields},
+        ),
         "component_channel": summarize_numeric(
             component_rows,
             {
@@ -2784,6 +3898,27 @@ def extract(
                 dos_rows,
                 ["dos_wasserstein_eV", "dos_mae_500_fermi_window"],
             ),
+            **{
+                f"kpoint_{key}": value
+                for key, value in metric_availability(
+                    kpoint_spectral_rows,
+                    [
+                        "global_rmse_eV",
+                        "occupied_rmse_eV",
+                        "fermi_window_rmse_eV",
+                        "frontier_window_rmse_eV",
+                        "low_energy_rmse_eV",
+                        "gap_abs_error_eV",
+                    ],
+                ).items()
+            },
+            **{
+                f"kpoint_{key}": value
+                for key, value in metric_availability(
+                    kpoint_dos_rows,
+                    ["dos_wasserstein_eV", "dos_mae_500_fermi_window"],
+                ).items()
+            },
         },
         "orbital_pair_metric_availability": metric_availability(
             orbital_pair_rows,
@@ -2795,17 +3930,60 @@ def extract(
         for issue in warnings
         if str(issue.get("severity") or "").lower() in {"severe", "fatal"}
     ]
+    prediction_safety = prediction_artifact_safety_summary(
+        [
+            *sparse_rows,
+            *spectral_rows,
+            *kpoint_matrix_rows,
+            *kpoint_spectral_rows,
+            *overlap_rows,
+            *component_rows,
+        ]
+    )
+    kpoint_meshes = {
+        tuple(row.get("kpoint_mesh") or [])
+        for row in [*kpoint_kpoint_rows, *kpoint_spectral_rows]
+        if row.get("kpoint_mesh")
+    }
+    kpoint_counts = {
+        int(row.get("kpoint_count") or 0)
+        for row in kpoint_spectral_rows
+        if int(row.get("kpoint_count") or 0) > 0
+    }
+    kpoint_sources = {
+        str(row.get("kpoint_source") or "")
+        for row in [*kpoint_kpoint_rows, *kpoint_spectral_rows]
+        if row.get("kpoint_source")
+    }
+    kpoint_mesh = list(next(iter(kpoint_meshes))) if len(kpoint_meshes) == 1 else None
+    kpoint_count = next(iter(kpoint_counts)) if len(kpoint_counts) == 1 else None
+    kpoint_source = "RUN.fdf" if kpoint_sources else None
     manifest = {
+        "metrics_schema_version": METRICS_SCHEMA_VERSION,
+        "metrics_provenance_generation": METRICS_PROVENANCE_GENERATION,
+        "metrics_provenance_status": "post_h_only_sref",
+        "post_h_only_reevaluation_required_for_legacy_metrics": False,
         "result_dir": str(result_dir),
         "samples_seen": len(sample_names),
-        "samples_compared": len(spectral_rows),
+        "samples_compared": len(spectral_rows) + len(kpoint_spectral_rows),
+        "kpoint_samples_compared": len(kpoint_spectral_rows),
         "samples_failed": len([row for row in sample_status if row.get("status") == "failed"]),
         "sparse_samples": len(sparse_rows),
         "dos_samples": len(dos_rows),
+        "kpoint_dos_samples": len(kpoint_dos_rows),
         "overlap_entries": len(overlap_rows),
         "component_channel_entries": len(component_rows),
         "target_component_policy": target_component_policy,
+        "official_target_matrix": "hamiltonian",
+        "official_target_component_index": 0,
         "reference_selection_policy": REFERENCE_SELECTION_POLICY,
+        "kpoint_metrics_enabled": enable_kpoint_metrics,
+        "kpoint_sampled_supported": bool(enable_kpoint_metrics),
+        "kpoint_mesh": kpoint_mesh,
+        "kpoint_count": kpoint_count,
+        "kpoint_source": kpoint_source,
+        "uses_reference_overlap_k": bool(kpoint_spectral_rows),
+        "complex_hamiltonians_supported_for_kpoint_metrics": bool(enable_kpoint_metrics),
         "sample_status": sample_status,
         "structural_metrics_basis_required": True,
         "structural_basis_dirs": [str(path) for path in basis_dirs],
@@ -2849,21 +4027,41 @@ def extract(
         "warnings": warnings,
         "severe_warnings": severe_warnings,
         "errors": errors,
+        "prediction_artifact_semantics": prediction_safety,
+        "prediction_artifacts_standalone_safe": prediction_safety["prediction_artifacts_standalone_safe"],
+        "prediction_self_contained_hsx_safe_samples": prediction_safety[
+            "prediction_self_contained_hsx_safe_samples"
+        ],
+        "prediction_self_contained_hsx_unsafe_samples": prediction_safety[
+            "prediction_self_contained_hsx_unsafe_samples"
+        ],
         "metric_compatibility": {
+            "metrics_schema_version": METRICS_SCHEMA_VERSION,
+            "metrics_provenance_generation": METRICS_PROVENANCE_GENERATION,
             "sparse_matrix_metrics_material_agnostic": True,
             "matrix_metric_target_space": MATRIX_METRIC_TARGET_SPACE,
             "target_component_policy": target_component_policy,
             "target_semantics_fields": semantic_fields,
+            "official_winner_uses_training_loss": False,
+            "h_matrix_metrics_independent_of_training_loss": True,
+            "h_only_loss_channel_semantics": (
+                "Configured training loss is interpretable as H-only only when "
+                "target_component_policy is h_only and n_matrix_components is 1."
+            ),
             "prediction_own_overlap_used_for_spectra": False,
             "nonorthogonal_spectral_overlap_source": "siesta_reference",
             "prediction_self_contained_hsx_safe_required": True,
+            "prediction_artifact_semantics": prediction_safety,
             "orbital_pair_metric_target_space": ORBITAL_PAIR_METRIC_TARGET_SPACE,
             "orbital_pair_basis_source": ORBITAL_PAIR_BASIS_SOURCE,
             "deeph_hprime_transform_applied": False,
             "deeph_orbital_hprime_transform_applied": False,
             "complex_hamiltonians_supported": False,
+            "complex_hamiltonians_supported_for_kpoint_metrics": bool(enable_kpoint_metrics),
             "spin_polarized_supported": False,
-            "kpoint_sampled_supported": False,
+            "kpoint_sampled_supported": bool(enable_kpoint_metrics),
+            "kpoint_metrics_enabled": bool(enable_kpoint_metrics),
+            "uses_reference_overlap_k": bool(kpoint_spectral_rows),
             "periodic_distance_bins_supported": False,
             "nonorthogonal_spectral_requires_reference_overlap": True,
             "structural_metrics_require_basis_species_coverage": True,
@@ -2881,6 +4079,9 @@ def extract(
             "sparse_metrics": str(metrics_root / "sparse_metrics.csv"),
             "spectral_metrics": str(metrics_root / "spectral_metrics.csv"),
             "dos_metrics": str(metrics_root / "dos_metrics.csv"),
+            "kpoint_matrix_metrics": str(metrics_root / "kpoint_matrix_metrics.csv"),
+            "kpoint_spectral_metrics": str(metrics_root / "kpoint_spectral_metrics.csv"),
+            "kpoint_dos_metrics": str(metrics_root / "kpoint_dos_metrics.csv"),
             "matrix_spectrum_relationship": str(metrics_root / "matrix_spectrum_relationship.csv"),
             "component_channel_metrics": str(metrics_root / "component_channel_metrics.csv"),
             "block_metrics": str(metrics_root / "block_metrics.csv"),
@@ -2888,9 +4089,11 @@ def extract(
             "distance_bin_metrics": str(metrics_root / "distance_bin_metrics.csv"),
             "orbital_pair_metrics": str(metrics_root / "orbital_pair_metrics.csv"),
             "orbital_pair_summary": str(metrics_root / "orbital_pair_summary.csv"),
+            "kpoints": str(eigen_root / "kpoints.csv"),
             "eigenvalues_siesta": str(eigen_root / "siesta"),
             "eigenvalues_predicted": str(eigen_root / "predicted"),
             "band_errors": str(eigen_root / "band_errors"),
+            "kpoint_band_errors": str(eigen_root / "kpoint_band_errors"),
             "dos": str(dos_root),
             "overlap_summary": str(eigen_root / "overlap_summary.csv"),
         },
@@ -2913,6 +4116,19 @@ def main() -> int:
     parser.add_argument("--low-energy-n-states", type=int, default=LOW_ENERGY_N_STATES)
     parser.add_argument("--low-energy-alignment", default=LOW_ENERGY_ALIGNMENT, choices=["none", "global_shift"])
     parser.add_argument("--workers", type=int, default=1, help="Parallel sample workers for metric extraction.")
+    parser.add_argument(
+        "--enable-kpoint-metrics",
+        action="store_true",
+        help="Opt in to k-point-aware periodic Hamiltonian metrics for non-gamma Monkhorst-Pack inputs.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Overwrite existing metrics/eigenvalues/DOS outputs. Use only for intentional "
+            "post-H-only/S_ref re-evaluation."
+        ),
+    )
     args = parser.parse_args()
     manifest = extract(
         args.result_dir,
@@ -2920,6 +4136,8 @@ def main() -> int:
         low_energy_n_states=args.low_energy_n_states,
         low_energy_alignment=args.low_energy_alignment,
         workers=args.workers,
+        enable_kpoint_metrics=args.enable_kpoint_metrics,
+        overwrite=args.overwrite,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=False, allow_nan=False))
     return 0 if not manifest["fatal_errors"] else 2

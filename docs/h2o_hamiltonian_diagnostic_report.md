@@ -2,6 +2,36 @@
 
 Date: 2026-05-19
 
+## Current repository status
+
+This report is the original diagnostic that motivated the H-only remediation.
+It should be read as historical evidence, not as proof that every archived run
+is already scientifically comparable.
+
+The current repository now treats the official Hamiltonian benchmark target as:
+
+```yaml
+data:
+  out_matrix: hamiltonian
+  matrix_component_policy: h_only
+  n_matrix_components: 1
+  symmetric_matrix: true
+```
+
+Post-remediation metrics are expected to record target policy, component
+counts, overlap source, Fermi-level source, and prediction-HSX safety fields.
+Official spectral and DOS metrics use the SIESTA reference overlap `S_ref`
+unless a prediction-owned overlap has been explicitly validated. A predicted
+`ML_prediction.HSX` with `prediction_self_contained_hsx_safe=false` is a metric
+artifact, not a standalone physical Hamiltonian+overlap file for external band
+or DOS calculations.
+
+Old metric files that do not carry the post-H-only/S_ref provenance fields are
+legacy or unknown and must be regenerated before robust winner claims. The
+one-sample overfit diagnostic described below exists so maintainers can test
+the end-to-end H-only path, but a dry run alone does not establish that the
+model can numerically overfit one sample.
+
 ## 1. Executive verdict
 
 The strongest finding is not a SIESTA read/write failure. A direct Graph2Mat
@@ -254,7 +284,7 @@ Training/loss:
    - Suggested fix: keep reporting current metrics honestly as repo-compatible
      diagnostics until H-prime exists.
 
-## 7. Recommended fixes, not implemented here
+## 7. Original recommended fixes
 
 1. Add an explicit Hamiltonian target component policy.
    - For non-orthogonal SIESTA H2O, train H component 0 only unless a separate
@@ -326,31 +356,56 @@ Targeted validation run:
 python3 -m unittest tests.test_comparison_workflow.ComparisonWorkflowTests.test_md_rewrite_makes_effective_geometries_differ_when_xv_differs tests.test_comparison_workflow.ComparisonWorkflowTests.test_md_step_xv_path_accepts_unique_system_label_xv
 ```
 
-Single-sample overfit recipe, not run in this audit:
-
-1. Create an isolated workspace under
-   `Comparison/results/diagnostics/h2o_hamiltonian/one_sample_overfit/`.
-2. Copy `structures/md_94/RUN.fdf` and
-   `siesta_hamiltonians/md_94/siesta.TSHS` into train, validation, test, and
-   prediction sample directories.
-3. Copy H/O `.ion.xml` basis files.
-4. Generate a Graph2Mat config with `batch_size: 1`, fixed seed if supported,
-   `store_in_memory: true`, `symmetric_matrix: true`, and an H-only target policy.
-5. Run the verified training command pattern:
+Single-sample H-only overfit diagnostic:
 
 ```bash
-graph2mat models mace main fit -c config.yaml
+python3 -m py_compile Comparison/scripts/diagnose_h2o_one_sample_overfit.py
+
+python3 Comparison/scripts/diagnose_h2o_one_sample_overfit.py \
+  --evaluation-root <h2o-result-or-cross-evaluation-root> \
+  --sample <sample-id> \
+  --basis-glob '<basis-dir>/*.ion.xml' \
+  --dry-run
 ```
 
-This recipe is intentionally marked unverified until the H-only target policy is
-implemented or explicitly configured.
+The dry run creates an isolated workspace under
+`Comparison/results/diagnostics/h2o_hamiltonian/one_sample_overfit/`, copies one
+verified reference sample into train/validation/test/predict splits, and writes
+`training/config.yaml` plus `provenance.json`. The generated config is required
+to contain `out_matrix: hamiltonian`, `matrix_component_policy: h_only`,
+`n_matrix_components: 1`, `symmetric_matrix: true`, and `batch_size: 1`.
+
+To run the expensive diagnostic end to end, add `--execute` after reviewing the
+dry-run workspace:
+
+```bash
+python3 Comparison/scripts/diagnose_h2o_one_sample_overfit.py \
+  --evaluation-root <h2o-result-or-cross-evaluation-root> \
+  --sample <sample-id> \
+  --basis-glob '<basis-dir>/*.ion.xml' \
+  --max-epochs 1500 \
+  --execute
+```
+
+The numerical acceptance threshold is a diagnostic bug-finding target, not a
+publication metric: if one sample cannot reach sub-meV to low-meV H matrix error,
+the remaining pipeline still has a likely label, ordering, reconstruction,
+readout, loss-scaling, or writer problem.
+
+The real `--execute` path also runs
+`Comparison/scripts/diagnose_h2o_overfit_direct_labels.py` on the selected
+checkpoint. The resulting report exposes node-label and edge-label H errors
+separately before MatrixWriter reconstruction, so a low training loss cannot hide
+poor Hamiltonian node/edge fits.
 
 ## 9. What remains unverified
 
-- A true single-sample overfit was not run.
+- A true single-sample overfit was not run during the original diagnostic. Do
+  not claim the overfit passes unless the current `--execute` diagnostic has
+  been run and its numerical report is cited.
 - Only one primary H2O sample (`md_94`) plus one wrong-overlap sample (`md_91`)
   was numerically diagnosed.
-- No production Graph2Mat or repository training logic was changed.
-- No broad re-evaluation was run after the diagnostic script.
-- The exact API/design for an H-only non-orthogonal Hamiltonian target still
-  needs to be chosen and tested.
+- Archived pre-remediation metrics without H-only/S_ref provenance remain
+  legacy. They need re-evaluation before being pooled with current runs.
+- The repository-compatible raw-global-H metrics are not exact DeepH H-prime
+  local-frame metrics unless a validated H-prime transform is implemented.

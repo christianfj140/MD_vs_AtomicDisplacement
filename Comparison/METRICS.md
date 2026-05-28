@@ -74,11 +74,50 @@ These plots are diagnostics for comparing repository outputs with DeepH-style
 reports. They do not change winner defaults and do not imply exact DeepH H'
 local-coordinate equivalence.
 
+## Official H-only Target Semantics
+
+The official Hamiltonian benchmark target is H-only:
+
+```yaml
+data:
+  out_matrix: hamiltonian
+  matrix_component_policy: h_only
+  n_matrix_components: 1
+  symmetric_matrix: true
+```
+
+Non-orthogonal SIESTA files may expose raw matrix components corresponding to
+Hamiltonian and overlap data. The official benchmark trains and evaluates only
+Hamiltonian component 0 as the target. It must not optimize or report a
+non-spin water or graphene model as if an auxiliary S-like channel were a
+physical second Hamiltonian or spin target.
+
+Generated Graph2Mat configs, manifests, and metric rows record the matrix
+target, component policy, and component count. Missing or mismatched target
+policy is treated as legacy/unknown at read time and as a severe blocker for
+new official runs.
+
+Training loss is not the primary scientific comparison metric. Reports should
+use the explicit H matrix, spectral, DOS, block/orbital, and safety provenance
+fields described below.
+
 ## DeepH Comparability Status
 
 The repository exposes DeepH-comparable diagnostics, not a complete
 reproduction of every DeepH benchmark. `metrics/manifest.json` records the same
 policy under `deeph_comparability_status`.
+
+The dedicated Graph2Mat-vs-DeepH workflow uses
+`joint_graph2mat_deeph_artifact_contract_v1` and aggregates common metrics only
+after both methods used the same validated snapshots and frozen split. The UI
+summary and `/api/g2m-deeph/plots` payload report `valid_joint_one_pass_dataset`,
+`valid_reused_joint_dataset`, `valid_repaired_dataset_with_warning`,
+`invalid_*`, or `diagnostic_only`. If the status is `diagnostic_only` or
+`invalid_*`, the UI must not declare a winner.
+
+See `docs/graph2mat_deeph_benchmark.md` for the required `HSX`,
+`STRUCT_OUT`, `XV`, `ORB_INDX`, `TSHS`, `TSDE` artifact contract and the rule
+that missing DeepH artifacts must not trigger silent SIESTA repair.
 
 Implemented repo-compatible analogues:
 
@@ -105,8 +144,8 @@ Future work not implemented in this repository phase:
 
 | Area | Why it is future work |
 | --- | --- |
-| True high-symmetry k-path band structures | Requires explicit k-path input, k-resolved reference/predicted bands, and validation against SIESTA band-structure outputs. Current metric-time gates reject k-point sampled inputs for this strict comparison path. |
-| SOC/complex Hamiltonians | Current compatibility gates reject complex Hamiltonians and unvalidated spin-orbit or multi-component matrix semantics. |
+| True high-symmetry k-path band structures | Requires explicit k-path input, k-resolved reference/predicted bands, and validation against SIESTA band-structure outputs. Monkhorst-Pack k-point metrics are available only through the explicit `--enable-kpoint-metrics` evaluator path; high-symmetry path band comparisons remain future work. |
+| SOC/complex Hamiltonians | The k-point path supports complex Hermitian H(k)/S(k) for the validated non-SOC workflow, but spin-orbit, spinful, and ambiguous multi-component semantics are still unsupported. |
 | Optical response, Berry quantities, electric susceptibility and shift current | Requires optical/Berry-response infrastructure, validated wavefunction or velocity/dipole data, and material-specific scientific checks. |
 | Ensemble uncertainty | Requires an explicit ensemble protocol and calibrated reliability validation across independent model instances. |
 | DeepH-vs-DFT scaling by system size | Requires controlled system-size series, DFT/DeepH timing protocol, and hardware-normalized scaling analysis. |
@@ -141,8 +180,9 @@ Reported metrics include:
   predicted matrix. These metrics are DeepH-comparable scalar diagnostics, but
   they are not exact DeepH local-coordinate H' block metrics unless a future
   validated H' transformation is implemented.
-- Target-semantics columns are repeated in sparse, spectral, overlap, and
-  matrix-spectrum outputs: `target_component_policy`,
+- Target-semantics columns are repeated in sparse, spectral, DOS, overlap, and
+  matrix-spectrum outputs: `metrics_schema_version`,
+  `metrics_provenance_generation`, `target_component_policy`,
   `reference_component_count`, `prediction_component_count`,
   `reference_spin_kind`, `prediction_spin_kind`, `overlap_source`,
   `prediction_own_overlap_used`,
@@ -163,10 +203,46 @@ Reported metrics include:
   This is a robustness diagnostic; it should not replace the canonical table.
 - `metrics/component_channel_metrics.csv`: per-channel diagnostics for
   containers that expose multiple matrix components. Component 0 is treated as
-  the Hamiltonian channel. Auxiliary channels are reported separately when both
-  reference and prediction channels exist, or marked unavailable when the
-  reference has no corresponding auxiliary target. Auxiliary-channel rows are
-  never mixed into the main Hamiltonian MAE/RMSE/R2 metrics.
+  the Hamiltonian channel and is labeled with `component_target_label=H`,
+  `component_units=eV`, and `component_is_official_hamiltonian_target=true`.
+  Auxiliary channels are reported separately when both reference and prediction
+  channels exist, or marked unavailable when the reference has no corresponding
+  auxiliary target. Auxiliary-channel rows are never mixed into the main
+  Hamiltonian MAE/RMSE/R2 metrics or into official winner metrics.
+
+Training loss is not an official winner metric. For H-only benchmark configs,
+`loss: graph2mat.metrics.block_type_mae` is interpretable as Hamiltonian-only
+only because the generated/validated Graph2Mat config requires
+`matrix_component_policy: h_only` and `n_matrix_components: 1`. Reports should
+therefore cite `h_matrix_mae_*`, `h_matrix_rmse_*`, spectral metrics, and
+component-channel diagnostics rather than training loss alone.
+
+Post-H-only/S_ref re-evaluations are schema-tagged with
+`metrics_schema_version=h_only_sref_v2` and
+`metrics_provenance_generation=post_h_only_sref_prediction_safety`. Legacy
+metric manifests that lack this provenance are treated as unknown/unsafe for
+official winner claims; cross aggregation emits
+`LEGACY_METRICS_SCHEMA_UNKNOWN_REEVALUATE_POST_H_ONLY` and related target/HSX
+safety warnings. To intentionally replace old files, rerun
+`evaluate_hamiltonian_metrics.py --overwrite` after confirming the predictions
+were produced with H-only semantics.
+
+For gamma/single-matrix runs:
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_metrics.py <result_dir> --overwrite
+```
+
+For non-gamma Monkhorst-Pack graphene runs:
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_metrics.py <result_dir> \
+  --enable-kpoint-metrics \
+  --overwrite
+```
+
+Do not pool old pre-H-only metric rows with post-H-only rows unless the report
+explicitly labels the comparison as historical or exploratory.
 
 Diagnostic structural metrics are written from the real SIESTA/Graph2Mat basis.
 The evaluator requires archived `.ion.xml` files and counts PAOs from each
@@ -230,6 +306,12 @@ for an unpolarized reference are allowed only as a severe diagnostic case:
 component 0 is used as H, the auxiliary component is ignored for the main
 metrics, and spectra still use `S_ref`.
 
+The metrics manifest also includes `prediction_artifact_semantics`, a compact
+summary of how many predicted HSX files are safe or unsafe as standalone
+Hamiltonian+overlap containers. Official reports should use this manifest field
+to avoid presenting unsafe `ML_prediction.HSX` artifacts as physically
+self-contained generalized-eigenproblem inputs.
+
 Reported metrics include:
 
 - `global_mae_eV`, `global_rmse_eV`: all compared eigenvalues.
@@ -261,13 +343,15 @@ a fatal evaluator error for strict comparisons; the evaluator does not invent an
 identity overlap.
 
 Compatibility gates are intentionally fail-closed for unsupported scientific
-cases. The evaluator rejects mismatched matrix shapes, non-orthogonal references
-without a readable overlap, unsupported multi-component matrices, spin metadata
-outside the supported unpolarized path, k-point sampled FDF inputs, and
-complex-valued Hamiltonian/overlap matrices because this workflow has not yet
-validated spin-orbit or k-point complex semantics. Matrix-level sparse metrics
-remain material-agnostic for supported single-matrix real Hamiltonians with
-compatible reference/prediction shapes.
+cases. The default gamma/single-matrix path rejects mismatched matrix shapes,
+non-orthogonal references without a readable overlap, unsupported
+multi-component matrices, spin metadata outside the supported unpolarized path,
+and non-gamma k-point sampled FDF inputs. Non-gamma Monkhorst-Pack runs require
+the explicit `--enable-kpoint-metrics` opt-in path, which constructs H(k) and
+uses `S_ref(k)` for spectra. Unsupported spin-orbit, ambiguous component
+semantics, missing overlaps, and invalid reference/prediction shapes remain
+fatal. Matrix-level sparse metrics remain material-agnostic for supported
+single-matrix Hamiltonians with compatible reference/prediction shapes.
 
 Configuration defaults are equivalent to:
 

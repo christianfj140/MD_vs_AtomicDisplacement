@@ -306,6 +306,7 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
     from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
     from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
 
+    matrix_component_policy, n_matrix_components = resolve_cli_matrix_component_policy(args)
     if args.patch_graph2mat_basis_loading:
         original = MatrixDataProcessor.get_config_kwargs
 
@@ -317,7 +318,7 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
         MatrixDataProcessor.get_config_kwargs = patched
 
     allow_graph2mat_checkpoint_globals()
-    model = LitMACEMatrixModel.load_from_checkpoint(str(args.checkpoint))
+    model = LitMACEMatrixModel.load_from_checkpoint(str(args.checkpoint), weights_only=False)
     datamodule_kwargs: dict[str, Any] = {
         "out_matrix": args.out_matrix,
         "symmetric_matrix": bool(args.symmetric_matrix),
@@ -326,27 +327,25 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
         "predict_structs": predict_glob,
         "store_in_memory": bool(args.store_in_memory),
     }
-    if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters and args.n_matrix_components:
-        matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
-            {
-                "matrix_component_policy": args.matrix_component_policy,
-                "n_matrix_components": args.n_matrix_components,
-            },
-            context="prediction CLI",
-        )
+    if "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["n_matrix_components"] = n_matrix_components
         if "matrix_component_policy" in inspect.signature(MatrixDataModule).parameters:
             datamodule_kwargs["matrix_component_policy"] = matrix_component_policy
+        else:
+            raise RuntimeError(
+                "MatrixDataModule does not expose matrix_component_policy; this official "
+                "benchmark cannot enforce H-only target semantics with this Graph2Mat version."
+            )
         validate_model_matrix_component_policy(
             model,
             matrix_component_policy=matrix_component_policy,
             n_matrix_components=n_matrix_components,
             context="cross prediction",
         )
-    elif "n_matrix_components" in inspect.signature(MatrixDataModule).parameters:
+    else:
         raise RuntimeError(
-            "--n-matrix-components and --matrix-component-policy are required "
-            "when Graph2Mat exposes explicit matrix components."
+            "MatrixDataModule does not expose n_matrix_components; this official "
+            "benchmark cannot enforce H-only target semantics with this Graph2Mat version."
         )
     if "batch_size" in inspect.signature(MatrixDataModule).parameters:
         datamodule_kwargs["batch_size"] = 1
@@ -357,7 +356,7 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
     callbacks = [StrictMatrixWriter(output_file=PREDICTION_OUTPUT_FILE, splits=["predict"])]
     trainer = pl.Trainer(accelerator=args.accelerator, logger=False, callbacks=callbacks)
     try:
-        trainer.predict(model, datamodule=datamodule, ckpt_path=str(args.checkpoint))
+        trainer.predict(model, datamodule=datamodule, ckpt_path=None)
     except ValueError as exc:
         if EDGE_LABEL_CONSUMPTION_ERROR not in str(exc):
             raise
@@ -434,8 +433,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_cli_matrix_component_policy(args: argparse.Namespace) -> tuple[str, int]:
+    return resolve_matrix_component_policy(
+        {
+            "matrix_component_policy": args.matrix_component_policy,
+            "n_matrix_components": args.n_matrix_components,
+        },
+        context="prediction CLI",
+    )
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    resolve_cli_matrix_component_policy(args)
     if args.loader_threads is not None and args.loader_threads <= 0:
         raise RuntimeError("--loader-threads must be a positive integer.")
     apply_torch_float32_matmul_precision(args.torch_float32_matmul_precision)

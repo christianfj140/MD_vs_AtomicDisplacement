@@ -43,6 +43,31 @@ Si no se selecciona ningun metodo, la UI y el backend rechazan el experimento.
 Los modos legacy siguen existiendo: cuando no llega `selected_methods`, el
 backend usa el default historico `["md", "siesta_fc_cartesian"]`.
 
+## Graph2Mat vs DeepH para grafeno
+
+El flujo dedicado `G2M vs DeepH` vive en una pestaña propia de la UI. Su guia
+operativa esta en `docs/graph2mat_deeph_benchmark.md`.
+
+Los datasets reutilizables de este flujo viven por defecto en
+`Comparison/datasets/`, separados de `Comparison/workspaces/` y
+`Comparison/results/`. La ruta preseleccionada para grafeno es
+`Comparison/datasets/graphene_w90_joint`.
+
+La idea central es evitar el fallo historico en el que un dataset valido para
+Graph2Mat no contenia `HSX`, `STRUCT_OUT` ni `ORB_INDX`, obligando a reruns
+SIESTA por snapshot para DeepH. Los datasets joint deben generarse en una sola
+pasada SIESTA y archivar, como minimo, `RUN.fdf`, `RUN.out` o `siesta.out`,
+`SystemLabel.TSHS`, `SystemLabel.TSDE`, `SystemLabel.HSX`,
+`SystemLabel.STRUCT_OUT`, `SystemLabel.XV`, `SystemLabel.ORB_INDX` y
+`metadata.json`.
+
+El modo normal valida y falla si faltan artefactos; no hay reparacion SIESTA
+silenciosa. Cualquier reparacion debe ser explicita, lenta/costosa y quedar
+marcada en los manifests. `ML_prediction.HSX` nunca es ground truth y las
+metricas espectrales usan `S_ref`/`S_ref(k)` cuando esta disponible. Si la
+equivalencia DeepH/Graph2Mat no esta probada en base, unidades, orden orbital,
+convencion R-vector o frame, la comparacion se marca `diagnostic_only`.
+
 ## Estructura actual del repositorio
 
 ```text
@@ -211,6 +236,47 @@ Un experimento con un solo metodo es valido para generar datos y diagnosticos,
 pero queda marcado como `non_comparative` porque no puede producir winner
 robusto.
 
+## Semantica oficial H-only y seguridad de `ML_prediction.HSX`
+
+El benchmark oficial de Hamiltonianos no entrena ni evalua el overlap S como si
+fuera una segunda componente fisica del Hamiltoniano. Para las rutas actuales de
+Graph2Mat, toda config oficial debe declarar:
+
+```yaml
+data:
+  out_matrix: hamiltonian
+  matrix_component_policy: h_only
+  n_matrix_components: 1
+  symmetric_matrix: true
+```
+
+En SIESTA no ortogonal, los contenedores raw pueden exponer `(H, S)`. En este
+repo, `matrix_component_policy: h_only` significa que la componente 0 es el
+target Hamiltoniano H y que S no entra como canal de perdida Hamiltoniana. Las
+configs generadas, los manifests y la evaluacion registran
+`target_component_policy`, `n_matrix_components`, `reference_component_count` y
+`prediction_component_count` para que no se mezclen resultados ambiguos con los
+runs corregidos.
+
+`ML_prediction.HSX` tampoco debe interpretarse automaticamente como un archivo
+SIESTA standalone fisicamente seguro. Graph2Mat puede escribir contenedores con
+componentes auxiliares/spin-like o un overlap propio que no coincide con el
+overlap de referencia. Las metricas espectrales y DOS oficiales resuelven el
+problema generalizado con el overlap SIESTA de referencia, `S_ref`, salvo que el
+overlap predicho haya sido validado explicitamente. Los manifests registran:
+
+- `overlap_source`
+- `prediction_own_overlap_used` o
+  `prediction_own_overlap_used_for_spectra`
+- `prediction_overlap_relative_frobenius_vs_reference`
+- `prediction_self_contained_hsx_safe`
+- `prediction_artifact_semantics`
+- `graph2mat_auxiliary_component_ignored`
+
+Si `prediction_self_contained_hsx_safe=false`, usa las metricas del evaluador
+como resultado oficial y no abras el `ML_prediction.HSX` predicho con su propio
+overlap para extraer bandas o DOS cientificas.
+
 ## Artefactos de trazabilidad
 
 Los artefactos importantes quedan bajo `Comparison/results/`:
@@ -231,7 +297,10 @@ Los artefactos importantes quedan bajo `Comparison/results/`:
 La recomendacion final solo debe tratarse como robusta cuando el manifest no
 contiene warnings severos de leakage, settings, checkpoint, presupuesto,
 metrica primaria incompleta o reproducibilidad, y hay suficientes seeds para el
-criterio configurado. Experimentos de una sola seed son exploratorios.
+criterio configurado. Tambien bloquean o degradan la conclusion los warnings de
+target semantics, prediction HSX safety, overlap source desconocido, Fermi level
+ausente para una metrica primaria near-Fermi, incompatibilidad material/SIESTA o
+checkpoint mismatch. Experimentos de una sola seed son exploratorios.
 
 Los CSV `orbital_pair_*` son diagnosticos para comparar mapas orbital-orbital
 tipo DeepH: usa `mae_union_meV` por `species_pair`, `row_orbital_index` y
@@ -367,6 +436,11 @@ comparaciones robustas requieren hashes compatibles de material, basis,
 pseudopotenciales y ajustes SIESTA; los runs antiguos sin procedencia aparecen
 como `unknown material`.
 
+El selector `Safety` de la UI no borra resultados archivados. Por defecto se
+muestran todos los estados, incluidos `unsafe`, `unknown`, `exploratory` y
+`non-comparative`, para auditoria. Si filtras a un subconjunto, el estado del
+filtro queda visible en la linea de estado de plots.
+
 Debajo de los plots hay una seccion destructiva para datasets generados. Permite
 listar artefactos, seleccionar uno o varios y borrar solo esos, o borrar todos
 los generados. El backend exige IDs concretos o `all=true`, valida rutas y
@@ -407,6 +481,7 @@ resumenes con `UNSAFE_UNVALIDATED_MATRIX_REFERENCE`.
 
 ```bash
 python3 Comparison/scripts/material_agnostic_smoke.py --case both
+python3 Comparison/scripts/g2m_deeph_smoke.py --dry-run
 python3 Comparison/scripts/verify_dataset_integrity.py --dry-run
 python3 Comparison/scripts/validate_sample_bundle.py --help
 python3 Comparison/scripts/check_geometry_leakage.py --help
@@ -415,6 +490,24 @@ python3 Comparison/scripts/evaluate_cross.py --help
 python3 Comparison/scripts/analyze_winners.py --help
 python3 Comparison/scripts/cleanup_generated_datasets.py --dry-run
 ```
+
+Re-evaluacion post-H-only/S_ref de un run archivado:
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_metrics.py <result_dir> --overwrite
+```
+
+Para grafeno u otros runs periodicos con malla Monkhorst-Pack no-gamma, la ruta
+k-point-aware es opt-in:
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_metrics.py <result_dir> \
+  --enable-kpoint-metrics \
+  --overwrite
+```
+
+Usa `--overwrite` solo cuando quieras reemplazar metricas antiguas de ese
+`result_dir` con metricas regeneradas bajo la semantica H-only/S_ref actual.
 
 El cleanup puede escribir `Comparison/generated_dataset_cleanup_manifest.json`
 como log local generado. Ese archivo no es fuente de verdad portable y queda
@@ -428,12 +521,13 @@ python3 -m unittest tests/test_analyze_winners_three_methods.py
 python3 -m unittest tests/test_method_provenance_fairness.py
 python3 -m unittest tests/test_material_agnostic_smoke.py
 python3 -m unittest tests/test_three_method_scientific_smoke.py
+python3 -m unittest tests/test_metrics_material_compatibility.py
 ```
 
 Chequeos rapidos de la UI:
 
 ```bash
-python3 -m py_compile Comparison/scripts/pipeline_ui.py Comparison/scripts/cleanup_generated_datasets.py
+python3 -m py_compile Comparison/scripts/pipeline_ui.py Comparison/scripts/evaluate_hamiltonian_metrics.py Comparison/scripts/cleanup_generated_datasets.py
 node --check Comparison/ui/app.js
 ```
 
@@ -448,6 +542,15 @@ node --check Comparison/ui/app.js
   diagnostico exploratorio.
 - Las metricas dependientes de Fermi solo son autoritativas si SIESTA proporciona
   un Fermi level real.
+- `ML_prediction.HSX` puede no ser un contenedor Hamiltoniano+overlap autonomo:
+  para referencias no ortogonales las metricas espectrales oficiales usan
+  `S_ref` y el manifest registra `prediction_artifact_semantics` para indicar si
+  el HSX predicho es seguro o no como problema generalizado standalone.
+- Las metricas antiguas sin `metrics_schema_version=h_only_sref_v2` ni
+  `metrics_provenance_generation=post_h_only_sref_prediction_safety` son
+  legado pre/post-fix desconocido: no deben mezclarse con resultados H-only
+  actuales hasta re-evaluarlas explicitamente con
+  `Comparison/scripts/evaluate_hamiltonian_metrics.py --overwrite`.
 - Las metricas comparables con DeepH son analogos del repositorio sobre la base
   Hamiltoniana archivada. No reproducen todavia H' local, k-path bands,
   SOC/complejos, optica/Berry/shift-current, incertidumbre de ensembles ni

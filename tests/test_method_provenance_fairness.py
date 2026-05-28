@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,19 @@ SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
 def load_script_module(name: str, relative_path: str):
     sys.path.insert(0, str(SCRIPTS_DIR))
     spec = importlib.util.spec_from_file_location(name, SCRIPTS_DIR / relative_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_repo_script_module(name: str, relative_path: str, *extra_paths: Path):
+    for path in (SCRIPTS_DIR, *extra_paths):
+        path_text = str(path)
+        if path_text not in sys.path:
+            sys.path.insert(0, path_text)
+    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / relative_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -359,6 +373,155 @@ class MethodProvenanceFairnessTests(unittest.TestCase):
         self.assertEqual(provenance["random_cartesian"]["basis_hash"], "basis_rc")
         self.assertEqual(provenance["random_cartesian"]["pseudopotential_hash"], "pseudo_rc")
         self.assertFalse(manifest["method_provenance_severe_warnings"])
+
+    def test_method_provenance_warnings_are_aggregated_as_blocking_warnings(self) -> None:
+        module = load_script_module("aggregate_cross_method_provenance_warning_tests", "aggregate_cross_metrics.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "md__on__test_md"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            (metrics_dir / "sparse_metrics.csv").write_text(
+                "sample,relative_frobenius_union\nsample_1,0.2\n",
+                encoding="utf-8",
+            )
+            (metrics_dir / "spectral_metrics.csv").write_text(
+                "sample,low_energy_rmse_eV\nsample_1,0.1\n",
+                encoding="utf-8",
+            )
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "train_method": "md",
+                        "test_set": "test_md",
+                        "method_provenance_warnings": ["md: Missing SIESTA settings hash."],
+                        "method_provenance_severe_warnings": [
+                            "md: Severe SIESTA settings mismatch: Save.HS"
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rows = module.aggregate_one(result_dir, "warning_case")
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Missing SIESTA settings hash", rows[0]["severe_warnings"])
+        self.assertIn("Save.HS", rows[0]["severe_warnings"])
+        self.assertIn("Missing SIESTA settings hash", rows[0]["method_provenance_warnings"])
+        self.assertIn("Save.HS", rows[0]["method_provenance_severe_warnings"])
+
+    def test_winner_analysis_treats_method_provenance_warning_as_severe(self) -> None:
+        module = load_script_module("analyze_winners_method_provenance_warning_tests", "analyze_winners.py")
+        rows = [
+            {
+                "train_method": "md",
+                "test_set": "test_md",
+                "low_energy_rmse_eV": 0.2,
+                "method_provenance_warnings": "md: Missing SIESTA settings hash.",
+                "seed": 1,
+            },
+            {
+                "train_method": "siesta_fc_cartesian",
+                "test_set": "test_md",
+                "low_energy_rmse_eV": 0.3,
+                "seed": 1,
+            },
+        ]
+        recommendation = module.build_recommendation(
+            rows,
+            summary_rows=[],
+            pair_rows=[],
+            primary_metric="low_energy_rmse_eV",
+        )
+
+        self.assertIn("Missing SIESTA settings hash", " | ".join(recommendation["severe_warnings"]))
+        self.assertNotEqual(recommendation["scientific_status"], "robust_comparison")
+        self.assertIsNone(recommendation["winner"])
+
+    def test_md_blocked_split_has_temporal_gap_between_partitions(self) -> None:
+        module = load_repo_script_module(
+            "md_blocked_split_fairness_tests",
+            "MD/scripts/generate_md_dataset.py",
+            REPO_ROOT / "MD" / "scripts",
+        )
+        items = [Path(str(index)) for index in range(10)]
+        split_ranges, excluded = module._split_blocked_with_gap(
+            items,
+            {"train": 4, "validation": 2, "test": 2},
+            temporal_gap=1,
+            block_order=["train", "validation", "test"],
+        )
+
+        split_by_frame = {
+            int(path.name): split
+            for split, paths in split_ranges.items()
+            for path in paths
+        }
+        for frame, split in split_by_frame.items():
+            for neighbor in (frame - 1, frame + 1):
+                if neighbor in split_by_frame:
+                    self.assertEqual(split, split_by_frame[neighbor])
+        self.assertEqual([int(path.name) for path, _reason in excluded], [4, 7])
+
+    def test_md_spread_split_summary_is_marked_exploratory(self) -> None:
+        module = load_repo_script_module(
+            "md_spread_split_fairness_tests",
+            "MD/scripts/generate_md_dataset.py",
+            REPO_ROOT / "MD" / "scripts",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            split_root = Path(tmp)
+            module.write_split_summary(
+                split_root,
+                {"train": [Path("0")], "validation": [Path("2")], "test": [Path("4")]},
+                [],
+                strategy="spread",
+                temporal_gap=0,
+                warnings=[module.SPREAD_SPLIT_WARNING],
+            )
+            summary = json.loads((split_root / "split_summary.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(summary["scientific_status"], "exploratory_temporal_leakage_risk")
+        self.assertTrue(any("interleaves trajectory frames" in warning for warning in summary["warnings"]))
+
+    def test_random_cartesian_grouped_split_keeps_family_together(self) -> None:
+        module = load_repo_script_module(
+            "random_cartesian_group_split_fairness_tests",
+            "AtomDisplacement/scripts/generate_random_cartesian_dataset.py",
+            REPO_ROOT / "AtomDisplacement" / "scripts",
+        )
+        samples = [
+            {"sample_id": "a1", "split_group_id": "family_a"},
+            {"sample_id": "a2", "split_group_id": "family_a"},
+            {"sample_id": "b1", "split_group_id": "family_b"},
+            {"sample_id": "c1", "split_group_id": "family_c"},
+        ]
+        split_samples, summary = module.grouped_split_assignment(samples)
+        module.assert_group_isolation(split_samples)
+
+        family_a_splits = [
+            split
+            for split, rows in split_samples.items()
+            if any(row["sample_id"].startswith("a") for row in rows)
+        ]
+        self.assertEqual(family_a_splits, ["train"])
+        self.assertTrue(summary["group_aware"])
+        self.assertEqual(summary["scientific_status"], "grouped_family_splits")
+
+    def test_random_cartesian_group_isolation_rejects_split_family(self) -> None:
+        module = load_repo_script_module(
+            "random_cartesian_group_isolation_fairness_tests",
+            "AtomDisplacement/scripts/generate_random_cartesian_dataset.py",
+            REPO_ROOT / "AtomDisplacement" / "scripts",
+        )
+        with self.assertRaisesRegex(RuntimeError, "split a family"):
+            module.assert_group_isolation(
+                {
+                    "train": [{"sample_id": "a1", "split_group_id": "family_a"}],
+                    "validation": [],
+                    "test": [{"sample_id": "a2", "split_group_id": "family_a"}],
+                }
+            )
 
     def test_random_cartesian_provenance_is_not_hidden_under_atom_displacement(self) -> None:
         module = load_script_module("pipeline_ui_method_provenance_alias_tests", "pipeline_ui.py")

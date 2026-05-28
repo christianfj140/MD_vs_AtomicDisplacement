@@ -4,7 +4,7 @@ paths:
   run_fdf_name: RUN.fdf
   run_out_name: RUN.out
   training_config_name: config.yaml
-  venv_activate: /home/christian/graph2mat-env/bin/activate
+  venv_activate: ${REPO_ROOT}/.venv/bin/activate
 material:
   preset: graphene
 commands:
@@ -14,6 +14,7 @@ commands:
 md:
   system_name: Graphene MD dataset
   system_label: siesta
+  run_fdf_template: ${REPO_ROOT}/materials/graphene/RUN.fdf
   type_of_run: verlet
   steps: 10
   temperature_K: 300.0
@@ -63,12 +64,12 @@ md:
     symbol: C
   coordinates_format: Ang
   kgrid_monkhorst_pack:
-  - - 6
+  - - 1
     - 0
     - 0
     - 0.0
   - - 0
-    - 6
+    - 1
     - 0
     - 0.0
   - - 0

@@ -29,5 +29,7 @@ tensorboard
 torch
 torch-geometric
 e3nn
+cuequivariance
+cuequivariance-torch
 mace-torch
 graph2mat @ git+ssh://git@github.com/christianfj140/graph2mat.git@hamiltonian-spin-colineal-support

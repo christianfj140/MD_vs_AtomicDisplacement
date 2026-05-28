@@ -13,6 +13,8 @@ const resultPipelines = [
   { key: "md", label: "MD", resultsDir: "results_md" },
   { key: "atom_displacement", label: "FC Cartesian", resultsDir: "results_atomdisp" },
   { key: "random_cartesian", label: "Random Cartesian", resultsDir: "results_random_cartesian" },
+  { key: "deeph_comparison", label: "Graph2Mat vs DeepH", resultsDir: "graphene_w90_deeph_fair_benchmark" },
+  { key: "graph2mat_deeph_comparison", label: "Graph2Mat sweep + DeepH", resultsDir: "graphene_w90_deeph_fair_benchmark" },
 ];
 
 const METHOD_ID_ALIASES = {
@@ -42,6 +44,8 @@ const TEST_SET_DISPLAY_LABELS = {
 
 const PLOTLY_SCRIPT_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js";
 const MATHJAX_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
+const G2M_DEEPH_LIVE_METRICS_URL = "http://127.0.0.1:8781/api/g2m-deeph/live-plots";
+const G2M_DEEPH_LIVE_PLOT_REFRESH_MS = 15000;
 let plotlyLoadPromise = null;
 let mathJaxLoadPromise = null;
 
@@ -161,7 +165,7 @@ function canonicalDisplayText(value) {
     .replace(/\brandom_cartesian\b/g, "Random Cartesian");
 }
 
-const DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate";
+const DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate";
 const PRIMARY_METRIC_DEFAULT = "low_energy_rmse_eV";
 const CROSS_PLOT_METRIC_DEFAULT = "low_energy_rmse_eV";
 const UNKNOWN_MATERIAL_LABEL = "unknown material";
@@ -317,6 +321,20 @@ const METRIC_HELP = {
     purpose: "Evalua si el modelo conserva donde existe acoplamiento/matriz activa, no solo el valor numerico de lo predicho.",
     direction: "Mayor es mejor; 1 es perfecto y 0 es el peor caso.",
   },
+  h_mae_eV: {
+    label: "Weighted H(k) MAE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s\\sum_k w_k\\operatorname{MAE}(|H^{pred}(k)-H^{ref}(k)|)",
+    description: "MAE complejo del Hamiltoniano evaluado en la malla de k-points, ponderado por pesos normalizados.",
+    purpose: "Mide error matricial periodico sin colapsar un run k-point a una aproximacion gamma.",
+    direction: "Menor es mejor; comparalo solo con otros resultados k-point-aware equivalentes.",
+  },
+  h_rmse_eV: {
+    label: "Weighted H(k) RMSE",
+    formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s\\sum_k w_k\\operatorname{RMSE}(|H^{pred}(k)-H^{ref}(k)|)",
+    description: "RMSE complejo de H(k), ponderado en la malla de k-points.",
+    purpose: "Penaliza mas los errores grandes en bloques o k-points concretos.",
+    direction: "Menor es mejor; no es equivalente a la metrica sparse gamma-only.",
+  },
   dos_wasserstein_eV: {
     label: "DOS Wasserstein-1",
     formula: "\\bar{m}=\\frac{1}{N_s}\\sum_s \\int |\\operatorname{CDF}_{ref}(E)-\\operatorname{CDF}_{pred}(E)|\\,dE",
@@ -363,6 +381,18 @@ const PLOT_HELP_BY_ID = {
   "plot-dos": {
     title: "Distancia DOS total",
     metricKey: "dos_wasserstein_eV",
+  },
+  "plot-kpoint-h": {
+    title: "K-point matrix H(k)",
+    metricKey: "h_mae_eV",
+  },
+  "plot-kpoint-low-energy": {
+    title: "K-point low-energy spectrum",
+    metricKey: "low_energy_rmse_eV",
+  },
+  "plot-kpoint-dos": {
+    title: "K-point DOS",
+    metricKey: "dos_mae_500_fermi_window",
   },
   "plot-gap": {
     title: "Error de gap",
@@ -464,6 +494,15 @@ const CROSS_PLOT_HELP_BY_ID = {
 const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
+  g2mDeephOffset: 0,
+  g2mDeephWasRunning: false,
+  g2mDeephValidation: null,
+  g2mDeephResults: null,
+  g2mDeephPlotPayload: null,
+  g2mDeephPlotsInFlight: false,
+  g2mDeephLastPlotRefreshAt: 0,
+  g2mDeephDatasets: [],
+  g2mDeephDatasetsLoaded: false,
   polling: null,
   pollingInFlight: false,
   pollingFailures: 0,
@@ -814,11 +853,1371 @@ async function pollLogs() {
   );
   await pollStatus();
   await pollExperimentLogs();
+  await pollG2MDeepHLogs();
   updateVenvCommandPreview();
 }
 
 function inputValue(id) {
   return String(document.getElementById(id)?.value || "").trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function numericInputValue(id, fallback = null) {
+  const raw = inputValue(id);
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function g2mDeephDatasetMode() {
+  return document.getElementById("g2m-deeph-dataset-mode")?.value || "reuse_validated";
+}
+
+function updateG2MDeepHDatasetPickerVisibility() {
+  const panel = document.getElementById("g2m-deeph-dataset-picker-panel");
+  if (!panel) return;
+  panel.hidden = ["generate_new", "full_strict_pipeline"].includes(g2mDeephDatasetMode());
+}
+
+function renderG2MDeepHDatasetPicker(payload = null) {
+  const list = document.getElementById("g2m-deeph-dataset-picker-list");
+  const status = document.getElementById("g2m-deeph-dataset-picker-status");
+  if (!list || !status) return;
+  updateG2MDeepHDatasetPickerVisibility();
+  const datasets = payload?.datasets || state.g2mDeephDatasets || [];
+  const ready = datasets.filter((item) => item.benchmark_ready);
+  status.textContent = datasets.length
+    ? `${ready.length}/${datasets.length} benchmark-ready datasets available`
+    : "No joint benchmark datasets found.";
+  if (!datasets.length) {
+    list.classList.add("muted-text");
+    list.textContent = "No datasets found under Comparison/datasets.";
+    return;
+  }
+  list.classList.remove("muted-text");
+  const currentRoot = inputValue("g2m-deeph-dataset-root");
+  list.innerHTML = `
+    <div class="cleanup-table-wrap g2m-deeph-table-wrap">
+      <table class="cleanup-table g2m-deeph-table">
+        <thead>
+          <tr>
+            <th>Select</th>
+            <th>Dataset</th>
+            <th>Snapshots</th>
+            <th>Ready</th>
+            <th>Path</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${datasets
+            .map((item) => {
+              const checked = item.dataset_root === currentRoot || item.relative_path === currentRoot ? "checked" : "";
+              const disabled = item.benchmark_ready ? "" : "disabled";
+              const missing = item.missing_required_counts && Object.keys(item.missing_required_counts).length
+                ? ` · missing ${escapeHtml(JSON.stringify(item.missing_required_counts))}`
+                : "";
+              const errors = Array.isArray(item.errors) && item.errors.length
+                ? `<div class="muted-text">${escapeHtml(item.errors.slice(0, 2).join(" | "))}</div>`
+                : "";
+              return `
+                <tr>
+                  <td>
+                    <input
+                      class="g2m-deeph-dataset-checkbox"
+                      type="checkbox"
+                      value="${escapeHtml(item.dataset_root)}"
+                      ${checked}
+                      ${disabled}
+                      aria-label="Select ${escapeHtml(item.label || item.relative_path)}"
+                    />
+                  </td>
+                  <td>${escapeHtml(item.label || item.relative_path || item.dataset_root)}</td>
+                  <td>${Number(item.valid_snapshots || 0)}/${Number(item.total_snapshots || 0)}</td>
+                  <td>${item.benchmark_ready ? "yes" : `no${missing}`}${errors}</td>
+                  <td><code>${escapeHtml(item.relative_path || item.dataset_root)}</code></td>
+                </tr>
+              `;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadG2MDeepHDatasets() {
+  const payload = await request("/api/g2m-deeph/datasets");
+  state.g2mDeephDatasets = payload.datasets || [];
+  state.g2mDeephDatasetsLoaded = true;
+  renderG2MDeepHDatasetPicker(payload);
+  return payload;
+}
+
+function selectG2MDeepHDatasetFromCheckbox(checkbox) {
+  if (!checkbox?.checked) return;
+  document.querySelectorAll(".g2m-deeph-dataset-checkbox").forEach((node) => {
+    if (node !== checkbox) node.checked = false;
+  });
+  const root = checkbox.value;
+  const rootInput = document.getElementById("g2m-deeph-dataset-root");
+  if (rootInput) rootInput.value = root;
+  const mode = document.getElementById("g2m-deeph-dataset-mode");
+  if (mode && ["generate_new", "full_strict_pipeline"].includes(mode.value)) mode.value = "reuse_validated";
+  updateG2MDeepHDatasetPickerVisibility();
+  renderG2MDeepHDatasetSweepPreview();
+  showToast("Dataset seleccionado para Graph2Mat vs DeepH.");
+}
+
+function g2mDeephDatasetSweepRecipes() {
+  syncDatasetEditorText("g2m_deeph_md");
+  const specs = parseMdDatasetTableSpecsFromText(
+    document.getElementById("g2m-deeph-md-sweep-table")?.value || "",
+  );
+  return applyDatasetSeeds("g2m_deeph_md", specs).map((spec, index) => ({
+    recipe_id: `md_sweep_${index + 1}_${spec.size}`,
+    label: `MD sweep ${index + 1}: ${spec.size} snapshots`,
+    ...datasetSeedPatch(spec),
+    blocks: spec.blocks,
+  }));
+}
+
+function g2mDeephDatasetSweepPayload() {
+  const enabled = ["generate_new", "full_strict_pipeline"].includes(g2mDeephDatasetMode());
+  const recipes = enabled ? g2mDeephDatasetSweepRecipes() : [];
+  if (enabled && !recipes.length) {
+    throw new Error("Generate/full strict joint dataset: anade al menos un dataset MD.");
+  }
+  return {
+    enabled,
+    max_datasets: numericInputValue("g2m-deeph-dataset-sweep-max", 20),
+    recipes,
+  };
+}
+
+function g2mDeephSplitCounts(size) {
+  const ratios = {
+    train: numericInputValue("g2m-deeph-split-train", 0.8),
+    validation: numericInputValue("g2m-deeph-split-validation", 0.1),
+    test: numericInputValue("g2m-deeph-split-test", 0.1),
+  };
+  const raw = Object.fromEntries(Object.entries(ratios).map(([key, value]) => [key, size * value]));
+  const counts = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, Math.floor(value)]));
+  let remainder = size - Object.values(counts).reduce((sum, value) => sum + value, 0);
+  const order = Object.keys(counts).sort(
+    (left, right) => raw[right] - counts[right] - (raw[left] - counts[left]) || ratios[right] - ratios[left],
+  );
+  for (const key of order.slice(0, remainder)) counts[key] += 1;
+  return counts;
+}
+
+function renderG2MDeepHDatasetSweepPreview() {
+  const container = document.getElementById("g2m-deeph-dataset-sweep-preview");
+  if (!container) return;
+  if (!["generate_new", "full_strict_pipeline"].includes(g2mDeephDatasetMode())) {
+    container.textContent = "Selecciona Generate new joint dataset o Full strict pipeline para generar datasets MD/SIESTA desde este panel.";
+    return;
+  }
+  try {
+    const recipes = g2mDeephDatasetSweepRecipes();
+    if (!recipes.length) {
+      container.textContent = "Dataset sweep enabled, but no MD groups are defined.";
+      return;
+    }
+    const totalSnapshots = recipes.reduce(
+      (sum, recipe) => sum + recipe.blocks.reduce((inner, block) => inner + Number(block.n_snapshots || 0), 0),
+      0,
+    );
+    const warning =
+      totalSnapshots >= 1000
+        ? `<div class="performance-warning">Total planned snapshots: ${totalSnapshots}. SIESTA generation may take a long time.</div>`
+        : "";
+    container.innerHTML = `
+      ${warning}
+      <div class="cleanup-table-wrap g2m-deeph-table-wrap">
+        <table class="cleanup-table g2m-deeph-table">
+          <thead>
+            <tr>
+              <th>Recipe</th>
+              <th>Total</th>
+              <th>Blocks</th>
+              <th>Temperatures</th>
+              <th>Split counts</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${recipes
+              .map((recipe) => {
+                const total = recipe.blocks.reduce((sum, block) => sum + Number(block.n_snapshots || 0), 0);
+                const counts = g2mDeephSplitCounts(total);
+                return `
+                  <tr>
+                    <td>${escapeHtml(recipe.recipe_id)}</td>
+                    <td>${total}</td>
+                    <td>${recipe.blocks.length}</td>
+                    <td>${escapeHtml(recipe.blocks.map((block) => `${block.temperature_K} K`).join(", "))}</td>
+                    <td>${counts.train}/${counts.validation}/${counts.test}</td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+      <p class="field-help">Every planned dataset will be generated with the joint Graph2Mat+DeepH artifact contract.</p>
+    `;
+  } catch (error) {
+    container.textContent = error.message;
+  }
+}
+
+function parseSweepBoolList(id) {
+  return String(inputValue(id) || "")
+    .split(/[\n,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const normalized = item.toLowerCase();
+      if (["1", "true", "yes", "y", "on", "si", "sí"].includes(normalized)) return true;
+      if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+      throw new Error(`${id}: boolean value expected, got ${item}`);
+    });
+}
+
+function setPayloadList(target, key, values) {
+  if (values.length) target[key] = [...new Set(values.map((value) => JSON.stringify(value)))].map((value) => JSON.parse(value));
+}
+
+function g2mDeephTrainingSweepPayload(performance = null) {
+  const enabled = Boolean(document.getElementById("g2m-deeph-training-sweep-enabled")?.checked);
+  if (!enabled) return { enabled: false };
+  if (g2mDeephDatasetMode() === "generate_new") {
+    throw new Error("Training sweep: primero genera/valida el dataset joint; despues lanza el sweep sobre Reuse existing validated joint dataset, o usa Full strict pipeline.");
+  }
+  const common = {};
+  setPayloadList(common, "seeds", parseSweepNumberList("g2m-deeph-sweep-common-seeds", "G2M/DeepH sweep seeds", { integer: true, min: 0 }));
+  setPayloadList(common, "epochs", parseSweepNumberList("g2m-deeph-sweep-common-epochs", "G2M/DeepH sweep epochs", { integer: true, min: 1 }));
+  setPayloadList(common, "learning_rate", parseSweepNumberList("g2m-deeph-sweep-common-lr", "G2M/DeepH sweep learning rate", { min: 0.000001 }));
+  setPayloadList(common, "batch_size", parseSweepNumberList("g2m-deeph-sweep-common-batch-size", "G2M/DeepH sweep batch size", { integer: true, min: 1 }));
+
+  const graph2mat = { enabled: Boolean(document.getElementById("g2m-deeph-sweep-graph2mat-enabled")?.checked) };
+  setPayloadList(graph2mat, "num_interactions", parseSweepNumberList("g2m-deeph-sweep-g2m-interactions", "G2M sweep interactions", { integer: true, min: 1 }));
+  setPayloadList(graph2mat, "correlation", parseSweepNumberList("g2m-deeph-sweep-g2m-correlation", "G2M sweep correlation", { integer: true, min: 1 }));
+  setPayloadList(graph2mat, "max_ell", parseSweepNumberList("g2m-deeph-sweep-g2m-max-ell", "G2M sweep max ell", { integer: true, min: 0 }));
+  setPayloadList(graph2mat, "hidden_irreps_channels", parseSweepNumberList("g2m-deeph-sweep-g2m-hidden-channels", "G2M sweep hidden channels", { integer: true, min: 1 }));
+  setPayloadList(graph2mat, "hidden_irreps", parseSweepTextList("g2m-deeph-sweep-g2m-hidden-irreps"));
+  setPayloadList(graph2mat, "batch_size", parseSweepNumberList("g2m-deeph-sweep-g2m-batch-size", "G2M sweep batch size", { integer: true, min: 1 }));
+  setPayloadList(graph2mat, "loss", parseSweepTextList("g2m-deeph-sweep-g2m-loss"));
+  setPayloadList(graph2mat, "loss_kwargs", parseSweepJsonObjectList("g2m-deeph-sweep-g2m-loss-kwargs", "G2M sweep loss kwargs"));
+  setPayloadList(graph2mat, "loader_threads", parseSweepNumberList("g2m-deeph-sweep-g2m-loader-threads", "G2M sweep loader threads", { integer: true, min: 1 }));
+  if (graph2mat.enabled && !graph2mat.batch_size?.length && !common.batch_size?.length && performance?.batch_size) {
+    graph2mat.batch_size = [performance.batch_size];
+  }
+  if (graph2mat.hidden_irreps?.length && graph2mat.hidden_irreps_channels?.length) {
+    throw new Error("Training sweep Graph2Mat: usa hidden irreps o hidden irreps channels, no ambos.");
+  }
+
+  const deeph = { enabled: Boolean(document.getElementById("g2m-deeph-sweep-deeph-enabled")?.checked) };
+  setPayloadList(deeph, "optimizer", parseSweepTextList("g2m-deeph-sweep-deeph-optimizer"));
+  setPayloadList(deeph, "weight_decay", parseSweepNumberList("g2m-deeph-sweep-deeph-weight-decay", "DeepH sweep weight decay", { min: 0 }));
+  setPayloadList(deeph, "criterion", parseSweepTextList("g2m-deeph-sweep-deeph-criterion"));
+  setPayloadList(deeph, "atom_fea_len", parseSweepNumberList("g2m-deeph-sweep-deeph-atom-fea-len", "DeepH sweep atom_fea_len", { integer: true, min: 1 }));
+  setPayloadList(deeph, "edge_fea_len", parseSweepNumberList("g2m-deeph-sweep-deeph-edge-fea-len", "DeepH sweep edge_fea_len", { integer: true, min: 1 }));
+  setPayloadList(deeph, "gauss_stop", parseSweepNumberList("g2m-deeph-sweep-deeph-gauss-stop", "DeepH sweep gauss_stop", { min: 0 }));
+  setPayloadList(deeph, "num_l", parseSweepNumberList("g2m-deeph-sweep-deeph-num-l", "DeepH sweep num_l", { integer: true, min: 1 }));
+  setPayloadList(deeph, "if_lcmp", parseSweepBoolList("g2m-deeph-sweep-deeph-if-lcmp"));
+  setPayloadList(deeph, "normalization", parseSweepTextList("g2m-deeph-sweep-deeph-normalization"));
+  setPayloadList(deeph, "atom_update_net", parseSweepTextList("g2m-deeph-sweep-deeph-atom-update-net"));
+  setPayloadList(deeph, "retain_edge_fea", parseSweepBoolList("g2m-deeph-sweep-deeph-retain-edge-fea"));
+  if (!graph2mat.enabled && !deeph.enabled) {
+    throw new Error("Training sweep necesita Graph2Mat o DeepH activado.");
+  }
+  return {
+    enabled: true,
+    max_runs: numericInputValue("g2m-deeph-training-sweep-max-runs", 128),
+    apply_to_datasets: ["all"],
+    error_policy: inputValue("g2m-deeph-training-sweep-error-policy") || "continue_on_error",
+    common,
+    graph2mat,
+    deeph,
+  };
+}
+
+function g2mDeephSweepGridCount(section) {
+  return Object.entries(section || {})
+    .filter(([key]) => key !== "enabled")
+    .reduce((total, [, values]) => total * Math.max(1, Array.isArray(values) ? values.length : 1), 1);
+}
+
+function renderG2MDeepHTrainingSweepPreview() {
+  const container = document.getElementById("g2m-deeph-training-sweep-preview");
+  if (!container) return;
+  try {
+    const payload = g2mDeephTrainingSweepPayload();
+    if (!payload.enabled) {
+      container.textContent = "Training sweep disabled.";
+      return;
+    }
+    const fullStrict = g2mDeephDatasetMode() === "full_strict_pipeline";
+    const datasetMultiplier = fullStrict ? Math.max(1, g2mDeephDatasetSweepRecipes().length) : 1;
+    const commonCount = g2mDeephSweepGridCount(payload.common);
+    const graph2matCount = payload.graph2mat.enabled ? datasetMultiplier * commonCount * g2mDeephSweepGridCount(payload.graph2mat) : 0;
+    const deephCount = payload.deeph.enabled ? datasetMultiplier * commonCount * g2mDeephSweepGridCount(payload.deeph) : 0;
+    const total = graph2matCount + deephCount;
+    const warning =
+      total > Number(payload.max_runs)
+        ? `<div class="performance-warning">Planned runs ${total} exceed max_runs=${payload.max_runs}.</div>`
+        : "";
+    container.innerHTML = `
+      ${warning}
+      <div class="cleanup-table-wrap g2m-deeph-table-wrap">
+        <table class="cleanup-table g2m-deeph-table">
+          <thead><tr><th>Model</th><th>Planned configs</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Graph2Mat</td><td>${graph2matCount}</td><td>Uses existing Graph2Mat sweep semantics</td></tr>
+            <tr><td>DeepH</td><td>${deephCount}</td><td>Uses DeepH train.ini overrides only</td></tr>
+            <tr><td>Total</td><td>${total}</td><td>${fullStrict ? `${datasetMultiplier} generated dataset(s) in full strict pipeline before training` : "No SIESTA generation in training sweep"}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch (error) {
+    container.textContent = error.message;
+  }
+}
+
+function g2mDeephPayload() {
+  const datasetMode = g2mDeephDatasetMode();
+  const fullStrict = datasetMode === "full_strict_pipeline";
+  const snapshotRoot = inputValue("g2m-deeph-snapshot-root");
+  const runId = inputValue("g2m-deeph-run-id");
+  const device = inputValue("g2m-deeph-deeph-device") || "cuda:0";
+  const performance = performanceSettings();
+  const datasetSweep = g2mDeephDatasetSweepPayload();
+  const trainingSweep = g2mDeephTrainingSweepPayload(performance);
+  if (fullStrict && !trainingSweep.enabled) {
+    throw new Error("Full strict pipeline requiere activar Training sweep.");
+  }
+  const payload = {
+    material_preset: inputValue("g2m-deeph-material-preset") || "graphene",
+    dataset_mode: fullStrict ? "full_strict_pipeline" : datasetSweep.enabled ? "generate_new" : datasetMode,
+    run_mode: fullStrict ? "full_strict_pipeline" : datasetSweep.enabled || datasetMode === "generate_new" ? "generate_datasets_only" : undefined,
+    dataset_root: inputValue("g2m-deeph-dataset-root"),
+    system_label: inputValue("g2m-deeph-system-label") || "graphene",
+    output_root: inputValue("g2m-deeph-output-root"),
+    compute_accelerator: performance.compute_accelerator,
+    performance,
+    snapshot_count: numericInputValue("g2m-deeph-snapshot-count", null),
+    split_mode: inputValue("g2m-deeph-split-mode") || "blocked_with_gap",
+    dataset_sweep: datasetSweep,
+    training_sweep: trainingSweep,
+    splits: {
+      train: numericInputValue("g2m-deeph-split-train", 0.8),
+      validation: numericInputValue("g2m-deeph-split-validation", 0.1),
+      test: numericInputValue("g2m-deeph-split-test", 0.1),
+    },
+    allow_repair: datasetMode === "repair_expensive",
+    repair_mode: datasetMode === "repair_expensive",
+    require_tshs: true,
+    require_tsde: true,
+    require_run_output: true,
+    graph2mat_overrides: {
+      max_epochs: numericInputValue("g2m-deeph-g2m-epochs", 200),
+      optim_lr: numericInputValue("g2m-deeph-g2m-lr", 0.005),
+      batch_size: numericInputValue("g2m-deeph-g2m-batch-size", 32),
+      hidden_irreps: inputValue("g2m-deeph-g2m-hidden-irreps") || "32x0e + 32x1o + 32x2e",
+    },
+    deeph: {
+      repo_path: optionalTextInput("g2m-deeph-deeph-repo"),
+      python: optionalTextInput("g2m-deeph-deeph-python"),
+      epochs: numericInputValue("g2m-deeph-deeph-epochs", 200),
+      batch_size: numericInputValue("g2m-deeph-deeph-batch-size", 4),
+      learning_rate: numericInputValue("g2m-deeph-deeph-lr", 0.001),
+      device,
+      disable_cuda: device.trim().toLowerCase() === "cpu",
+    },
+  };
+  if (snapshotRoot) payload.snapshot_root = snapshotRoot;
+  if (runId) payload.run_id = runId;
+  return payload;
+}
+
+function clearNode(node) {
+  if (node) node.textContent = "";
+}
+
+function appendKeyValue(container, label, value) {
+  const row = document.createElement("div");
+  row.className = "summary-row";
+  const key = document.createElement("span");
+  key.textContent = label;
+  const val = document.createElement("strong");
+  val.textContent = value == null || value === "" ? "-" : String(value);
+  row.append(key, val);
+  container.appendChild(row);
+}
+
+function g2mDeephValue(value, digits = 5) {
+  const number = finiteNumber(value);
+  if (number == null) {
+    if (value === true) return "yes";
+    if (value === false) return "no";
+    return value == null || value === "" ? "-" : String(value);
+  }
+  if (Math.abs(number) >= 1000 || (Math.abs(number) > 0 && Math.abs(number) < 0.001)) {
+    return number.toExponential(3);
+  }
+  return Number(number).toPrecision(digits);
+}
+
+function g2mDeephIntegerValue(value) {
+  const number = finiteNumber(value);
+  return number == null ? g2mDeephValue(value) : String(Math.round(number));
+}
+
+function appendG2MDeepHHeading(container, title, subtitle = "") {
+  const block = document.createElement("div");
+  block.className = "g2m-deeph-section-heading";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  block.appendChild(heading);
+  if (subtitle) {
+    const text = document.createElement("p");
+    text.textContent = subtitle;
+    block.appendChild(text);
+  }
+  container.appendChild(block);
+}
+
+function appendG2MDeepHTable(container, title, columns, rows, emptyMessage = "No data available.") {
+  appendG2MDeepHHeading(container, title);
+  if (!rows?.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted-text";
+    empty.textContent = emptyMessage;
+    container.appendChild(empty);
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "cleanup-table-wrap g2m-deeph-table-wrap";
+  if (["Metrics vs dataset size", "Timing vs dataset size"].includes(title)) {
+    wrap.classList.add("g2m-deeph-scroll-table-wrap");
+  }
+  const table = document.createElement("table");
+  table.className = "cleanup-table g2m-deeph-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const column of columns) {
+    const th = document.createElement("th");
+    th.textContent = column.label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  const tbody = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    for (const column of columns) {
+      const td = document.createElement("td");
+      const raw = typeof column.value === "function" ? column.value(row) : row[column.key];
+      td.textContent = column.format ? column.format(raw, row) : g2mDeephValue(raw);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  container.appendChild(wrap);
+}
+
+function renderG2MDeepHArtifactSummary(payload) {
+  const container = document.getElementById("g2m-deeph-artifact-summary");
+  if (!container) return;
+  container.classList.remove("muted-text");
+  container.classList.add("g2m-deeph-summary-stack");
+  container.textContent = "";
+  if (!payload) {
+    container.classList.add("muted-text");
+    container.classList.remove("g2m-deeph-summary-stack");
+    container.textContent = "No dataset validation yet.";
+    return;
+  }
+  const summary = payload.artifact_summary || {};
+  appendG2MDeepHTable(
+    container,
+    "Artifact completeness",
+    [
+      { key: "contract", label: "Contract" },
+      { key: "benchmark_ready", label: "Ready" },
+      { key: "valid_snapshots", label: "Valid snapshots" },
+      { key: "invalid_snapshots", label: "Invalid" },
+      { key: "repair_required_snapshots", label: "Repair required" },
+      { key: "basis_present", label: "Basis" },
+      { key: "pseudopotential_provenance_present", label: "Pseudos provenance" },
+    ],
+    [
+      {
+        contract: payload.contract_name,
+        benchmark_ready: payload.benchmark_ready,
+        valid_snapshots: `${summary.valid_snapshots || 0}/${summary.total_snapshots || 0}`,
+        invalid_snapshots: summary.invalid_snapshots || 0,
+        repair_required_snapshots: summary.repair_required_snapshots || 0,
+        basis_present: summary.basis_present ? "present" : "not required / missing",
+        pseudopotential_provenance_present: summary.pseudopotential_provenance_present ? "present" : "not required / missing",
+      },
+    ],
+  );
+  const missingRows = Object.entries(summary.missing_required_counts || {}).map(([artifact, count]) => ({
+    artifact,
+    count,
+  }));
+  appendG2MDeepHTable(
+    container,
+    "Missing required artifacts",
+    [
+      { key: "artifact", label: "Artifact" },
+      { key: "count", label: "Snapshots" },
+    ],
+    missingRows,
+    "No required artifacts are missing.",
+  );
+}
+
+function renderG2MDeepHRankingSummary(container, ranking) {
+  if (!container || !ranking) return;
+  const recommendation = ranking.recommendation || {};
+  const status = recommendation.status || "unknown";
+  const robust = String(status).startsWith("robust_");
+  const exploratory = String(status).startsWith("exploratory_");
+  const banner = document.createElement("div");
+  banner.className = "comparison-status-banner";
+  banner.classList.toggle("diagnostic", status === "diagnostic_only" || recommendation.scientific_status === "diagnostic_only");
+  banner.classList.toggle("invalid", String(status).startsWith("invalid_") || status === "no_robust_winner");
+  banner.textContent = robust
+    ? `Robust winner: ${methodDisplayLabel(recommendation.winner || recommendation.winning_model || "unknown")} (${recommendation.primary_metric || "primary metric"})`
+    : exploratory
+    ? `Exploratory best run: ${methodDisplayLabel(recommendation.winner || recommendation.winning_model || "unknown")} (${recommendation.primary_metric || "primary metric"})`
+    : `No robust Graph2Mat/DeepH winner: ${status}. ${recommendation.reason || "Review gates and warnings."}`;
+  container.appendChild(banner);
+
+  appendG2MDeepHTable(
+    container,
+    "Ranking recommendation",
+    [
+      { key: "status", label: "Status" },
+      { key: "scientific_status", label: "Scientific status" },
+      { key: "winner", label: "Winner" },
+      { key: "primary_metric", label: "Primary metric" },
+      { key: "adapter_equivalence_status", label: "Adapter equivalence" },
+      { key: "split_audit_status", label: "DeepH split audit" },
+      { key: "reason", label: "Reason" },
+    ],
+    [
+      {
+        status,
+        scientific_status: recommendation.scientific_status || "-",
+        winner: recommendation.winner ? methodDisplayLabel(recommendation.winner) : "none",
+        primary_metric: recommendation.primary_metric || "-",
+        adapter_equivalence_status: recommendation.adapter_equivalence_status || "-",
+        split_audit_status: recommendation.split_audit_status || "-",
+        reason: recommendation.reason || "-",
+      },
+    ],
+  );
+
+  const bestRows = (ranking.best_runs_by_model || []).filter((row) => row.scope === "global" || row.rank === 1);
+  appendG2MDeepHTable(
+    container,
+    "Best Graph2Mat / DeepH runs",
+    [
+      { key: "model", label: "Model", format: methodDisplayLabel },
+      { key: "scope", label: "Scope" },
+      { key: "dataset_id", label: "Dataset" },
+      { key: "config_id", label: "Config" },
+      { key: "metric", label: "Metric" },
+      {
+        key: "mean",
+        label: "Value",
+        format: (value) => {
+          const numeric = finiteNumber(value);
+          return numeric == null ? "-" : numeric.toPrecision(5);
+        },
+      },
+      { key: "seed_stability_status", label: "Seeds" },
+      { key: "scientific_status", label: "Scientific" },
+      { key: "adapter_equivalence_status", label: "Adapter" },
+      { key: "split_audit_status", label: "Split audit" },
+    ],
+    bestRows,
+    "No best-run ranking available.",
+  );
+
+  appendG2MDeepHTable(
+    container,
+    "Pairwise Graph2Mat vs DeepH",
+    [
+      { key: "dataset_id", label: "Dataset" },
+      { key: "metric", label: "Metric" },
+      { key: "winner", label: "Winner", format: (value) => (value ? methodDisplayLabel(value) : "none") },
+      { key: "status", label: "Status" },
+      {
+        key: "percent_improvement_challenger_vs_baseline",
+        label: "Improvement %",
+        format: (value) => {
+          const numeric = finiteNumber(value);
+          return numeric == null ? "-" : numeric.toFixed(2);
+        },
+      },
+    ],
+    ranking.pairwise_graph2mat_vs_deeph || [],
+    "No pairwise comparison available.",
+  );
+
+  appendG2MDeepHTable(
+    container,
+    "Accuracy-vs-time Pareto",
+    [
+      { key: "model", label: "Model", format: methodDisplayLabel },
+      { key: "config_id", label: "Config" },
+      { key: "metric", label: "Metric" },
+      {
+        key: "metric_value",
+        label: "Metric value",
+        format: (value) => {
+          const numeric = finiteNumber(value);
+          return numeric == null ? "-" : numeric.toPrecision(5);
+        },
+      },
+      {
+        key: "total_time_seconds",
+        label: "Seconds",
+        format: (value) => {
+          const numeric = finiteNumber(value);
+          return numeric == null ? "-" : numeric.toFixed(2);
+        },
+      },
+      { key: "pareto_status", label: "Status" },
+    ],
+    ranking.pareto_accuracy_cost || [],
+    "No robust Pareto frontier available.",
+  );
+
+  const gateRows = [
+    ...(recommendation.gates_failed || []).map((gate) => ({ gate, status: "failed" })),
+    ...(recommendation.gates_passed || []).map((gate) => ({ gate, status: "passed" })),
+  ];
+  appendG2MDeepHTable(
+    container,
+    "Scientific gates",
+    [
+      { key: "gate", label: "Gate" },
+      { key: "status", label: "Status" },
+    ],
+    gateRows,
+    "No gate information available.",
+  );
+}
+
+function g2mDeephPhaseLabel(phase) {
+  return String(phase || "idle").replace(/_/g, " ");
+}
+
+function renderG2MDeepHPhaseProgress(status = {}) {
+  const container = document.getElementById("g2m-deeph-phase-progress");
+  if (!container) return;
+  container.textContent = "";
+  const phases = status.phases || [];
+  const current = status.stage || "idle";
+  const activeIndex = phases.indexOf(current);
+  for (const phase of phases) {
+    const index = phases.indexOf(phase);
+    const chip = document.createElement("span");
+    chip.className = "phase-chip";
+    if (phase === current) chip.classList.add("active");
+    if (activeIndex >= 0 && index < activeIndex) chip.classList.add("done");
+    chip.textContent = g2mDeephPhaseLabel(phase);
+    container.appendChild(chip);
+  }
+}
+
+function renderG2MDeepHWarnings({ status = null, validation = null, results = null } = {}) {
+  const banner = document.getElementById("g2m-deeph-warning-summary");
+  if (!banner) return;
+  const common = results?.results?.common_metrics || results?.common_metrics || null;
+  const warnings = [
+    ...((status && status.warnings) || []),
+    ...((validation && validation.errors) || []),
+    ...((validation && validation.warnings) || []),
+    ...((common && common.warnings) || []),
+  ].filter(Boolean);
+  banner.classList.toggle("hidden", warnings.length === 0);
+  if (!warnings.length) {
+    banner.textContent = "";
+    return;
+  }
+  banner.textContent = warnings
+    .slice(0, 8)
+    .map((warning) => {
+      if (typeof warning === "string") return warning;
+      return [warning.severity, warning.kind || warning.code, warning.message]
+        .filter(Boolean)
+        .join(": ");
+    })
+    .join(" | ");
+}
+
+function updateG2MDeepHGlobalStatus(status = {}) {
+  if (!status.running && status.returncode == null) return;
+  const dot = document.getElementById("global-status-dot");
+  const text = document.getElementById("global-status-text");
+  if (!dot || !text) return;
+  dot.classList.toggle("running", Boolean(status.running));
+  dot.classList.toggle("error", !status.running && status.returncode != null && status.returncode !== 0);
+  if (status.running) {
+    text.textContent = `G2M vs DeepH · ${g2mDeephPhaseLabel(status.stage)}`;
+  } else if (status.returncode !== 0) {
+    text.textContent = "G2M vs DeepH finished with errors";
+  }
+}
+
+function updateG2MDeepHStatus(status = {}) {
+  const dot = document.getElementById("g2m-deeph-status-dot");
+  const text = document.getElementById("g2m-deeph-status-text");
+  const title = document.getElementById("g2m-deeph-phase-title");
+  const root = document.getElementById("g2m-deeph-run-root");
+  const sweepStatus = document.getElementById("g2m-deeph-training-sweep-status");
+  if (dot) {
+    dot.classList.toggle("running", Boolean(status.running));
+    dot.classList.toggle("error", status.returncode != null && status.returncode !== 0);
+  }
+  if (text) text.textContent = statusText(status);
+  if (title) title.textContent = g2mDeephPhaseLabel(status.stage || "idle");
+  if (root) root.textContent = status.run_root || "No run root yet";
+  if (sweepStatus) {
+    const sweep = status.training_sweep || {};
+    if (sweep.enabled) {
+      const activeRuns = Array.isArray(sweep.active_runs) ? sweep.active_runs.length : 0;
+      const pieces = [
+        `training sweep ${sweep.completed || 0}/${sweep.total || 0}`,
+        `failed ${sweep.failed || 0}`,
+        `G2M parallel ${sweep.graph2mat_parallelism || 1}`,
+        `DeepH parallel ${sweep.deeph_parallelism || 1}`,
+      ];
+      if (sweep.active_model) pieces.push(`active ${sweep.active_model}`);
+      if (activeRuns) pieces.push(`${activeRuns} active run${activeRuns === 1 ? "" : "s"}`);
+      sweepStatus.textContent = pieces.join(" | ");
+    } else {
+      sweepStatus.textContent = "No training sweep active.";
+    }
+  }
+  renderG2MDeepHPhaseProgress(status);
+  renderG2MDeepHArtifactSummary(status.dataset_validation || state.g2mDeephValidation);
+  renderG2MDeepHWarnings({ status, validation: state.g2mDeephValidation, results: state.g2mDeephResults });
+  updateG2MDeepHGlobalStatus(status);
+}
+
+function renderG2MDeepHMetricSummary(payload) {
+  const container = document.getElementById("g2m-deeph-metric-summary");
+  if (!container) return;
+  container.classList.remove("muted-text");
+  container.classList.add("g2m-deeph-summary-stack");
+  container.textContent = "";
+  const plotPayload = payload?.plot_payload || state.g2mDeephPlotPayload || null;
+  const common = payload?.results?.common_metrics || plotPayload?.common_metrics || null;
+  const ranking = payload?.results?.ranking || plotPayload?.ranking || null;
+  const archivedMetricRows = plotPayload?.metric_scaling_rows || [];
+  const archivedTimingRows = plotPayload?.timing_scaling_rows || [];
+  if (!common && !ranking && !archivedMetricRows.length && !archivedTimingRows.length) {
+    container.classList.add("muted-text");
+    container.classList.remove("g2m-deeph-summary-stack");
+    container.textContent = "No common metrics or ranking yet.";
+    return;
+  }
+  if (ranking) {
+    renderG2MDeepHRankingSummary(container, ranking);
+    if (!common && !archivedMetricRows.length && !archivedTimingRows.length) return;
+  }
+  if (!common) {
+    const statusBanner = document.createElement("div");
+    statusBanner.className = "comparison-status-banner diagnostic";
+    const liveRows =
+      Number(plotPayload?.live_metric_rows || 0) ||
+      (plotPayload?.metric_scaling_rows || []).filter((row) => row.source === "live_training_sweep_metrics").length;
+    statusBanner.textContent = liveRows
+      ? `Live Graph2Mat/DeepH metrics: ${liveRows} metric row(s), ${plotPayload?.timing_scaling_rows?.length || 0} timing row(s).`
+      : `Archived Graph2Mat/DeepH plots: ${plotPayload?.archived_runs || 0} metric run(s), ${plotPayload?.archived_timing_runs || 0} timing source(s).`;
+    container.appendChild(statusBanner);
+  }
+  if (archivedMetricRows.length) {
+    appendG2MDeepHTable(
+      container,
+      "Metrics vs dataset size",
+      [
+        { key: "run_id", label: "Run" },
+        { key: "dataset_size", label: "Snapshots", format: g2mDeephIntegerValue },
+        { key: "method", label: "Method" },
+        { key: "epoch_label", label: "Epochs", format: (value, row) => g2mDeephEpochLabel(row) },
+        { key: "config_id", label: "Config" },
+        { key: "metric_key", label: "Metric" },
+        {
+          key: "metric_value",
+          label: "Value",
+          format: (value) => {
+            const number = finiteNumber(value);
+            return number == null ? "-" : number.toPrecision(5);
+          },
+        },
+        { key: "scientific_status", label: "Status" },
+      ],
+      archivedMetricRows,
+      "No archived metric-vs-size rows available.",
+    );
+  }
+  if (!common) {
+    if (archivedTimingRows.length) {
+      appendG2MDeepHTable(
+        container,
+        "Timing vs dataset size",
+        [
+          { key: "dataset_id", label: "Dataset" },
+          { key: "dataset_size", label: "Snapshots", format: g2mDeephIntegerValue },
+          { key: "label", label: "Phase" },
+          { key: "model", label: "Model" },
+          { key: "epoch_label", label: "Epochs", format: (value, row) => g2mDeephEpochLabel(row) },
+          { key: "config_id", label: "Config" },
+          {
+            key: "elapsed_seconds",
+            label: "Seconds",
+            format: (value) => {
+              const number = finiteNumber(value);
+              return number == null ? "-" : number.toFixed(2);
+            },
+          },
+          {
+            key: "seconds_per_snapshot",
+            label: "s/snapshot",
+            format: (value) => {
+              const number = finiteNumber(value);
+              return number == null ? "-" : number.toFixed(4);
+            },
+          },
+        ],
+        archivedTimingRows,
+        "No timing-vs-size rows available.",
+      );
+    }
+    return;
+  }
+  const recommendation = common.recommendation || {};
+  const scientificStatus = common.status || plotPayload?.scientific_status || recommendation.status || "unknown";
+  const statusBanner = document.createElement("div");
+  statusBanner.className = "comparison-status-banner";
+  statusBanner.classList.toggle("diagnostic", scientificStatus === "diagnostic_only");
+  statusBanner.classList.toggle("invalid", String(scientificStatus).startsWith("invalid_"));
+  const winner = recommendation.robust_recommendation ? recommendation.winner : null;
+  statusBanner.textContent = winner
+    ? `Robust candidate: ${winner} (${recommendation.primary_metric || "h_mae_eV_mean"})`
+    : `No robust winner: ${scientificStatus}. ${recommendation.reason || "Review comparability warnings."}`;
+  container.appendChild(statusBanner);
+
+  appendG2MDeepHTable(
+    container,
+    "Final recommendation",
+    [
+      { key: "scientific_status", label: "Scientific status" },
+      { key: "winner", label: "Winner" },
+      { key: "robust", label: "Robust" },
+      { key: "primary_metric", label: "Primary metric" },
+      { key: "reason", label: "Reason" },
+    ],
+    [
+      {
+        scientific_status: scientificStatus,
+        winner: winner || "none",
+        robust: Boolean(recommendation.robust_recommendation),
+        primary_metric: recommendation.primary_metric || "h_mae_eV_mean",
+        reason: recommendation.reason || "-",
+      },
+    ],
+  );
+
+  const metricGroups = plotPayload?.metric_groups || [
+    {
+      id: "matrix",
+      title: "Matrix MAE/RMSE/MSE/R2 comparison",
+      metrics: [
+        { key: "h_mae_eV_mean", label: "H MAE" },
+        { key: "h_rmse_eV_mean", label: "H RMSE" },
+        { key: "h_mse_eV2_mean", label: "H MSE" },
+        { key: "r2_mean", label: "R2" },
+      ],
+    },
+    {
+      id: "frobenius",
+      title: "Relative Frobenius comparison",
+      metrics: [{ key: "relative_frobenius_mean", label: "Relative Frobenius" }],
+    },
+    {
+      id: "spectral",
+      title: "Spectral metrics comparison",
+      metrics: [
+        { key: "global_rmse_eV_mean", label: "Global RMSE" },
+        { key: "low_energy_rmse_eV_mean", label: "Low-energy RMSE" },
+        { key: "fermi_window_rmse_eV_mean", label: "Fermi RMSE" },
+        { key: "frontier_window_rmse_eV_mean", label: "Frontier RMSE" },
+      ],
+    },
+    {
+      id: "dos",
+      title: "DOS metrics",
+      metrics: [{ key: "dos_mae_500_fermi_window_mean", label: "DOS MAE" }],
+    },
+  ];
+  const summaryRows = common.summary_rows || [];
+  for (const group of metricGroups) {
+    const columns = [
+      { key: "method", label: "Method" },
+      ...(group.metrics || []).map((metric) => ({
+        key: metric.key,
+        label: metric.unit ? `${metric.label} (${metric.unit})` : metric.label,
+      })),
+    ];
+    appendG2MDeepHTable(
+      container,
+      group.title,
+      columns,
+      summaryRows,
+      "No metric rows available.",
+    );
+  }
+
+  appendG2MDeepHTable(
+    container,
+    "Phase timing",
+    [
+      { key: "label", label: "Phase" },
+      {
+        key: "elapsed_seconds",
+        label: "Seconds",
+        format: (value) => {
+          const number = finiteNumber(value);
+          return number == null ? "-" : number.toFixed(2);
+        },
+      },
+      { key: "status", label: "Status" },
+      { key: "source", label: "Source" },
+    ],
+    plotPayload?.timing_rows || common.timing_rows || [],
+    "No phase timing rows available.",
+  );
+
+  appendG2MDeepHTable(
+    container,
+    "Timing vs dataset size",
+    [
+      { key: "dataset_id", label: "Dataset" },
+      { key: "dataset_size", label: "Snapshots", format: g2mDeephIntegerValue },
+      { key: "label", label: "Phase" },
+      { key: "model", label: "Model" },
+      { key: "config_id", label: "Config" },
+      {
+        key: "elapsed_seconds",
+        label: "Seconds",
+        format: (value) => {
+          const number = finiteNumber(value);
+          return number == null ? "-" : number.toFixed(2);
+        },
+      },
+      {
+        key: "seconds_per_snapshot",
+        label: "s/snapshot",
+        format: (value) => {
+          const number = finiteNumber(value);
+          return number == null ? "-" : number.toFixed(4);
+        },
+      },
+    ],
+    plotPayload?.timing_scaling_rows || common.timing_scaling_rows || [],
+    "No timing-vs-size rows available.",
+  );
+}
+
+async function validateG2MDeepHDataset() {
+  const payload = await request("/api/g2m-deeph/validate-dataset", {
+    method: "POST",
+    body: JSON.stringify(g2mDeephPayload()),
+  });
+  state.g2mDeephValidation = payload;
+  renderG2MDeepHArtifactSummary(payload);
+  renderG2MDeepHWarnings({ validation: payload });
+  showToast(payload.benchmark_ready ? "Joint dataset validado." : "Dataset no esta listo para benchmark.");
+  return payload;
+}
+
+function formatG2MDeepHValidationError(validation, datasetMode) {
+  const summary = validation?.artifact_summary || {};
+  const errors = Array.isArray(validation?.errors) ? validation.errors.filter(Boolean) : [];
+  const missing = summary.missing_required_counts || {};
+  const missingText = Object.entries(missing)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ");
+  const reasons = [];
+  if (datasetMode === "generate_new") {
+    reasons.push("pulsa Run para generar un dataset joint nuevo con SIESTA");
+  }
+  if (!Number(summary.total_snapshots || 0)) {
+    reasons.push(`no hay snapshots en ${validation?.snapshot_root || validation?.dataset_root || "dataset_root"}`);
+  }
+  if (Number(summary.invalid_snapshots || 0)) {
+    reasons.push(`${summary.invalid_snapshots} snapshots invalidos`);
+  }
+  if (missingText) {
+    reasons.push(`faltan artefactos requeridos: ${missingText}`);
+  }
+  reasons.push(...errors);
+  return `Dataset no listo para Graph2Mat vs DeepH: ${reasons.join("; ") || "validacion incompleta"}.`;
+}
+
+async function runG2MDeepHBenchmark() {
+  state.g2mDeephOffset = 0;
+  state.g2mDeephResults = null;
+  clearNode(document.getElementById("g2m-deeph-log"));
+  renderG2MDeepHMetricSummary(null);
+  const datasetMode = g2mDeephDatasetMode();
+  if (!["generate_new", "full_strict_pipeline"].includes(datasetMode)) {
+    const validation = await validateG2MDeepHDataset();
+    if (!validation.benchmark_ready && datasetMode !== "repair_expensive") {
+      throw new Error(formatG2MDeepHValidationError(validation, datasetMode));
+    }
+  } else {
+    renderG2MDeepHDatasetSweepPreview();
+    if (datasetMode === "full_strict_pipeline") renderG2MDeepHTrainingSweepPreview();
+  }
+  const payload = await request("/api/g2m-deeph/run", {
+    method: "POST",
+    body: JSON.stringify(g2mDeephPayload()),
+  });
+  updateG2MDeepHStatus(payload);
+  showToast("Graph2Mat vs DeepH benchmark started.");
+}
+
+async function stopG2MDeepHBenchmark() {
+  const payload = await request("/api/g2m-deeph/stop", { method: "POST", body: "{}" });
+  updateG2MDeepHStatus(payload);
+  showToast("Graph2Mat vs DeepH stop requested.");
+}
+
+async function loadG2MDeepHResults() {
+  const payload = await request("/api/g2m-deeph/results");
+  state.g2mDeephResults = payload;
+  if (payload.plot_payload) state.g2mDeephPlotPayload = payload.plot_payload;
+  updateG2MDeepHStatus(payload.status || {});
+  renderG2MDeepHMetricSummary(payload);
+  renderG2MDeepHWarnings({
+    status: payload.status,
+    validation: state.g2mDeephValidation,
+    results: payload.results,
+  });
+  return payload;
+}
+
+function renderG2MDeepHGroupedBarPlot(card, plot) {
+  const rows = plot.rows || [];
+  const methods = rows.map((row) => methodDisplayLabel(row.method || "unknown"));
+  const traces = (plot.metrics || []).map((metric) => ({
+    type: "bar",
+    x: methods,
+    y: rows.map((row) => finiteNumber(row[metric.key])),
+    name: metric.unit ? `${metric.label} (${metric.unit})` : metric.label,
+    hovertemplate: "%{x}<br>%{fullData.name}: %{y:.5g}<extra></extra>",
+  }));
+  const finiteValues = traces.flatMap((trace) => (trace.y || []).filter((value) => value != null));
+  const missing = plot.missing_metrics || [];
+  const annotations = [];
+  if (!finiteValues.length) {
+    annotations.push(emptyPlotAnnotation("No finite values for this metric group."));
+  } else if (missing.length) {
+    annotations.push(topPlotAnnotation(`${missing.length} missing metric values`, 1.12, "#9f5b00"));
+  }
+  renderPlot(
+    card,
+    traces,
+    plotLayout(plot.title || "Graph2Mat vs DeepH", plot.y_title || "", {
+      barmode: "group",
+      annotations,
+      xaxis: { title: "Method", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: plot.y_title || "", gridcolor: "#edf1f4", zeroline: false },
+    }),
+  );
+}
+
+function g2mDeephIsDeepH(method) {
+  return String(method || "").toLowerCase().includes("deeph");
+}
+
+function g2mDeephMarkerSymbol(method) {
+  return g2mDeephIsDeepH(method) ? "triangle-up" : "circle";
+}
+
+function g2mDeephEpochLabel(row = {}) {
+  if (row.epoch_label) return String(row.epoch_label);
+  if (row.epochs != null && row.epochs !== "") return `${row.epochs} epochs`;
+  return "epochs unknown";
+}
+
+function renderG2MDeepHTimingScalingPlot(card, plot) {
+  const rows = (plot.rows || [])
+    .map((row) => ({
+      ...row,
+      dataset_size: finiteNumber(row.dataset_size),
+      elapsed_seconds: finiteNumber(row.elapsed_seconds),
+    }))
+    .filter((row) => row.dataset_size != null && row.elapsed_seconds != null)
+    .sort(
+      (a, b) =>
+        String(a.phase || "").localeCompare(String(b.phase || "")) ||
+        String(a.model || "").localeCompare(String(b.model || "")) ||
+        String(g2mDeephEpochLabel(a)).localeCompare(String(g2mDeephEpochLabel(b))) ||
+        a.dataset_size - b.dataset_size ||
+        String(a.config_id || "").localeCompare(String(b.config_id || "")),
+    );
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.phase || "unknown"}|${row.model || "all"}|${g2mDeephEpochLabel(row)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const traces = Array.from(groups.entries()).map(([key, group]) => {
+    const [phase, model, epochLabel] = key.split("|");
+    const label = group[0]?.label || phase;
+    return {
+      type: "scatter",
+      mode: "markers",
+      marker: { symbol: g2mDeephMarkerSymbol(model), size: g2mDeephIsDeepH(model) ? 10 : 8 },
+      x: group.map((row) => row.dataset_size),
+      y: group.map((row) => row.elapsed_seconds),
+      text: group.map((row) => `${row.dataset_id || "-"} · ${row.config_id || "-"} · ${g2mDeephEpochLabel(row)}`),
+      name: `${label}${model && model !== "all" ? ` · ${methodDisplayLabel(model)}` : ""} · ${epochLabel}`,
+      hovertemplate:
+        "Dataset size: %{x}<br>Seconds: %{y:.3f}<br>%{text}<extra>%{fullData.name}</extra>",
+    };
+  });
+  const annotations = traces.length ? [] : [emptyPlotAnnotation("No timing-vs-size rows with finite values.")];
+  renderPlot(
+    card,
+    traces,
+    plotLayout(plot.title || "Phase time vs dataset size", plot.y_title || "Seconds", {
+      annotations,
+      xaxis: { title: plot.x_title || "Dataset size (snapshots)", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: plot.y_title || "Seconds", gridcolor: "#edf1f4", zeroline: false },
+      legend: { orientation: "h", y: -0.24 },
+    }),
+  );
+}
+
+function renderG2MDeepHMetricScalingPlot(card, plot) {
+  const rows = (plot.rows || [])
+    .map((row) => ({
+      ...row,
+      dataset_size: finiteNumber(row.dataset_size),
+      metric_value: finiteNumber(row.metric_value),
+    }))
+    .filter((row) => row.dataset_size != null && row.metric_value != null)
+    .sort(
+      (a, b) =>
+        String(a.metric_key || "").localeCompare(String(b.metric_key || "")) ||
+        String(a.method || "").localeCompare(String(b.method || "")) ||
+        String(g2mDeephEpochLabel(a)).localeCompare(String(g2mDeephEpochLabel(b))) ||
+        a.dataset_size - b.dataset_size ||
+        String(a.run_id || "").localeCompare(String(b.run_id || "")),
+    );
+  const metricLabels = Object.fromEntries((plot.metrics || []).map((metric) => [metric.key, metric.label || metric.key]));
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.metric_key || "metric"}|${row.method || "unknown"}|${g2mDeephEpochLabel(row)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const traces = Array.from(groups.entries()).map(([key, group]) => {
+    const [metricKey, method, epochLabel] = key.split("|");
+    return {
+      type: "scatter",
+      mode: "markers",
+      marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8 },
+      x: group.map((row) => row.dataset_size),
+      y: group.map((row) => row.metric_value),
+      text: group.map((row) => `${row.run_id || "-"} · ${row.config_id || "-"} · ${g2mDeephEpochLabel(row)} · ${row.scientific_status || "-"}`),
+      name: `${metricLabels[metricKey] || metricKey} · ${methodDisplayLabel(method)} · ${epochLabel}`,
+      hovertemplate:
+        "Dataset size: %{x}<br>Value: %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>",
+    };
+  });
+  const annotations = traces.length ? [] : [emptyPlotAnnotation("No archived metric-vs-size rows with finite values.")];
+  renderPlot(
+    card,
+    traces,
+    plotLayout(plot.title || "Metrics vs dataset size", plot.y_title || "Metric value", {
+      annotations,
+      xaxis: { title: plot.x_title || "Dataset size (snapshots)", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: plot.y_title || "Metric value", gridcolor: "#edf1f4", zeroline: false },
+      legend: { orientation: "h", y: -0.24 },
+    }),
+  );
+}
+
+function renderG2MDeepHPlotsPayload(payload) {
+  const container = document.getElementById("g2m-deeph-plots");
+  if (!container) return;
+  container.textContent = "";
+  if (!payload.available || !(payload.plots || []).length) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "plot-card full placeholder-card";
+    placeholder.textContent = payload.message || "No benchmark plots available yet.";
+    container.appendChild(placeholder);
+    return;
+  }
+  for (const plot of payload.plots) {
+    const card = document.createElement("div");
+    card.id = `g2m-deeph-plot-${plot.id || container.children.length}`;
+    card.className = "plot-card wide";
+    container.appendChild(card);
+    if (window.Plotly && plot.kind === "grouped_bar") {
+      renderG2MDeepHGroupedBarPlot(card, plot);
+    } else if (window.Plotly && plot.kind === "timing_scaling") {
+      renderG2MDeepHTimingScalingPlot(card, plot);
+    } else if (window.Plotly && plot.kind === "metric_scaling") {
+      renderG2MDeepHMetricScalingPlot(card, plot);
+    } else {
+      card.textContent = plot.title || "Graph2Mat vs DeepH plot";
+    }
+  }
+  schedulePlotResize();
+}
+
+function metricScalingRowKey(row = {}) {
+  return [
+    row.run_id || "",
+    row.dataset_id || "",
+    row.method || "",
+    row.config_id || "",
+    g2mDeephEpochLabel(row),
+    row.metric_key || "",
+  ].join("|");
+}
+
+function dedupeMetricScalingRows(rows = []) {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const key = metricScalingRowKey(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(row);
+  }
+  return result;
+}
+
+function mergeG2MDeepHLivePlotPayload(payload, livePayload) {
+  const liveRows = livePayload?.metric_scaling_rows || [];
+  if (!liveRows.length) return payload;
+  const metricRows = dedupeMetricScalingRows([...(payload.metric_scaling_rows || []), ...liveRows]);
+  const primaryPlots = (payload.plots || []).filter((plot) => plot.kind !== "metric_scaling");
+  const liveMetricPlots = (livePayload.plots || []).filter((plot) => plot.kind === "metric_scaling");
+  return {
+    ...payload,
+    available: true,
+    metric_scaling_rows: metricRows,
+    live_metric_rows: liveRows.length,
+    live_metrics_source: livePayload.source || "sidecar",
+    plots: [...liveMetricPlots, ...primaryPlots],
+    message: payload.message || livePayload.message,
+  };
+}
+
+async function maybeLoadG2MDeepHLiveMetrics(payload) {
+  const hasMetrics = (payload?.metric_scaling_rows || []).length > 0;
+  const status = payload?.status || {};
+  if (hasMetrics || !status.running || !status.run_root) return payload;
+  try {
+    const livePayload = await request(G2M_DEEPH_LIVE_METRICS_URL);
+    return mergeG2MDeepHLivePlotPayload(payload, livePayload);
+  } catch {
+    return payload;
+  }
+}
+
+async function loadG2MDeepHPlots() {
+  if (!window.Plotly) await ensurePlotlyLoaded();
+  const payload = await maybeLoadG2MDeepHLiveMetrics(await request("/api/g2m-deeph/plots"));
+  state.g2mDeephPlotPayload = payload;
+  renderG2MDeepHMetricSummary({
+    available: payload.available,
+    results: { common_metrics: payload.common_metrics },
+    plot_payload: payload,
+    status: payload.status,
+  });
+  renderG2MDeepHWarnings({
+    status: payload.status,
+    validation: state.g2mDeephValidation,
+    results: { common_metrics: payload.common_metrics },
+  });
+  renderG2MDeepHPlotsPayload(payload);
+  return payload;
+}
+
+async function maybeRefreshG2MDeepHLivePlots(status = {}) {
+  if (!status.running || !status.run_root) return;
+  const now = Date.now();
+  if (state.g2mDeephPlotsInFlight) return;
+  if (now - state.g2mDeephLastPlotRefreshAt < G2M_DEEPH_LIVE_PLOT_REFRESH_MS) return;
+  state.g2mDeephPlotsInFlight = true;
+  state.g2mDeephLastPlotRefreshAt = now;
+  try {
+    await loadG2MDeepHPlots();
+  } finally {
+    state.g2mDeephPlotsInFlight = false;
+  }
+}
+
+async function pollG2MDeepHStatus() {
+  const payload = await request("/api/g2m-deeph/status");
+  updateG2MDeepHStatus(payload);
+  return payload;
+}
+
+function scrollG2MDeepHLogToBottom() {
+  const output = document.getElementById("g2m-deeph-log");
+  if (output) output.scrollTop = output.scrollHeight;
+}
+
+function clearG2MDeepHLogView() {
+  const output = document.getElementById("g2m-deeph-log");
+  if (output) output.textContent = "";
+}
+
+async function pollG2MDeepHLogs() {
+  const payload = await request(`/api/g2m-deeph/logs?since=${state.g2mDeephOffset}&limit=${LOG_POLL_LIMIT}`);
+  state.g2mDeephOffset = payload.offset;
+  updateG2MDeepHStatus(payload.status || {});
+  if (payload.lines.length) {
+    const output = document.getElementById("g2m-deeph-log");
+    output.textContent += payload.lines.join("");
+    scrollG2MDeepHLogToBottom();
+  }
+  const wasRunning = state.g2mDeephWasRunning;
+  state.g2mDeephWasRunning = Boolean(payload.status?.running);
+  if (wasRunning && !payload.status?.running) {
+    await loadG2MDeepHResults();
+    await loadG2MDeepHPlots();
+  } else if (payload.status?.running) {
+    maybeRefreshG2MDeepHLivePlots(payload.status).catch(() => {});
+  }
 }
 
 function splitList(value) {
@@ -913,6 +2312,10 @@ function performanceSettings() {
       optionalPositiveInteger("performance-max-parallel-evaluation-jobs", "Max evaluation jobs") || 1,
     max_parallel_metric_jobs:
       optionalPositiveInteger("performance-max-parallel-metric-jobs", "Max metric jobs") || 1,
+    max_parallel_graph2mat_training_jobs:
+      optionalPositiveInteger("performance-max-parallel-graph2mat-training-jobs", "Max Graph2Mat training jobs") || 1,
+    max_parallel_deeph_training_jobs:
+      optionalPositiveInteger("performance-max-parallel-deeph-training-jobs", "Max DeepH training jobs") || 1,
     omp_num_threads: optionalPositiveInteger("performance-omp-num-threads", "OMP threads"),
     mkl_num_threads: optionalPositiveInteger("performance-mkl-num-threads", "MKL threads"),
     openblas_num_threads: optionalPositiveInteger("performance-openblas-num-threads", "OpenBLAS threads"),
@@ -920,6 +2323,19 @@ function performanceSettings() {
     torch_num_threads: optionalPositiveInteger("performance-torch-num-threads", "Torch threads"),
     compute_accelerator: accelerator,
     batch_size: optionalPositiveInteger("performance-batch-size", "Batch size override"),
+    graph2mat_log_every_n_steps: optionalPositiveInteger(
+      "performance-graph2mat-log-every-n-steps",
+      "Graph2Mat log every steps",
+    ),
+    graph2mat_check_val_every_n_epoch: optionalPositiveInteger(
+      "performance-graph2mat-check-val-every-n-epoch",
+      "Graph2Mat validate every epochs",
+    ),
+    graph2mat_checkpoint_every_n_epochs: optionalPositiveInteger(
+      "performance-graph2mat-checkpoint-every-n-epochs",
+      "Graph2Mat checkpoint every epochs",
+    ),
+    graph2mat_require_cuequivariance: optionalBooleanSelect("performance-graph2mat-require-cuequivariance"),
     store_in_memory: optionalBooleanSelect("performance-store-in-memory"),
     reuse_validated_siesta_outputs: optionalBooleanSelect("performance-reuse-validated-siesta-outputs"),
     enable_experiment_cache: optionalBooleanSelect("performance-enable-experiment-cache"),
@@ -927,12 +2343,53 @@ function performanceSettings() {
     preset: document.getElementById("performance-preset")?.value || null,
     torch_float32_matmul_precision:
       document.getElementById("performance-torch-float32-matmul-precision")?.value || null,
+    torch_mixed_precision:
+      document.getElementById("performance-torch-mixed-precision")?.value || null,
   };
 }
 
 function optionalTextInput(id) {
   const value = inputValue(id);
   return value ? value : null;
+}
+
+function positiveFloatInput(id, label, fallback) {
+  const raw = inputValue(id);
+  if (!raw && fallback != null) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label} debe ser un numero positivo.`);
+  }
+  return value;
+}
+
+function nonNegativeIntegerInput(id, label, fallback) {
+  const raw = inputValue(id);
+  if (!raw && fallback != null) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${label} debe ser un entero >= 0.`);
+  }
+  return value;
+}
+
+function deephComparisonPayload() {
+  return {
+    graph2mat_result_dir: optionalTextInput("deeph-graph2mat-result-dir"),
+    graph2mat_result_dirs: optionalTextInput("deeph-graph2mat-result-dirs"),
+    graph2mat_candidate_summary_csv: optionalTextInput("deeph-graph2mat-candidate-summary"),
+    deeph_repo: optionalTextInput("deeph-repo"),
+    deeph_python: optionalTextInput("deeph-python"),
+    siesta_command: optionalTextInput("deeph-siesta-command") || "siesta",
+    epochs: optionalPositiveInteger("deeph-epochs", "DeepH epochs") || 200,
+    batch_size: optionalPositiveInteger("deeph-batch-size", "DeepH batch size") || 4,
+    learning_rate: positiveFloatInput("deeph-learning-rate", "DeepH learning rate", 0.001),
+    sample_limit_per_split: optionalPositiveInteger("deeph-sample-limit-per-split", "Sample limit per split"),
+    seed: nonNegativeIntegerInput("deeph-seed", "DeepH seed", 0),
+    device: optionalTextInput("deeph-device") || "cuda:0",
+    graph2mat_top_count: optionalPositiveInteger("deeph-graph2mat-top-count", "Graph2Mat top count"),
+    allow_regenerate_siesta: Boolean(document.getElementById("deeph-allow-regenerate-siesta")?.checked),
+  };
 }
 
 function parseHiddenIrrepsTerms(raw) {
@@ -1186,7 +2643,7 @@ function hyperparameterSweepPayload({ includeTargets = false } = {}) {
     if (runMode === "dataset_only") {
       throw new Error("Hyperparameter sweep no esta disponible con dataset_only.");
     }
-    if (runMode === "train_test_metrics_plots_only") {
+    if (["train_test_metrics_plots_only", "graph2mat_deeph_comparison"].includes(runMode)) {
       const ids = selectedReusableDatasetIds();
       if (!ids.length) {
         throw new Error("Selecciona al menos un dataset reusable para el sweep.");
@@ -1415,15 +2872,17 @@ function renderTrainingPlan() {
 
 function addTrainingPlanEntry() {
   const runMode = document.getElementById("run-mode")?.value;
-  if (!["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode)) {
-    throw new Error("Training plan solo esta disponible en Full strict o Train/test/metrics/plots only.");
+  const plannedTargetModes = ["full_strict_pipeline"];
+  const reusableDatasetModes = ["train_test_metrics_plots_only", "graph2mat_deeph_comparison"];
+  if (![...plannedTargetModes, ...reusableDatasetModes].includes(runMode)) {
+    throw new Error("Training plan solo esta disponible en Full strict, modo combinado o Train/test/metrics/plots only.");
   }
-  const datasetIds = runMode === "train_test_metrics_plots_only" ? selectedReusableDatasetIds() : [];
-  const datasetTargets = runMode === "full_strict_pipeline" ? selectedPlannedDatasetTargets() : [];
-  if (runMode === "train_test_metrics_plots_only" && !datasetIds.length) {
+  const datasetIds = reusableDatasetModes.includes(runMode) ? selectedReusableDatasetIds() : [];
+  const datasetTargets = plannedTargetModes.includes(runMode) ? selectedPlannedDatasetTargets() : [];
+  if (reusableDatasetModes.includes(runMode) && !datasetIds.length) {
     throw new Error("Selecciona al menos un dataset reusable para esta configuracion.");
   }
-  if (runMode === "full_strict_pipeline" && !datasetTargets.length) {
+  if (plannedTargetModes.includes(runMode) && !datasetTargets.length) {
     throw new Error("Selecciona al menos un planned dataset para esta configuracion.");
   }
   const settings = trainingSettings();
@@ -1446,7 +2905,7 @@ function updateTrainingPlanPanel() {
   const panel = document.getElementById("training-plan-panel");
   if (!panel) return;
   const runMode = document.getElementById("run-mode")?.value;
-  const enabled = ["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode);
+  const enabled = ["full_strict_pipeline", "graph2mat_deeph_comparison", "train_test_metrics_plots_only"].includes(runMode);
   panel.classList.toggle("hidden", !enabled);
   updatePlannedDatasetTargetPanel();
   renderTrainingPlan();
@@ -1458,6 +2917,8 @@ const performanceFieldMap = {
   max_parallel_prediction_jobs: "performance-max-parallel-prediction-jobs",
   max_parallel_evaluation_jobs: "performance-max-parallel-evaluation-jobs",
   max_parallel_metric_jobs: "performance-max-parallel-metric-jobs",
+  max_parallel_graph2mat_training_jobs: "performance-max-parallel-graph2mat-training-jobs",
+  max_parallel_deeph_training_jobs: "performance-max-parallel-deeph-training-jobs",
   omp_num_threads: "performance-omp-num-threads",
   mkl_num_threads: "performance-mkl-num-threads",
   openblas_num_threads: "performance-openblas-num-threads",
@@ -1465,11 +2926,16 @@ const performanceFieldMap = {
   torch_num_threads: "performance-torch-num-threads",
   compute_accelerator: "performance-compute-accelerator",
   batch_size: "performance-batch-size",
+  graph2mat_log_every_n_steps: "performance-graph2mat-log-every-n-steps",
+  graph2mat_check_val_every_n_epoch: "performance-graph2mat-check-val-every-n-epoch",
+  graph2mat_checkpoint_every_n_epochs: "performance-graph2mat-checkpoint-every-n-epochs",
+  graph2mat_require_cuequivariance: "performance-graph2mat-require-cuequivariance",
   store_in_memory: "performance-store-in-memory",
   reuse_validated_siesta_outputs: "performance-reuse-validated-siesta-outputs",
   enable_experiment_cache: "performance-enable-experiment-cache",
   error_policy: "performance-error-policy",
   torch_float32_matmul_precision: "performance-torch-float32-matmul-precision",
+  torch_mixed_precision: "performance-torch-mixed-precision",
 };
 
 function allPerformancePresetItems() {
@@ -1726,6 +3192,16 @@ const datasetEditorConfigs = {
     defaultCount: "1000",
     defaultValue: "300",
   },
+  g2m_deeph_md: {
+    label: "Graph2Mat vs DeepH MD",
+    containerId: "g2m-deeph-md-dataset-editor",
+    sourceId: "g2m-deeph-md-sweep-table",
+    addDatasetId: "g2m-deeph-md-add-dataset",
+    countLabel: "Snapshots",
+    valueLabel: "Temperatura (K)",
+    defaultCount: "600",
+    defaultValue: "300",
+  },
   fc: {
     label: "FC Cartesian",
     containerId: "fc-dataset-editor",
@@ -1757,13 +3233,17 @@ function datasetEditorContainer(kind) {
   return config ? document.getElementById(config.containerId) : null;
 }
 
+function isMdDatasetEditorKind(kind) {
+  return kind === "md" || kind === "g2m_deeph_md";
+}
+
 function sourceTextForKind(kind) {
   const config = datasetEditorConfig(kind);
   return String(document.getElementById(config?.sourceId)?.value || "");
 }
 
 function blocksForEditorSpec(kind, spec) {
-  if (kind === "md") {
+  if (isMdDatasetEditorKind(kind)) {
     return (spec.blocks || []).map((block) => ({
       count: block.n_snapshots,
       value: block.temperature_K,
@@ -1972,7 +3452,7 @@ function applyRandomCartesianDatasetSettings(specs) {
 
 function specsForEditor(kind) {
   try {
-    if (kind === "md") return parseMdDatasetTableSpecsFromText(sourceTextForKind(kind));
+    if (isMdDatasetEditorKind(kind)) return parseMdDatasetTableSpecsFromText(sourceTextForKind(kind));
     if (kind === "fc") return parseFcDatasetTableSpecsFromText(sourceTextForKind(kind)) || [];
     if (kind === "random_cartesian") return parseRandomCartesianDatasetTableSpecsFromText(sourceTextForKind(kind));
   } catch (error) {
@@ -2265,7 +3745,7 @@ function syncDatasetEditorText(kind) {
       .join("\n"),
   );
   source.value = groups.join("\n\n");
-  if (kind === "md") {
+  if (isMdDatasetEditorKind(kind)) {
     const sizes = groups
       .map((group) =>
         group
@@ -2283,7 +3763,8 @@ function syncDatasetEditorText(kind) {
 
 function handleDatasetEditorChanged(kind) {
   syncDatasetEditorText(kind);
-  if (kind === "fc") updateAtomSizesFromFcPlan();
+  if (kind === "g2m_deeph_md") renderG2MDeepHDatasetSweepPreview();
+  else if (kind === "fc") updateAtomSizesFromFcPlan();
   else updateDatasetPreview();
 }
 
@@ -2417,6 +3898,126 @@ function materialContextText(item) {
   return `material ${label}${structure}`;
 }
 
+function metricSpaceLabel(run) {
+  const space = String(run?.metric_space || "").trim();
+  if (space === "kpoint_sampled" || run?.kpoint_metrics_enabled) {
+    const mesh = Array.isArray(run?.kpoint_mesh) ? run.kpoint_mesh.join("x") : "";
+    return mesh ? `k-point ${mesh}` : "k-point";
+  }
+  if (space === "gamma_only") return "gamma-only";
+  return "";
+}
+
+function metricContextText(run) {
+  const label = metricSpaceLabel(run);
+  if (!label) return "";
+  if (run?.kpoint_metrics_enabled) {
+    const overlap = run?.uses_reference_overlap_k ? "S_ref(k)" : "overlap unknown";
+    const count = run?.kpoint_count ? `${run.kpoint_count} k-points` : "";
+    return [label, count, overlap].filter(Boolean).join(" · ");
+  }
+  return label;
+}
+
+function predictionSafetyStatus(run) {
+  const explicitStatus = String(run?.prediction_artifact_safety_status || "").trim();
+  if (explicitStatus) return explicitStatus;
+  if (run?.prediction_artifacts_standalone_safe === true) return "safe";
+  if (run?.prediction_artifacts_standalone_safe === false) return "unsafe";
+  const unsafeSamples = finiteNumber(run?.prediction_self_contained_hsx_unsafe_samples);
+  if (unsafeSamples != null && unsafeSamples > 0) return "unsafe";
+  const safeSamples = finiteNumber(run?.prediction_self_contained_hsx_safe_samples);
+  if (safeSamples != null && safeSamples > 0) return "safe";
+  return "unknown";
+}
+
+function runHasSevereWarnings(run) {
+  const severeCount = finiteNumber(run?.severe_warning_count);
+  if (severeCount != null && severeCount > 0) return true;
+  const severeKinds = run?.severe_warning_kinds;
+  if (Array.isArray(severeKinds) && severeKinds.length > 0) return true;
+  const diagnostics = run?.diagnostics || {};
+  const errors = diagnostics.errors || [];
+  return Array.isArray(errors) && errors.length > 0;
+}
+
+function runScientificSafetyStatus(run) {
+  const scientificStatus = String(run?.scientific_status || run?.summary?.scientific_status || "").trim();
+  const predictionStatus = predictionSafetyStatus(run);
+  if (predictionStatus === "unsafe" || runHasSevereWarnings(run)) return "unsafe";
+  if (scientificStatus === "non_comparative") return "non_comparative";
+  if (scientificStatus && scientificStatus !== "robust_comparison" && scientificStatus !== "analysis_completed") {
+    return "exploratory";
+  }
+  if (predictionStatus === "unknown" || String(run?.target_component_policy || "unknown") === "unknown") {
+    return "unknown";
+  }
+  return "safe";
+}
+
+function safetyStatusLabel(status) {
+  return ({
+    safe: "safe",
+    unsafe: "unsafe/severe",
+    unknown: "unknown safety",
+    exploratory: "exploratory",
+    non_comparative: "non-comparative",
+  }[status] || status || "unknown safety");
+}
+
+function runSafetyContextText(run) {
+  const policy = run?.target_component_policy || "target unknown";
+  const components = run?.n_matrix_components != null ? `${run.n_matrix_components} component(s)` : "components unknown";
+  const overlap = run?.overlap_source || (run?.uses_reference_overlap_k ? "siesta_reference" : "overlap unknown");
+  const prediction = predictionSafetyStatus(run);
+  const severe = finiteNumber(run?.severe_warning_count);
+  const severeText = severe != null && severe > 0 ? `${severe} severe warning(s)` : "";
+  return [
+    `target ${policy}`,
+    components,
+    `overlap ${overlap}`,
+    `prediction HSX ${prediction}`,
+    safetyStatusLabel(runScientificSafetyStatus(run)),
+    severeText,
+  ].filter(Boolean).join(" · ");
+}
+
+function selectedPlotSafety() {
+  return document.getElementById("plot-safety-filter")?.value || "all";
+}
+
+function syncSafetyFilterOptions(payload) {
+  const select = document.getElementById("plot-safety-filter");
+  if (!select) return;
+  const previous = select.value || "all";
+  const counts = new Map();
+  for (const run of payload?.runs || []) {
+    const status = runScientificSafetyStatus(run);
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  select.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "All safety states";
+  select.appendChild(all);
+  for (const status of ["safe", "unsafe", "exploratory", "non_comparative", "unknown"]) {
+    const count = counts.get(status) || 0;
+    if (!count) continue;
+    const option = document.createElement("option");
+    option.value = status;
+    option.textContent = `${safetyStatusLabel(status)} (${count})`;
+    select.appendChild(option);
+  }
+  const available = new Set(["all", ...Array.from(counts.keys())]);
+  select.value = available.has(previous) ? previous : "all";
+}
+
+function filterRunsBySafety(runs) {
+  const selection = selectedPlotSafety();
+  if (selection === "all") return runs || [];
+  return (runs || []).filter((run) => runScientificSafetyStatus(run) === selection);
+}
+
 function rowMaterialContextText(row) {
   return `material ${rowMaterialDisplayLabel(row)}`;
 }
@@ -2442,6 +4043,86 @@ function availableMaterialLabels(payload) {
 
 function selectedPlotMaterial() {
   return document.getElementById("plot-material-filter")?.value || "all";
+}
+
+const RUN_FAMILY_OPTIONS = [
+  { id: "graphene_fair_deeph", label: "Graphene fair DeepH" },
+  { id: "graphene_w90_md1000", label: "Graphene W90 MD1000" },
+  { id: "graphene_w90_kpoint", label: "Graphene W90 k-point" },
+  { id: "h2o", label: "H2O" },
+  { id: "debug_partial", label: "Debug / partial" },
+  { id: "other", label: "Other" },
+];
+
+function runSearchText(run) {
+  return [
+    run?.pipeline,
+    run?.method_id,
+    run?.dataset_label,
+    run?.training_tag,
+    run?.training_plan_label,
+    run?.training_plan_display_label,
+    run?.result_dir,
+    run?.run_id,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function runFamilyId(run) {
+  const text = runSearchText(run);
+  const material = runMaterialLabel(run).toLowerCase();
+  const failed = Number(run?.sample_row_counts?.kpoint_matrix?.total || 0) === 0 &&
+    (String(run?.diagnostics?.severity || "").toLowerCase() === "error" || text.includes("partial"));
+  if (run?.pipeline === "deeph_comparison" || text.includes("graph2mat_vs_deeph")) return "graphene_fair_deeph";
+  if (material === "h2o" || text.includes("h2o")) return "h2o";
+  if (material === "graphene" || text.includes("graphene")) {
+    if (text.includes("md1000") || text.includes("xuqnco")) return "graphene_w90_md1000";
+    if (text.includes("w90") || run?.metric_space === "kpoint_sampled" || run?.kpoint_metrics_enabled) return "graphene_w90_kpoint";
+  }
+  if (failed || text.includes("smoke") || text.includes("dryrun") || text.includes("unsupported_kpoint")) return "debug_partial";
+  return "other";
+}
+
+function runFamilyLabel(familyId) {
+  return RUN_FAMILY_OPTIONS.find((item) => item.id === familyId)?.label || "Other";
+}
+
+function selectedRunFamily() {
+  return document.getElementById("plot-family-filter")?.value || "all";
+}
+
+function syncRunFamilyFilterOptions(payload) {
+  const select = document.getElementById("plot-family-filter");
+  if (!select) return;
+  const previous = select.value || "all";
+  const counts = new Map();
+  for (const run of payload?.runs || []) {
+    const id = runFamilyId(run);
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  select.replaceChildren();
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "All run families";
+  select.appendChild(all);
+  for (const optionDef of RUN_FAMILY_OPTIONS) {
+    const count = counts.get(optionDef.id) || 0;
+    if (!count) continue;
+    const option = document.createElement("option");
+    option.value = optionDef.id;
+    option.textContent = `${optionDef.label} (${count})`;
+    select.appendChild(option);
+  }
+  const available = new Set(["all", ...Array.from(counts.keys())]);
+  select.value = available.has(previous) ? previous : "all";
+}
+
+function filterRunsByFamily(runs) {
+  const selection = selectedRunFamily();
+  if (selection === "all") return runs || [];
+  return (runs || []).filter((run) => runFamilyId(run) === selection);
 }
 
 function materialSelectionMatches(labels, selection = selectedPlotMaterial()) {
@@ -2505,6 +4186,7 @@ function runDisplayLabel(run) {
   return [
     `${pipelineLabel(run?.pipeline || run?.label)} ${size}`.trim(),
     isKnownMaterialLabel(material) ? material : "",
+    metricSpaceLabel(run),
     detail,
   ].filter(Boolean).join(" · ");
 }
@@ -3224,10 +4906,37 @@ function renderExperimentResults(results) {
     const item = document.createElement("div");
     item.className = "result-pill";
     const label = result.dataset_label || `dataset_${result.dataset_size}`;
+    const detailRows = [];
+    if (result.predicted_hamiltonians !== undefined && result.predicted_hamiltonians !== "") {
+      detailRows.push(`<span>${result.predicted_hamiltonians} predicted Hamiltonians</span>`);
+    }
+    if (result.siesta_hamiltonians !== undefined && result.siesta_hamiltonians !== "") {
+      detailRows.push(`<span>${result.siesta_hamiltonians} SIESTA Hamiltonians</span>`);
+    }
+    if (result.comparison_report) {
+      detailRows.push(`<span>Report: <code>${result.comparison_report}</code></span>`);
+    }
+    if (result.aggregate_csv) {
+      detailRows.push(`<span>Aggregate: <code>${result.aggregate_csv}</code></span>`);
+    }
+    const safetyStatus = runScientificSafetyStatus(result);
+    detailRows.push(`<span>Scientific status: <strong>${safetyStatusLabel(safetyStatus)}</strong></span>`);
+    detailRows.push(
+      `<span>Target: ${result.target_component_policy || "unknown"} / ` +
+      `${result.n_matrix_components ?? "?"} component(s)</span>`,
+    );
+    detailRows.push(`<span>Overlap: ${result.overlap_source || "unknown"}</span>`);
+    detailRows.push(`<span>Prediction HSX standalone: ${predictionSafetyStatus(result)}</span>`);
+    const severeCount = finiteNumber(result.severe_warning_count);
+    if (severeCount != null && severeCount > 0) {
+      const kinds = Array.isArray(result.severe_warning_kinds) && result.severe_warning_kinds.length
+        ? ` (${result.severe_warning_kinds.slice(0, 4).join(", ")})`
+        : "";
+      detailRows.push(`<span>Severe warnings: ${severeCount}${kinds}</span>`);
+    }
     item.innerHTML = `
       <strong>${pipelineLabel(result.pipeline)} ${label}</strong>
-      <span>${result.predicted_hamiltonians} predicted Hamiltonians</span>
-      <span>${result.siesta_hamiltonians} SIESTA Hamiltonians</span>
+      ${detailRows.join("")}
       <code>${result.result_dir}</code>
     `;
     container.appendChild(item);
@@ -3235,6 +4944,21 @@ function renderExperimentResults(results) {
 }
 
 async function runExperiment() {
+  const runMode = document.getElementById("run-mode").value;
+  if (runMode === "deeph_comparison") {
+    state.experimentOffset = 0;
+    document.getElementById("experiment-log").textContent = "";
+    const payload = await request("/api/experiment", {
+      method: "POST",
+      body: JSON.stringify({
+        run_mode: runMode,
+        deeph_comparison: deephComparisonPayload(),
+      }),
+    });
+    updateExperimentStatus(payload);
+    showToast("DeepH comparison started");
+    return;
+  }
   const methods = selectedMethods();
   if (!methods.length) {
     throw new Error("Selecciona al menos un metodo.");
@@ -3290,16 +5014,15 @@ async function runExperiment() {
   const maxDatasets = Number(document.getElementById("fc-max-datasets").value);
   const performance = performanceSettings();
   const training = trainingSettings();
-  const runMode = document.getElementById("run-mode").value;
   if (runMode === "full_strict_pipeline") {
     state.datasetTargets = plannedDatasetTargetsFromRecipes(datasetRecipes, methods);
     renderPlannedDatasetTargets(state.datasetTargets);
   }
   const sweep = hyperparameterSweepPayload({ includeTargets: true });
-  const plan = !sweep.enabled && ["full_strict_pipeline", "train_test_metrics_plots_only"].includes(runMode)
+  const plan = !sweep.enabled && ["full_strict_pipeline", "graph2mat_deeph_comparison", "train_test_metrics_plots_only"].includes(runMode)
     ? trainingPlanPayload()
     : [];
-  const reusableDatasetIds = runMode === "train_test_metrics_plots_only"
+  const reusableDatasetIds = ["train_test_metrics_plots_only", "graph2mat_deeph_comparison"].includes(runMode)
     ? selectedReusableDatasetIds()
     : [];
   const venvActivateCommandInput = document.getElementById("venv-activate-command");
@@ -3333,6 +5056,7 @@ async function runExperiment() {
       training_settings: training,
       training_plan: plan,
       hyperparameter_sweep: sweep,
+      deeph_comparison: runMode === "graph2mat_deeph_comparison" ? deephComparisonPayload() : undefined,
       random_seed: Number.isInteger(randomSeed) ? randomSeed : 42,
       max_datasets: Number.isInteger(maxDatasets) ? maxDatasets : 100,
       venv_activate_command: venvActivateCommand || DEFAULT_VENV_ACTIVATE_COMMAND,
@@ -3398,8 +5122,20 @@ async function loadResults() {
   for (const pipeline of resultPipelines) {
     const items = archived[pipeline.key] || [];
     const orbitalPairItems = items.filter((item) => item?.diagnostic_outputs?.orbital_pair_metrics?.exists);
+    const kpointItems = items.filter((item) => item?.diagnostic_outputs?.kpoint_spectral_metrics?.exists);
+    const safetyCounts = items.reduce((counts, item) => {
+      const status = runScientificSafetyStatus(item);
+      counts[status] = (counts[status] || 0) + 1;
+      return counts;
+    }, {});
+    const safetyText = Object.entries(safetyCounts)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([status, count]) => `${safetyStatusLabel(status)}: ${count}`)
+      .join(" · ") || "none";
     const orbitalPairPath = orbitalPairItems[0]?.diagnostic_outputs?.orbital_pair_metrics?.path ||
       `Comparison/results/${pipeline.resultsDir}/.../metrics/orbital_pair_metrics.csv`;
+    const kpointPath = kpointItems[0]?.diagnostic_outputs?.kpoint_spectral_metrics?.path ||
+      `Comparison/results/${pipeline.resultsDir}/.../metrics/kpoint_spectral_metrics.csv`;
     const panel = document.createElement("section");
     panel.className = "panel result-row";
     panel.innerHTML = `
@@ -3409,8 +5145,11 @@ async function loadResults() {
       </div>
       <p><strong>${items.length}</strong> archived experiment runs</p>
       <p><strong>Orbital-pair diagnostics:</strong> ${orbitalPairItems.length}/${items.length} runs</p>
+      <p><strong>K-point-aware metrics:</strong> ${kpointItems.length}/${items.length} runs</p>
+      <p><strong>Safety:</strong> ${safetyText}</p>
       <code>Comparison/results/${pipeline.resultsDir}</code>
       <code>${orbitalPairPath}</code>
+      <code>${kpointPath}</code>
     `;
     grid.appendChild(panel);
   }
@@ -3432,7 +5171,41 @@ function finiteNumber(value) {
 const PLOT_COLORS = ["#4b6f8f", "#2a7f62", "#9467bd", "#d7a021", "#4f8f84", "#b15c5f", "#6370aa"];
 const DEEPH_REFERENCE_COLORS = ["#b45309", "#9f1239", "#6d28d9", "#0f766e", "#374151"];
 const DEEPH_PAPER_REFERENCE_LINES = {
+  "plot-kpoint-h": [
+    {
+      value: 0.0019,
+      label: "DeepH graphene gen. 1.9 meV",
+      detail: "Paper graphene generalization MAE of local transformed H' blocks; shown here as an eV-scale visual guide, not an identical H(k) metric.",
+    },
+    {
+      value: 0.0021,
+      label: "DeepH graphene avg 2.1 meV",
+      detail: "Paper graphene H' orbital-combination MAE averaged over all 13x13 orbital pairs; not identical to repository weighted H(k) MAE.",
+    },
+    {
+      value: 0.0066,
+      label: "DeepH graphene NN 6.6 meV",
+      detail: "Paper nearest-neighbor 1s Hamiltonian element MAE; visual guide only.",
+    },
+    {
+      value: 0.0085,
+      label: "DeepH graphene high 8.5 meV",
+      detail: "Upper end of the reported graphene orbital-combination MAE range; visual guide only.",
+    },
+  ],
+  "plot-kpoint-dos": [
+    {
+      value: 0.0001,
+      label: "DeepH DOS ~1e-4",
+      detail: "Paper graphene DOS MAE is about 0.1 x 10^-3 eV^-1 A^-2 over 500 points from -6 to +6 eV around Fermi; compare units carefully.",
+    },
+  ],
   "plot-deeph-mev": [
+    {
+      value: 1.9,
+      label: "DeepH graphene gen. 1.9 meV",
+      detail: "Graphene generalization MAE of H' for 2,000 unseen 100-400 K configurations.",
+    },
     {
       value: 1.3,
       label: "DeepH MoS2 pairs 1.3 meV",
@@ -3707,7 +5480,14 @@ function lineTraces(runs, group, metrics) {
         .map((run) => ({
           x: run.dataset_size,
           y: metricValue(run, group, metric.key),
-          text: [run.training_tag || run.run_id || "", materialContextText(run)].filter(Boolean).join(" · "),
+          text: [
+            run.training_tag || run.run_id || "",
+            materialContextText(run),
+            metricContextText(run),
+            runSafetyContextText(run),
+          ]
+            .filter(Boolean)
+            .join(" · "),
         }))
         .filter((point) => point.y != null);
       if (!points.length) continue;
@@ -4086,7 +5866,7 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
     traces,
     DEEPH_PAPER_REFERENCE_LINES[id],
     DEEPH_PAPER_REFERENCE_LINES[id]
-      ? "DeepH paper reference lines are diagnostic guides; repository metrics use raw/global supports."
+      ? "DeepH paper reference lines are diagnostic guides; match metric definitions before final claims."
       : "",
   );
   layout = withFitSelector(layout, traces);
@@ -4585,6 +6365,9 @@ function renderHeatmap(id, runs) {
     { group: "spectral", key: "frontier_window_rmse_eV", label: "Frontier RMSE", better: "lower" },
     { group: "spectral", key: "gap_abs_error_eV", label: "Gap error", better: "lower" },
     { group: "dos", key: "dos_wasserstein_eV", label: "DOS W1", better: "lower" },
+    { group: "kpoint_matrix", key: "h_mae_eV", label: "H(k) MAE", better: "lower" },
+    { group: "kpoint_spectral", key: "low_energy_rmse_eV", label: "K low-energy", better: "lower" },
+    { group: "kpoint_dos", key: "dos_mae_500_fermi_window", label: "K DOS MAE", better: "lower" },
     {
       group: "run",
       key: "pipeline_elapsed_seconds",
@@ -5459,6 +7242,26 @@ function visibleMaterialWarning(runs, crossExperiment) {
   };
 }
 
+function visibleRunSafetyWarning(runs) {
+  const counts = new Map();
+  for (const run of runs || []) {
+    const status = runScientificSafetyStatus(run);
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  const unsafe = counts.get("unsafe") || 0;
+  const unknown = counts.get("unknown") || 0;
+  const exploratory = counts.get("exploratory") || 0;
+  const nonComparative = counts.get("non_comparative") || 0;
+  if (!unsafe && !unknown && !exploratory && !nonComparative) return null;
+  return {
+    severity: unsafe ? "error" : "warning",
+    code: "visible_run_safety_states",
+    scientific_status: unsafe ? "scientifically_inconclusive" : "exploratory_only",
+    message: "Visible plot points include unsafe, unknown, exploratory or non-comparative runs; they remain visible for audit.",
+    details: Object.fromEntries(Array.from(counts.entries()).sort()),
+  };
+}
+
 function plotWarningEntriesForPayload(payload, crossExperiment, visibleRuns = null) {
   const warnings = [];
   const seen = new Set();
@@ -5495,6 +7298,7 @@ function plotWarningEntriesForPayload(payload, crossExperiment, visibleRuns = nu
     }
   }
   addWarning(visibleMaterialWarning(visibleRuns || payload?.runs || [], crossExperiment));
+  addWarning(visibleRunSafetyWarning(visibleRuns || payload?.runs || []));
   for (const warning of payload?.plot_warnings || []) {
     if (!crossExperiment || warning.experiment_id === crossExperiment.experiment_id || warning.code === "visualization_compatibility") {
       addWarning(warning);
@@ -5551,9 +7355,13 @@ function renderPlots(payload) {
     return;
   }
   syncMaterialFilterOptions(payload);
+  syncRunFamilyFilterOptions(payload);
+  syncSafetyFilterOptions(payload);
   const allRuns = payload?.runs || [];
-  const runs = filterRunsByMaterial(allRuns);
+  const runs = filterRunsBySafety(filterRunsByFamily(filterRunsByMaterial(allRuns)));
   const materialFilter = selectedPlotMaterial();
+  const familyFilter = selectedRunFamily();
+  const safetyFilter = selectedPlotSafety();
   const crossExperiment = filterCrossExperimentByMaterial(selectedCrossExperimentSet(payload));
   const crossMetric = selectedCrossMetric(crossExperiment);
   const primaryMetric = primaryCrossMetric(crossExperiment);
@@ -5563,17 +7371,23 @@ function renderPlots(payload) {
   const crossSources = crossExperiment?.source_experiments?.length || 0;
   const isolationText = crossExperiment?.isolation_warning ? ` | ${canonicalDisplayText(crossExperiment.isolation_warning)}` : "";
   const materialFilterText = materialFilter === "all" ? "all materials" : materialFilter;
+  const familyFilterText = familyFilter === "all" ? "all families" : runFamilyLabel(familyFilter);
+  const safetyFilterText = safetyFilter === "all" ? "all safety states" : safetyStatusLabel(safetyFilter);
   const blockerText = recommendation ? recommendationBlockers(recommendation).slice(0, 6).join(" | ") : "";
   const crossMissingText = !crossExperiment ? crossUnavailableMessage(payload) : "";
   const plotScientificStatus = crossExperiment?.plot_scientific_status || recommendation?.scientific_status || "unknown";
   const crossText = recommendation?.status
-    ? ` | material: ${materialFilterText} | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${plotScientificStatus} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${canonicalDisplayText(recommendation.reason || "")}${isolationText}`
+    ? ` | material: ${materialFilterText} | family: ${familyFilterText} | cross: ${crossRows} filas del experimento seleccionado (${crossSources} disponibles) | plot metric: ${crossMetric} | primary: ${primaryMetric} | scientific: ${plotScientificStatus} | blockers: ${blockerText || "none"} | ${recommendation.status} - ${canonicalDisplayText(recommendation.reason || "")}${isolationText}`
     : crossMissingText
       ? ` | cross: ${crossMissingText}`
     : "";
   status.textContent = runs.length
     ? `${runs.length}/${allRuns.length} runs con metricas${missingFermiSummary(runs)}`
     : "No hay metricas archivadas";
+  status.textContent += ` | family: ${familyFilterText}`;
+  status.textContent += ` | safety filter: ${safetyFilterText}`;
+  const kpointRunCount = runs.filter((run) => run.metric_space === "kpoint_sampled" || run.kpoint_metrics_enabled).length;
+  if (kpointRunCount) status.textContent += ` | ${kpointRunCount} k-point-aware`;
   status.textContent += crossText;
   renderLinePlot(
     "plot-fermi",
@@ -5588,6 +7402,40 @@ function renderPlots(payload) {
   renderLinePlot("plot-low-energy", runs, "spectral", [{ key: "low_energy_rmse_eV", label: "Low-energy RMSE" }], "Low-energy eigenvalues", "RMSE eV");
   renderLinePlot("plot-sparse", runs, "sparse", [{ key: "relative_frobenius_union", label: "Frobenius rel." }], "Error sparse matricial", "Relative Frobenius");
   renderLinePlot("plot-dos", runs, "dos", [{ key: "dos_wasserstein_eV", label: "Wasserstein" }], "Distancia DOS total", "Wasserstein eV");
+  renderLinePlot(
+    "plot-kpoint-h",
+    runs,
+    "kpoint_matrix",
+    [
+      { key: "h_mae_eV", label: "H(k) MAE" },
+      { key: "h_rmse_eV", label: "H(k) RMSE" },
+    ],
+    "K-point weighted matrix error",
+    "eV",
+  );
+  renderLinePlot(
+    "plot-kpoint-low-energy",
+    runs,
+    "kpoint_spectral",
+    [
+      { key: "low_energy_rmse_eV", label: "Low-energy" },
+      { key: "fermi_window_rmse_eV", label: "Fermi-window" },
+      { key: "frontier_window_rmse_eV", label: "Frontier" },
+    ],
+    "K-point weighted spectral error",
+    "RMSE eV",
+  );
+  renderLinePlot(
+    "plot-kpoint-dos",
+    runs,
+    "kpoint_dos",
+    [
+      { key: "dos_mae_500_fermi_window", label: "DOS Fermi MAE" },
+      { key: "dos_wasserstein_eV", label: "DOS W1" },
+    ],
+    "K-point weighted DOS",
+    "error",
+  );
   renderLinePlot("plot-gap", runs, "spectral", [{ key: "gap_abs_error_eV", label: "Gap error" }], "Error de gap", "Abs error eV");
   renderBoxPlot("plot-box", runs);
   renderScatterPlot("plot-scatter", runs);
@@ -5744,10 +7592,27 @@ function updatePlannedDatasetTargetPanel() {
   }
 }
 
+function setVisible(selector, visible) {
+  document.querySelectorAll(selector).forEach((node) => {
+    node.classList.toggle("hidden", !visible);
+  });
+}
+
+function updateDatasetBuilderPanel() {
+  const panel = document.getElementById("dataset-builder-panel");
+  if (!panel) return;
+  const runMode = document.getElementById("run-mode")?.value;
+  const enabled = ["dataset_only", "full_strict_pipeline"].includes(runMode);
+  panel.classList.toggle("hidden", !enabled);
+  panel.open = enabled;
+}
+
 function updateReusableDatasetPanel() {
   const panel = document.getElementById("reusable-dataset-panel");
   if (!panel) return;
-  const downstreamOnly = document.getElementById("run-mode")?.value === "train_test_metrics_plots_only";
+  const downstreamOnly = ["train_test_metrics_plots_only", "graph2mat_deeph_comparison"].includes(
+    document.getElementById("run-mode")?.value,
+  );
   panel.classList.toggle("hidden", !downstreamOnly);
   if (downstreamOnly) {
     if (state.reusableDatasetsLoaded) {
@@ -5756,6 +7621,36 @@ function updateReusableDatasetPanel() {
       loadReusableDatasets().catch((error) => showToast(error.message));
     }
   }
+}
+
+function updateDeepHComparisonPanel() {
+  const panel = document.getElementById("deeph-comparison-panel");
+  if (!panel) return;
+  const enabled = ["deeph_comparison", "graph2mat_deeph_comparison"].includes(
+    document.getElementById("run-mode")?.value,
+  );
+  panel.classList.toggle("hidden", !enabled);
+}
+
+function updateExperimentModePanels() {
+  const runMode = document.getElementById("run-mode")?.value;
+  const deepHOnly = runMode === "deeph_comparison";
+  const graph2matModes = ["dataset_only", "full_strict_pipeline", "train_test_metrics_plots_only", "graph2mat_deeph_comparison"];
+  const trainingModes = ["full_strict_pipeline", "train_test_metrics_plots_only", "graph2mat_deeph_comparison"];
+  const showGraph2MatControls = graph2matModes.includes(runMode);
+  const showTrainingControls = trainingModes.includes(runMode);
+
+  setVisible("#method-selection-panel", showGraph2MatControls);
+  setVisible(".material-selector-panel", !deepHOnly);
+  setVisible(".run-mode-extra-field", !deepHOnly);
+  setVisible("#split-controls-panel", !deepHOnly);
+  setVisible("#venv-activation-panel", !deepHOnly);
+  setVisible("#training-config-block", showTrainingControls);
+  setVisible("#hyperparameter-sweep-panel", showTrainingControls);
+  updateDatasetBuilderPanel();
+  updateDeepHComparisonPanel();
+  updateReusableDatasetPanel();
+  updateTrainingPlanPanel();
 }
 
 function formatBytes(bytes) {
@@ -5898,6 +7793,11 @@ function setupTabs() {
         loadResults().catch((error) => showToast(error.message));
         loadDatasetTargets().catch((error) => showToast(error.message));
         schedulePlotResize();
+      } else if (tab.dataset.view === "g2m-deeph") {
+        pollG2MDeepHStatus().catch((error) => showToast(error.message));
+        loadG2MDeepHDatasets().catch((error) => showToast(error.message));
+        loadG2MDeepHResults().catch((error) => showToast(error.message));
+        loadG2MDeepHPlots().catch((error) => showToast(error.message));
       }
     });
   });
@@ -6014,8 +7914,7 @@ function setupEvents() {
   });
   document.getElementById("run-mode")?.addEventListener("change", () => {
     state.trainingPlan = [];
-    updateReusableDatasetPanel();
-    updateTrainingPlanPanel();
+    updateExperimentModePanels();
     renderHyperparameterSweepPreview();
   });
   document.addEventListener("change", (event) => {
@@ -6057,11 +7956,102 @@ function setupEvents() {
       schedulePlotResize();
     }
   });
+  document.getElementById("plot-family-filter")?.addEventListener("change", () => {
+    if (state.plotsEnabled) {
+      renderPlots(state.plotData);
+      schedulePlotResize();
+    }
+  });
+  document.getElementById("plot-safety-filter")?.addEventListener("change", () => {
+    if (state.plotsEnabled) {
+      renderPlots(state.plotData);
+      schedulePlotResize();
+    }
+  });
   document.getElementById("run-experiment").addEventListener("click", () => {
     runExperiment().catch((error) => showToast(error.message));
   });
   document.getElementById("stop-experiment").addEventListener("click", () => {
     stopExperiment().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-validate")?.addEventListener("click", () => {
+    validateG2MDeepHDataset().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-run")?.addEventListener("click", () => {
+    runG2MDeepHBenchmark().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-stop")?.addEventListener("click", () => {
+    stopG2MDeepHBenchmark().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-refresh-results")?.addEventListener("click", () => {
+    Promise.all([loadG2MDeepHResults(), loadG2MDeepHPlots()])
+      .then(() => showToast("Graph2Mat vs DeepH refreshed"))
+      .catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-log-bottom")?.addEventListener("click", scrollG2MDeepHLogToBottom);
+  document.getElementById("g2m-deeph-log-clear")?.addEventListener("click", () => {
+    clearG2MDeepHLogView();
+    showToast("Graph2Mat vs DeepH log view cleared");
+  });
+  document.getElementById("g2m-deeph-refresh-datasets")?.addEventListener("click", () => {
+    loadG2MDeepHDatasets()
+      .then(() => showToast("Graph2Mat vs DeepH dataset list refreshed"))
+      .catch((error) => showToast(error.message));
+  });
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target?.classList?.contains("g2m-deeph-dataset-checkbox")) {
+      selectG2MDeepHDatasetFromCheckbox(target);
+    }
+  });
+  [
+    "g2m-deeph-md-sweep-table",
+    "g2m-deeph-dataset-sweep-max",
+    "g2m-deeph-split-mode",
+    "g2m-deeph-dataset-mode",
+    "g2m-deeph-split-train",
+    "g2m-deeph-split-validation",
+    "g2m-deeph-split-test",
+  ].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", renderG2MDeepHDatasetSweepPreview);
+    document.getElementById(id)?.addEventListener("change", () => {
+      updateG2MDeepHDatasetPickerVisibility();
+      renderG2MDeepHDatasetSweepPreview();
+      renderG2MDeepHTrainingSweepPreview();
+    });
+  });
+  [
+    "g2m-deeph-training-sweep-enabled",
+    "g2m-deeph-training-sweep-max-runs",
+    "g2m-deeph-training-sweep-error-policy",
+    "g2m-deeph-sweep-common-seeds",
+    "g2m-deeph-sweep-common-epochs",
+    "g2m-deeph-sweep-common-lr",
+    "g2m-deeph-sweep-common-batch-size",
+    "g2m-deeph-sweep-graph2mat-enabled",
+    "g2m-deeph-sweep-g2m-interactions",
+    "g2m-deeph-sweep-g2m-correlation",
+    "g2m-deeph-sweep-g2m-max-ell",
+    "g2m-deeph-sweep-g2m-hidden-channels",
+    "g2m-deeph-sweep-g2m-hidden-irreps",
+    "g2m-deeph-sweep-g2m-loss",
+    "g2m-deeph-sweep-g2m-loss-kwargs",
+    "g2m-deeph-sweep-g2m-loader-threads",
+    "g2m-deeph-sweep-deeph-enabled",
+    "g2m-deeph-sweep-deeph-optimizer",
+    "g2m-deeph-sweep-deeph-weight-decay",
+    "g2m-deeph-sweep-deeph-criterion",
+    "g2m-deeph-sweep-deeph-atom-fea-len",
+    "g2m-deeph-sweep-deeph-edge-fea-len",
+    "g2m-deeph-sweep-deeph-gauss-stop",
+    "g2m-deeph-sweep-deeph-num-l",
+    "g2m-deeph-sweep-deeph-if-lcmp",
+    "g2m-deeph-sweep-deeph-normalization",
+    "g2m-deeph-sweep-deeph-atom-update-net",
+    "g2m-deeph-sweep-deeph-retain-edge-fea",
+  ].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", renderG2MDeepHTrainingSweepPreview);
+    document.getElementById(id)?.addEventListener("change", renderG2MDeepHTrainingSweepPreview);
   });
   document.getElementById("copy-venv-command").addEventListener("click", () => {
     copyVenvActivationCommand().catch((error) => showToast(error.message));
@@ -6091,10 +8081,14 @@ function setupEvents() {
       setMethodSelected(node.value, node.checked, node);
       updateAtomSizesFromFcPlan();
       updateDatasetPreview();
-      updateReusableDatasetPanel();
-      updateTrainingPlanPanel();
+      updateExperimentModePanels();
       renderHyperparameterSweepPreview();
     });
+  });
+  document.querySelectorAll(
+    ".panel-summary button, .panel-summary code, .subpanel-summary button, .subpanel-summary input, .subpanel-summary label",
+  ).forEach((node) => {
+    node.addEventListener("click", (event) => event.stopPropagation());
   });
   window.addEventListener("resize", () => schedulePlotResize());
 }
@@ -6118,9 +8112,13 @@ async function boot() {
   }
   await loadFcConfig();
   updateDatasetPreview();
-  updateReusableDatasetPanel();
-  updateTrainingPlanPanel();
+  updateExperimentModePanels();
   renderHyperparameterSweepPreview();
+  updateG2MDeepHDatasetPickerVisibility();
+  renderG2MDeepHDatasetSweepPreview();
+  renderG2MDeepHTrainingSweepPreview();
+  renderG2MDeepHArtifactSummary(null);
+  renderG2MDeepHMetricSummary(null);
   await pollOnce();
   state.polling = setInterval(pollOnce, POLL_INTERVAL_MS);
 }

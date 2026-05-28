@@ -45,6 +45,7 @@ COMMON_KEYS = [
     "FixSpin",
     "NonCollinearSpin",
     "ForceAuxCell",
+    "SaveHS",
     "Save.HS",
     "TS.HS.Save",
     "TS.DE.Save",
@@ -76,6 +77,7 @@ PHYSICS_RELEVANT_KEYS = {
 }
 
 OUTPUT_ARTIFACT_KEYS = {
+    "SaveHS",
     "Save.HS",
     "TS.HS.Save",
     "TS.DE.Save",
@@ -112,6 +114,19 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def siesta_bool(value: Any, *, default: bool = True) -> str:
+    if value is None:
+        return "T" if default else "F"
+    if isinstance(value, bool):
+        return "T" if value else "F"
+    text = str(value).strip().lower()
+    if text in {"t", "true", ".true.", "1", "yes", "on"}:
+        return "T"
+    if text in {"f", "false", ".false.", "0", "no", "off"}:
+        return "F"
+    return str(value).strip()
+
+
 def canonical_json(data: dict[str, Any]) -> str:
     return json.dumps(normalize_value(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -142,6 +157,7 @@ def md_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
         "FixSpin": md.get("fix_spin"),
         "NonCollinearSpin": md.get("non_collinear_spin"),
         "ForceAuxCell": "T" if bool(md.get("force_aux_cell", False)) else "F",
+        "SaveHS": "T" if bool(md.get("save_hs_file", False)) else "F",
         "Save.HS": "T" if bool(md.get("save_hs_file", False)) else "F",
         "TS.HS.Save": "T" if bool(md.get("save_hs", False)) else "F",
         "TS.DE.Save": "T" if bool(md.get("save_de", False)) else "F",
@@ -153,12 +169,14 @@ def atom_siesta_settings(config: dict[str, Any]) -> dict[str, Any]:
     structure = config.get("structure", {}) or {}
     siesta = dict(structure.get("siesta", {}) or {})
     force_constants = structure.get("force_constants", {}) or {}
+    save_hs_value = siesta.get("SaveHS", siesta.get("Save.HS", True))
     return {
         "lattice_constant": structure.get("lattice_constant"),
         "lattice_vectors": structure.get("lattice_vectors"),
         "TS.HS.Save": "T" if bool(force_constants.get("save_tshs", siesta.get("TS.HS.Save", True))) else "F",
         "TS.DE.Save": "T" if bool(force_constants.get("save_tsde", siesta.get("TS.DE.Save", True))) else "F",
         **siesta,
+        "SaveHS": siesta_bool(save_hs_value),
     }
 
 

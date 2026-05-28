@@ -35,6 +35,13 @@ from reference_selection import (
 MATRIX_SUFFIXES = (".TSHS", ".HSX")
 STRUCTURE_NAMES = ("RUN.fdf",)
 XV_NAMES = ("siesta.XV",)
+JOB_COMPLETION_MARKERS = ("Job completed",)
+SCF_CONVERGENCE_MARKERS = (
+    "SCF cycle converged",
+    "PostSCF",
+    "FINAL_HF",
+)
+MD_RUN_FDF_XV_MARKER = "Graph2Mat MD geometry materialized from siesta.XV"
 
 
 @dataclass
@@ -113,23 +120,49 @@ def has_atomic_coordinates(path: Path) -> bool:
     return "%block atomiccoordinatesandatomicspecies" in text
 
 
-def parse_run_out_status(path: Path | None) -> tuple[bool, bool, str]:
+def md_run_fdf_geometry_materialized(path: Path | None) -> bool:
     if path is None or not path.exists():
-        return False, False, "missing_run_out"
+        return False
+    metadata_path = path.parent / "metadata.json"
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            metadata = {}
+        if isinstance(metadata, dict) and (
+            metadata.get("run_fdf_rewritten_from_xv") is True
+            or str(metadata.get("run_fdf_geometry_source") or "").lower() == "siesta.xv"
+        ):
+            return True
+    try:
+        return MD_RUN_FDF_XV_MARKER in path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+
+def parse_run_out_status(path: Path | None, structure_path: Path | None = None) -> tuple[bool, bool, str, list[str]]:
+    if path is None or not path.exists():
+        return False, False, "missing_run_out", []
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
-        return False, False, f"parser_error:{exc}"
-    completed = "Job completed" in text
-    converged = "SCF cycle converged" in text
+        return False, False, f"parser_error:{exc}", []
+    warnings: list[str] = []
+    if structure_path is not None and structure_path.exists() and path.stat().st_mtime < structure_path.stat().st_mtime:
+        if md_run_fdf_geometry_materialized(structure_path):
+            warnings.append("md_post_siesta_run_fdf_mtime")
+        else:
+            return False, False, "stale_output", warnings
+    completed = any(marker in text for marker in JOB_COMPLETION_MARKERS)
+    converged = any(marker in text for marker in SCF_CONVERGENCE_MARKERS)
     if completed and converged:
-        return True, True, "ok"
+        return True, True, "ok", warnings
     missing = []
     if not completed:
         missing.append("job_completed")
     if not converged:
         missing.append("scf_converged")
-    return completed, converged, "missing_" + "_and_".join(missing)
+    return completed, converged, "missing_" + "_and_".join(missing), warnings
 
 
 def spectral_ready(matrix_path: Path | None, require_spectral: bool) -> tuple[bool, str]:
@@ -198,8 +231,10 @@ def validate_sample(
     *,
     require_spectral: bool,
     allow_missing_hamiltonian_debug: bool,
+    allow_unvalidated_matrices: bool,
 ) -> dict[str, Any]:
     reasons: list[str] = []
+    warnings: list[str] = []
     structure_path = sample.structure_path
     hamiltonian_path = sample.hamiltonian_path
 
@@ -209,8 +244,12 @@ def validate_sample(
         if hamiltonian_path is None:
             hamiltonian_path, ambiguous_matrix, matrix_count = choose_reference_matrix(sample.sample_dir)
         else:
-            ambiguous_matrix = False
-            matrix_count = 1 if hamiltonian_path.exists() else 0
+            selection = strict_choose_reference_matrix(sample.sample_dir)
+            ambiguous_matrix = selection.ambiguous
+            matrix_count = selection.candidate_count
+            if selection.ok and hamiltonian_path.exists():
+                if hamiltonian_path.resolve(strict=False) != selection.path.resolve(strict=False):
+                    reasons.append("reference_matrix_selection_mismatch")
     else:
         ambiguous_matrix = False
         matrix_count = 1 if hamiltonian_path is not None and hamiltonian_path.exists() else 0
@@ -229,9 +268,27 @@ def validate_sample(
     if ambiguous_matrix:
         reasons.append("ambiguous_reference_matrix")
 
-    completed, converged, run_out_status = parse_run_out_status(sample.run_out_path)
+    if (
+        hamiltonian_path is not None
+        and hamiltonian_path.exists()
+        and structure_path is not None
+        and structure_path.exists()
+        and hamiltonian_path.stat().st_mtime < structure_path.stat().st_mtime
+    ):
+        if md_run_fdf_geometry_materialized(structure_path):
+            warnings.append("md_post_siesta_run_fdf_mtime")
+        else:
+            reasons.append("stale_matrix")
+
+    completed, converged, run_out_status, run_out_warnings = parse_run_out_status(
+        sample.run_out_path,
+        structure_path,
+    )
+    warnings.extend(run_out_warnings)
     if run_out_status == "missing_run_out":
         reasons.append("missing_output")
+    if run_out_status == "stale_output":
+        reasons.append("stale_output")
     if run_out_status.startswith("parser_error"):
         reasons.append("parser_error")
     if not completed:
@@ -251,13 +308,26 @@ def validate_sample(
         # itself, but it is recorded because it can hide wrong sample pairing.
         corresponds = False
 
-    is_valid = not any(
-        reason
-        for reason in reasons
-        if reason != "missing_hamiltonian_debug_allowed"
+    ignored_debug_reasons = {"missing_hamiltonian_debug_allowed"}
+    unsafe_allowed_reasons = {
+        "missing_output",
+        "job_not_completed",
+        "scf_not_converged",
+        "stale_output",
+        "stale_matrix",
+    }
+    hard_reasons = [reason for reason in reasons if reason not in ignored_debug_reasons]
+    unsafe_reasons: list[str] = []
+    if allow_unvalidated_matrices:
+        unsafe_reasons = [reason for reason in hard_reasons if reason in unsafe_allowed_reasons]
+        hard_reasons = [reason for reason in hard_reasons if reason not in unsafe_allowed_reasons]
+    is_valid = not hard_reasons
+    unsafe_unvalidated = bool(is_valid and allow_unvalidated_matrices and unsafe_reasons)
+    severe_warnings = (
+        "UNSAFE_UNVALIDATED_MATRIX_REFERENCE:" + ";".join(sorted(dict.fromkeys(unsafe_reasons)))
+        if unsafe_unvalidated
+        else ""
     )
-    if allow_missing_hamiltonian_debug and reasons == ["missing_hamiltonian_debug_allowed"]:
-        is_valid = True
 
     return {
         **sample.row,
@@ -278,6 +348,11 @@ def validate_sample(
         "structure_corresponds_to_sample": corresponds,
         "status": "valid" if is_valid else "invalid",
         "invalid_reasons": ";".join(reasons),
+        "warnings": ";".join(sorted(dict.fromkeys(warnings))),
+        "allow_unvalidated_matrices": bool(allow_unvalidated_matrices),
+        "unsafe_unvalidated_matrices": unsafe_unvalidated,
+        "unsafe_validation_reasons": ";".join(sorted(dict.fromkeys(unsafe_reasons))),
+        "severe_warnings": severe_warnings,
     }
 
 
@@ -292,6 +367,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-spectral", action="store_true")
     parser.add_argument("--min-valid", type=int, default=1)
     parser.add_argument("--allow-missing-hamiltonian-debug", action="store_true")
+    parser.add_argument(
+        "--allow-unvalidated-matrices",
+        action="store_true",
+        help=(
+            "Debug only: accept existing matrix references with missing/stale/non-converged "
+            "RUN.out proof and mark them unsafe."
+        ),
+    )
     return parser
 
 
@@ -308,6 +391,7 @@ def main() -> int:
             sample,
             require_spectral=args.require_spectral,
             allow_missing_hamiltonian_debug=args.allow_missing_hamiltonian_debug,
+            allow_unvalidated_matrices=args.allow_unvalidated_matrices,
         )
         for sample in candidates
     ]
@@ -325,9 +409,18 @@ def main() -> int:
         "samples_seen": len(rows),
         "valid_samples": len(valid_rows),
         "invalid_samples": len(invalid_rows),
+        "unsafe_unvalidated_samples": sum(1 for row in rows if row.get("unsafe_unvalidated_matrices")),
         "min_valid": args.min_valid,
         "require_spectral": bool(args.require_spectral),
         "allow_missing_hamiltonian_debug": bool(args.allow_missing_hamiltonian_debug),
+        "allow_unvalidated_matrices": bool(args.allow_unvalidated_matrices),
+        "severe_warnings": sorted(
+            {
+                str(row.get("severe_warnings"))
+                for row in rows
+                if row.get("severe_warnings") not in (None, "", False)
+            }
+        ),
         "outputs": {
             "sample_validation_summary": str(args.output_dir / "sample_validation_summary.csv"),
             "valid_samples": str(args.output_dir / "valid_samples.csv"),

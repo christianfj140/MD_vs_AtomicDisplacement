@@ -11,6 +11,7 @@ import subprocess
 import sys
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 
 
@@ -63,6 +64,30 @@ def minimal_run_fdf(path: Path) -> None:
                 "0.0 0.7 0.0 2",
                 "0.0 -0.7 0.0 2",
                 "%endblock AtomicCoordinatesAndAtomicSpecies",
+                "Save.HS T",
+                "XML.Write T",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def kpoint_run_fdf(path: Path, *, mesh: tuple[int, int, int] = (6, 6, 1)) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "SystemLabel graphene",
+                "%block LatticeVectors",
+                "6.5 0.0 0.0",
+                "0.0 6.5 0.0",
+                "0.0 0.0 14.0",
+                "%endblock LatticeVectors",
+                "%block kgrid_Monkhorst_Pack",
+                f"{mesh[0]} 0 0 0.0",
+                f"0 {mesh[1]} 0 0.0",
+                f"0 0 {mesh[2]} 0.0",
+                "%endblock kgrid_Monkhorst_Pack",
                 "Save.HS T",
                 "XML.Write T",
                 "",
@@ -723,6 +748,37 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(plan[0]["sweep_index"], 1)
         self.assertIn("max_epochs", plan[0]["sweep_parameters"])
 
+    def test_hyperparameter_sweep_expands_benchmark_methods_and_reuses_same_split(self) -> None:
+        module = self.load_pipeline_ui_module()
+        plan = module.expand_hyperparameter_sweep_to_training_plan(
+            {
+                "enabled": True,
+                "max_configs": 4,
+                "parameters": {
+                    "seed_everything": [0, 1],
+                    "benchmark_metadata": [
+                        {"benchmark_method_id": "default_huber"},
+                        {"benchmark_method_id": "context_hamiltonian_readout"},
+                    ],
+                    "model": [
+                        {"loss": "graph2mat.metrics.block_type_huber", "loss_kwargs": {"beta": 0.01}},
+                    ],
+                },
+            },
+            run_mode="train_test_metrics_plots_only",
+            reusable_dataset_ids=["md_run_1140"],
+        )
+        self.assertEqual(len(plan), 4)
+        self.assertTrue(all(item["reusable_dataset_ids"] == ["md_run_1140"] for item in plan))
+        self.assertEqual(
+            {item["training_settings"]["benchmark_metadata"]["benchmark_method_id"] for item in plan},
+            {"default_huber", "context_hamiltonian_readout"},
+        )
+        self.assertEqual(
+            {item["training_settings"]["model"]["loss"] for item in plan},
+            {"graph2mat.metrics.block_type_huber"},
+        )
+
     def test_hyperparameter_sweep_excludes_cartesian_indices(self) -> None:
         module = self.load_pipeline_ui_module()
         sweep = module.parse_hyperparameter_sweep(
@@ -958,6 +1014,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(default_settings["torch_float32_matmul_precision"], "high")
         self.assertGreaterEqual(default_settings["max_parallel_siesta_jobs"], 1)
         self.assertEqual(default_settings["max_parallel_dataset_jobs"], 1)
+        self.assertEqual(default_settings["max_parallel_graph2mat_training_jobs"], 1)
+        self.assertEqual(default_settings["max_parallel_deeph_training_jobs"], 1)
         fake_hardware = {
             "cpu_physical_cores": 16,
             "cpu_logical_cores": 32,
@@ -979,6 +1037,17 @@ class ComparisonWorkflowTests(unittest.TestCase):
             next(item for item in catalog["presets"] if item["id"] == "gpu_focused")["settings"]["compute_accelerator"],
             "gpu",
         )
+        parallel = next(item for item in catalog["presets"] if item["id"] == "parallel_trains")["settings"]
+        self.assertEqual(parallel["compute_accelerator"], "gpu")
+        self.assertEqual(parallel["batch_size"], 1024)
+        self.assertEqual(parallel["max_parallel_graph2mat_training_jobs"], 4)
+        self.assertEqual(parallel["max_parallel_deeph_training_jobs"], 2)
+        self.assertEqual(parallel["torch_num_threads"], 1)
+        self.assertEqual(parallel["numexpr_num_threads"], 1)
+        self.assertEqual(parallel["torch_mixed_precision"], "bf16-mixed")
+        self.assertEqual(parallel["graph2mat_log_every_n_steps"], 10)
+        self.assertEqual(parallel["graph2mat_check_val_every_n_epoch"], 5)
+        self.assertEqual(parallel["graph2mat_checkpoint_every_n_epochs"], 5)
         resolved, auto_settings = module.preset_settings_by_id("auto_detect", fake_hardware)
         self.assertEqual(resolved, "balanced")
         self.assertEqual(auto_settings["compute_accelerator"], "gpu")
@@ -991,6 +1060,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "max_parallel_prediction_jobs": "4",
                 "max_parallel_evaluation_jobs": "5",
                 "max_parallel_metric_jobs": "6",
+                "max_parallel_graph2mat_training_jobs": "2",
+                "max_parallel_deeph_training_jobs": "2",
                 "omp_num_threads": "3",
                 "mkl_num_threads": None,
                 "openblas_num_threads": "",
@@ -998,11 +1069,16 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "torch_num_threads": "4",
                 "compute_accelerator": "auto",
                 "batch_size": "16",
+                "graph2mat_log_every_n_steps": "10",
+                "graph2mat_check_val_every_n_epoch": "5",
+                "graph2mat_checkpoint_every_n_epochs": "5",
+                "graph2mat_require_cuequivariance": "true",
                 "store_in_memory": "false",
                 "reuse_validated_siesta_outputs": "true",
                 "enable_experiment_cache": "false",
                 "error_policy": "continue_on_error",
                 "torch_float32_matmul_precision": "high",
+                "torch_mixed_precision": "bf16-mixed",
             }
         )
         self.assertEqual(settings["max_parallel_siesta_jobs"], 2)
@@ -1010,9 +1086,16 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(settings["max_parallel_prediction_jobs"], 4)
         self.assertEqual(settings["max_parallel_evaluation_jobs"], 5)
         self.assertEqual(settings["max_parallel_metric_jobs"], 6)
+        self.assertEqual(settings["max_parallel_graph2mat_training_jobs"], 2)
+        self.assertEqual(settings["max_parallel_deeph_training_jobs"], 2)
         self.assertEqual(settings["compute_accelerator"], "auto")
         self.assertEqual(settings["batch_size"], 16)
+        self.assertEqual(settings["graph2mat_log_every_n_steps"], 10)
+        self.assertEqual(settings["graph2mat_check_val_every_n_epoch"], 5)
+        self.assertEqual(settings["graph2mat_checkpoint_every_n_epochs"], 5)
+        self.assertIs(settings["graph2mat_require_cuequivariance"], True)
         self.assertIs(settings["store_in_memory"], False)
+        self.assertEqual(settings["torch_mixed_precision"], "bf16-mixed")
         self.assertIs(settings["reuse_validated_siesta_outputs"], True)
         self.assertIs(settings["enable_experiment_cache"], False)
         self.assertEqual(settings["error_policy"], "continue_on_error")
@@ -1029,6 +1112,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
         }
         module.apply_performance_to_config(config, settings)
         self.assertEqual(config["training"]["trainer"]["accelerator"], "auto")
+        self.assertEqual(config["training"]["trainer"]["precision"], "bf16-mixed")
+        self.assertEqual(config["training"]["trainer"]["log_every_n_steps"], 10)
+        self.assertEqual(config["training"]["trainer"]["check_val_every_n_epoch"], 5)
+        self.assertEqual(config["training"]["trainer"]["callbacks"][0]["init_args"]["every_n_epochs"], 5)
+        self.assertEqual(config["training"]["trainer"]["callbacks"][1]["init_args"]["every_n_epochs"], 5)
         self.assertEqual(config["training"]["data"]["batch_size"], 16)
         self.assertIs(config["training"]["data"]["store_in_memory"], False)
         self.assertIs(config["testing"]["data"]["store_in_memory"], False)
@@ -1036,6 +1124,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertFalse(config["single_points"]["rerun"])
         with self.assertRaisesRegex(RuntimeError, "performance.max_parallel_siesta_jobs"):
             module.parse_performance_settings({"max_parallel_siesta_jobs": 0})
+        with self.assertRaisesRegex(RuntimeError, "torch_mixed_precision"):
+            module.parse_performance_settings({"torch_mixed_precision": "fp8"})
         with self.assertRaisesRegex(RuntimeError, "error_policy"):
             module.parse_performance_settings({"error_policy": "ignore"})
         with self.assertRaisesRegex(RuntimeError, "enable_experiment_cache"):
@@ -1110,6 +1200,58 @@ class ComparisonWorkflowTests(unittest.TestCase):
         )
         self.assertTrue(coeff_config["training"]["model"]["return_coefficients"])
 
+    def test_training_settings_pass_through_graph2mat_sections_and_benchmark_metadata(self) -> None:
+        module = self.load_pipeline_ui_module()
+        settings = module.parse_training_settings(
+            {
+                "data": {
+                    "out_matrix": "hamiltonian",
+                    "matrix_component_policy": "h_only",
+                    "n_matrix_components": 1,
+                    "symmetric_matrix": True,
+                    "batch_size": 8,
+                },
+                "model": {
+                    "readout": "hamiltonian",
+                    "hamiltonian_context": {"enabled": True},
+                    "training_stages": [{"id": "coeff", "loss": "coefficient_space_mse"}],
+                },
+                "trainer": {"log_every_n_steps": 1},
+                "training": {"training_stages": [{"id": "warmup"}]},
+                "benchmark_metadata": {
+                    "benchmark_method_id": "context_hamiltonian_readout_staged",
+                    "architecture": "hamiltonian_context",
+                    "readout": "hamiltonian",
+                    "context_enabled": True,
+                    "training_stages": [{"id": "coeff"}, {"id": "composite"}],
+                },
+            }
+        )
+        config = {"training": {"data": {}, "model": {}, "trainer": {}}}
+        module.apply_training_settings_to_config(config, settings)
+
+        training = config["training"]
+        self.assertEqual(training["data"]["matrix_component_policy"], "h_only")
+        self.assertEqual(training["data"]["n_matrix_components"], 1)
+        self.assertEqual(training["model"]["readout"], "hamiltonian")
+        self.assertTrue(training["model"]["hamiltonian_context"]["enabled"])
+        self.assertEqual(training["trainer"]["log_every_n_steps"], 1)
+        self.assertEqual(training["training_stages"], [{"id": "warmup"}])
+
+        metadata = module.benchmark_metadata_from_config(config)
+        self.assertEqual(metadata["benchmark_method_id"], "context_hamiltonian_readout_staged")
+        self.assertEqual(metadata["architecture"], "hamiltonian_context")
+        self.assertEqual(metadata["readout"], "hamiltonian")
+        self.assertTrue(metadata["context_enabled"])
+        self.assertEqual(metadata["loss_kwargs"], {})
+        self.assertEqual(metadata["target"]["matrix_component_policy"], "h_only")
+
+        with self.assertRaisesRegex(RuntimeError, "n_matrix_components"):
+            module.apply_training_settings_to_config(
+                {"training": {"data": {}, "model": {}, "trainer": {}}},
+                {"data": {"out_matrix": "hamiltonian", "matrix_component_policy": "h_only", "n_matrix_components": 2}},
+            )
+
     def test_md_graph2mat_training_config_excludes_ui_metadata(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "MD" / "scripts"))
         module = self.load_module_from_path(
@@ -1130,6 +1272,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     "trainer": {"max_epochs": 12},
                     "optimizer": {"class_path": "Adam"},
                     "ui_training_settings": {"max_epochs": 12, "batch_size": 4},
+                    "benchmark_metadata": {"benchmark_method_id": "not_for_graph2mat"},
+                    "training_stages": [{"id": "stage1"}],
                 }
             }
         )
@@ -1137,10 +1281,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("model:", rendered)
         self.assertIn("trainer:", rendered)
         self.assertIn("optimizer:", rendered)
+        self.assertIn("training_stages:", rendered)
         self.assertIn("matrix_component_policy: h_only", rendered)
         self.assertIn("n_matrix_components: 1", rendered)
         self.assertIn("max_epochs: 12", rendered)
         self.assertNotIn("ui_training_settings", rendered)
+        self.assertNotIn("benchmark_metadata", rendered)
         self.assertNotIn("torch_float32_matmul_precision", rendered)
 
     def test_default_venv_command_uses_repo_local_venv(self) -> None:
@@ -1763,6 +1909,37 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 400,
             )
 
+    def test_cross_metric_aggregation_marks_legacy_metrics_provenance_unknown(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "Comparison" / "scripts"))
+        aggregate = self.load_module_from_path(
+            "aggregate_cross_metrics_legacy_provenance_test",
+            REPO_ROOT / "Comparison" / "scripts" / "aggregate_cross_metrics.py",
+        )
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "cross" / "cross_abc__md__on__test_md"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps({"train_method": "md", "test_set": "test_md", "dataset_size": 3}),
+                encoding="utf-8",
+            )
+            write_csv(metrics_dir / "spectral_metrics.csv", [{"sample": "sample_1", "low_energy_rmse_eV": "0.1"}])
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps({"samples_seen": 1, "samples_compared": 1}),
+                encoding="utf-8",
+            )
+
+            rows = aggregate.aggregate_one(result_dir, "exp_legacy")
+
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["metrics_schema_version"], "legacy_unknown")
+            self.assertEqual(row["target_component_policy"], "unknown")
+            self.assertIn("LEGACY_METRICS_SCHEMA_UNKNOWN_REEVALUATE_POST_H_ONLY", row["severe_warnings"])
+            self.assertIn("LEGACY_TARGET_COMPONENT_POLICY_UNKNOWN", row["severe_warnings"])
+            self.assertIn("PREDICTION_HSX_SAFETY_UNKNOWN_LEGACY", row["severe_warnings"])
+
     def test_prepare_cross_result_dir_resets_existing_nonempty_output(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -1836,11 +2013,15 @@ class ComparisonWorkflowTests(unittest.TestCase):
             atom_species=[atom["species_index"] for atom in random_config["structure"]["atoms"]],
             sample_id="rc_sample",
         )
-        for text in (md_fdf, fc_fdf, random_fdf):
+        for text in (fc_fdf, random_fdf):
             self.assertIn("Generated from pipeline_config.yaml using shared RUN.fdf layers", text)
             self.assertIn("PAO.BasisSize", text)
             self.assertIn("MeshCutoff", text)
             self.assertIn("XML.Write", text)
+        self.assertIn("Wannier.Manifold.entangled", md_fdf)
+        self.assertIn("MeshCutoff             600.0 Ry", md_fdf)
+        self.assertIn("SaveHS", md_fdf)
+        self.assertIn("Save.HS", md_fdf)
         self.assertIn("MD.TypeOfRun", md_fdf)
         self.assertIn("Verlet", md_fdf)
         self.assertIn("MD.InitialTemperature", md_fdf)
@@ -2642,11 +2823,29 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            dataset_only_result = module.RESULTS_ROOT / "results_md" / "dataset_only_md" / "run_dataset_only"
+            dataset_only_result.mkdir(parents=True)
+            (dataset_only_result / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "pipeline": "md",
+                        "method_id": "md",
+                        "dataset_label": "dataset_only_md",
+                        "dataset_size": 3,
+                        "returncode": 0,
+                        "run_id": "dataset_only",
+                        "run_mode": "dataset_only",
+                        "dataset_dir": str(hidden_dataset),
+                        "result_dir": str(dataset_only_result),
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             runner = module.ExperimentRunner()
             payload = runner.reusable_dataset_candidates_payload()
             labels = [item["dataset_label"] for item in payload["datasets"]]
-            self.assertEqual(labels, ["visible_md"])
+            self.assertEqual(labels, ["visible_md", "dataset_only_md"])
             self.assertEqual([run["dataset_label"] for run in module.plot_data_summary()["runs"]], ["visible_md"])
 
     def test_parallel_callable_tasks_honor_continue_and_fail_fast(self) -> None:
@@ -3242,6 +3441,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "training_plan",
                 "material_config",
                 "hyperparameter_sweep",
+                "deeph_comparison_options",
             ]
             self.assertEqual(len(started["args"]), len(arg_names))
             args = dict(zip(arg_names, started["args"]))
@@ -3257,6 +3457,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(args["training_plan"], [])
             self.assertIsNone(args["material_config"])
             self.assertEqual(args["hyperparameter_sweep"], {"enabled": False})
+            self.assertIsNone(args["deeph_comparison_options"])
 
     def test_experiment_start_rejects_zero_selected_methods(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -3389,10 +3590,19 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('value="gpu" selected', index_html)
         self.assertIn('value="auto"', index_html)
         self.assertIn('<option value="balanced" selected>Balanced</option>', index_html)
+        self.assertIn('<option value="parallel_trains">Parallel trains</option>', index_html)
         self.assertIn('<option value="auto_detect">Auto detect</option>', index_html)
         self.assertIn('<option value="max_aggressive">Max aggressive / stress</option>', index_html)
         self.assertIn('id="performance-batch-size" type="number" step="1" min="1" value="128"', index_html)
+        self.assertIn('id="performance-max-parallel-graph2mat-training-jobs"', index_html)
+        self.assertIn('id="performance-max-parallel-deeph-training-jobs"', index_html)
+        self.assertIn('id="performance-graph2mat-log-every-n-steps"', index_html)
+        self.assertIn('id="performance-graph2mat-check-val-every-n-epoch"', index_html)
+        self.assertIn('id="performance-graph2mat-checkpoint-every-n-epochs"', index_html)
+        self.assertIn('id="performance-graph2mat-require-cuequivariance"', index_html)
         self.assertIn('id="performance-torch-num-threads" type="number" step="1" min="1" value="8"', index_html)
+        self.assertIn('id="performance-torch-mixed-precision"', index_html)
+        self.assertIn('<option value="bf16-mixed">bf16-mixed</option>', index_html)
         self.assertIn('<option value="high" selected>high</option>', index_html)
         self.assertIn('<option value="true" selected>true</option>', index_html)
         self.assertIn('id="performance-preset-description"', index_html)
@@ -3404,6 +3614,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('id="performance-max-parallel-prediction-jobs"', index_html)
         self.assertIn('id="performance-max-parallel-evaluation-jobs"', index_html)
         self.assertIn('id="performance-max-parallel-metric-jobs"', index_html)
+        self.assertIn('id="performance-max-parallel-deeph-training-jobs"', index_html)
         self.assertIn('id="performance-numexpr-num-threads"', index_html)
         self.assertIn('id="performance-reuse-validated-siesta-outputs"', index_html)
         self.assertIn('id="performance-enable-experiment-cache"', index_html)
@@ -3864,6 +4075,191 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 places=12,
             )
 
+    def test_plot_payload_exposes_kpoint_metric_groups_and_manifest_fields(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            result_dir = module.RESULTS_ROOT / "results_md" / "graphene_kmesh" / "run_kpoint"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "kpoint_matrix_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "row_type": "per_k",
+                        "k_index": "0",
+                        "h_mae_eV": "0.3",
+                        "h_rmse_eV": "0.4",
+                        "relative_frobenius": "0.5",
+                    },
+                    {
+                        "sample": "sample_1",
+                        "row_type": "weighted_sample",
+                        "k_index": "",
+                        "h_mae_eV": "0.02",
+                        "h_rmse_eV": "0.04",
+                        "relative_frobenius": "0.018",
+                    },
+                ],
+            )
+            write_csv(
+                metrics_dir / "kpoint_spectral_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "kpoint_count": "36",
+                        "low_energy_rmse_eV": "0.055",
+                        "fermi_window_rmse_eV": "0.075",
+                        "frontier_window_rmse_eV": "0.064",
+                    }
+                ],
+            )
+            write_csv(
+                metrics_dir / "kpoint_dos_metrics.csv",
+                [{"sample": "sample_1", "dos_wasserstein_eV": "0.39", "dos_mae_500_fermi_window": "0.085"}],
+            )
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "samples_seen": 60,
+                        "samples_compared": 1,
+                        "kpoint_samples_compared": 1,
+                        "kpoint_metrics_enabled": True,
+                        "kpoint_sampled_supported": True,
+                        "kpoint_mesh": [6, 6, 1],
+                        "kpoint_count": 36,
+                        "kpoint_source": "RUN.fdf",
+                        "uses_reference_overlap_k": True,
+                        "complex_hamiltonians_supported_for_kpoint_metrics": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plots = module.plot_data_summary()
+            run = plots["runs"][0]
+            self.assertEqual(run["metric_space"], "kpoint_sampled")
+            self.assertEqual(run["run_id"], "kpoint")
+            self.assertEqual(run["dataset_label"], "graphene_kmesh")
+            self.assertEqual(run["dataset_size"], 60)
+            self.assertEqual(run["kpoint_mesh"], [6, 6, 1])
+            self.assertEqual(run["kpoint_count"], 36)
+            self.assertTrue(run["uses_reference_overlap_k"])
+            self.assertAlmostEqual(run["means"]["kpoint_matrix"]["h_mae_eV"], 0.02, places=12)
+            self.assertAlmostEqual(run["means"]["kpoint_matrix"]["h_rmse_eV"], 0.04, places=12)
+            self.assertAlmostEqual(run["means"]["kpoint_spectral"]["low_energy_rmse_eV"], 0.055, places=12)
+            self.assertAlmostEqual(run["means"]["kpoint_dos"]["dos_mae_500_fermi_window"], 0.085, places=12)
+            self.assertEqual(len(run["samples"]["kpoint_matrix"]), 1)
+            self.assertEqual(len(run["samples"]["kpoint_matrix_per_k"]), 1)
+            self.assertEqual(run["diagnostic_outputs"]["kpoint_spectral_metrics"]["rows"], 1)
+
+    def test_plot_payload_warns_when_kpoint_manifest_enabled_but_csvs_missing(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            result_dir = module.RESULTS_ROOT / "results_md" / "graphene_incomplete_kmesh" / "run_kpoint_missing"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "kpoint_matrix_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "row_type": "weighted_sample",
+                        "h_mae_eV": "0.02",
+                        "h_rmse_eV": "0.04",
+                    }
+                ],
+            )
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "metrics_schema_version": "h_only_sref_v2",
+                        "metrics_provenance_generation": "post_h_only_sref_prediction_safety",
+                        "target_component_policy": "h_only",
+                        "samples_seen": 1,
+                        "samples_compared": 1,
+                        "kpoint_samples_compared": 1,
+                        "kpoint_metrics_enabled": True,
+                        "kpoint_mesh": [6, 6, 1],
+                        "kpoint_count": 36,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (result_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "pipeline": "md",
+                        "method_id": "md",
+                        "run_id": "kpoint_missing",
+                        "result_dir": str(result_dir),
+                        "dataset_size": 60,
+                        "requested_dataset_size": 60,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            run = module.plot_data_summary()["runs"][0]
+            warning_kinds = {item["kind"] for item in run["diagnostics"]["warnings"]}
+            self.assertIn("missing_kpoint_metric_csv", warning_kinds)
+
+    def test_hamiltonian_evaluator_command_enables_kpoint_metrics_for_nongamma_result(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "run_graphene"
+            structure_dir = result_dir / "structures" / "540"
+            structure_dir.mkdir(parents=True)
+            kpoint_run_fdf(structure_dir / "RUN.fdf", mesh=(6, 6, 1))
+            (result_dir / "eigenvalues").mkdir(parents=True)
+            (result_dir / "eigenvalues" / "manifest.json").write_text(
+                json.dumps({"samples_compared": 1, "fatal_errors": []}),
+                encoding="utf-8",
+            )
+            config = {
+                "paths": {"venv_activate": str(root / "missing" / "activate")},
+                "performance": {},
+            }
+            runner = module.ExperimentRunner()
+            completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(module.subprocess, "run", return_value=completed) as run_mock:
+                runner._evaluate_hamiltonian_metrics("md", config, result_dir)
+
+            command = run_mock.call_args.args[0]
+            self.assertIn("--enable-kpoint-metrics", command)
+
+    def test_hamiltonian_evaluator_command_keeps_gamma_result_default(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "run_gamma"
+            structure_dir = result_dir / "structures" / "001"
+            structure_dir.mkdir(parents=True)
+            kpoint_run_fdf(structure_dir / "RUN.fdf", mesh=(1, 1, 1))
+            (result_dir / "eigenvalues").mkdir(parents=True)
+            (result_dir / "eigenvalues" / "manifest.json").write_text(
+                json.dumps({"samples_compared": 1, "fatal_errors": []}),
+                encoding="utf-8",
+            )
+            config = {
+                "paths": {"venv_activate": str(root / "missing" / "activate")},
+                "performance": {},
+            }
+            runner = module.ExperimentRunner()
+            completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(module.subprocess, "run", return_value=completed) as run_mock:
+                runner._evaluate_hamiltonian_metrics("md", config, result_dir)
+
+            command = run_mock.call_args.args[0]
+            self.assertNotIn("--enable-kpoint-metrics", command)
+
     def test_deeph_like_plot_payload_preserves_missing_dos_reason(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -3921,7 +4317,29 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 },
                 "checkpoint": {},
                 "performance": {},
-                "training": {"ui_training_settings": {"max_epochs": 5}},
+                "training": {
+                    "data": {
+                        "out_matrix": "hamiltonian",
+                        "matrix_component_policy": "h_only",
+                        "n_matrix_components": 1,
+                        "symmetric_matrix": True,
+                    },
+                    "model": {
+                        "loss": "graph2mat.metrics.block_type_huber",
+                        "loss_kwargs": {"beta": 0.01},
+                        "readout": "default",
+                    },
+                    "trainer": {"max_epochs": 5},
+                    "training_stages": [{"id": "stage1"}],
+                    "benchmark_metadata": {
+                        "benchmark_method_id": "default_huber_b0p01",
+                        "architecture": "default",
+                        "readout": "default",
+                        "context_enabled": False,
+                        "training_stages": [{"id": "stage1"}],
+                    },
+                    "ui_training_settings": {"max_epochs": 5},
+                },
             }
             runner = module.ExperimentRunner()
 
@@ -3966,6 +4384,15 @@ class ComparisonWorkflowTests(unittest.TestCase):
 
             self.assertEqual(first["training_tag"], "dataset_1000_train1")
             self.assertEqual(first["training_index"], 1)
+            self.assertEqual(first["benchmark_method_id"], "default_huber_b0p01")
+            self.assertEqual(first["architecture"], "default")
+            self.assertEqual(first["readout"], "default")
+            self.assertEqual(first["loss"], "graph2mat.metrics.block_type_huber")
+            self.assertEqual(first["loss_kwargs"], {"beta": 0.01})
+            self.assertEqual(first["training_stages"], [{"id": "stage1"}])
+            self.assertIn("pipeline_commit", first)
+            self.assertIn("graph2mat_commit", first)
+            self.assertIn("evaluation_config", first)
             self.assertEqual(second["training_tag"], "dataset_1000_train2")
             self.assertEqual(second["training_index"], 2)
             self.assertEqual(second["training_base_dataset_label"], "Dataset_1000")
@@ -4033,6 +4460,30 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(fermi_gap["n_total"], 1)
             self.assertEqual(fermi_gap["n_finite"], 0)
+
+    def test_plot_summary_skips_oversized_cross_diagnostic_manifests(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            module.MAX_CROSS_DIAGNOSTIC_MANIFEST_BYTES = 32
+            experiment_dir = module.RESULTS_ROOT / "oversized_manifest_case"
+            experiment_dir.mkdir(parents=True)
+            (experiment_dir / "experiment_manifest.yaml").write_text(
+                "run_mode: full_strict_pipeline\n"
+                "runs:\n"
+                + "\n".join(f"  - id: run_{index}" for index in range(20)),
+                encoding="utf-8",
+            )
+
+            plots = module.plot_data_summary()
+
+            cross_diagnostic = plots["plot_diagnostics"]["cross"][0]
+            self.assertEqual(
+                cross_diagnostic["reason"],
+                "experiment_manifest_too_large_for_plot_diagnostics",
+            )
+            self.assertEqual(cross_diagnostic["archived_runs"], 0)
 
     def test_plot_summary_discovers_recipe_named_archived_runs(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -4473,10 +4924,89 @@ class ComparisonWorkflowTests(unittest.TestCase):
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
         app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="plot-warnings"', index_html)
+        self.assertIn('id="plot-safety-filter"', index_html)
         self.assertIn("function renderPlotWarnings", app_js)
+        self.assertIn("function visibleRunSafetyWarning", app_js)
+        self.assertIn("function runSafetyContextText", app_js)
+        self.assertIn("syncSafetyFilterOptions", app_js)
+        self.assertIn("filterRunsBySafety", app_js)
         self.assertIn("plot_scientific_status", app_js)
         self.assertIn("plot_warnings", app_js)
         self.assertIn("invalid_incomplete_grid", app_js)
+
+    def test_plot_and_results_payload_include_metric_safety_fields(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            module.RESULTS_ROOT = root / "results"
+            result_dir = module.RESULTS_ROOT / "results_md" / "dataset_alpha" / "run_123"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            (result_dir / "manifest.json").write_text(
+                json.dumps({"run_id": "123", "dataset_label": "dataset_alpha", "dataset_size": 3}),
+                encoding="utf-8",
+            )
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "metrics_schema_version": "h_only_sref_v2",
+                        "target_component_policy": "h_only",
+                        "n_matrix_components": 1,
+                        "overlap_source": "siesta_reference",
+                        "fermi_level_source": "siesta_output",
+                        "prediction_own_overlap_used_for_spectra": False,
+                        "prediction_self_contained_hsx_safe_samples": 0,
+                        "prediction_self_contained_hsx_unsafe_samples": 1,
+                        "prediction_self_contained_hsx_unsafe_reasons": {"prediction_overlap_mismatch": 1},
+                        "graph2mat_auxiliary_component_ignored_samples": 0,
+                        "severe_warnings": [
+                            {
+                                "sample": "1",
+                                "kind": "prediction_overlap_mismatch",
+                                "severity": "severe",
+                                "overlap_source": "siesta_reference",
+                                "prediction_own_overlap_used": False,
+                                "prediction_self_contained_hsx_safe": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            write_csv(metrics_dir / "sparse_metrics.csv", [{"sample": "1", "mae_ref_eV": "0.1"}])
+
+            results = module.result_summary()
+            archived = results["archived"]["md"][0]
+            self.assertEqual(archived["target_component_policy"], "h_only")
+            self.assertEqual(archived["n_matrix_components"], 1)
+            self.assertEqual(archived["overlap_source"], "siesta_reference")
+            self.assertFalse(archived["prediction_artifacts_standalone_safe"])
+            self.assertEqual(archived["prediction_artifact_safety_status"], "unsafe")
+            self.assertEqual(archived["severe_warning_count"], 1)
+
+            plots = module.plot_data_summary()
+            run = plots["runs"][0]
+            self.assertEqual(run["target_component_policy"], "h_only")
+            self.assertEqual(run["overlap_source"], "siesta_reference")
+            self.assertFalse(run["prediction_artifacts_standalone_safe"])
+            self.assertEqual(run["prediction_artifact_safety_status"], "unsafe")
+            self.assertIn("prediction_overlap_mismatch", run["severe_warning_kinds"])
+
+    def test_ui_renders_kpoint_metric_fields(self) -> None:
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+        for plot_id in ("plot-kpoint-h", "plot-kpoint-low-energy", "plot-kpoint-dos"):
+            self.assertIn(f'id="{plot_id}"', index_html)
+            self.assertIn(plot_id, app_js)
+        for text in (
+            "kpoint_matrix",
+            "kpoint_spectral",
+            "kpoint_dos",
+            "kpoint_sampled",
+            "gamma-only",
+            "uses_reference_overlap_k",
+        ):
+            self.assertIn(text, app_js)
 
     def test_repo_local_paths_do_not_raise_reproducibility_warning(self) -> None:
         module = self.load_pipeline_ui_module()
@@ -5162,6 +5692,71 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertIn("missing_matrix", reasons)
             self.assertIn("scf_not_converged", reasons)
 
+    def test_validate_sample_bundle_rejects_missing_output_incomplete_and_stale_references(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            missing_output = make_sample(root / "samples", "missing_output")
+            (missing_output / "RUN.out").unlink()
+            incomplete = make_sample(root / "samples", "incomplete")
+            (incomplete / "RUN.out").write_text("SCF cycle converged\n", encoding="utf-8")
+            stale = make_sample(root / "samples", "stale")
+            os.utime(stale / "siesta.TSHS", (1000, 1000))
+            os.utime(stale / "RUN.fdf", (2000, 2000))
+            os.utime(stale / "RUN.out", (3000, 3000))
+            output = root / "validation"
+
+            result = run_script(
+                "Comparison/scripts/validate_sample_bundle.py",
+                "--samples-dir",
+                str(root / "samples"),
+                "--method",
+                "md",
+                "--output-dir",
+                str(output),
+                "--min-valid",
+                "3",
+            )
+
+            self.assertEqual(result.returncode, 2)
+            with (output / "invalid_samples.csv").open(encoding="utf-8") as handle:
+                invalid = list(csv.DictReader(handle))
+            reasons = " ".join(row["invalid_reasons"] for row in invalid)
+            self.assertIn("missing_output", reasons)
+            self.assertIn("job_not_completed", reasons)
+            self.assertIn("stale_matrix", reasons)
+
+    def test_validate_sample_bundle_debug_allows_unvalidated_matrix_with_severe_warning(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            sample = make_sample(root / "samples", "unsafe_missing_output")
+            (sample / "RUN.out").unlink()
+            output = root / "validation"
+
+            result = run_script(
+                "Comparison/scripts/validate_sample_bundle.py",
+                "--samples-dir",
+                str(root / "samples"),
+                "--method",
+                "md",
+                "--output-dir",
+                str(output),
+                "--min-valid",
+                "1",
+                "--allow-unvalidated-matrices",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            summary = json.loads((output / "validation_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["unsafe_unvalidated_samples"], 1)
+            self.assertTrue(summary["allow_unvalidated_matrices"])
+            self.assertTrue(
+                any("UNSAFE_UNVALIDATED_MATRIX_REFERENCE" in warning for warning in summary["severe_warnings"])
+            )
+            with (output / "valid_samples.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["unsafe_unvalidated_matrices"], "True")
+            self.assertIn("missing_output", rows[0]["unsafe_validation_reasons"])
+
     def test_strict_atomdisp_validation_rejects_missing_run_out_and_failed_scf(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
         spec = importlib.util.spec_from_file_location(
@@ -5308,6 +5903,23 @@ class ComparisonWorkflowTests(unittest.TestCase):
             prediction_only.mkdir()
             (prediction_only / "ML_prediction.HSX").write_bytes(b"prediction")
             self.assertFalse(module.choose_reference_matrix(prediction_only).ok)
+
+    def test_reference_archive_never_copies_ml_prediction_as_reference(self) -> None:
+        module = self.load_pipeline_ui_module()
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            source = root / "samples"
+            prediction_only = source / "001"
+            prediction_only.mkdir(parents=True)
+            (prediction_only / "ML_prediction.HSX").write_bytes(b"prediction")
+            reference = source / "002"
+            reference.mkdir(parents=True)
+            (reference / "siesta.TSHS").write_bytes(b"reference")
+
+            copied = module.copy_selected_reference_files(source, root / "archive")
+            self.assertEqual(copied, 1)
+            self.assertFalse((root / "archive" / "001" / "ML_prediction.HSX").exists())
+            self.assertTrue((root / "archive" / "002" / "siesta.TSHS").exists())
 
     def test_atomdisp_training_requires_split_manifest_in_strict_mode(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "AtomDisplacement" / "scripts"))
@@ -5851,6 +6463,145 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(new_row["dos_mae_500_fermi_window"], "0.04")
             self.assertEqual(old_row["mse_ref_eV2"], "")
             self.assertEqual(old_row["dos_mae_500_fermi_window"], "")
+
+    def test_cross_aggregation_preserves_kpoint_metrics_and_marks_metric_space(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "cross" / "md__on__test_md"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "kpoint_matrix_metrics.csv",
+                [
+                    {
+                        "sample": "sample_1",
+                        "row_type": "per_k",
+                        "k_index": "0",
+                        "h_mae_eV": "0.3",
+                    },
+                    {
+                        "sample": "sample_1",
+                        "row_type": "weighted_sample",
+                        "h_mae_eV": "0.02",
+                        "h_rmse_eV": "0.04",
+                        "relative_frobenius": "0.018",
+                    },
+                ],
+            )
+            write_csv(
+                metrics_dir / "kpoint_spectral_metrics.csv",
+                [{"sample": "sample_1", "low_energy_rmse_eV": "0.055", "fermi_window_rmse_eV": "0.075"}],
+            )
+            write_csv(
+                metrics_dir / "kpoint_dos_metrics.csv",
+                [{"sample": "sample_1", "dos_mae_500_fermi_window": "0.085"}],
+            )
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "metrics_schema_version": "h_only_sref_v2",
+                        "metrics_provenance_generation": "post_h_only_sref_prediction_safety",
+                        "target_component_policy": "h_only",
+                        "samples_seen": 1,
+                        "samples_compared": 1,
+                        "kpoint_samples_compared": 1,
+                        "kpoint_metrics_enabled": True,
+                        "kpoint_sampled_supported": True,
+                        "kpoint_mesh": [6, 6, 1],
+                        "kpoint_count": 36,
+                        "kpoint_source": "RUN.fdf",
+                        "uses_reference_overlap_k": True,
+                        "prediction_artifact_semantics": {"prediction_artifacts_standalone_safe": True},
+                        "metric_compatibility": {
+                            "prediction_own_overlap_used_for_spectra": False,
+                            "official_winner_uses_training_loss": False,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "train_method": "md",
+                        "test_set": "test_md",
+                        "dataset_size": 60,
+                        "seed": 1,
+                        "model_checkpoint": "model.ckpt",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_kpoint",
+                "--cross-root",
+                str(root / "cross"),
+                "--output-dir",
+                str(root / "summary"),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "cross_evaluation_metrics.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["metric_space"], "kpoint_sampled")
+            self.assertEqual(json.loads(row["kpoint_mesh"]), [6, 6, 1])
+            self.assertEqual(row["kpoint_count"], "36")
+            self.assertEqual(row["uses_reference_overlap_k"], "True")
+            self.assertEqual(row["h_mae_eV"], "0.02")
+            self.assertEqual(row["h_rmse_eV"], "0.04")
+            self.assertEqual(row["low_energy_rmse_eV"], "0.055")
+            self.assertEqual(row["dos_mae_500_fermi_window"], "0.085")
+            self.assertEqual(row["warning_status"], "ok")
+
+    def test_cross_aggregation_warns_when_kpoint_manifest_enabled_but_csvs_missing(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            result_dir = root / "cross" / "md__on__test_md"
+            metrics_dir = result_dir / "metrics"
+            metrics_dir.mkdir(parents=True)
+            write_csv(
+                metrics_dir / "kpoint_matrix_metrics.csv",
+                [{"sample": "sample_1", "row_type": "weighted_sample", "h_mae_eV": "0.02"}],
+            )
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "samples_seen": 1,
+                        "samples_compared": 1,
+                        "kpoint_samples_compared": 1,
+                        "kpoint_metrics_enabled": True,
+                        "kpoint_mesh": [6, 6, 1],
+                        "kpoint_count": 36,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (result_dir / "cross_evaluation_manifest.json").write_text(
+                json.dumps({"train_method": "md", "test_set": "test_md", "dataset_size": 60}),
+                encoding="utf-8",
+            )
+
+            result = run_script(
+                "Comparison/scripts/aggregate_cross_metrics.py",
+                "--experiment-id",
+                "exp_kpoint_missing",
+                "--cross-root",
+                str(root / "cross"),
+                "--output-dir",
+                str(root / "summary"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            with (root / "summary" / "cross_evaluation_metrics.csv").open(encoding="utf-8") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["metric_space"], "kpoint_sampled")
+            self.assertEqual(row["warning_status"], "warning")
+            self.assertIn("kpoint_metrics_enabled_but_missing_csvs", row["evaluation_warning"])
 
     def test_cross_aggregation_rejects_duplicate_sample_ids_and_propagates_evaluator_errors(self) -> None:
         with workspace_tempdir() as tmp:
@@ -7484,6 +8235,52 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.assertEqual(recommendation["scientific_status"], "robust_comparison")
             self.assertEqual(recommendation["winner"], "md")
             self.assertIsNone(recommendation["first_dataset_size_surpassing_md"])
+
+    def test_final_recommendation_blocks_unsafe_metric_warnings(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            metrics = root / "cross_evaluation_metrics.csv"
+            output_dir = root / "summary"
+            methods = ("md", "siesta_fc_cartesian", "random_cartesian")
+            test_sets = ("test_md", "test_siesta_fc_cartesian", "test_random_cartesian", "test_mixed")
+
+            def values(method: str, _test_set: str, _seed: str) -> str:
+                return {"md": "0.5", "siesta_fc_cartesian": "0.2", "random_cartesian": "0.8"}[method]
+
+            def extra(method: str, _test_set: str, _seed: str) -> dict[str, str]:
+                if method == "siesta_fc_cartesian":
+                    return {
+                        "severe_warnings": (
+                            "prediction_overlap_mismatch: ML_prediction.HSX is not a validated "
+                            "standalone generalized-eigenproblem input | "
+                            "TARGET_COMPONENT_POLICY_NOT_H_ONLY:h_plus_s"
+                        )
+                    }
+                return {}
+
+            self.write_final_recommendation_metric_grid(metrics, value_for=values, extra_for=extra)
+            self.write_completeness_report(
+                output_dir / "cross_evaluation_completeness.json",
+                methods,
+                test_sets,
+                primary_metric="low_energy_rmse_eV",
+            )
+            result = run_script(
+                "Comparison/scripts/analyze_winners.py",
+                "--metrics-csv",
+                str(metrics),
+                "--output-dir",
+                str(output_dir),
+                "--primary-metric",
+                "low_energy_rmse_eV",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recommendation = json.loads((output_dir / "recommendation.json").read_text(encoding="utf-8"))
+            self.assertEqual(recommendation["status"], "fairness_provenance_mismatch")
+            self.assertEqual(recommendation["scientific_status"], "not_scientifically_valid")
+            self.assertIsNone(recommendation["winner"])
+            self.assertIn("prediction_overlap_mismatch", " ".join(recommendation["severe_warnings"]))
+            self.assertIn("TARGET_COMPONENT_POLICY_NOT_H_ONLY", " ".join(recommendation["severe_warnings"]))
 
     def test_final_recommendation_blocks_incomplete_grid(self) -> None:
         with workspace_tempdir() as tmp:
@@ -9326,6 +10123,43 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(args.train_method, method)
 
+    def test_cross_prediction_requires_explicit_component_policy(self) -> None:
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_policy",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+        parser = module.build_parser()
+        base_args = [
+            "--checkpoint",
+            "model.ckpt",
+            "--train-method",
+            "md",
+            "--test-set",
+            "test_md",
+            "--test-manifest",
+            "test.csv",
+            "--output-dir",
+            "out",
+            "--basis-files",
+            "basis/*.ion.xml",
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "prediction CLI.matrix_component_policy"):
+            module.resolve_cli_matrix_component_policy(parser.parse_args(base_args))
+
+        resolved = module.resolve_cli_matrix_component_policy(
+            parser.parse_args(
+                [
+                    *base_args,
+                    "--matrix-component-policy",
+                    "h_only",
+                    "--n-matrix-components",
+                    "1",
+                ]
+            )
+        )
+        self.assertEqual(resolved, ("h_only", 1))
+
     def test_cross_prediction_matrix_writer_recovers_known_symmetric_edge_count_error(self) -> None:
         module = self.load_module_from_path(
             "predict_model_on_dataset_strict_writer",
@@ -9428,6 +10262,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
                     str(output_dir),
                     "--basis-files",
                     "basis/*.ion.xml",
+                    "--matrix-component-policy",
+                    "h_only",
+                    "--n-matrix-components",
+                    "1",
                 ]
                 status = module.main()
             finally:
@@ -10018,6 +10856,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(md_block["data"]["val_runs"], "../MD/dataset/splits/validation/*/RUN.fdf")
         self.assertEqual(fc_block["data"]["train_runs"], "../AtomDisplacement/dataset/train_samples/*/RUN.fdf")
         self.assertEqual(fc_block["data"]["val_runs"], "../AtomDisplacement/dataset/validation_samples/*/RUN.fdf")
+        self.assertEqual(md_block["data"]["matrix_component_policy"], fc_block["data"]["matrix_component_policy"])
+        self.assertEqual(md_block["data"]["n_matrix_components"], fc_block["data"]["n_matrix_components"])
         self.assertEqual(fc_block["data"]["matrix_component_policy"], "h_only")
         self.assertEqual(fc_block["data"]["n_matrix_components"], 1)
         module.validate_config(md_block, "md_block")
@@ -10159,6 +10999,9 @@ class ComparisonWorkflowTests(unittest.TestCase):
 
     def test_structural_metric_outputs_are_part_of_metrics_manifest_schema(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py").read_text(encoding="utf-8")
+        aggregate_script = (REPO_ROOT / "Comparison" / "scripts" / "aggregate_cross_metrics.py").read_text(
+            encoding="utf-8"
+        )
         metrics_doc = (REPO_ROOT / "Comparison" / "METRICS.md").read_text(encoding="utf-8")
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("block_metrics.csv", script)
@@ -10172,6 +11015,18 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("prediction_self_contained_hsx_safe", script)
         self.assertIn("graph2mat_auxiliary_component_ignored", script)
         self.assertIn("prediction_own_overlap_used_for_spectra", script)
+        self.assertIn("prediction_artifact_semantics", script)
+        self.assertIn("prediction_artifact_semantics", aggregate_script)
+        self.assertIn("prediction_artifacts_standalone_safe", aggregate_script)
+        self.assertIn("METRICS_SCHEMA_VERSION", script)
+        self.assertIn("metrics_schema_version", aggregate_script)
+        self.assertIn("LEGACY_METRICS_SCHEMA_UNKNOWN_REEVALUATE_POST_H_ONLY", aggregate_script)
+        self.assertIn("--overwrite", script)
+        self.assertIn("h_matrix_mae_eV", script)
+        self.assertIn("component_target_label", script)
+        self.assertIn("component_in_official_h_only_loss", script)
+        self.assertIn("official_winner_uses_training_loss", script)
+        self.assertIn("official_winner_uses_training_loss", aggregate_script)
         self.assertIn("structural_metrics_available", script)
         self.assertIn("orbital_pair_metrics_available", script)
         self.assertIn("ORBITAL_PAIR_METRIC_TARGET_SPACE", script)
@@ -10189,6 +11044,13 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("component_channel_metrics.csv", metrics_doc)
         self.assertIn("target_component_policy", metrics_doc)
         self.assertIn("prediction_self_contained_hsx_safe", metrics_doc)
+        self.assertIn("prediction_artifact_semantics", metrics_doc)
+        self.assertIn("prediction_artifact_semantics", readme)
+        self.assertIn("h_matrix_mae", metrics_doc)
+        self.assertIn("component_target_label=H", metrics_doc)
+        self.assertIn("Training loss is not an official winner metric", metrics_doc)
+        self.assertIn("Post-H-only", metrics_doc)
+        self.assertIn("LEGACY_METRICS_SCHEMA_UNKNOWN_REEVALUATE_POST_H_ONLY", metrics_doc)
 
     def test_sparse_deeph_comparable_metric_outputs_are_part_of_schema(self) -> None:
         script = (REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py").read_text(encoding="utf-8")
@@ -10629,9 +11491,15 @@ class ComparisonWorkflowTests(unittest.TestCase):
 
             self.assertEqual(rows["fatal_errors"], [])
             self.assertEqual(rows["sparse"][0]["target_component_policy"], "h_only")
+            self.assertEqual(rows["sparse"][0]["metrics_schema_version"], module.METRICS_SCHEMA_VERSION)
+            self.assertEqual(rows["sparse"][0]["metrics_provenance_generation"], module.METRICS_PROVENANCE_GENERATION)
             self.assertEqual(rows["sparse"][0]["reference_component_count"], 1)
             self.assertEqual(rows["sparse"][0]["prediction_component_count"], 1)
             self.assertEqual(rows["spectral"][0]["overlap_source"], "siesta_reference")
+            self.assertEqual(rows["dos"][0]["target_component_policy"], "h_only")
+            self.assertEqual(rows["dos"][0]["overlap_source"], "siesta_reference")
+            self.assertEqual(rows["dos"][0]["fermi_level_source"], "siesta_file")
+            self.assertEqual(rows["dos"][0]["metrics_schema_version"], module.METRICS_SCHEMA_VERSION)
             self.assertFalse(rows["spectral"][0]["prediction_own_overlap_used"])
             self.assertGreater(rows["spectral"][0]["prediction_overlap_relative_frobenius_vs_reference"], 0.0)
             self.assertFalse(rows["spectral"][0]["prediction_self_contained_hsx_safe"])
@@ -11016,8 +11884,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("--matrix-component-policy", predictor)
         self.assertIn("--n-matrix-components", predictor)
         self.assertIn("validate_model_matrix_component_policy", predictor)
+        self.assertIn("resolve_cli_matrix_component_policy(args)", predictor)
 
         module = self.load_pipeline_ui_module()
+        ui_text = (REPO_ROOT / "Comparison" / "scripts" / "pipeline_ui.py").read_text(encoding="utf-8")
+        self.assertNotIn('setdefault("n_matrix_components", 2)', ui_text)
         runner = module.ExperimentRunner()
         config = {"training": {"data": {"matrix_component_policy": "h_only", "n_matrix_components": 1}}}
         self.assertEqual(runner._matrix_component_policy_for_result(config), "h_only")

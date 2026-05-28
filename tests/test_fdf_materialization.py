@@ -64,6 +64,7 @@ def simple_fdf_text(
     if output_flags:
         lines.extend(
             [
+                "SaveHS false",
                 "Save.HS F",
                 "XML.Write F",
             ]
@@ -151,6 +152,7 @@ class FdfMaterializationTests(unittest.TestCase):
 
         for key, value in DEFAULT_REQUIRED_OUTPUT_FLAGS.items():
             self.assertIn(f"{key:<32} {value}", text)
+        self.assertNotIn("SaveHS false", text)
         self.assertNotIn("Save.HS F", text)
         self.assertNotIn("XML.Write F", text)
 
@@ -173,7 +175,9 @@ class FdfMaterializationTests(unittest.TestCase):
         self.assertEqual(structure.atom_count, 3)
         self.assertEqual([item.label for item in structure.species], ["O", "H"])
         self.assertEqual(result.metadata["structure_type"], "molecule")
-        self.assertIn("Save.HS", output.read_text(encoding="utf-8"))
+        text = output.read_text(encoding="utf-8")
+        self.assertIn("SaveHS", text)
+        self.assertIn("Save.HS", text)
 
     def test_non_h2o_validated_bundle_can_be_materialized(self) -> None:
         material_root = self.root / "materials" / "sic"

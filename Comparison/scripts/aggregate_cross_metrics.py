@@ -330,6 +330,57 @@ def join_by_sample(*groups: list[dict[str, Any]]) -> tuple[dict[str, dict[str, A
     return joined, sorted(set(duplicate_errors))
 
 
+def weighted_kpoint_matrix_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row.get("row_type") or "") == "weighted_sample"]
+
+
+def kpoint_metric_space(evaluation_manifest: dict[str, Any]) -> str:
+    if evaluation_manifest.get("kpoint_metrics_enabled") or evaluation_manifest.get("kpoint_samples_compared"):
+        return "kpoint_sampled"
+    return "gamma_only"
+
+
+def kpoint_output_warnings(
+    evaluation_manifest: dict[str, Any],
+    groups: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    if not evaluation_manifest.get("kpoint_metrics_enabled"):
+        return []
+    missing = [
+        key
+        for key in ("kpoint_matrix", "kpoint_spectral", "kpoint_dos")
+        if not groups.get(key)
+    ]
+    if not missing:
+        return []
+    return [
+        "kpoint_metrics_enabled_but_missing_csvs:"
+        f"{','.join(missing)}"
+    ]
+
+
+def metrics_provenance_warnings(evaluation_manifest: dict[str, Any]) -> list[str]:
+    if not evaluation_manifest:
+        return []
+    warnings: list[str] = []
+    schema_version = str(evaluation_manifest.get("metrics_schema_version") or "").strip()
+    if not schema_version:
+        warnings.append("LEGACY_METRICS_SCHEMA_UNKNOWN_REEVALUATE_POST_H_ONLY")
+    target_policy = str(evaluation_manifest.get("target_component_policy") or "").strip()
+    if not target_policy:
+        warnings.append("LEGACY_TARGET_COMPONENT_POLICY_UNKNOWN")
+    elif target_policy != "h_only":
+        warnings.append(f"TARGET_COMPONENT_POLICY_NOT_H_ONLY:{target_policy}")
+    compatibility = evaluation_manifest.get("metric_compatibility") or {}
+    if compatibility.get("prediction_own_overlap_used_for_spectra") not in (False, "False", "false", 0):
+        warnings.append("PREDICTION_OVERLAP_POLICY_UNKNOWN_OR_UNSAFE")
+    if "prediction_artifact_semantics" not in evaluation_manifest:
+        warnings.append("PREDICTION_HSX_SAFETY_UNKNOWN_LEGACY")
+    if compatibility.get("official_winner_uses_training_loss") not in (False, "False", "false", 0):
+        warnings.append("WINNER_LOSS_POLICY_UNKNOWN_OR_UNSAFE")
+    return warnings
+
+
 def issue_messages(items: Any) -> list[str]:
     if not isinstance(items, list):
         return []
@@ -345,6 +396,16 @@ def issue_messages(items: Any) -> list[str]:
         elif item not in (None, "", False):
             messages.append(str(item))
     return messages
+
+
+def warning_items_text(value: Any) -> str:
+    if value in (None, "", False):
+        return ""
+    if isinstance(value, list):
+        return " | ".join(str(item) for item in value if item not in (None, "", False))
+    if isinstance(value, dict):
+        return json_text(value)
+    return str(value)
 
 
 def infer_metadata(path: Path) -> tuple[str, str]:
@@ -363,6 +424,9 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
     sparse = read_rows(metrics_root / "sparse_metrics.csv")
     spectral = read_rows(metrics_root / "spectral_metrics.csv")
     dos = read_rows(metrics_root / "dos_metrics.csv")
+    kpoint_matrix = weighted_kpoint_matrix_rows(read_rows(metrics_root / "kpoint_matrix_metrics.csv"))
+    kpoint_spectral = read_rows(metrics_root / "kpoint_spectral_metrics.csv")
+    kpoint_dos = read_rows(metrics_root / "kpoint_dos_metrics.csv")
     manifest = read_json(result_dir / "cross_evaluation_manifest.json")
     if not manifest:
         train_method, test_set = infer_metadata(result_dir)
@@ -376,14 +440,33 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
     )
     material_maps = material_maps_from_manifest(manifest)
     material_warning = manifest.get("material_compatibility_warning") or material_compatibility_warning(material_maps)
-    joined, duplicate_errors = join_by_sample(sparse, spectral, dos)
+    metric_groups = {
+        "sparse": sparse,
+        "spectral": spectral,
+        "dos": dos,
+        "kpoint_matrix": kpoint_matrix,
+        "kpoint_spectral": kpoint_spectral,
+        "kpoint_dos": kpoint_dos,
+    }
+    joined, duplicate_errors = join_by_sample(
+        sparse,
+        spectral,
+        dos,
+        kpoint_matrix,
+        kpoint_spectral,
+        kpoint_dos,
+    )
     if duplicate_errors:
         raise RuntimeError(f"{result_dir}: duplicate sample ids in metric CSVs: {' | '.join(duplicate_errors)}")
     evaluation_warning = manifest.get("evaluation_warning")
+    method_provenance_warning = warning_items_text(manifest.get("method_provenance_warnings"))
+    method_provenance_severe_warning = warning_items_text(manifest.get("method_provenance_severe_warnings"))
     evaluation_messages = (
         duplicate_errors
         + issue_messages(evaluation_manifest.get("fatal_errors"))
         + issue_messages(evaluation_manifest.get("warnings"))
+        + kpoint_output_warnings(evaluation_manifest, metric_groups)
+        + metrics_provenance_warnings(evaluation_manifest)
     )
     if evaluation_messages:
         warning_parts = [str(evaluation_warning)] if evaluation_warning else []
@@ -408,6 +491,8 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
             manifest.get("matrix_warning"),
             manifest.get("prediction_warning"),
             material_warning,
+            method_provenance_warning,
+            method_provenance_severe_warning,
             evaluation_warning,
         ]
         warning_text = " | ".join(str(item) for item in warnings if item not in (None, "", False))
@@ -479,6 +564,8 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "training_plan_settings_warning": manifest.get("training_plan_settings_warning"),
                 "basis_pseudopotential_warning": manifest.get("basis_pseudopotential_warning"),
                 "material_compatibility_warning": material_warning,
+                "method_provenance_warnings": method_provenance_warning,
+                "method_provenance_severe_warnings": method_provenance_severe_warning,
                 "strict_comparison_mode": manifest.get("strict_comparison_mode"),
                 "md_dataset_label": manifest.get("md_dataset_label"),
                 "atom_dataset_label": manifest.get("atom_dataset_label"),
@@ -509,6 +596,46 @@ def aggregate_one(result_dir: Path, experiment_id: str) -> list[dict[str, Any]]:
                 "evaluation_time_seconds": manifest.get("evaluation_time_seconds"),
                 "total_time_seconds": manifest.get("total_time_seconds"),
                 "evaluation_samples_seen": evaluation_manifest.get("samples_seen"),
+                "metrics_schema_version": evaluation_manifest.get("metrics_schema_version") or "legacy_unknown",
+                "metrics_provenance_generation": evaluation_manifest.get("metrics_provenance_generation")
+                or "legacy_unknown",
+                "metrics_provenance_status": evaluation_manifest.get("metrics_provenance_status")
+                or ("legacy_unknown" if evaluation_manifest else "metrics_manifest_missing"),
+                "target_component_policy": evaluation_manifest.get("target_component_policy") or "unknown",
+                "official_target_matrix": evaluation_manifest.get("official_target_matrix") or "unknown",
+                "official_target_component_index": evaluation_manifest.get("official_target_component_index"),
+                "metric_space": kpoint_metric_space(evaluation_manifest),
+                "kpoint_metrics_enabled": evaluation_manifest.get("kpoint_metrics_enabled"),
+                "kpoint_sampled_supported": evaluation_manifest.get("kpoint_sampled_supported"),
+                "kpoint_mesh": json_text(evaluation_manifest.get("kpoint_mesh")),
+                "kpoint_count": evaluation_manifest.get("kpoint_count"),
+                "kpoint_source": evaluation_manifest.get("kpoint_source"),
+                "uses_reference_overlap_k": evaluation_manifest.get("uses_reference_overlap_k"),
+                "complex_hamiltonians_supported_for_kpoint_metrics": evaluation_manifest.get(
+                    "complex_hamiltonians_supported_for_kpoint_metrics"
+                ),
+                "prediction_artifacts_standalone_safe": evaluation_manifest.get(
+                    "prediction_artifacts_standalone_safe"
+                ),
+                "prediction_self_contained_hsx_safe_samples": evaluation_manifest.get(
+                    "prediction_self_contained_hsx_safe_samples"
+                ),
+                "prediction_self_contained_hsx_unsafe_samples": evaluation_manifest.get(
+                    "prediction_self_contained_hsx_unsafe_samples"
+                ),
+                "prediction_artifact_semantics": json_text(
+                    evaluation_manifest.get("prediction_artifact_semantics")
+                ),
+                "official_winner_uses_training_loss": (
+                    (evaluation_manifest.get("metric_compatibility") or {}).get(
+                        "official_winner_uses_training_loss"
+                    )
+                ),
+                "h_matrix_metrics_independent_of_training_loss": (
+                    (evaluation_manifest.get("metric_compatibility") or {}).get(
+                        "h_matrix_metrics_independent_of_training_loss"
+                    )
+                ),
                 **row,
         }
         output_row.update(

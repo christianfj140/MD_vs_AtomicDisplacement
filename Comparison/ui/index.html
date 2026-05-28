@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pipeline Comparison</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260528-g2m-parallel-trains" />
   </head>
   <body>
     <div class="app-shell">
@@ -16,6 +16,7 @@
         <nav class="tabs" aria-label="Views">
           <button class="tab hidden" data-view="run" data-icon="RN" aria-hidden="true" tabindex="-1">Run</button>
           <button class="tab active" data-view="experiment" data-icon="EX">Experiment</button>
+          <button class="tab" data-view="g2m-deeph" data-icon="GD">G2M vs DeepH</button>
           <button class="tab" data-view="results" data-icon="RS">Results</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -82,14 +83,14 @@
             </div>
           </header>
 
-          <section class="panel comparison-design-panel">
-            <div class="panel-heading">
+          <details id="experiment-design-panel" class="panel comparison-design-panel experiment-panel-details" open>
+            <summary class="panel-summary">
               <div>
                 <p class="eyebrow">Scientific comparison</p>
                 <h3>Experiment design</h3>
               </div>
-            </div>
-            <div class="method-run-selector" aria-label="Methods to run">
+            </summary>
+            <div id="method-selection-panel" class="method-run-selector" aria-label="Methods to run">
               <label class="toggle-field method-run-toggle">
                 <input class="method-execution-checkbox" type="checkbox" value="md" checked />
                 <span>MD</span>
@@ -104,8 +105,8 @@
               </label>
               <span id="method-selection-summary" class="muted-text">3 methods selected</span>
             </div>
-            <section class="material-selector-panel">
-              <div class="panel-heading compact-heading">
+            <details class="material-selector-panel experiment-subpanel-details" open>
+              <summary class="subpanel-summary">
                 <div>
                   <p class="eyebrow">Material bundle</p>
                   <h3>SIESTA input source</h3>
@@ -114,7 +115,7 @@
                   </p>
                 </div>
                 <button id="validate-material" class="button secondary" type="button">Validate material</button>
-              </div>
+              </summary>
               <div class="grid four split-grid">
                 <label class="field">
                   <span>Material source</span>
@@ -155,7 +156,7 @@
               <div id="material-validation-status" class="material-validation muted">
                 Material not validated yet.
               </div>
-            </section>
+            </details>
             <div class="grid three split-grid">
               <label class="field">
                 <span>Run mode</span>
@@ -163,10 +164,12 @@
                   <option value="dataset_only">Dataset only</option>
                   <option value="full_strict_pipeline" selected>Full strict pipeline</option>
                   <option value="train_test_metrics_plots_only">Train/test/metrics/plots only</option>
+                  <option value="deeph_comparison">DeepH comparison</option>
+                  <option value="graph2mat_deeph_comparison">Graph2Mat sweep + DeepH comparison</option>
                 </select>
-                <small>Dataset only stops before training. Full strict can queue training plans after generation. Train/test/metrics/plots only reuses archived datasets.</small>
+                <small>Dataset only stops before training. Full strict can queue training plans after generation. Train/test/metrics/plots only reuses archived datasets. DeepH comparison reuses an existing Graph2Mat graphene result. The combined mode runs Graph2Mat first, then DeepH one-to-one on the top candidates.</small>
               </label>
-              <label class="field">
+              <label class="field run-mode-extra-field">
                 <span>MD split mode</span>
                 <select id="split-mode">
                   <option value="blocked_with_gap" selected>Blocked + temporal gap</option>
@@ -175,7 +178,7 @@
                 </select>
                 <small>Default keeps one MD frame out between train, validation and test; spread is exploratory/debug only.</small>
               </label>
-              <label class="field">
+              <label class="field run-mode-extra-field">
                 <span>Primary metric</span>
                 <select id="primary-metric">
                   <option value="fermi_window_rmse_eV">Fermi-window RMSE</option>
@@ -186,7 +189,7 @@
                   <option value="mae_ref_eV">Sparse MAE on SIESTA support</option>
                 </select>
               </label>
-              <label class="field">
+              <label class="field run-mode-extra-field">
                 <span>Compute-budget mode</span>
                 <select id="compute-budget-mode">
                   <option value="both">Both</option>
@@ -195,7 +198,7 @@
                 </select>
               </label>
             </div>
-            <div class="grid four split-grid">
+            <div id="split-controls-panel" class="grid four split-grid">
               <label class="field">
                 <span>Common test sets</span>
                 <select id="test-sets" multiple size="3">
@@ -219,7 +222,7 @@
                 <input id="split-test" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
               </label>
             </div>
-            <label class="field">
+            <label id="venv-activation-panel" class="field">
               <span>Comando de activacion del entorno</span>
               <input
                 id="venv-activate-command"
@@ -230,8 +233,96 @@
                 Se ejecuta antes de cada pipeline del experimento. Puedes cambiarlo sin tocar YAML.
               </small>
             </label>
-            <section id="reusable-dataset-panel" class="reusable-dataset-panel hidden">
-              <div class="panel-heading compact-heading">
+            <details id="deeph-comparison-panel" class="reusable-dataset-panel experiment-subpanel-details hidden" open>
+              <summary class="subpanel-summary">
+                <div>
+                  <p class="eyebrow">Fair benchmark</p>
+                  <h3>Graph2Mat vs DeepH</h3>
+                  <p class="field-help">
+                    Usa los mismos snapshots, splits, referencias SIESTA reales y metricas k-point-aware.
+                    Si los artefactos HSX/ORB_INDX/STRUCT_OUT faltan, se regeneran solo para esos snapshots.
+                    En modo combinado, el result dir manual se ignora y se usan los mejores candidatos del sweep Graph2Mat.
+                  </p>
+                </div>
+              </summary>
+              <div class="grid two split-grid">
+                <label class="field">
+                  <span>Graph2Mat result dir (single)</span>
+                  <input
+                    id="deeph-graph2mat-result-dir"
+                    type="text"
+                    value="${REPO_ROOT}/Comparison/results/results_md/md_dataset1_df6jp1_graphene_w90_default_mse_lr0p005_ep600/run_20260521_141037"
+                  />
+                </label>
+                <label class="field">
+                  <span>Graph2Mat result dirs (manual list)</span>
+                  <textarea
+                    id="deeph-graph2mat-result-dirs"
+                    rows="4"
+                    placeholder="One result dir per line. If set, DeepH trains one-to-one for these runs."
+                  ></textarea>
+                </label>
+                <label class="field">
+                  <span>Graph2Mat candidate summary CSV</span>
+                  <input
+                    id="deeph-graph2mat-candidate-summary"
+                    type="text"
+                    placeholder="${REPO_ROOT}/Comparison/results/phase1_bundle_20260525/md_candidate_selection_summary.csv"
+                  />
+                  <small>Optional. Uses Graph2Mat top count sorted by score_0_10; manual list takes priority.</small>
+                </label>
+                <label class="field">
+                  <span>DeepH repo</span>
+                  <input id="deeph-repo" type="text" placeholder="Optional; DEEPH_PACK_ROOT is also supported" />
+                </label>
+                <label class="field">
+                  <span>DeepH Python</span>
+                  <input id="deeph-python" type="text" placeholder="Optional DeepH virtualenv Python" />
+                </label>
+                <label class="field">
+                  <span>SIESTA command</span>
+                  <input id="deeph-siesta-command" type="text" value="siesta" />
+                </label>
+              </div>
+              <div class="grid four split-grid">
+                <label class="field">
+                  <span>DeepH epochs</span>
+                  <input id="deeph-epochs" type="number" min="1" step="1" value="200" />
+                </label>
+                <label class="field">
+                  <span>Batch size</span>
+                  <input id="deeph-batch-size" type="number" min="1" step="1" value="4" />
+                </label>
+                <label class="field">
+                  <span>Learning rate</span>
+                  <input id="deeph-learning-rate" type="number" min="0.000001" step="0.0001" value="0.001" />
+                </label>
+                <label class="field">
+                  <span>Sample limit / split</span>
+                  <input id="deeph-sample-limit-per-split" type="number" min="1" step="1" placeholder="Full split" />
+                </label>
+              </div>
+              <div class="grid four split-grid">
+                <label class="field">
+                  <span>Seed</span>
+                  <input id="deeph-seed" type="number" min="0" step="1" value="0" />
+                </label>
+                <label class="field">
+                  <span>Device</span>
+                  <input id="deeph-device" type="text" value="cuda:0" />
+                </label>
+                <label class="field">
+                  <span>Graph2Mat top count</span>
+                  <input id="deeph-graph2mat-top-count" type="number" min="1" step="1" value="10" />
+                </label>
+                <label class="field toggle-field">
+                  <span>Regenerate missing SIESTA raw files</span>
+                  <input id="deeph-allow-regenerate-siesta" type="checkbox" checked />
+                </label>
+              </div>
+            </details>
+            <details id="reusable-dataset-panel" class="reusable-dataset-panel experiment-subpanel-details hidden" open>
+              <summary class="subpanel-summary">
                 <div>
                   <p class="eyebrow">Dataset reuse</p>
                   <h3>Reusable archived datasets</h3>
@@ -242,7 +333,7 @@
                 <div class="button-row">
                   <button id="refresh-reusable-datasets" class="button secondary" type="button">Refresh datasets</button>
                 </div>
-              </div>
+              </summary>
               <label class="field">
                 <span>Split source</span>
                 <select id="reusable-split-policy">
@@ -269,13 +360,17 @@
                   <tbody id="reusable-dataset-list"></tbody>
                 </table>
               </div>
-            </section>
-            <div class="training-config-block">
-              <p class="eyebrow">Graph2Mat training</p>
-              <h3>Training parameters</h3>
-              <p class="field-help">
-                Estos valores se aplican a todos los métodos seleccionados para mantener una comparación justa. Deja batch size vacío para usar el preset de rendimiento.
-              </p>
+            </details>
+            <details id="training-config-block" class="training-config-block experiment-subpanel-details" open>
+              <summary class="subpanel-summary">
+                <div>
+                  <p class="eyebrow">Graph2Mat training</p>
+                  <h3>Training parameters</h3>
+                  <p class="field-help">
+                    Estos valores se aplican a todos los métodos seleccionados para mantener una comparación justa. Deja batch size vacío para usar el preset de rendimiento.
+                  </p>
+                </div>
+              </summary>
               <div class="grid four split-grid">
                 <label class="field">
                   <span>Epochs</span>
@@ -333,8 +428,8 @@
               <small>
                 Usa la misma multiplicidad en todos los ell de hidden irreps, por ejemplo 32x0e + 32x1o + 32x2e + 32x3o. El número de componentes de matriz Hamiltonian queda bloqueado por el pipeline para evitar salidas spin-polarized incompatibles con referencias SIESTA no polarizadas.
               </small>
-              <section id="hyperparameter-sweep-panel" class="training-plan-panel">
-                <div class="panel-heading compact-heading">
+              <details id="hyperparameter-sweep-panel" class="training-plan-panel experiment-subpanel-details" open>
+                <summary class="subpanel-summary">
                   <div>
                     <p class="eyebrow">Training sweep</p>
                     <h3>Hyperparameter sweep</h3>
@@ -346,7 +441,7 @@
                     <input id="sweep-enabled" type="checkbox" />
                     <span>Enable sweep</span>
                   </label>
-                </div>
+                </summary>
                 <div class="grid four split-grid">
                   <label class="field">
                     <span>Label prefix</span>
@@ -423,9 +518,9 @@
                     <tbody id="sweep-preview-list"></tbody>
                   </table>
                 </div>
-              </section>
-              <section id="training-plan-panel" class="training-plan-panel hidden">
-                <div class="panel-heading compact-heading">
+              </details>
+              <details id="training-plan-panel" class="training-plan-panel experiment-subpanel-details hidden" open>
+                <summary class="subpanel-summary">
                   <div>
                     <p class="eyebrow">Training queue</p>
                     <h3>Training plan</h3>
@@ -437,9 +532,9 @@
                     <button id="add-training-plan-entry" class="button secondary" type="button">Add current config</button>
                     <button id="clear-training-plan" class="button danger" type="button">Clear plan</button>
                   </div>
-                </div>
-                <section id="planned-dataset-target-panel" class="planned-dataset-target-panel hidden">
-                  <div class="panel-heading compact-heading">
+                </summary>
+                <details id="planned-dataset-target-panel" class="planned-dataset-target-panel experiment-subpanel-details hidden" open>
+                  <summary class="subpanel-summary">
                     <div>
                       <p class="eyebrow">Full strict targets</p>
                       <h3>Planned datasets</h3>
@@ -448,7 +543,7 @@
                       </p>
                     </div>
                     <div id="planned-dataset-target-status" class="muted-text">No planned datasets loaded.</div>
-                  </div>
+                  </summary>
                   <div class="cleanup-table-wrap">
                     <table class="cleanup-table planned-dataset-target-table">
                       <thead>
@@ -463,7 +558,7 @@
                       <tbody id="planned-dataset-target-list"></tbody>
                     </table>
                   </div>
-                </section>
+                </details>
                 <div class="grid two split-grid">
                   <label class="field">
                     <span>Config label</span>
@@ -484,12 +579,12 @@
                     <tbody id="training-plan-list"></tbody>
                   </table>
                 </div>
-              </section>
-            </div>
-          </section>
+              </details>
+            </details>
+          </details>
 
-          <section class="panel dataset-builder-panel">
-            <div class="panel-heading">
+          <details id="dataset-builder-panel" class="panel dataset-builder-panel experiment-panel-details" open>
+            <summary class="panel-summary">
               <div>
                 <p class="eyebrow">Dataset recipes</p>
                 <h3>Dataset builder</h3>
@@ -498,7 +593,7 @@
               <div class="button-row">
                 <button id="export-dataset-recipes" class="button secondary" type="button">Exportar recetas</button>
               </div>
-            </div>
+            </summary>
 
             <div class="dataset-method-grid">
               <section class="method-card method-md">
@@ -632,10 +727,10 @@
                 </label>
               </div>
             </details>
-          </section>
+          </details>
 
-          <section class="panel experiment-status">
-            <div class="panel-heading">
+          <details class="panel experiment-status experiment-panel-details" open>
+            <summary class="panel-summary">
               <div>
                 <p class="eyebrow">Experiment</p>
                 <h3 id="experiment-status-text">Idle</h3>
@@ -646,10 +741,359 @@
                 </button>
                 <code id="experiment-results-root">Comparison/results</code>
               </div>
-            </div>
+            </summary>
             <code id="venv-command-preview">source "/ruta/al/venv/bin/activate"</code>
             <div id="experiment-results" class="result-list"></div>
             <pre id="experiment-log" class="log-output experiment-log"></pre>
+          </details>
+        </section>
+
+        <section id="view-g2m-deeph" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Unified SIESTA/W90 benchmark</p>
+              <h2>Graph2Mat vs DeepH</h2>
+            </div>
+            <div class="button-row">
+              <button id="g2m-deeph-validate" class="button secondary" type="button">Validate dataset artifacts</button>
+              <button id="g2m-deeph-run" class="button primary" type="button">Run Graph2Mat vs DeepH benchmark</button>
+              <button id="g2m-deeph-stop" class="button danger" type="button">Stop</button>
+            </div>
+          </header>
+
+          <section class="panel g2m-deeph-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Dataset contract</p>
+                <h3>Joint Graph2Mat + DeepH artifacts</h3>
+                <p class="field-help">
+                  Esta vista usa solo datasets joint validados. El flujo normal no repara snapshots incompletos ni reutiliza ML_prediction.HSX como referencia.
+                </p>
+              </div>
+              <span class="inline-status">
+                <span id="g2m-deeph-status-dot" class="status-dot"></span>
+                <span id="g2m-deeph-status-text">Idle</span>
+              </span>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field">
+                <span>Material / preset</span>
+                <select id="g2m-deeph-material-preset">
+                  <option value="graphene" selected>graphene</option>
+                  <option value="h2o">h2o</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Dataset mode</span>
+                <select id="g2m-deeph-dataset-mode">
+                  <option value="reuse_validated" selected>Reuse existing validated joint dataset</option>
+                  <option value="generate_new">Generate new joint dataset</option>
+                  <option value="full_strict_pipeline">Full strict pipeline: generate + train/test sweep</option>
+                  <option value="repair_expensive">Repair missing artifacts, slow/expensive</option>
+                </select>
+                <small>Repair can rerun SIESTA per missing snapshot and must remain explicit.</small>
+              </label>
+              <label class="field">
+                <span>Snapshot count / dataset size</span>
+                <input id="g2m-deeph-snapshot-count" type="number" min="1" step="1" value="600" />
+              </label>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field">
+                <span>Dataset root</span>
+                <input id="g2m-deeph-dataset-root" type="text" value="Comparison/datasets/graphene_w90_joint" placeholder="Comparison/datasets/graphene_w90_joint" />
+                <small>Directorio persistente para datasets joint reutilizables, separado de results/ y workspaces/.</small>
+              </label>
+              <label class="field">
+                <span>Snapshot root</span>
+                <input id="g2m-deeph-snapshot-root" type="text" placeholder="MD_steps or absolute snapshot directory" />
+              </label>
+              <label class="field">
+                <span>SystemLabel</span>
+                <input id="g2m-deeph-system-label" type="text" value="graphene" />
+              </label>
+              <label class="field">
+                <span>Output root</span>
+                <input id="g2m-deeph-output-root" type="text" value="${REPO_ROOT}/Comparison/results/graphene_w90_g2m_deeph_benchmark" />
+              </label>
+            </div>
+            <details id="g2m-deeph-dataset-picker-panel" class="advanced-recipes g2m-deeph-dataset-picker" open>
+              <summary>Available joint datasets for training / reuse</summary>
+              <div class="advanced-recipes-body">
+                <p class="field-help">
+                  Selecciona un dataset joint ya validado para entrenar Graph2Mat/DeepH sin volver a generar SIESTA. Al marcarlo se copia su ruta a
+                  <code>Dataset root</code>.
+                </p>
+                <div class="button-row">
+                  <button id="g2m-deeph-refresh-datasets" class="button secondary" type="button">Refresh datasets</button>
+                  <span id="g2m-deeph-dataset-picker-status" class="muted-text">Dataset list not loaded.</span>
+                </div>
+                <div id="g2m-deeph-dataset-picker-list" class="result-list muted-text">No dataset list loaded.</div>
+              </div>
+            </details>
+            <div class="grid four split-grid">
+              <label class="field">
+                <span>Train split</span>
+                <input id="g2m-deeph-split-train" type="number" step="0.01" min="0.01" max="0.98" value="0.8" />
+              </label>
+              <label class="field">
+                <span>Validation split</span>
+                <input id="g2m-deeph-split-validation" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
+              </label>
+              <label class="field">
+                <span>Test split</span>
+                <input id="g2m-deeph-split-test" type="number" step="0.01" min="0.01" max="0.98" value="0.1" />
+              </label>
+              <label class="field">
+                <span>Run id</span>
+                <input id="g2m-deeph-run-id" type="text" placeholder="g2m_deeph_graphene_YYYYMMDD" />
+              </label>
+            </div>
+            <details class="advanced-recipes g2m-deeph-dataset-sweep" open>
+              <summary>MD dataset builder</summary>
+              <div class="advanced-recipes-body">
+                <p class="field-help">
+                  Es el mismo esquema MD del panel Experiment: cada tarjeta es un dataset independiente y cada fila dentro de la tarjeta es un bloque
+                  <code>snapshots | temperature_K</code>. Si hay varias tarjetas, se genera un sweep de datasets.
+                </p>
+                <div class="grid two split-grid">
+                  <label class="field">
+                    <span>Max datasets</span>
+                    <input id="g2m-deeph-dataset-sweep-max" type="number" min="1" step="1" value="20" />
+                  </label>
+                  <label class="field">
+                    <span>Split mode</span>
+                    <select id="g2m-deeph-split-mode">
+                      <option value="blocked_with_gap" selected>blocked_with_gap</option>
+                      <option value="block">block</option>
+                      <option value="spread">spread</option>
+                    </select>
+                  </label>
+                </div>
+                <div id="g2m-deeph-md-dataset-editor" class="dataset-editor" data-kind="g2m_deeph_md"></div>
+                <div class="button-row">
+                  <button id="g2m-deeph-md-add-dataset" class="button secondary" type="button">+ Add dataset</button>
+                </div>
+                <label class="field">
+                  <span>MD sweep groups</span>
+                  <textarea id="g2m-deeph-md-sweep-table" rows="8" spellcheck="false">600 | 300</textarea>
+                  <small>
+                    Usa grupos separados por linea en blanco. Cada fila es
+                    <code>snapshots | temperature_K</code>. Todos los datasets se generaran con artefactos joint Graph2Mat+DeepH.
+                  </small>
+                </label>
+                <div id="g2m-deeph-dataset-sweep-preview" class="result-list muted-text">No dataset sweep planned.</div>
+              </div>
+            </details>
+          </section>
+
+          <div class="grid two">
+            <section class="panel g2m-deeph-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Graph2Mat</p>
+                  <h3>Training settings</h3>
+                </div>
+              </div>
+              <div class="grid two split-grid">
+                <label class="field">
+                  <span>Epochs</span>
+                  <input id="g2m-deeph-g2m-epochs" type="number" min="1" step="1" value="200" />
+                </label>
+                <label class="field">
+                  <span>Learning rate</span>
+                  <input id="g2m-deeph-g2m-lr" type="number" min="0.000001" step="0.0001" value="0.005" />
+                </label>
+                <label class="field">
+                  <span>Batch size</span>
+                  <input id="g2m-deeph-g2m-batch-size" type="number" min="1" step="1" value="32" />
+                </label>
+                <label class="field">
+                  <span>Hidden irreps</span>
+                  <input id="g2m-deeph-g2m-hidden-irreps" type="text" value="32x0e + 32x1o + 32x2e" />
+                </label>
+              </div>
+            </section>
+
+            <section class="panel g2m-deeph-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">DeepH</p>
+                  <h3>Training settings</h3>
+                </div>
+              </div>
+              <div class="grid two split-grid">
+                <label class="field">
+                  <span>DeepH repo (optional)</span>
+                  <input id="g2m-deeph-deeph-repo" type="text" placeholder="Set only if DeepH CLIs are not in PATH; DEEPH_PACK_ROOT is also supported" />
+                </label>
+                <label class="field">
+                  <span>DeepH Python (optional)</span>
+                  <input id="g2m-deeph-deeph-python" type="text" placeholder="Defaults to DeepH venv python or current Python" />
+                </label>
+                <label class="field">
+                  <span>Epochs</span>
+                  <input id="g2m-deeph-deeph-epochs" type="number" min="1" step="1" value="200" />
+                </label>
+                <label class="field">
+                  <span>Batch size</span>
+                  <input id="g2m-deeph-deeph-batch-size" type="number" min="1" step="1" value="4" />
+                </label>
+                <label class="field">
+                  <span>Learning rate</span>
+                  <input id="g2m-deeph-deeph-lr" type="number" min="0.000001" step="0.0001" value="0.001" />
+                </label>
+                <label class="field">
+                  <span>Device</span>
+                  <input id="g2m-deeph-deeph-device" type="text" value="cuda:0" />
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <details class="panel g2m-deeph-panel" id="g2m-deeph-training-sweep-panel">
+            <summary class="panel-summary">
+              <div>
+                <p class="eyebrow">Training sweep</p>
+                <h3>Graph2Mat + DeepH hyperparameters</h3>
+                <p class="field-help">
+                  Reusa datasets joint ya validados y splits congelados. Este sweep no genera SIESTA ni repara snapshots.
+                </p>
+              </div>
+            </summary>
+            <div class="grid four split-grid">
+              <label class="toggle-field">
+                <input id="g2m-deeph-training-sweep-enabled" type="checkbox" />
+                <span>Enable training sweep</span>
+              </label>
+              <label class="field">
+                <span>Max runs</span>
+                <input id="g2m-deeph-training-sweep-max-runs" type="number" min="1" step="1" value="128" />
+              </label>
+              <label class="field">
+                <span>Error policy</span>
+                <select id="g2m-deeph-training-sweep-error-policy">
+                  <option value="continue_on_error" selected>continue_on_error</option>
+                  <option value="fail_fast">fail_fast</option>
+                </select>
+              </label>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field">
+                <span>Common seeds</span>
+                <input id="g2m-deeph-sweep-common-seeds" type="text" value="42" />
+              </label>
+              <label class="field">
+                <span>Common epochs</span>
+                <input id="g2m-deeph-sweep-common-epochs" type="text" placeholder="100, 200" />
+              </label>
+              <label class="field">
+                <span>Common learning rates</span>
+                <input id="g2m-deeph-sweep-common-lr" type="text" placeholder="0.001, 0.0005" />
+              </label>
+              <label class="field">
+                <span>Common batch sizes</span>
+                <input id="g2m-deeph-sweep-common-batch-size" type="text" placeholder="Optional; applies to both models" />
+              </label>
+            </div>
+            <div class="grid two">
+              <section class="subpanel">
+                <div class="panel-heading">
+                  <div>
+                    <p class="eyebrow">Graph2Mat sweep</p>
+                    <h3>Model-specific values</h3>
+                  </div>
+                  <label class="toggle-field">
+                    <input id="g2m-deeph-sweep-graph2mat-enabled" type="checkbox" checked />
+                    <span>Graph2Mat</span>
+                  </label>
+                </div>
+                <div class="grid two split-grid">
+                  <label class="field"><span>Interactions</span><input id="g2m-deeph-sweep-g2m-interactions" type="text" placeholder="1, 2" /></label>
+                  <label class="field"><span>Correlation</span><input id="g2m-deeph-sweep-g2m-correlation" type="text" placeholder="1" /></label>
+                  <label class="field"><span>Max ell</span><input id="g2m-deeph-sweep-g2m-max-ell" type="text" placeholder="2" /></label>
+                  <label class="field"><span>Hidden irreps channels</span><input id="g2m-deeph-sweep-g2m-hidden-channels" type="text" placeholder="32" /></label>
+                  <label class="field"><span>Hidden irreps</span><input id="g2m-deeph-sweep-g2m-hidden-irreps" type="text" placeholder="32x0e + 32x1o + 32x2e" /></label>
+                  <label class="field"><span>Batch sizes</span><input id="g2m-deeph-sweep-g2m-batch-size" type="text" placeholder="Performance preset batch size" /></label>
+                  <label class="field"><span>Loss</span><input id="g2m-deeph-sweep-g2m-loss" type="text" placeholder="graph2mat.metrics.block_type_mae" /></label>
+                  <label class="field"><span>Loss kwargs JSON lines</span><textarea id="g2m-deeph-sweep-g2m-loss-kwargs" rows="3" placeholder='{"beta": 0.01}'></textarea></label>
+                  <label class="field"><span>Loader threads</span><input id="g2m-deeph-sweep-g2m-loader-threads" type="text" placeholder="4" /></label>
+                </div>
+              </section>
+              <section class="subpanel">
+                <div class="panel-heading">
+                  <div>
+                    <p class="eyebrow">DeepH sweep</p>
+                    <h3>Model-specific values</h3>
+                  </div>
+                  <label class="toggle-field">
+                    <input id="g2m-deeph-sweep-deeph-enabled" type="checkbox" checked />
+                    <span>DeepH</span>
+                  </label>
+                </div>
+                <div class="grid two split-grid">
+                  <label class="field"><span>Optimizer</span><input id="g2m-deeph-sweep-deeph-optimizer" type="text" placeholder="adam" /></label>
+                  <label class="field"><span>Weight decay</span><input id="g2m-deeph-sweep-deeph-weight-decay" type="text" placeholder="0.0" /></label>
+                  <label class="field"><span>Criterion</span><input id="g2m-deeph-sweep-deeph-criterion" type="text" placeholder="MaskMSELoss" /></label>
+                  <label class="field"><span>Atom fea len</span><input id="g2m-deeph-sweep-deeph-atom-fea-len" type="text" placeholder="64" /></label>
+                  <label class="field"><span>Edge fea len</span><input id="g2m-deeph-sweep-deeph-edge-fea-len" type="text" placeholder="128" /></label>
+                  <label class="field"><span>Gauss stop</span><input id="g2m-deeph-sweep-deeph-gauss-stop" type="text" placeholder="6" /></label>
+                  <label class="field"><span>Num l</span><input id="g2m-deeph-sweep-deeph-num-l" type="text" placeholder="5" /></label>
+                  <label class="field"><span>if_lcmp</span><input id="g2m-deeph-sweep-deeph-if-lcmp" type="text" placeholder="true" /></label>
+                  <label class="field"><span>Normalization</span><input id="g2m-deeph-sweep-deeph-normalization" type="text" placeholder="LayerNorm" /></label>
+                  <label class="field"><span>Atom update net</span><input id="g2m-deeph-sweep-deeph-atom-update-net" type="text" placeholder="CGConv" /></label>
+                  <label class="field"><span>Retain edge fea</span><input id="g2m-deeph-sweep-deeph-retain-edge-fea" type="text" placeholder="true" /></label>
+                </div>
+              </section>
+            </div>
+            <div id="g2m-deeph-training-sweep-preview" class="result-list muted-text">Training sweep disabled.</div>
+          </details>
+
+          <section class="panel g2m-deeph-monitor-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Progress</p>
+                <h3 id="g2m-deeph-phase-title">Idle</h3>
+              </div>
+              <code id="g2m-deeph-run-root">No run root yet</code>
+            </div>
+            <div id="g2m-deeph-phase-progress" class="phase-progress"></div>
+            <div id="g2m-deeph-training-sweep-status" class="muted-text">No training sweep active.</div>
+            <div class="grid two split-grid">
+              <section>
+                <h3>Artifact summary</h3>
+                <div id="g2m-deeph-artifact-summary" class="result-list muted-text">No dataset validation yet.</div>
+              </section>
+              <section>
+                <h3>Metric summary</h3>
+                <div id="g2m-deeph-metric-summary" class="result-list muted-text">No common metrics yet.</div>
+              </section>
+            </div>
+            <div id="g2m-deeph-warning-summary" class="performance-warning hidden" role="status" aria-live="polite"></div>
+            <div class="terminal-frame g2m-deeph-terminal">
+              <div class="terminal-navbar">
+                <span>Streaming logs</span>
+                <div class="terminal-actions">
+                  <button id="g2m-deeph-log-bottom" class="button ghost small" type="button">Bottom</button>
+                  <button id="g2m-deeph-log-clear" class="button ghost small" type="button">Clear view</button>
+                </div>
+              </div>
+              <pre id="g2m-deeph-log" class="log-output experiment-log"></pre>
+            </div>
+          </section>
+
+          <section class="panel g2m-deeph-plots-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Plots</p>
+                <h3>Graph2Mat vs DeepH plots</h3>
+                <p class="field-help">Se rellena cuando el backend publica plots para el benchmark dedicado.</p>
+              </div>
+              <button id="g2m-deeph-refresh-results" class="button secondary" type="button">Refresh results</button>
+            </div>
+            <div id="g2m-deeph-plots" class="plot-grid">
+              <div class="plot-card full placeholder-card">No benchmark plots available yet.</div>
+            </div>
           </section>
         </section>
 
@@ -676,6 +1120,7 @@
 	                  <option value="balanced" selected>Balanced</option>
 	                  <option value="aggressive">Aggressive</option>
 	                  <option value="gpu_focused">GPU-focused</option>
+	                  <option value="parallel_trains">Parallel trains</option>
 	                  <option value="cpu_only">CPU-only</option>
 	                  <option value="max_aggressive">Max aggressive / stress</option>
 	                  <option value="auto_detect">Auto detect</option>
@@ -745,6 +1190,16 @@
 	                <span>Batch size override</span>
 	                <input id="performance-batch-size" type="number" step="1" min="1" value="128" />
 	              </label>
+              <label class="field">
+                <span>Max Graph2Mat train jobs</span>
+                <input id="performance-max-parallel-graph2mat-training-jobs" type="number" step="1" min="1" value="1" />
+                <small>Parallelizes independent sweep configs; use cautiously on one GPU.</small>
+              </label>
+              <label class="field">
+                <span>Max DeepH train jobs</span>
+                <input id="performance-max-parallel-deeph-training-jobs" type="number" step="1" min="1" value="1" />
+                <small>Parallelizes independent DeepH sweep configs; start with 2 on one high-VRAM GPU.</small>
+              </label>
 	              <label class="field">
 	                <span>Store in memory</span>
 	                <select id="performance-store-in-memory">
@@ -761,6 +1216,38 @@
 	                  <option value="medium">medium</option>
 	                </select>
 	              </label>
+              <label class="field">
+                <span>Lightning precision</span>
+                <select id="performance-torch-mixed-precision">
+                  <option value="">Default 32-bit</option>
+                  <option value="32-true">32-true</option>
+                  <option value="bf16-mixed">bf16-mixed</option>
+                  <option value="16-mixed">16-mixed</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>G2M log every steps</span>
+                <input id="performance-graph2mat-log-every-n-steps" type="number" step="1" min="1" placeholder="10" />
+                <small>Less frequent Lightning logging reduces per-epoch overhead.</small>
+              </label>
+              <label class="field">
+                <span>G2M validate every epochs</span>
+                <input id="performance-graph2mat-check-val-every-n-epoch" type="number" step="1" min="1" placeholder="5" />
+                <small>Validation is still run, just not every epoch.</small>
+              </label>
+              <label class="field">
+                <span>G2M checkpoint every epochs</span>
+                <input id="performance-graph2mat-checkpoint-every-n-epochs" type="number" step="1" min="1" placeholder="5" />
+                <small>Best/last checkpoint callbacks keep their monitors.</small>
+              </label>
+              <label class="field">
+                <span>Require cuequivariance</span>
+                <select id="performance-graph2mat-require-cuequivariance">
+                  <option value="false" selected>false</option>
+                  <option value="true">true</option>
+                </select>
+                <small>Fail early if Graph2Mat cannot import cuequivariance acceleration.</small>
+              </label>
 	              <label class="field">
 	                <span>Torch threads</span>
 	                <input id="performance-torch-num-threads" type="number" step="1" min="1" value="8" />
@@ -883,6 +1370,18 @@
                     <option value="all" selected>All materials</option>
                   </select>
                 </label>
+                <label class="field inline-field">
+                  <span>Run family</span>
+                  <select id="plot-family-filter">
+                    <option value="all" selected>All run families</option>
+                  </select>
+                </label>
+                <label class="field inline-field">
+                  <span>Safety</span>
+                  <select id="plot-safety-filter">
+                    <option value="all" selected>All safety states</option>
+                  </select>
+                </label>
                 <span id="plots-status" class="muted-text">Plots disabled</span>
               </div>
             </div>
@@ -892,6 +1391,9 @@
               <div id="plot-low-energy" class="plot-card"></div>
               <div id="plot-sparse" class="plot-card"></div>
               <div id="plot-dos" class="plot-card"></div>
+              <div id="plot-kpoint-h" class="plot-card"></div>
+              <div id="plot-kpoint-low-energy" class="plot-card"></div>
+              <div id="plot-kpoint-dos" class="plot-card"></div>
               <div id="plot-gap" class="plot-card"></div>
               <div id="plot-frontier" class="plot-card"></div>
               <div id="plot-aligned" class="plot-card"></div>
@@ -971,12 +1473,19 @@
             <code>POST /api/experiment/stop</code>
             <code>GET /api/experiment/status</code>
             <code>GET /api/experiment/logs?since=0&amp;limit=2000</code>
+            <code>POST /api/g2m-deeph/validate-dataset</code>
+            <code>POST /api/g2m-deeph/run</code>
+            <code>POST /api/g2m-deeph/stop</code>
+            <code>GET /api/g2m-deeph/status</code>
+            <code>GET /api/g2m-deeph/logs?since=0&amp;limit=2000</code>
+            <code>GET /api/g2m-deeph/results</code>
+            <code>GET /api/g2m-deeph/plots</code>
           </div>
         </section>
       </main>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260518-lazy-external-assets"></script>
+    <script src="/app.js?v=20260528-g2m-parallel-trains"></script>
   </body>
 </html>

@@ -56,6 +56,7 @@ from material_provenance import (
     material_maps_from_manifest,
     read_json_file,
 )
+from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner
 
 try:
     import pty
@@ -78,8 +79,11 @@ from material_presets import (  # noqa: E402
 LOG_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
+MAX_CROSS_DIAGNOSTIC_MANIFEST_BYTES = 2_000_000
+MAX_PLOT_SAMPLE_ROWS_PER_GROUP = 100
 METRIC_VERSION = "2026-05-08.frontier-window-v1"
-DEFAULT_VENV_ACTIVATE_COMMAND = "source /home/christian/graph2mat-env/bin/activate"
+DEFAULT_VENV_ACTIVATE_COMMAND = "source ${REPO_ROOT}/.venv/bin/activate"
+KGRID_MONKHORST_PACK_DIRECTIVES = {"kgrid_monkhorst_pack", "kgrid.monkhorstpack"}
 
 
 def format_duration(seconds: float | int | None) -> str:
@@ -127,6 +131,99 @@ def reset_output_directory(path: Path) -> None:
         else:
             remove_tree_with_retries(stale_path)
     path.mkdir(parents=True, exist_ok=False)
+
+
+def _strip_fdf_comment_for_kgrid(line: str) -> str:
+    return line.split("#", 1)[0].strip()
+
+
+def _float_token_for_kgrid(value: str) -> float | None:
+    try:
+        return float(value.replace("d", "e").replace("D", "E"))
+    except ValueError:
+        return None
+
+
+def _monkhorst_pack_rows_are_gamma(rows: list[str]) -> bool:
+    matrix: list[list[float]] = []
+    for row in rows:
+        values = [_float_token_for_kgrid(token) for token in row.split()]
+        if len(values) < 4 or any(value is None for value in values[:4]):
+            return False
+        matrix.append([float(value) for value in values[:4] if value is not None])
+    if len(matrix) != 3:
+        return False
+    expected = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+    )
+    return all(
+        math.isclose(matrix[row][col], expected[row][col], rel_tol=0.0, abs_tol=1e-12)
+        for row in range(3)
+        for col in range(4)
+    )
+
+
+def _monkhorst_pack_inline_is_gamma(tokens: list[str]) -> bool:
+    values = [_float_token_for_kgrid(token) for token in tokens]
+    if not values or any(value is None for value in values):
+        return False
+    numeric = [float(value) for value in values if value is not None]
+    if len(numeric) == 3:
+        return all(math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-12) for value in numeric)
+    if len(numeric) >= 6:
+        return all(math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-12) for value in numeric[:3]) and all(
+            math.isclose(value, 0.0, rel_tol=0.0, abs_tol=1e-12) for value in numeric[3:6]
+        )
+    return False
+
+
+def structure_has_nongamma_monkhorst_pack(structure_path: Path) -> bool:
+    """Lightweight UI-side check for deciding whether to opt into k-point metrics."""
+    if not structure_path.exists():
+        return False
+    try:
+        lines = structure_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    kgrid_block_name: str | None = None
+    kgrid_block_rows: list[str] = []
+    for raw_line in lines:
+        clean = _strip_fdf_comment_for_kgrid(raw_line)
+        if not clean:
+            continue
+        lower = clean.lower()
+        parts = lower.split()
+        key = parts[0] if parts else ""
+        if lower.startswith("%block"):
+            block_name = parts[1] if len(parts) > 1 else ""
+            if block_name in KGRID_MONKHORST_PACK_DIRECTIVES:
+                kgrid_block_name = block_name
+                kgrid_block_rows = []
+            continue
+        if lower.startswith("%endblock"):
+            if kgrid_block_name is not None and not _monkhorst_pack_rows_are_gamma(kgrid_block_rows):
+                return True
+            kgrid_block_name = None
+            kgrid_block_rows = []
+            continue
+        if kgrid_block_name is not None:
+            kgrid_block_rows.append(clean)
+            continue
+        if key in KGRID_MONKHORST_PACK_DIRECTIVES:
+            return not _monkhorst_pack_inline_is_gamma(parts[1:])
+    return bool(kgrid_block_name is not None and not _monkhorst_pack_rows_are_gamma(kgrid_block_rows))
+
+
+def result_dir_needs_kpoint_metrics(result_dir: Path) -> bool:
+    structure_root = result_dir / "structures"
+    if not structure_root.exists():
+        return False
+    for structure_path in itertools.islice(structure_root.glob("*/RUN.fdf"), 20):
+        if structure_has_nongamma_monkhorst_pack(structure_path):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -202,12 +299,29 @@ METHOD_REGISTRY: dict[str, MethodSpec] = {
 DATASET_ONLY_RUN_MODE = "dataset_only"
 FULL_STRICT_RUN_MODE = "full_strict_pipeline"
 DOWNSTREAM_ONLY_RUN_MODE = "train_test_metrics_plots_only"
-RUN_MODES = {DATASET_ONLY_RUN_MODE, FULL_STRICT_RUN_MODE, DOWNSTREAM_ONLY_RUN_MODE}
+DEEPH_COMPARISON_RUN_MODE = "deeph_comparison"
+GRAPH2MAT_DEEPH_RUN_MODE = "graph2mat_deeph_comparison"
+RUN_MODES = {
+    DATASET_ONLY_RUN_MODE,
+    FULL_STRICT_RUN_MODE,
+    DOWNSTREAM_ONLY_RUN_MODE,
+    DEEPH_COMPARISON_RUN_MODE,
+    GRAPH2MAT_DEEPH_RUN_MODE,
+}
 MD_DOWNSTREAM_STEPS = ("run_md_training", "run_md_testing", "run_md_prediction")
 ATOM_DOWNSTREAM_STEPS = ("render_inputs", "run_atdisp_training", "run_atdisp_testing", "run_atdisp_prediction")
 PRESERVE_ARCHIVED_SPLITS = "preserve_archived_splits"
 REBUILD_REUSABLE_SPLITS = "rebuild_splits"
 REUSABLE_SPLIT_POLICIES = {PRESERVE_ARCHIVED_SPLITS, REBUILD_REUSABLE_SPLITS}
+DEFAULT_DEEPH_REPO = Path(os.environ["DEEPH_PACK_ROOT"]).expanduser() if os.environ.get("DEEPH_PACK_ROOT") else None
+DEFAULT_DEEPH_PYTHON = DEFAULT_DEEPH_REPO / ".venv" / "bin" / "python" if DEFAULT_DEEPH_REPO else None
+DEFAULT_PIPELINE_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+DEFAULT_DEEPH_GRAPH2MAT_RESULT = (
+    RESULTS_ROOT
+    / "results_md"
+    / "md_dataset1_df6jp1_graphene_w90_default_mse_lr0p005_ep600"
+    / "run_20260521_141037"
+)
 
 
 def method_registry_payload() -> list[dict[str, Any]]:
@@ -275,15 +389,176 @@ def parse_run_mode(value: Any) -> str:
     mode = FULL_STRICT_RUN_MODE if value in (None, "") else str(value).strip()
     if mode not in RUN_MODES:
         raise RuntimeError(
-            "run_mode debe ser 'dataset_only', 'full_strict_pipeline' o "
-            "'train_test_metrics_plots_only' "
+            "run_mode debe ser 'dataset_only', 'full_strict_pipeline', "
+            "'train_test_metrics_plots_only', 'deeph_comparison' o "
+            "'graph2mat_deeph_comparison' "
             f"(recibido: {value!r})."
         )
     return mode
 
 
 def run_mode_skips_dataset_generation(run_mode: str) -> bool:
-    return run_mode == DOWNSTREAM_ONLY_RUN_MODE
+    return run_mode in {DOWNSTREAM_ONLY_RUN_MODE, GRAPH2MAT_DEEPH_RUN_MODE}
+
+
+def run_mode_uses_planned_dataset_targets(run_mode: str) -> bool:
+    return run_mode == FULL_STRICT_RUN_MODE
+
+
+def resolve_ui_path(value: Any, default: Path | str | None = None) -> Path:
+    raw = default if value in (None, "") else value
+    if raw in (None, ""):
+        raise RuntimeError("Se esperaba una ruta no vacia.")
+    text = str(raw).strip().replace("${REPO_ROOT}", str(REPO_ROOT))
+    return Path(os.path.expandvars(text)).expanduser()
+
+
+def parse_ui_path_list(value: Any) -> list[Path]:
+    if value in (None, "", []):
+        return []
+    raw_items: list[Any]
+    if isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        text = str(value)
+        raw_items = []
+        for line in text.replace(",", "\n").splitlines():
+            item = line.strip()
+            if item:
+                raw_items.append(item)
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        path = resolve_ui_path(item)
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def parse_optional_positive_int(value: Any, label: str) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} debe ser un entero positivo.") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"{label} debe ser un entero positivo.")
+    return parsed
+
+
+def parse_positive_float(value: Any, label: str, default: float) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} debe ser un numero positivo.") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"{label} debe ser un numero positivo.")
+    return parsed
+
+
+def parse_non_negative_int(value: Any, label: str, default: int = 0) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} debe ser un entero >= 0.") from exc
+    if parsed < 0:
+        raise RuntimeError(f"{label} debe ser un entero >= 0.")
+    return parsed
+
+
+def parse_deeph_comparison_options(
+    value: Any,
+    *,
+    require_graph2mat_result: bool = True,
+) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    graph2mat_result_dirs = parse_ui_path_list(payload.get("graph2mat_result_dirs"))
+    candidate_summary_csv = (
+        resolve_ui_path(payload.get("graph2mat_candidate_summary_csv"))
+        if payload.get("graph2mat_candidate_summary_csv") not in (None, "")
+        else None
+    )
+    single_result_required = require_graph2mat_result and not graph2mat_result_dirs and candidate_summary_csv is None
+    graph2mat_result_dir = None
+    if single_result_required:
+        graph2mat_result_dir = resolve_ui_path(payload.get("graph2mat_result_dir"), DEFAULT_DEEPH_GRAPH2MAT_RESULT)
+    elif not graph2mat_result_dirs and candidate_summary_csv is None and payload.get("graph2mat_result_dir") not in (None, ""):
+        graph2mat_result_dir = resolve_ui_path(payload.get("graph2mat_result_dir"))
+    if payload.get("deeph_repo") in (None, "") and DEFAULT_DEEPH_REPO is None:
+        raise RuntimeError("Configura deeph_repo o define DEEPH_PACK_ROOT para ejecutar DeepH.")
+    deeph_repo = resolve_ui_path(payload.get("deeph_repo"), DEFAULT_DEEPH_REPO)
+    deeph_python = resolve_ui_path(payload.get("deeph_python"), DEFAULT_DEEPH_PYTHON or sys.executable)
+    pipeline_python = resolve_ui_path(
+        payload.get("pipeline_python"),
+        DEFAULT_PIPELINE_PYTHON if DEFAULT_PIPELINE_PYTHON.exists() else sys.executable,
+    )
+    output_root = resolve_ui_path(
+        payload.get("output_root"),
+        RESULTS_ROOT / "graphene_w90_deeph_fair_benchmark",
+    )
+    epochs = parse_optional_positive_int(payload.get("epochs"), "DeepH epochs") or 200
+    batch_size = parse_optional_positive_int(payload.get("batch_size"), "DeepH batch size") or 4
+    sample_limit = parse_optional_positive_int(
+        payload.get("sample_limit_per_split"),
+        "Sample limit per split",
+    )
+    top_percent = parse_positive_float(
+        payload.get("graph2mat_top_percent"),
+        "Graph2Mat top percent",
+        10.0,
+    )
+    if top_percent > 100.0:
+        raise RuntimeError("Graph2Mat top percent debe estar entre 0 y 100.")
+    top_count = parse_optional_positive_int(payload.get("graph2mat_top_count"), "Graph2Mat top count")
+    learning_rate = parse_positive_float(payload.get("learning_rate"), "DeepH learning rate", 0.001)
+    seed = parse_non_negative_int(payload.get("seed"), "DeepH seed", 0)
+    siesta_command = str(payload.get("siesta_command") or "siesta").strip()
+    if not siesta_command:
+        raise RuntimeError("SIESTA command no puede estar vacio.")
+    device = str(payload.get("device") or "cuda:0").strip()
+    if not device:
+        device = "cuda:0"
+    if graph2mat_result_dir is not None and not graph2mat_result_dir.exists():
+        raise RuntimeError(f"No existe el result dir de Graph2Mat: {graph2mat_result_dir}")
+    for result_dir in graph2mat_result_dirs:
+        if not result_dir.exists():
+            raise RuntimeError(f"No existe el result dir de Graph2Mat: {result_dir}")
+    if candidate_summary_csv is not None and not candidate_summary_csv.exists():
+        raise RuntimeError(f"No existe el CSV de candidatos Graph2Mat: {candidate_summary_csv}")
+    if not deeph_repo.exists():
+        raise RuntimeError(f"No existe el repo de DeepH: {deeph_repo}")
+    if not deeph_python.exists():
+        raise RuntimeError(f"No existe el Python de DeepH: {deeph_python}")
+    if not pipeline_python.exists():
+        raise RuntimeError(f"No existe el Python del pipeline: {pipeline_python}")
+    return {
+        "graph2mat_result_dir": str(graph2mat_result_dir) if graph2mat_result_dir is not None else "",
+        "graph2mat_result_dirs": [str(path) for path in graph2mat_result_dirs],
+        "graph2mat_candidate_summary_csv": str(candidate_summary_csv) if candidate_summary_csv is not None else "",
+        "deeph_repo": str(deeph_repo),
+        "deeph_python": str(deeph_python),
+        "pipeline_python": str(pipeline_python),
+        "output_root": str(output_root),
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "seed": seed,
+        "sample_limit_per_split": sample_limit,
+        "graph2mat_top_percent": top_percent,
+        "graph2mat_top_count": top_count,
+        "allow_regenerate_siesta": parse_bool(payload.get("allow_regenerate_siesta"), True),
+        "siesta_command": siesta_command,
+        "device": device,
+        "copy_raw": parse_bool(payload.get("copy_raw"), True),
+    }
 
 
 def parse_reusable_dataset_ids(value: Any) -> list[str]:
@@ -368,10 +643,10 @@ def validate_training_plan_for_run_mode(training_plan: list[dict[str, Any]], run
                 raise RuntimeError(
                     f"training_plan[{index}] necesita reusable_dataset_ids en train_test_metrics_plots_only."
                 )
-        elif run_mode == FULL_STRICT_RUN_MODE:
+        elif run_mode_uses_planned_dataset_targets(run_mode):
             if not item.get("dataset_targets"):
                 raise RuntimeError(
-                    f"training_plan[{index}] necesita dataset_targets en full_strict_pipeline."
+                    f"training_plan[{index}] necesita dataset_targets en {run_mode}."
                 )
 
 
@@ -1432,6 +1707,107 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+def _format_progress_value(value: float | int | None) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return "n/a"
+    if abs(number) >= 100:
+        return f"{number:.1f}"
+    if abs(number) >= 1:
+        return f"{number:.4f}"
+    return f"{number:.6f}"
+
+
+def _resolve_config_relative_path(config_path: Path, value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+    text = os.path.expandvars(str(value)).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path
+    return (config_path.parent / path).resolve()
+
+
+def lightning_training_progress_from_config(config_path: Path) -> str | None:
+    """Return a compact progress summary from Lightning TensorBoard events."""
+    try:
+        config = load_config(config_path)
+        training_dir = _resolve_config_relative_path(
+            config_path,
+            (config.get("paths") or {}).get("training_dir"),
+        )
+        if training_dir is None:
+            return None
+        training_config = load_config(training_dir / "config.yaml")
+        max_epochs = (training_config.get("trainer") or {}).get("max_epochs")
+        log_root = training_dir / "lightning_logs"
+        event_files = sorted(
+            log_root.rglob("events.out.tfevents.*"),
+            key=lambda path: path.stat().st_mtime,
+        )
+        if not event_files:
+            return None
+        from tensorboard.backend.event_processing import event_accumulator
+
+        accumulator = event_accumulator.EventAccumulator(
+            str(event_files[-1]),
+            size_guidance={"scalars": 0},
+        )
+        accumulator.Reload()
+        scalar_tags = set(accumulator.Tags().get("scalars", []))
+
+        def latest_scalar(tag: str) -> tuple[int | None, float | None]:
+            if tag not in scalar_tags:
+                return None, None
+            values = accumulator.Scalars(tag)
+            if not values:
+                return None, None
+            item = values[-1]
+            return int(item.step), float(item.value)
+
+        epoch_step, epoch_value = latest_scalar("epoch")
+        train_step, train_loss = latest_scalar("train_loss_epoch")
+        val_step, val_loss = latest_scalar("val_loss")
+        _, val_node = latest_scalar("val_node_smooth_l1")
+        _, val_edge = latest_scalar("val_edge_smooth_l1")
+        _, beta = latest_scalar("val_smooth_l1_beta")
+        step = max([item for item in (epoch_step, train_step, val_step) if item is not None], default=None)
+        parts = []
+        if epoch_value is not None:
+            epoch_display = str(int(epoch_value))
+            if max_epochs not in (None, ""):
+                epoch_display += f"/{max_epochs}"
+            parts.append(f"epoch {epoch_display}")
+        if step is not None:
+            parts.append(f"step {step}")
+        if train_loss is not None:
+            parts.append(f"train_loss {_format_progress_value(train_loss)}")
+        if val_loss is not None:
+            parts.append(f"val_loss {_format_progress_value(val_loss)}")
+        if val_node is not None:
+            parts.append(f"val_node {_format_progress_value(val_node)}")
+        if val_edge is not None:
+            parts.append(f"val_edge {_format_progress_value(val_edge)}")
+        if beta is not None:
+            parts.append(f"beta {_format_progress_value(beta)}")
+        checkpoints = sorted(
+            log_root.rglob("checkpoints/*.ckpt"),
+            key=lambda path: path.stat().st_mtime,
+        )
+        if checkpoints:
+            parts.append(f"ckpt {checkpoints[-1].name}")
+        return " | ".join(parts) if parts else None
+    except Exception:
+        return None
+
+
 def stream_process_output(
     process: subprocess.Popen[str],
     append: Any,
@@ -1439,6 +1815,7 @@ def stream_process_output(
     label: str,
     master_fd: int | None = None,
     eta_provider: Any | None = None,
+    progress_provider: Any | None = None,
 ) -> int:
     if master_fd is None:
         assert process.stdout is not None
@@ -1458,12 +1835,15 @@ def stream_process_output(
                 break
             if now - last_output >= LOG_HEARTBEAT_SECONDS and now - last_heartbeat >= LOG_HEARTBEAT_SECONDS:
                 eta_seconds = eta_provider() if eta_provider is not None else None
+                progress_text = progress_provider() if progress_provider is not None else None
+                progress_fragment = f" | progreso {progress_text}" if progress_text else ""
                 append(
                     "[UI] "
                     f"{label} sigue ejecutandose | PID {process.pid} | "
                     f"elapsed {format_duration(now - started_at)} | "
                     f"sin nueva salida {format_duration(now - last_output)} | "
-                    f"ETA {format_duration(eta_seconds)}\n"
+                    f"ETA {format_duration(eta_seconds)}"
+                    f"{progress_fragment}\n"
                 )
                 last_heartbeat = now
         return process.wait()
@@ -1495,12 +1875,15 @@ def stream_process_output(
             break
         if now - last_output >= LOG_HEARTBEAT_SECONDS and now - last_heartbeat >= LOG_HEARTBEAT_SECONDS:
             eta_seconds = eta_provider() if eta_provider is not None else None
+            progress_text = progress_provider() if progress_provider is not None else None
+            progress_fragment = f" | progreso {progress_text}" if progress_text else ""
             append(
                 "[UI] "
                 f"{label} sigue ejecutandose | PID {process.pid} | "
                 f"elapsed {format_duration(now - started_at)} | "
                 f"sin nueva salida {format_duration(now - last_output)} | "
-                f"ETA {format_duration(eta_seconds)}\n"
+                f"ETA {format_duration(eta_seconds)}"
+                f"{progress_fragment}\n"
             )
             last_heartbeat = now
 
@@ -1593,6 +1976,7 @@ class PipelineRunner:
                 lambda line: self._append_log(line),
                 label=self.spec.label,
                 master_fd=master_fd,
+                progress_provider=lambda: lightning_training_progress_from_config(self.spec.config_path),
             )
         finally:
             if master_fd is not None:
@@ -1821,6 +2205,13 @@ def material_presets_payload(*, preset_dir: Path = MATERIAL_PRESET_DIR) -> dict[
 def apply_material_to_config(config: dict[str, Any], material: dict[str, Any] | None) -> None:
     if material is not None:
         config["material"] = dict(material)
+        md = config.get("md")
+        if isinstance(md, dict):
+            preset = str(material.get("preset") or "").strip().lower()
+            if preset == "graphene":
+                md["run_fdf_template"] = "${REPO_ROOT}/materials/graphene/RUN.fdf"
+            else:
+                md.pop("run_fdf_template", None)
 
 
 def resolve_venv_activate_from_command(command: str) -> str:
@@ -1845,10 +2236,6 @@ def resolve_venv_activate_from_command(command: str) -> str:
         text = "${REPO_ROOT}/" + text
     resolved_text = os.path.expandvars(text.replace("${REPO_ROOT}", str(REPO_ROOT)))
     resolved_path = Path(resolved_text).expanduser()
-    legacy_missing_default = REPO_ROOT / ".venv" / "bin" / "activate"
-    graph2mat_env = Path("/home/christian/graph2mat-env/bin/activate")
-    if resolved_path == legacy_missing_default and not resolved_path.exists() and graph2mat_env.exists():
-        return str(graph2mat_env)
     return text
 
 
@@ -2444,6 +2831,8 @@ DEFAULT_PERFORMANCE_SETTINGS: dict[str, Any] = {
     "max_parallel_prediction_jobs": 1,
     "max_parallel_evaluation_jobs": 1,
     "max_parallel_metric_jobs": 1,
+    "max_parallel_graph2mat_training_jobs": 1,
+    "max_parallel_deeph_training_jobs": 1,
     "omp_num_threads": None,
     "mkl_num_threads": None,
     "openblas_num_threads": None,
@@ -2457,6 +2846,11 @@ DEFAULT_PERFORMANCE_SETTINGS: dict[str, Any] = {
     "error_policy": "fail_fast",
     "preset": None,
     "torch_float32_matmul_precision": None,
+    "torch_mixed_precision": None,
+    "graph2mat_log_every_n_steps": None,
+    "graph2mat_check_val_every_n_epoch": None,
+    "graph2mat_checkpoint_every_n_epochs": None,
+    "graph2mat_require_cuequivariance": False,
 }
 
 PERFORMANCE_PRESET_IDS = {
@@ -2465,6 +2859,7 @@ PERFORMANCE_PRESET_IDS = {
     "aggressive",
     "aggressive_local",
     "gpu_focused",
+    "parallel_trains",
     "gpu_only",
     "cpu_only",
     "max_aggressive",
@@ -2654,6 +3049,13 @@ def _base_profile(
     threads: int,
     torch_threads: int,
     store_in_memory: bool | None = True,
+    graph2mat_training_jobs: int = 1,
+    deeph_training_jobs: int = 1,
+    torch_mixed_precision: str | None = None,
+    graph2mat_log_every_n_steps: int | None = None,
+    graph2mat_check_val_every_n_epoch: int | None = None,
+    graph2mat_checkpoint_every_n_epochs: int | None = None,
+    graph2mat_require_cuequivariance: bool = False,
 ) -> dict[str, Any]:
     return {
         "max_parallel_siesta_jobs": int(siesta_jobs),
@@ -2661,6 +3063,8 @@ def _base_profile(
         "max_parallel_prediction_jobs": 1,
         "max_parallel_evaluation_jobs": int(evaluation_jobs),
         "max_parallel_metric_jobs": int(metric_jobs),
+        "max_parallel_graph2mat_training_jobs": int(graph2mat_training_jobs),
+        "max_parallel_deeph_training_jobs": int(deeph_training_jobs),
         "omp_num_threads": int(threads),
         "mkl_num_threads": int(threads),
         "openblas_num_threads": int(threads),
@@ -2674,6 +3078,11 @@ def _base_profile(
         "error_policy": "fail_fast",
         "preset": preset,
         "torch_float32_matmul_precision": "high",
+        "torch_mixed_precision": torch_mixed_precision,
+        "graph2mat_log_every_n_steps": graph2mat_log_every_n_steps,
+        "graph2mat_check_val_every_n_epoch": graph2mat_check_val_every_n_epoch,
+        "graph2mat_checkpoint_every_n_epochs": graph2mat_checkpoint_every_n_epochs,
+        "graph2mat_require_cuequivariance": bool(graph2mat_require_cuequivariance),
     }
 
 
@@ -2722,19 +3131,45 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         threads=_clamp(logical // max(1, _clamp(physical // 2, 2, 8)), 1, 4),
         torch_threads=_clamp(logical // 2, 4, 16),
         store_in_memory=False if low_ram else True,
+        graph2mat_training_jobs=1,
+        torch_mixed_precision="bf16-mixed" if has_cuda else None,
     )
     gpu_focused = _base_profile(
         preset="gpu_focused",
         hardware=hw,
         accelerator="gpu" if has_cuda else "cpu",
-        batch_size=_vram_batch_size(vram_gb, mode="gpu_focused") if has_cuda else 32,
+        batch_size=1024 if strong_gpu else (_vram_batch_size(vram_gb, mode="gpu_focused") if has_cuda else 32),
         siesta_jobs=_clamp(physical // 6, 1, 3),
         evaluation_jobs=_clamp(logical // 8, 1, 3),
         metric_jobs=_clamp(logical // 3, 2, 8),
         threads=1,
         torch_threads=_clamp(logical // 2, 4, 16),
         store_in_memory=False if low_ram else True,
+        graph2mat_training_jobs=2 if strong_gpu else 1,
+        torch_mixed_precision="bf16-mixed" if has_cuda else None,
+        graph2mat_log_every_n_steps=10 if strong_gpu else None,
+        graph2mat_check_val_every_n_epoch=5 if strong_gpu else None,
+        graph2mat_checkpoint_every_n_epochs=5 if strong_gpu else None,
     )
+    parallel_trains = _base_profile(
+        preset="parallel_trains",
+        hardware=hw,
+        accelerator="gpu" if has_cuda else "cpu",
+        batch_size=1024 if strong_gpu else (_vram_batch_size(vram_gb, mode="gpu_focused") if has_cuda else 32),
+        siesta_jobs=_clamp(physical // 6, 1, 3),
+        evaluation_jobs=_clamp(logical // 8, 1, 3),
+        metric_jobs=_clamp(logical // 3, 2, 8),
+        threads=1,
+        torch_threads=1,
+        store_in_memory=False if low_ram else True,
+        graph2mat_training_jobs=4 if strong_gpu else 2,
+        deeph_training_jobs=2 if strong_gpu else 1,
+        torch_mixed_precision="bf16-mixed" if has_cuda else None,
+        graph2mat_log_every_n_steps=10 if strong_gpu else None,
+        graph2mat_check_val_every_n_epoch=5 if strong_gpu else None,
+        graph2mat_checkpoint_every_n_epochs=5 if strong_gpu else None,
+    )
+    parallel_trains["numexpr_num_threads"] = 1
     cpu_only = _base_profile(
         preset="cpu_only",
         hardware=hw,
@@ -2758,6 +3193,8 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         threads=_clamp(logical // max(1, _clamp(physical, 2, 12)), 1, 4),
         torch_threads=_clamp(logical, 8, 24),
         store_in_memory=False if low_ram else True,
+        graph2mat_training_jobs=2 if strong_gpu else 1,
+        torch_mixed_precision="bf16-mixed" if has_cuda else None,
     )
     debug = _base_profile(
         preset="single_run_debug",
@@ -2841,6 +3278,13 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         ("balanced", "Balanced", "Recommended default: good GPU usage without overloading CPU/RAM/I/O.", balanced, []),
         ("aggressive", "Aggressive", "High-performance local mode with controlled CPU parallelism.", aggressive, []),
         ("gpu_focused", "GPU-focused", "Prioritizes GPU training/inference and keeps CPU-side jobs moderate.", gpu_focused, []),
+        (
+            "parallel_trains",
+            "Parallel trains",
+            "Runs several independent Graph2Mat trainings on the GPU while keeping CPU worker pressure bounded.",
+            parallel_trains,
+            [],
+        ),
         ("cpu_only", "CPU-only", "Disables GPU assumptions and uses CPU-safe throughput settings.", cpu_only, []),
         (
             "max_aggressive",
@@ -2881,7 +3325,10 @@ def performance_oversubscription_score(settings: dict[str, Any]) -> int:
         int(settings.get("max_parallel_siesta_jobs") or 1) * blas_threads
         + int(settings.get("max_parallel_evaluation_jobs") or 1)
         + int(settings.get("max_parallel_metric_jobs") or 1)
-        + int(settings.get("torch_num_threads") or 1)
+        + int(settings.get("max_parallel_graph2mat_training_jobs") or 1)
+        * int(settings.get("torch_num_threads") or 1)
+        + int(settings.get("max_parallel_deeph_training_jobs") or 1)
+        * int(settings.get("torch_num_threads") or 1)
     )
 
 
@@ -2896,6 +3343,16 @@ def performance_warnings(settings: dict[str, Any], hardware: dict[str, Any] | No
         )
     if settings.get("compute_accelerator") == "gpu" and not hw.get("cuda_available"):
         warnings.append("GPU selected, but CUDA/GPU availability could not be confirmed in the UI environment.")
+    if int(settings.get("max_parallel_graph2mat_training_jobs") or 1) > 1:
+        if settings.get("compute_accelerator") == "gpu":
+            warnings.append("Parallel Graph2Mat training jobs share the same GPU; monitor VRAM and throughput.")
+        else:
+            warnings.append("Parallel Graph2Mat training jobs on CPU can oversubscribe memory bandwidth.")
+    if int(settings.get("max_parallel_deeph_training_jobs") or 1) > 1:
+        if settings.get("compute_accelerator") == "gpu":
+            warnings.append("Parallel DeepH training jobs share the same GPU; monitor VRAM and throughput.")
+        else:
+            warnings.append("Parallel DeepH training jobs on CPU can oversubscribe memory bandwidth.")
     vram = hw.get("gpu_vram_total_gb")
     batch = int(settings.get("batch_size") or 0)
     if settings.get("compute_accelerator") == "gpu" and vram is not None:
@@ -2906,6 +3363,11 @@ def performance_warnings(settings: dict[str, Any], hardware: dict[str, Any] | No
     ram = hw.get("ram_total_gb")
     if settings.get("store_in_memory") and ram is not None and float(ram) < 32:
         warnings.append("store_in_memory is enabled on a low-RAM machine.")
+    if (
+        settings.get("compute_accelerator") == "gpu"
+        and not settings.get("graph2mat_require_cuequivariance")
+    ):
+        warnings.append("Graph2Mat equivariant CUDA acceleration is optional; install cuequivariance for faster epochs.")
     if str(settings.get("preset")) in {"max_aggressive", "stress"}:
         warnings.append("Stress mode can make the machine unresponsive or exhaust RAM/VRAM.")
     return warnings
@@ -2928,6 +3390,8 @@ def validate_performance_settings(settings: dict[str, Any], hardware: dict[str, 
         "max_parallel_prediction_jobs",
         "max_parallel_evaluation_jobs",
         "max_parallel_metric_jobs",
+        "max_parallel_graph2mat_training_jobs",
+        "max_parallel_deeph_training_jobs",
     ):
         value = int(settings.get(key) or 1)
         if value > max(64, logical * 4):
@@ -3035,6 +3499,45 @@ def parse_optional_json_object(value: Any, name: str) -> dict[str, Any] | None:
     return parsed
 
 
+TRAINING_SETTINGS_OBJECT_KEYS = {
+    "data",
+    "model",
+    "trainer",
+    "optimizer",
+    "lr_scheduler",
+    "training",
+    "benchmark_metadata",
+}
+
+
+def deep_merge_dict(target: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            deep_merge_dict(target[key], value)
+        else:
+            target[key] = value
+    return target
+
+
+def validate_hamiltonian_honly_training_config(config: dict[str, Any]) -> None:
+    data = config.get("training", {}).get("data", {})
+    if not data:
+        return
+    if data.get("out_matrix") not in (None, "hamiltonian"):
+        raise RuntimeError("training.data.out_matrix debe ser hamiltonian.")
+    policy = str(data.get("matrix_component_policy") or "h_only").strip()
+    if policy != "h_only":
+        raise RuntimeError("training.data.matrix_component_policy debe ser h_only.")
+    try:
+        n_components = int(data.get("n_matrix_components", 1))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("training.data.n_matrix_components debe ser 1.") from exc
+    if n_components != 1:
+        raise RuntimeError("training.data.n_matrix_components debe ser 1.")
+    if bool(data.get("symmetric_matrix", True)) is not True:
+        raise RuntimeError("training.data.symmetric_matrix debe ser true.")
+
+
 HIDDEN_IRREPS_TERM_RE = re.compile(r"^(?:(\d+)\s*x\s*)?(\d+)\s*([eoEO])$")
 DEFAULT_HYPERPARAMETER_SWEEP_MAX_CONFIGS = 256
 HYPERPARAMETER_SWEEP_MODE = "cartesian"
@@ -3043,6 +3546,7 @@ HYPERPARAMETER_SWEEP_PARAMETER_KEYS = {
     "optim_lr",
     "batch_size",
     "loader_threads",
+    "seed_everything",
     "loss",
     "loss_kwargs",
     "num_interactions",
@@ -3050,6 +3554,13 @@ HYPERPARAMETER_SWEEP_PARAMETER_KEYS = {
     "max_ell",
     "hidden_irreps",
     "hidden_irreps_channels",
+    "data",
+    "model",
+    "trainer",
+    "optimizer",
+    "lr_scheduler",
+    "training",
+    "benchmark_metadata",
 }
 HYPERPARAMETER_SWEEP_TRAINING_KEYS = HYPERPARAMETER_SWEEP_PARAMETER_KEYS - {"hidden_irreps_channels"}
 
@@ -3144,6 +3655,12 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
         parsed = parse_optional_positive_int(raw.get(key), f"training_settings.{key}")
         if parsed is not None:
             settings[key] = parsed
+    training_seed = parse_optional_nonnegative_int(
+        raw.get("seed_everything", raw.get("seed")),
+        "training_settings.seed_everything",
+    )
+    if training_seed is not None:
+        settings["seed_everything"] = training_seed
     max_ell = parse_optional_nonnegative_int(raw.get("max_ell"), "training_settings.max_ell")
     if max_ell is not None:
         settings["max_ell"] = max_ell
@@ -3160,6 +3677,10 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
     )
     if loss_kwargs is not None:
         settings["loss_kwargs"] = loss_kwargs
+    for key in sorted(TRAINING_SETTINGS_OBJECT_KEYS):
+        parsed_object = parse_optional_json_object(raw.get(key), f"training_settings.{key}")
+        if parsed_object is not None:
+            settings[key] = parsed_object
     if settings.get("hidden_irreps") is not None:
         validate_hidden_irreps(
             str(settings["hidden_irreps"]),
@@ -3171,7 +3692,7 @@ def parse_training_settings(value: Any) -> dict[str, Any]:
 def _parse_sweep_value_list(value: Any, key: str) -> list[Any]:
     if value in (None, "", []):
         return []
-    if key == "loss_kwargs":
+    if key == "loss_kwargs" or key in TRAINING_SETTINGS_OBJECT_KEYS:
         if isinstance(value, str):
             raw_values = [
                 item.strip()
@@ -3187,7 +3708,7 @@ def _parse_sweep_value_list(value: Any, key: str) -> list[Any]:
         for raw in raw_values:
             parsed = parse_optional_json_object(
                 raw,
-                "hyperparameter_sweep.parameters.loss_kwargs",
+                f"hyperparameter_sweep.parameters.{key}",
             )
             if parsed is None:
                 continue
@@ -3220,6 +3741,8 @@ def _parse_sweep_value_list(value: Any, key: str) -> list[Any]:
             "hidden_irreps_channels",
         }:
             parsed = parse_optional_positive_int(raw, f"hyperparameter_sweep.parameters.{key}")
+        elif key == "seed_everything":
+            parsed = parse_optional_nonnegative_int(raw, f"hyperparameter_sweep.parameters.{key}")
         elif key == "max_ell":
             parsed = parse_optional_nonnegative_int(raw, f"hyperparameter_sweep.parameters.{key}")
         elif key == "optim_lr":
@@ -3344,8 +3867,15 @@ def _sweep_label_parts(settings: dict[str, Any], sweep_parameters: dict[str, Any
         parts.append(f"b{settings.get('batch_size')}")
     if "loader_threads" in sweep_parameters:
         parts.append(f"w{settings.get('loader_threads')}")
+    if "seed_everything" in sweep_parameters:
+        parts.append(f"seed{settings.get('seed_everything')}")
     if "loss" in sweep_parameters:
         parts.append(f"loss{_format_sweep_label_value(settings.get('loss'))}")
+    metadata = settings.get("benchmark_metadata")
+    if "benchmark_metadata" in sweep_parameters and isinstance(metadata, dict):
+        method_id = metadata.get("benchmark_method_id") or metadata.get("method_id")
+        if method_id:
+            parts.append(str(method_id))
     return [part for part in parts if part and "None" not in part]
 
 
@@ -3404,8 +3934,8 @@ def expand_hyperparameter_sweep_to_training_plan(
     targets = parse_dataset_targets(dataset_targets)
     if run_mode_skips_dataset_generation(run_mode) and not reusable_ids:
         raise RuntimeError("hyperparameter_sweep necesita reusable_dataset_ids en train_test_metrics_plots_only.")
-    if run_mode == FULL_STRICT_RUN_MODE and not targets:
-        raise RuntimeError("hyperparameter_sweep necesita dataset_targets en full_strict_pipeline.")
+    if run_mode_uses_planned_dataset_targets(run_mode) and not targets:
+        raise RuntimeError(f"hyperparameter_sweep necesita dataset_targets en {run_mode}.")
 
     plan: list[dict[str, Any]] = []
     used_labels: set[str] = set()
@@ -3449,7 +3979,7 @@ def expand_hyperparameter_sweep_to_training_plan(
             "display_label": display_label,
             "training_settings": settings,
             "reusable_dataset_ids": reusable_ids if run_mode_skips_dataset_generation(run_mode) else [],
-            "dataset_targets": targets if run_mode == FULL_STRICT_RUN_MODE else [],
+            "dataset_targets": targets if run_mode_uses_planned_dataset_targets(run_mode) else [],
             "sweep_index": cartesian_index,
             "sweep_label": label,
             "sweep_parameters": sweep_parameters,
@@ -3549,6 +4079,8 @@ def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str
         data["batch_size"] = int(settings["batch_size"])
     if settings.get("loader_threads") is not None:
         data["loader_threads"] = int(settings["loader_threads"])
+    if settings.get("seed_everything") is not None:
+        training["seed_everything"] = int(settings["seed_everything"])
     for key in ("num_interactions", "correlation", "max_ell"):
         if settings.get(key) is not None:
             model[key] = int(settings[key])
@@ -3559,8 +4091,29 @@ def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str
             model[key] = str(settings[key])
     if settings.get("loss_kwargs") is not None:
         model["loss_kwargs"] = dict(settings["loss_kwargs"])
-    if str(settings.get("loss") or "").endswith((".coefficient_space_mse", ".coefficient_space_mae")):
-        model["return_coefficients"] = True
+    for section_key in ("data", "model", "trainer", "optimizer", "lr_scheduler"):
+        section_override = settings.get(section_key)
+        if isinstance(section_override, dict):
+            deep_merge_dict(training.setdefault(section_key, {}), dict(section_override))
+    training_override = settings.get("training")
+    if isinstance(training_override, dict):
+        for key, value in training_override.items():
+            if isinstance(value, dict) and isinstance(training.get(key), dict):
+                deep_merge_dict(training[key], value)
+            else:
+                training[key] = value
+    if isinstance(settings.get("benchmark_metadata"), dict):
+        training["benchmark_metadata"] = dict(settings["benchmark_metadata"])
+    loss_name = str(training.get("model", {}).get("loss") or "")
+    if loss_name.endswith((".coefficient_space_mse", ".coefficient_space_mae")):
+        training.setdefault("model", {})["return_coefficients"] = True
+    data = training.setdefault("data", {})
+    data.setdefault("out_matrix", "hamiltonian")
+    data.setdefault("matrix_component_policy", "h_only")
+    data.setdefault("n_matrix_components", 1)
+    data.setdefault("symmetric_matrix", True)
+    validate_hamiltonian_honly_training_config(config)
+    model = training.setdefault("model", {})
     if model.get("hidden_irreps") is not None and model.get("max_ell") is not None:
         validate_hidden_irreps(
             str(model["hidden_irreps"]),
@@ -3568,6 +4121,171 @@ def apply_training_settings_to_config(config: dict[str, Any], settings: dict[str
             "training.model.hidden_irreps",
         )
     training["ui_training_settings"] = dict(settings)
+
+
+def benchmark_metadata_from_config(
+    config: dict[str, Any],
+    recipe_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    training = config.get("training", {}) if isinstance(config.get("training"), dict) else {}
+    data = training.get("data", {}) if isinstance(training.get("data"), dict) else {}
+    model = training.get("model", {}) if isinstance(training.get("model"), dict) else {}
+    ui_settings = (
+        training.get("ui_training_settings", {})
+        if isinstance(training.get("ui_training_settings"), dict)
+        else {}
+    )
+    metadata = {}
+    for source in (
+        ui_settings.get("benchmark_metadata"),
+        training.get("benchmark_metadata"),
+    ):
+        if isinstance(source, dict):
+            metadata.update(source)
+    recipe_metadata = recipe_metadata or {}
+    loss = metadata.get("loss") or model.get("loss")
+    loss_kwargs = metadata.get("loss_kwargs")
+    if loss_kwargs is None:
+        loss_kwargs = model.get("loss_kwargs", {})
+    training_stages = (
+        metadata.get("training_stages")
+        or model.get("training_stages")
+        or training.get("training_stages")
+        or training.get("stages")
+        or []
+    )
+    hamiltonian_context = (
+        metadata.get("hamiltonian_context")
+        or model.get("hamiltonian_context")
+        or model.get("context")
+        or {}
+    )
+    if isinstance(hamiltonian_context, dict):
+        context_enabled = bool(
+            metadata.get(
+                "context_enabled",
+                hamiltonian_context.get("enabled", hamiltonian_context.get("use_context", False)),
+            )
+        )
+    else:
+        context_enabled = bool(metadata.get("context_enabled", hamiltonian_context))
+    readout = (
+        metadata.get("readout")
+        or model.get("readout")
+        or model.get("readout_type")
+        or model.get("matrix_readout")
+        or "default"
+    )
+    architecture = (
+        metadata.get("architecture")
+        or model.get("architecture")
+        or ("hamiltonian_context" if context_enabled else "default")
+    )
+    return {
+        **metadata,
+        "benchmark_method_id": metadata.get("benchmark_method_id")
+        or metadata.get("method_id")
+        or recipe_metadata.get("training_plan_label")
+        or recipe_metadata.get("sweep_label"),
+        "architecture": architecture,
+        "readout": readout,
+        "hamiltonian_context": hamiltonian_context,
+        "context_enabled": context_enabled,
+        "loss": loss,
+        "loss_kwargs": loss_kwargs if isinstance(loss_kwargs, dict) else {},
+        "training_stages": training_stages,
+        "seed": training.get("seed_everything"),
+        "coefficient_space_enabled": bool(model.get("return_coefficients"))
+        or str(loss or "").endswith((".coefficient_space_mse", ".coefficient_space_mae")),
+        "diagnostic_only": bool(metadata.get("diagnostic_only", metadata.get("non_production", False))),
+        "target": {
+            "out_matrix": data.get("out_matrix"),
+            "matrix_component_policy": data.get("matrix_component_policy"),
+            "n_matrix_components": data.get("n_matrix_components"),
+            "symmetric_matrix": data.get("symmetric_matrix"),
+        },
+        "dataset_reference_policy": {
+            "require_real_siesta_reference": True,
+            "forbidden_reference_filenames": ["ML_prediction.HSX"],
+        },
+    }
+
+
+def _git_output(path: Path, args: list[str], timeout: float = 5.0) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def git_metadata_for_path(path: Path | str | None) -> dict[str, Any]:
+    if path in (None, ""):
+        return {"path": None, "commit": None, "branch": None, "dirty": None}
+    candidate = Path(path).expanduser()
+    if not candidate.exists():
+        return {"path": str(candidate), "commit": None, "branch": None, "dirty": None, "error": "path_missing"}
+    root_text = _git_output(candidate, ["rev-parse", "--show-toplevel"])
+    if not root_text:
+        return {"path": str(candidate), "commit": None, "branch": None, "dirty": None, "error": "not_git_repo"}
+    root = Path(root_text)
+    commit = _git_output(root, ["rev-parse", "HEAD"])
+    branch = _git_output(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    dirty_text = _git_output(root, ["status", "--porcelain"], timeout=10.0)
+    return {
+        "path": str(root),
+        "commit": commit,
+        "branch": branch,
+        "dirty": bool(dirty_text),
+    }
+
+
+def _python_from_config(config: dict[str, Any]) -> Path | None:
+    paths = config.get("paths", {}) if isinstance(config.get("paths"), dict) else {}
+    activate = paths.get("venv_activate")
+    if not activate:
+        return None
+    activate_text = os.path.expandvars(str(activate).replace("${REPO_ROOT}", str(REPO_ROOT)))
+    activate_path = Path(activate_text).expanduser()
+    python = activate_path.parent / "python"
+    return python if python.exists() else None
+
+
+def graph2mat_git_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    python = _python_from_config(config)
+    if python is None:
+        return {"path": None, "commit": None, "branch": None, "dirty": None, "error": "python_not_found"}
+    script = "import graph2mat, pathlib; print(pathlib.Path(graph2mat.__file__).resolve())"
+    try:
+        completed = subprocess.run(
+            [str(python), "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+    except Exception as exc:
+        return {"path": None, "commit": None, "branch": None, "dirty": None, "error": str(exc)}
+    if completed.returncode != 0:
+        return {
+            "path": None,
+            "commit": None,
+            "branch": None,
+            "dirty": None,
+            "error": completed.stderr.strip() or "graph2mat_import_failed",
+        }
+    package_file = Path(completed.stdout.strip()).expanduser()
+    metadata = git_metadata_for_path(package_file.parent)
+    metadata["package_file"] = str(package_file)
+    return metadata
 
 
 def aggressive_local_performance_defaults() -> dict[str, Any]:
@@ -3579,6 +4297,8 @@ def aggressive_local_performance_defaults() -> dict[str, Any]:
         "max_parallel_prediction_jobs": 1,
         "max_parallel_evaluation_jobs": min(cores, 8),
         "max_parallel_metric_jobs": cores,
+        "max_parallel_graph2mat_training_jobs": 1,
+        "max_parallel_deeph_training_jobs": 1,
         "omp_num_threads": max(1, cores // siesta_jobs),
         "mkl_num_threads": max(1, cores // siesta_jobs),
         "openblas_num_threads": max(1, cores // siesta_jobs),
@@ -3591,6 +4311,7 @@ def aggressive_local_performance_defaults() -> dict[str, Any]:
         "enable_experiment_cache": False,
         "error_policy": "fail_fast",
         "torch_float32_matmul_precision": "high",
+        "torch_mixed_precision": "bf16-mixed",
     }
 
 
@@ -3621,6 +4342,8 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
         "max_parallel_prediction_jobs",
         "max_parallel_evaluation_jobs",
         "max_parallel_metric_jobs",
+        "max_parallel_graph2mat_training_jobs",
+        "max_parallel_deeph_training_jobs",
     ):
         settings[key] = parse_optional_positive_int(
             raw.get(key, settings[key]),
@@ -3633,6 +4356,9 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
         "numexpr_num_threads",
         "torch_num_threads",
         "batch_size",
+        "graph2mat_log_every_n_steps",
+        "graph2mat_check_val_every_n_epoch",
+        "graph2mat_checkpoint_every_n_epochs",
     ):
         settings[key] = parse_optional_positive_int(raw.get(key, settings.get(key)), f"performance.{key}")
     settings["store_in_memory"] = parse_optional_bool(
@@ -3649,6 +4375,11 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
         raw.get("enable_experiment_cache"),
         "performance.enable_experiment_cache",
         settings.get("enable_experiment_cache"),
+    ))
+    settings["graph2mat_require_cuequivariance"] = bool(parse_optional_bool(
+        raw.get("graph2mat_require_cuequivariance"),
+        "performance.graph2mat_require_cuequivariance",
+        settings.get("graph2mat_require_cuequivariance"),
     ))
     if settings["enable_experiment_cache"]:
         raise RuntimeError(
@@ -3670,6 +4401,14 @@ def parse_performance_settings(value: Any, *, compute_accelerator: str | None = 
         if precision not in {"high", "medium"}:
             raise RuntimeError("performance.torch_float32_matmul_precision debe ser null, high o medium.")
         settings["torch_float32_matmul_precision"] = precision
+    mixed_precision = raw.get("torch_mixed_precision", settings.get("torch_mixed_precision"))
+    if mixed_precision in (None, "", "null"):
+        settings["torch_mixed_precision"] = None
+    else:
+        mixed_precision = str(mixed_precision).strip().lower()
+        if mixed_precision not in {"32-true", "16-mixed", "bf16-mixed"}:
+            raise RuntimeError("performance.torch_mixed_precision debe ser null, 32-true, 16-mixed o bf16-mixed.")
+        settings["torch_mixed_precision"] = mixed_precision
     warnings = performance_warnings(settings)
     settings["warnings"] = warnings
     validate_performance_settings(settings)
@@ -3709,6 +4448,38 @@ def apply_performance_to_config(config: dict[str, Any], settings: dict[str, Any]
     config.setdefault("training", {})["torch_float32_matmul_precision"] = settings.get(
         "torch_float32_matmul_precision"
     )
+    if settings.get("torch_mixed_precision"):
+        config.setdefault("training", {}).setdefault("trainer", {})["precision"] = str(settings["torch_mixed_precision"])
+    trainer = config.setdefault("training", {}).setdefault("trainer", {})
+    if settings.get("graph2mat_log_every_n_steps") is not None:
+        trainer["log_every_n_steps"] = int(settings["graph2mat_log_every_n_steps"])
+    if settings.get("graph2mat_check_val_every_n_epoch") is not None:
+        trainer["check_val_every_n_epoch"] = int(settings["graph2mat_check_val_every_n_epoch"])
+    if settings.get("graph2mat_checkpoint_every_n_epochs") is not None:
+        every_n_epochs = int(settings["graph2mat_checkpoint_every_n_epochs"])
+        trainer["callbacks"] = [
+            {
+                "class_path": "ModelCheckpoint",
+                "init_args": {
+                    "monitor": "step",
+                    "mode": "max",
+                    "filename": "last-{step:02d}",
+                    "save_last": True,
+                    "auto_insert_metric_name": False,
+                    "every_n_epochs": every_n_epochs,
+                },
+            },
+            {
+                "class_path": "ModelCheckpoint",
+                "init_args": {
+                    "monitor": "val_loss",
+                    "mode": "min",
+                    "filename": "best-{step:02d}",
+                    "auto_insert_metric_name": False,
+                    "every_n_epochs": every_n_epochs,
+                },
+            },
+        ]
 
 
 def cuda_available(python_executable: Path | str) -> bool:
@@ -5116,6 +5887,42 @@ def numeric_means(rows: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
+def bounded_plot_sample_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int = MAX_PLOT_SAMPLE_ROWS_PER_GROUP,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    if limit == 1:
+        return [rows[0]]
+    last_index = len(rows) - 1
+    indices = {
+        round(index * last_index / (limit - 1))
+        for index in range(limit)
+    }
+    return [rows[index] for index in sorted(indices)]
+
+
+def plot_sample_payload(rows_by_group: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    return {
+        group: bounded_plot_sample_rows(rows)
+        for group, rows in rows_by_group.items()
+    }
+
+
+def plot_sample_row_counts(rows_by_group: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, int | bool]]:
+    counts: dict[str, dict[str, int | bool]] = {}
+    for group, rows in rows_by_group.items():
+        shown = min(len(rows), MAX_PLOT_SAMPLE_ROWS_PER_GROUP)
+        counts[group] = {
+            "total": len(rows),
+            "shown": shown,
+            "truncated": len(rows) > shown,
+        }
+    return counts
+
+
 def finite_metric_count(rows: list[dict[str, Any]], metric: str) -> int:
     count = 0
     for row in rows:
@@ -5165,6 +5972,192 @@ def metric_availability_for_rows(
     return availability
 
 
+def metric_space_from_manifest(manifest: dict[str, Any]) -> str:
+    if manifest.get("kpoint_metrics_enabled") or manifest.get("kpoint_samples_compared"):
+        return "kpoint_sampled"
+    return "gamma_only"
+
+
+def kpoint_output_warnings(
+    metric_manifest: dict[str, Any],
+    metric_rows: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    if not metric_manifest.get("kpoint_metrics_enabled"):
+        return []
+    missing = [
+        key
+        for key in ("kpoint_matrix", "kpoint_spectral", "kpoint_dos")
+        if not metric_rows.get(key)
+    ]
+    if not missing:
+        return []
+    return [
+        {
+            "kind": "missing_kpoint_metric_csv",
+            "severity": "warning",
+            "error": (
+                "metrics/manifest.json marks k-point metrics as enabled, "
+                f"but these k-point CSV groups are empty or missing: {', '.join(missing)}"
+            ),
+            "missing_groups": missing,
+        }
+    ]
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def metric_manifest_warning_entries(metric_manifest: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    entries = metric_manifest.get(key, [])
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def metric_manifest_safety_summary(metric_manifest: dict[str, Any]) -> dict[str, Any]:
+    """Compact provenance/safety fields for UI payloads without shipping huge warning lists."""
+    if not metric_manifest:
+        return {
+            "metrics_schema_version": "unknown",
+            "target_component_policy": "unknown",
+            "n_matrix_components": None,
+            "reference_component_count": None,
+            "prediction_component_count": None,
+            "overlap_source": "unknown",
+            "fermi_level_source": "unknown",
+            "prediction_own_overlap_used_for_spectra": None,
+            "prediction_artifacts_standalone_safe": None,
+            "prediction_artifact_safety_status": "unknown",
+            "prediction_self_contained_hsx_safe_samples": None,
+            "prediction_self_contained_hsx_unsafe_samples": None,
+            "prediction_self_contained_hsx_unsafe_reasons": {},
+            "graph2mat_auxiliary_component_ignored_samples": None,
+            "severe_warning_count": 0,
+            "warning_count": 0,
+            "severe_warning_kinds": [],
+            "safety_warnings_preview": [],
+        }
+    severe_entries = metric_manifest_warning_entries(metric_manifest, "severe_warnings")
+    warning_entries = metric_manifest_warning_entries(metric_manifest, "warnings")
+    severe_kinds = sorted(
+        {
+            str(entry.get("kind") or entry.get("code") or entry.get("severity") or "severe_warning")
+            for entry in severe_entries
+        }
+    )
+    warning_kinds = sorted(
+        {
+            str(entry.get("kind") or entry.get("code") or entry.get("severity") or "warning")
+            for entry in warning_entries
+        }
+    )
+    overlap_source = (
+        metric_manifest.get("overlap_source")
+        or next((entry.get("overlap_source") for entry in severe_entries + warning_entries if entry.get("overlap_source")), None)
+        or "unknown"
+    )
+    fermi_level_source = (
+        metric_manifest.get("fermi_level_source")
+        or next((entry.get("fermi_level_source") for entry in severe_entries + warning_entries if entry.get("fermi_level_source")), None)
+        or "unknown"
+    )
+    prediction_own_overlap_used = metric_manifest.get("prediction_own_overlap_used_for_spectra")
+    if prediction_own_overlap_used is None:
+        entry_value = next(
+            (
+                entry.get("prediction_own_overlap_used")
+                for entry in severe_entries + warning_entries
+                if "prediction_own_overlap_used" in entry
+            ),
+            None,
+        )
+        prediction_own_overlap_used = entry_value
+    unsafe_reasons = metric_manifest.get("prediction_self_contained_hsx_unsafe_reasons")
+    if not isinstance(unsafe_reasons, dict):
+        unsafe_reasons = {}
+    unsafe_sample_ids = {
+        str(entry.get("sample"))
+        for entry in severe_entries
+        if entry.get("sample") not in (None, "")
+        and (
+            entry.get("prediction_self_contained_hsx_safe") is False
+            or str(entry.get("kind") or "") in {
+                "prediction_overlap_mismatch",
+                "graph2mat_auxiliary_component_ignored",
+            }
+        )
+    }
+    derived_unsafe_count = len(unsafe_sample_ids)
+    unsafe_count = metric_manifest.get("prediction_self_contained_hsx_unsafe_samples")
+    if unsafe_count is None and derived_unsafe_count:
+        unsafe_count = derived_unsafe_count
+    safe_count = metric_manifest.get("prediction_self_contained_hsx_safe_samples")
+    auxiliary_count = metric_manifest.get("graph2mat_auxiliary_component_ignored_samples")
+    if auxiliary_count is None:
+        auxiliary_count = len(
+            {
+                str(entry.get("sample"))
+                for entry in severe_entries + warning_entries
+                if entry.get("sample") not in (None, "")
+                and str(entry.get("kind") or "") == "graph2mat_auxiliary_component_ignored"
+            }
+        ) or None
+    standalone_safe = metric_manifest.get("prediction_artifacts_standalone_safe")
+    if standalone_safe is None:
+        try:
+            unsafe_positive = unsafe_count not in (None, "") and int(unsafe_count or 0) > 0
+        except (TypeError, ValueError):
+            unsafe_positive = False
+        try:
+            safe_positive = safe_count not in (None, "") and int(safe_count or 0) > 0
+        except (TypeError, ValueError):
+            safe_positive = False
+        if unsafe_positive:
+            standalone_safe = False
+        elif safe_positive:
+            standalone_safe = True
+    if standalone_safe is True:
+        safety_status = "safe"
+    elif standalone_safe is False:
+        safety_status = "unsafe"
+    else:
+        safety_status = "unknown"
+    preview: list[str] = []
+    for entry in severe_entries[:4]:
+        append_unique_text(
+            preview,
+            entry.get("kind") or entry.get("code") or entry.get("error") or entry.get("message") or entry,
+        )
+    return {
+        "metrics_schema_version": metric_manifest.get("metrics_schema_version") or "unknown",
+        "target_component_policy": metric_manifest.get("target_component_policy") or "unknown",
+        "n_matrix_components": metric_manifest.get("n_matrix_components"),
+        "reference_component_count": metric_manifest.get("reference_component_count"),
+        "prediction_component_count": metric_manifest.get("prediction_component_count"),
+        "overlap_source": overlap_source,
+        "fermi_level_source": fermi_level_source,
+        "prediction_own_overlap_used_for_spectra": prediction_own_overlap_used,
+        "prediction_artifacts_standalone_safe": standalone_safe,
+        "prediction_artifact_safety_status": safety_status,
+        "prediction_self_contained_hsx_safe_samples": safe_count,
+        "prediction_self_contained_hsx_unsafe_samples": unsafe_count,
+        "prediction_self_contained_hsx_unsafe_reasons": unsafe_reasons,
+        "graph2mat_auxiliary_component_ignored_samples": auxiliary_count,
+        "severe_warning_count": len(severe_entries),
+        "warning_count": len(warning_entries),
+        "severe_warning_kinds": severe_kinds,
+        "warning_kinds": warning_kinds,
+        "safety_warnings_preview": preview,
+    }
+
+
 def append_unique_text(items: list[str], value: Any) -> None:
     if value in (None, "", False):
         return
@@ -5196,6 +6189,14 @@ def run_metric_gap_diagnostics(runs: list[dict[str, Any]]) -> list[dict[str, Any
             ("sparse", "r2_union"),
             ("dos", "dos_wasserstein_eV"),
             ("dos", "dos_mae_500_fermi_window"),
+            ("kpoint_matrix", "h_mae_eV"),
+            ("kpoint_matrix", "h_rmse_eV"),
+            ("kpoint_matrix", "relative_frobenius"),
+            ("kpoint_spectral", "low_energy_rmse_eV"),
+            ("kpoint_spectral", "fermi_window_rmse_eV"),
+            ("kpoint_spectral", "frontier_window_rmse_eV"),
+            ("kpoint_dos", "dos_wasserstein_eV"),
+            ("kpoint_dos", "dos_mae_500_fermi_window"),
         ]
         metrics = []
         for group, metric in metric_groups:
@@ -5302,6 +6303,29 @@ def cross_plot_diagnostics(
     for manifest_path in sorted(RESULTS_ROOT.glob("*/experiment_manifest.yaml")):
         experiment_id = manifest_path.parent.name
         if experiment_id in existing_cross_ids:
+            continue
+        try:
+            manifest_size = manifest_path.stat().st_size
+        except OSError:
+            manifest_size = 0
+        if manifest_size > MAX_CROSS_DIAGNOSTIC_MANIFEST_BYTES:
+            archived = archived_by_run_id.get(experiment_id, {"total": 0, "by_method": {}})
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "severity": "warning",
+                    "reason": "experiment_manifest_too_large_for_plot_diagnostics",
+                    "message": (
+                        f"No se cargo {manifest_path.name} para diagnosticos cross porque ocupa "
+                        f"{manifest_size} bytes; los plots de runs archivados siguen disponibles."
+                    ),
+                    "expected_csv": str(manifest_path.parent / "summary" / "cross_evaluation_metrics.csv"),
+                    "manifest_runs": None,
+                    "archived_runs": int(archived.get("total", 0) or 0),
+                    "archived_runs_by_method": dict(archived.get("by_method", {})),
+                    "warnings": [],
+                }
+            )
             continue
         try:
             manifest = load_config(manifest_path)
@@ -5612,6 +6636,51 @@ def cross_experiment_plot_warnings(
             message="Fairness/provenance warnings are present; plot comparisons are not robust.",
             details=recommendation.get("fairness_provenance_warnings") or recommendation.get("severe_warnings"),
         )
+    if recommendation.get("severe_warnings"):
+        warning_entry(
+            warnings,
+            code="severe_scientific_warnings",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Severe scientific warnings are present; the selected plot set is not a robust benchmark.",
+            details=recommendation.get("severe_warnings"),
+        )
+    if "target_component_policy" in text_blob or "target semantics" in text_blob or "target_component" in text_blob:
+        warning_entry(
+            warnings,
+            code="target_semantics_warning",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Target-component semantics warnings are present; do not compare as a robust H-only benchmark.",
+            details=recommendation.get("severe_warnings"),
+        )
+    if "prediction_overlap" in text_blob or "prediction_self_contained" in text_blob or "overlap_source" in text_blob:
+        warning_entry(
+            warnings,
+            code="prediction_hsx_overlap_safety_warning",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Prediction HSX/overlap safety warnings are present; spectra must use validated reference overlap.",
+            details=recommendation.get("severe_warnings"),
+        )
+    if "missing_fermi" in text_blob or "fermi level" in text_blob:
+        warning_entry(
+            warnings,
+            code="missing_fermi_level_warning",
+            severity="warning",
+            status=plot_status,
+            message="Fermi-level warnings are present; near-Fermi and DOS-window metrics may be unavailable.",
+            details=recommendation.get("severe_warnings"),
+        )
+    if "checkpoint" in text_blob:
+        warning_entry(
+            warnings,
+            code="checkpoint_warning",
+            severity="error",
+            status="scientifically_inconclusive",
+            message="Checkpoint compatibility/fallback warnings are present; comparisons are not robust.",
+            details=recommendation.get("severe_warnings"),
+        )
     method_provenance = manifest.get("method_provenance")
     if "random_cartesian" in selected_methods and (
         not isinstance(method_provenance, dict)
@@ -5734,12 +6803,19 @@ def metric_diagnostics(
 
 
 def archived_manifest_result_dir(manifest: dict[str, Any], manifest_path: Path) -> Path:
-    result_dir = Path(manifest.get("result_dir", manifest_path.parent))
-    if not result_dir.is_absolute():
-        result_dir = manifest_path.parent / result_dir
-    if not result_dir.exists():
-        result_dir = manifest_path.parent
-    return result_dir
+    raw_result_dir = manifest.get("result_dir")
+    if raw_result_dir not in (None, ""):
+        result_dir = Path(str(raw_result_dir))
+        candidates = [result_dir] if result_dir.is_absolute() else [
+            REPO_ROOT / result_dir,
+            manifest_path.parent / result_dir,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    if manifest_path.parent.name == "metrics":
+        return manifest_path.parent.parent
+    return manifest_path.parent
 
 
 def csv_data_row_count(path: Path) -> int | None:
@@ -5754,26 +6830,42 @@ def csv_data_row_count(path: Path) -> int | None:
 
 def archived_run_diagnostic_outputs(result_dir: Path) -> dict[str, dict[str, Any]]:
     metrics_dir = result_dir / "metrics"
+    eigen_dir = result_dir / "eigenvalues"
     outputs: dict[str, dict[str, Any]] = {}
     for key, path in {
         "orbital_pair_metrics": metrics_dir / "orbital_pair_metrics.csv",
         "orbital_pair_summary": metrics_dir / "orbital_pair_summary.csv",
+        "kpoint_matrix_metrics": metrics_dir / "kpoint_matrix_metrics.csv",
+        "kpoint_spectral_metrics": metrics_dir / "kpoint_spectral_metrics.csv",
+        "kpoint_dos_metrics": metrics_dir / "kpoint_dos_metrics.csv",
+        "kpoints": eigen_dir / "kpoints.csv",
     }.items():
         outputs[key] = {
             "path": str(path),
             "exists": path.exists(),
             "rows": csv_data_row_count(path),
-            "diagnostic_only": True,
+            "diagnostic_only": key.startswith("orbital_pair"),
         }
     return outputs
 
 
+def weighted_kpoint_matrix_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row.get("row_type") or "") == "weighted_sample"]
+
+
 def archived_run_metric_rows(result_dir: Path) -> dict[str, list[dict[str, Any]]]:
     metrics_dir = result_dir / "metrics"
+    kpoint_matrix_rows = read_csv_rows(metrics_dir / "kpoint_matrix_metrics.csv")
     return {
         "sparse": read_csv_rows(metrics_dir / "sparse_metrics.csv"),
         "spectral": read_csv_rows(metrics_dir / "spectral_metrics.csv"),
         "dos": read_csv_rows(metrics_dir / "dos_metrics.csv"),
+        "kpoint_matrix": weighted_kpoint_matrix_rows(kpoint_matrix_rows),
+        "kpoint_matrix_per_k": [
+            row for row in kpoint_matrix_rows if str(row.get("row_type") or "") == "per_k"
+        ],
+        "kpoint_spectral": read_csv_rows(metrics_dir / "kpoint_spectral_metrics.csv"),
+        "kpoint_dos": read_csv_rows(metrics_dir / "kpoint_dos_metrics.csv"),
         "sparse_sweep": read_csv_rows(metrics_dir / "sparse_threshold_sweep.csv"),
         "dos_sweep": read_csv_rows(metrics_dir / "dos_sigma_sweep.csv"),
         "matrix_spectrum": read_csv_rows(metrics_dir / "matrix_spectrum_relationship.csv"),
@@ -5785,6 +6877,9 @@ PLOT_METRIC_CSV_FILES = {
     "sparse": "sparse_metrics.csv",
     "spectral": "spectral_metrics.csv",
     "dos": "dos_metrics.csv",
+    "kpoint_matrix": "kpoint_matrix_metrics.csv",
+    "kpoint_spectral": "kpoint_spectral_metrics.csv",
+    "kpoint_dos": "kpoint_dos_metrics.csv",
     "sparse_sweep": "sparse_threshold_sweep.csv",
     "dos_sweep": "dos_sigma_sweep.csv",
     "matrix_spectrum": "matrix_spectrum_relationship.csv",
@@ -5832,6 +6927,10 @@ def plot_data_summary() -> dict[str, Any]:
             sparse_rows = metric_rows["sparse"]
             spectral_rows = metric_rows["spectral"]
             dos_rows = metric_rows["dos"]
+            kpoint_matrix_rows = metric_rows["kpoint_matrix"]
+            kpoint_matrix_per_k_rows = metric_rows["kpoint_matrix_per_k"]
+            kpoint_spectral_rows = metric_rows["kpoint_spectral"]
+            kpoint_dos_rows = metric_rows["kpoint_dos"]
             sparse_sweep_rows = metric_rows["sparse_sweep"]
             dos_sweep_rows = metric_rows["dos_sweep"]
             relationship_rows = metric_rows["matrix_spectrum"]
@@ -5842,17 +6941,31 @@ def plot_data_summary() -> dict[str, Any]:
                 errors = []
             metric_manifest = {}
             metric_manifest_path = result_dir / "metrics" / "manifest.json"
-            if metric_manifest_path.exists():
-                try:
-                    metric_manifest = json.loads(metric_manifest_path.read_text(encoding="utf-8"))
-                except Exception:
-                    metric_manifest = {}
+            metric_manifest = load_json_object(metric_manifest_path)
+            metric_safety = metric_manifest_safety_summary(metric_manifest)
             metric_errors = metric_manifest.get("fatal_errors", metric_manifest.get("errors", []))
             if isinstance(metric_errors, list):
                 errors = errors + metric_errors
             warnings = metric_manifest.get("warnings", [])
             if not isinstance(warnings, list):
                 warnings = []
+            warnings = warnings + kpoint_output_warnings(metric_manifest, metric_rows)
+            metric_space = metric_space_from_manifest(metric_manifest)
+            inferred_dataset_size = int(
+                manifest.get(
+                    "requested_dataset_size",
+                    manifest.get(
+                        "dataset_size",
+                        metric_manifest.get(
+                            "samples_seen",
+                            metric_manifest.get("samples_compared", 0),
+                        ),
+                    ),
+                )
+                or 0
+            )
+            inferred_run_id = str(manifest.get("run_id") or result_dir.name.removeprefix("run_"))
+            inferred_dataset_label = manifest.get("dataset_label") or result_dir.parent.name
             material_payload = plot_material_metadata(
                 manifest.get("material_provenance") if isinstance(manifest.get("material_provenance"), dict) else {},
                 manifest.get("material_validation") if isinstance(manifest.get("material_validation"), dict) else {},
@@ -5860,6 +6973,19 @@ def plot_data_summary() -> dict[str, Any]:
                 metric_manifest.get("material_provenance") if isinstance(metric_manifest.get("material_provenance"), dict) else {},
                 metric_manifest,
             )
+            samples_by_group = {
+                "sparse": sparse_rows,
+                "spectral": spectral_rows,
+                "dos": dos_rows,
+                "kpoint_matrix": kpoint_matrix_rows,
+                "kpoint_matrix_per_k": kpoint_matrix_per_k_rows,
+                "kpoint_spectral": kpoint_spectral_rows,
+                "kpoint_dos": kpoint_dos_rows,
+                "sparse_sweep": sparse_sweep_rows,
+                "dos_sweep": dos_sweep_rows,
+                "matrix_spectrum": relationship_rows,
+                "orbital_pair_summary": orbital_pair_summary_rows,
+            }
             runs.append(
                 {
                     "pipeline": key,
@@ -5868,27 +6994,17 @@ def plot_data_summary() -> dict[str, Any]:
                         "siesta_fc_cartesian" if key == "atom_displacement" else key,
                     ),
                     "label": PIPELINES[key].label if key in PIPELINES else "Random Cartesian",
-                    "dataset_size": int(
-                        manifest.get(
-                            "requested_dataset_size",
-                            manifest.get("dataset_size", 0),
-                        )
-                    ),
+                    "dataset_size": inferred_dataset_size,
                     "effective_dataset_size": int(
                         manifest.get(
                             "effective_dataset_size",
-                            manifest.get("dataset_size", 0),
+                            inferred_dataset_size,
                         )
                     ),
-                    "requested_dataset_size": int(
-                        manifest.get(
-                            "requested_dataset_size",
-                            manifest.get("dataset_size", 0),
-                        )
-                    ),
-                    "run_id": str(manifest.get("run_id", manifest_path.parent.name.removeprefix("run_"))),
+                    "requested_dataset_size": inferred_dataset_size,
+                    "run_id": inferred_run_id,
                     "result_dir": str(result_dir),
-                    "dataset_label": manifest.get("dataset_label"),
+                    "dataset_label": inferred_dataset_label,
                     "training_tag": manifest.get("training_tag"),
                     "training_index": manifest.get("training_index"),
                     "training_base_dataset_label": manifest.get("training_base_dataset_label"),
@@ -5912,6 +7028,18 @@ def plot_data_summary() -> dict[str, Any]:
                     "recipe_set_hash": manifest.get("recipe_set_hash"),
                     "dataset_recipe": manifest.get("dataset_recipe", {}),
                     **material_payload,
+                    **metric_safety,
+                    "metric_manifest_path": str(metric_manifest_path),
+                    "metric_space": metric_space,
+                    "kpoint_metrics_enabled": bool(metric_manifest.get("kpoint_metrics_enabled")),
+                    "kpoint_sampled_supported": bool(metric_manifest.get("kpoint_sampled_supported")),
+                    "kpoint_mesh": metric_manifest.get("kpoint_mesh"),
+                    "kpoint_count": metric_manifest.get("kpoint_count"),
+                    "kpoint_source": metric_manifest.get("kpoint_source"),
+                    "uses_reference_overlap_k": bool(metric_manifest.get("uses_reference_overlap_k")),
+                    "complex_hamiltonians_supported_for_kpoint_metrics": bool(
+                        metric_manifest.get("complex_hamiltonians_supported_for_kpoint_metrics")
+                    ),
                     "pipeline_elapsed_seconds": manifest.get("pipeline_elapsed_seconds"),
                     "means": {
                         "run": {
@@ -5922,20 +7050,17 @@ def plot_data_summary() -> dict[str, Any]:
                         "sparse": numeric_means(sparse_rows),
                         "spectral": numeric_means(spectral_rows),
                         "dos": numeric_means(dos_rows),
+                        "kpoint_matrix": numeric_means(kpoint_matrix_rows),
+                        "kpoint_matrix_per_k": numeric_means(kpoint_matrix_per_k_rows),
+                        "kpoint_spectral": numeric_means(kpoint_spectral_rows),
+                        "kpoint_dos": numeric_means(kpoint_dos_rows),
                         "sparse_sweep": numeric_means(sparse_sweep_rows),
                         "dos_sweep": numeric_means(dos_sweep_rows),
                         "matrix_spectrum": numeric_means(relationship_rows),
                         "orbital_pair_summary": numeric_means(orbital_pair_summary_rows),
                     },
-                    "samples": {
-                        "sparse": sparse_rows,
-                        "spectral": spectral_rows,
-                        "dos": dos_rows,
-                        "sparse_sweep": sparse_sweep_rows,
-                        "dos_sweep": dos_sweep_rows,
-                        "matrix_spectrum": relationship_rows,
-                        "orbital_pair_summary": orbital_pair_summary_rows,
-                    },
+                    "samples": plot_sample_payload(samples_by_group),
+                    "sample_row_counts": plot_sample_row_counts(samples_by_group),
                     "diagnostics": metric_diagnostics(
                         spectral_rows,
                         relationship_rows,
@@ -5947,11 +7072,25 @@ def plot_data_summary() -> dict[str, Any]:
                             spectral_rows,
                             SPECTRAL_PLOT_AVAILABILITY_METRICS,
                         ),
+                        "kpoint_matrix": metric_availability_for_rows(
+                            kpoint_matrix_rows,
+                            ["h_mae_eV", "h_rmse_eV", "relative_frobenius"],
+                        ),
+                        "kpoint_spectral": metric_availability_for_rows(
+                            kpoint_spectral_rows,
+                            SPECTRAL_PLOT_AVAILABILITY_METRICS + ["global_rmse_eV", "gap_abs_error_eV"],
+                        ),
+                        "kpoint_dos": metric_availability_for_rows(
+                            kpoint_dos_rows,
+                            ["dos_wasserstein_eV", "dos_mae_500_fermi_window"],
+                        ),
                     },
                     "summary": manifest.get("summary", {}),
                     "diagnostic_outputs": diagnostic_outputs,
                 }
             )
+    runs.sort(key=lambda item: (item["pipeline"], item["dataset_size"], item["run_id"]))
+    runs.extend(deeph_comparison_plot_runs())
     runs.sort(key=lambda item: (item["pipeline"], item["dataset_size"], item["run_id"]))
     cross_experiments: list[dict[str, Any]] = []
     for metrics_path in sorted(RESULTS_ROOT.glob("*/summary/cross_evaluation_metrics.csv")):
@@ -6193,6 +7332,7 @@ class ExperimentRunner:
         training_plan: list[dict[str, Any]] | None = None,
         material: dict[str, Any] | None = None,
         hyperparameter_sweep: dict[str, Any] | None = None,
+        deeph_comparison_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -6204,6 +7344,14 @@ class ExperimentRunner:
             validate_training_plan_for_run_mode(training_plan, run_mode)
             hyperparameter_sweep = parse_hyperparameter_sweep(hyperparameter_sweep)
             validate_training_plan_sweep_sources(training_plan, hyperparameter_sweep)
+            deeph_comparison_options = (
+                parse_deeph_comparison_options(
+                    deeph_comparison_options or {},
+                    require_graph2mat_result=run_mode == DEEPH_COMPARISON_RUN_MODE,
+                )
+                if run_mode in {DEEPH_COMPARISON_RUN_MODE, GRAPH2MAT_DEEPH_RUN_MODE}
+                else None
+            )
             material_config = parse_material_payload(material, required=material is not None)
             if material_config is not None:
                 validate_material_payload(material_config, required=True)
@@ -6285,7 +7433,32 @@ class ExperimentRunner:
                     training_plan,
                     material_config,
                     hyperparameter_sweep,
+                    deeph_comparison_options,
                 ),
+                daemon=True,
+            )
+            self._thread.start()
+        return self.status()
+
+    def start_deeph_comparison(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        parsed_options = parse_deeph_comparison_options(options or {})
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("Ya hay una comparacion experimental en ejecucion.")
+            self._logs = []
+            self._started_at = time.time()
+            self._finished_at = None
+            self._returncode = None
+            self._current = None
+            self._results = []
+            self._progress = {}
+            self._processes = set()
+            self._stop_requested = False
+            self._run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._rate_seconds_per_structure = {}
+            self._thread = threading.Thread(
+                target=self._run_deeph_comparison,
+                args=(self._run_id, parsed_options),
                 daemon=True,
             )
             self._thread.start()
@@ -6342,6 +7515,900 @@ class ExperimentRunner:
     def _append(self, line: str) -> None:
         with self._lock:
             self._logs.append(line)
+
+    def _run_deeph_stage(
+        self,
+        label: str,
+        command: list[str],
+        *,
+        cwd: Path = REPO_ROOT,
+    ) -> int:
+        env = {
+            **os.environ,
+            "PYTHONUNBUFFERED": "1",
+        }
+        self._append(f"\n[DEEPh] {label}\n")
+        self._append(f"[RUN] {' '.join(shlex.quote(part) for part in command)}\n")
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        with self._lock:
+            self._process = process
+            self._processes.add(process)
+        self._append(f"[UI] PID: {process.pid}\n")
+        started_at = time.time()
+        try:
+            returncode = stream_process_output(
+                process,
+                self._append,
+                label=f"DeepH comparison: {label}",
+            )
+        finally:
+            with self._lock:
+                if self._process is process:
+                    self._process = None
+                self._processes.discard(process)
+        elapsed = time.time() - started_at
+        self._append(
+            f"[DEEPh] {label} finalizo con codigo {returncode} "
+            f"en {format_duration(elapsed)}.\n"
+        )
+        if self._stop_requested:
+            raise RuntimeError("Comparacion Graph2Mat vs DeepH detenida por el usuario.")
+        if returncode != 0:
+            raise RuntimeError(f"DeepH comparison fallo en etapa '{label}' con codigo {returncode}.")
+        return returncode
+
+    def _run_deeph_comparison(self, run_id: str, options: dict[str, Any]) -> None:
+        if options.get("graph2mat_result_dirs") or options.get("graph2mat_candidate_summary_csv"):
+            self._run_deeph_existing_graph2mat_candidates_comparison(run_id, options)
+            return
+        started_at = time.time()
+        graph2mat_result_dir = Path(str(options["graph2mat_result_dir"]))
+        deeph_repo = Path(str(options["deeph_repo"]))
+        deeph_python = Path(str(options["deeph_python"]))
+        pipeline_python = Path(str(options["pipeline_python"]))
+        output_root = Path(str(options["output_root"]))
+        output_dir = output_root / f"ui_run_{run_id}"
+        raw_prepare_dir = output_dir / "raw_prepare"
+        preprocess_dir = output_dir / "preprocess"
+        processed_dir = preprocess_dir / "processed"
+        train_dir = output_dir / "train"
+        eval_dir = output_dir / "eval"
+        comparison_dir = output_dir / "comparison"
+        sample_limit = options.get("sample_limit_per_split")
+        try:
+            output_dir.mkdir(parents=True, exist_ok=False)
+            with self._lock:
+                self._current = {
+                    "pipeline": DEEPH_COMPARISON_RUN_MODE,
+                    "size": int(sample_limit or 0),
+                    "dataset_label": "Graph2Mat vs DeepH",
+                    "started_at": started_at,
+                }
+                self._progress = {
+                    "stage": "starting",
+                    "output_dir": str(output_dir),
+                    "graph2mat_result_dir": str(graph2mat_result_dir),
+                }
+            manifest = {
+                "run_id": run_id,
+                "run_mode": DEEPH_COMPARISON_RUN_MODE,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "graph2mat_result_dir": str(graph2mat_result_dir),
+                "deeph_repo": str(deeph_repo),
+                "deeph_python": str(deeph_python),
+                "pipeline_python": str(pipeline_python),
+                "epochs": options["epochs"],
+                "batch_size": options["batch_size"],
+                "learning_rate": options["learning_rate"],
+                "seed": options["seed"],
+                "sample_limit_per_split": sample_limit,
+                "allow_regenerate_siesta": options["allow_regenerate_siesta"],
+                "siesta_command": options["siesta_command"],
+                "device": options["device"],
+                "output_dir": str(output_dir),
+            }
+            (output_dir / "ui_deeph_comparison_manifest.json").write_text(
+                json.dumps(json_safe(manifest), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+            self._append(f"[UI] Comparacion Graph2Mat vs DeepH {run_id} iniciada.\n")
+            self._append(f"[UI] Graph2Mat result dir: {graph2mat_result_dir}\n")
+            self._append(f"[UI] Output dir: {output_dir}\n")
+            common_sample_args: list[str] = []
+            if sample_limit is not None:
+                common_sample_args = ["--sample-limit-per-split", str(sample_limit)]
+
+            with self._lock:
+                self._progress["stage"] = "prepare_deeph_raw"
+            prepare_command = [
+                str(pipeline_python),
+                str(COMPARISON_ROOT / "scripts" / "prepare_deeph_siesta_dataset.py"),
+                "--graph2mat-result-dir",
+                str(graph2mat_result_dir),
+                "--output-dir",
+                str(raw_prepare_dir),
+                "--deeph-repo",
+                str(deeph_repo),
+                "--siesta-command",
+                str(options["siesta_command"]),
+                *common_sample_args,
+            ]
+            if options.get("allow_regenerate_siesta"):
+                prepare_command.append("--allow-regenerate-siesta")
+            if options.get("copy_raw"):
+                prepare_command.append("--copy")
+            self._run_deeph_stage("1/5 preparar dataset raw SIESTA para DeepH", prepare_command)
+
+            with self._lock:
+                self._progress["stage"] = "deeph_preprocess"
+            preprocess_command = [
+                str(pipeline_python),
+                str(COMPARISON_ROOT / "scripts" / "run_deeph_preprocess.py"),
+                "--raw-dir",
+                str(raw_prepare_dir / "raw"),
+                "--processed-dir",
+                str(processed_dir),
+                "--output-dir",
+                str(preprocess_dir),
+                "--raw-manifest",
+                str(raw_prepare_dir / "deeph_raw_manifest.json"),
+                "--deeph-repo",
+                str(deeph_repo),
+                "--python",
+                str(deeph_python),
+                "--multiprocessing",
+                "0",
+            ]
+            self._run_deeph_stage("2/5 preprocess DeepH SIESTA", preprocess_command)
+
+            with self._lock:
+                self._progress["stage"] = "deeph_train"
+            train_command = [
+                str(pipeline_python),
+                str(COMPARISON_ROOT / "scripts" / "run_deeph_benchmark.py"),
+                "--graph2mat-result-dir",
+                str(graph2mat_result_dir),
+                "--processed-dir",
+                str(processed_dir),
+                "--output-dir",
+                str(train_dir),
+                "--deeph-repo",
+                str(deeph_repo),
+                "--python",
+                str(deeph_python),
+                "--epochs",
+                str(options["epochs"]),
+                "--batch-size",
+                str(options["batch_size"]),
+                "--learning-rate",
+                str(options["learning_rate"]),
+                "--seed",
+                str(options["seed"]),
+                "--device",
+                str(options["device"]),
+                *common_sample_args,
+            ]
+            self._run_deeph_stage("3/5 entrenar DeepH con los splits de Graph2Mat", train_command)
+
+            with self._lock:
+                self._progress["stage"] = "deeph_evaluate"
+            eval_command = [
+                str(pipeline_python),
+                str(COMPARISON_ROOT / "scripts" / "evaluate_deeph_kpoint_metrics.py"),
+                "--graph2mat-result-dir",
+                str(graph2mat_result_dir),
+                "--processed-dir",
+                str(processed_dir),
+                "--predictions-dir",
+                str(eval_dir / "predictions"),
+                "--output-dir",
+                str(eval_dir),
+                "--trained-model-dir",
+                str(train_dir / "training"),
+                "--deeph-repo",
+                str(deeph_repo),
+                "--python",
+                str(deeph_python),
+                "--generate-predictions",
+                "--split",
+                "test",
+                "--device",
+                str(options["device"]),
+                *common_sample_args,
+            ]
+            self._run_deeph_stage("4/5 evaluar DeepH con metricas k-point", eval_command)
+
+            with self._lock:
+                self._progress["stage"] = "aggregate"
+            compare_command = [
+                str(pipeline_python),
+                str(COMPARISON_ROOT / "scripts" / "compare_graph2mat_deeph.py"),
+                "--graph2mat-result-dir",
+                str(graph2mat_result_dir),
+                "--deeph-eval-dir",
+                str(eval_dir),
+                "--output-dir",
+                str(comparison_dir),
+            ]
+            self._run_deeph_stage("5/5 agregar comparacion Graph2Mat vs DeepH", compare_command)
+
+            with self._lock:
+                self._results.append(
+                    {
+                        "pipeline": DEEPH_COMPARISON_RUN_MODE,
+                        "dataset_label": "Graph2Mat vs DeepH",
+                        "dataset_size": int(sample_limit or 0),
+                        "predicted_hamiltonians": "",
+                        "siesta_hamiltonians": "",
+                        "result_dir": str(output_dir),
+                        "comparison_report": str(comparison_dir / "final_report.md"),
+                        "aggregate_csv": str(comparison_dir / "aggregate_graph2mat_vs_deeph.csv"),
+                    }
+                )
+                self._progress["stage"] = "completed"
+                self._current = None
+                self._returncode = 0
+                self._finished_at = time.time()
+            self._append(f"[UI] Comparacion Graph2Mat vs DeepH completada: {comparison_dir}\n")
+        except Exception as exc:
+            with self._lock:
+                self._returncode = 1
+                self._finished_at = time.time()
+                self._current = None
+            self._append(f"[ERROR] Comparacion Graph2Mat vs DeepH fallo: {exc}\n")
+
+    def _mean_metric_from_csv(self, path: Path, metric: str) -> float | None:
+        rows = read_csv_rows(path)
+        values: list[float] = []
+        for row in rows:
+            raw = row.get(metric)
+            if raw in (None, ""):
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                values.append(value)
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    def _graph2mat_candidate_score(
+        self,
+        result: dict[str, Any],
+        primary_metric: str,
+    ) -> tuple[float, str]:
+        result_dir = Path(str(result.get("result_dir") or ""))
+        metric_root = result_dir / "metrics"
+        preferred: list[tuple[str, str]] = [
+            ("kpoint_spectral_metrics.csv", primary_metric),
+            ("spectral_metrics.csv", primary_metric),
+            ("matrix_spectrum_relationship.csv", primary_metric),
+            ("kpoint_matrix_metrics.csv", primary_metric),
+            ("sparse_metrics.csv", primary_metric),
+            ("kpoint_spectral_metrics.csv", "low_energy_rmse_eV"),
+            ("kpoint_spectral_metrics.csv", "fermi_window_rmse_eV"),
+            ("kpoint_matrix_metrics.csv", "h_mae_eV"),
+            ("kpoint_spectral_metrics.csv", "global_rmse_eV"),
+            ("sparse_metrics.csv", "relative_frobenius_union"),
+        ]
+        seen: set[tuple[str, str]] = set()
+        for filename, metric in preferred:
+            key = (filename, metric)
+            if key in seen:
+                continue
+            seen.add(key)
+            value = self._mean_metric_from_csv(metric_root / filename, metric)
+            if value is not None:
+                return value, metric
+        return math.inf, "no_finite_metric"
+
+    def _select_graph2mat_top_candidates(
+        self,
+        manifest: dict[str, Any],
+        primary_metric: str,
+        top_percent: float,
+        top_count: int | None = None,
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for run in manifest.get("runs") or []:
+            if str(run.get("pipeline") or "") != "md":
+                continue
+            returncode = run.get("returncode", 1)
+            if returncode is None:
+                returncode = 1
+            if int(returncode) != 0:
+                continue
+            if not Path(str(run.get("result_dir") or "")).exists():
+                continue
+            evaluation = run.get("hamiltonian_evaluation") or {}
+            if int(evaluation.get("samples_compared") or 0) <= 0:
+                continue
+            score, metric = self._graph2mat_candidate_score(run, primary_metric)
+            enriched = dict(run)
+            enriched["_deeph_selection_score"] = score
+            enriched["_deeph_selection_metric"] = metric
+            candidates.append(enriched)
+        if not candidates:
+            raise RuntimeError("No hay candidatos MD Graph2Mat completados para comparar con DeepH.")
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                float(item.get("_deeph_selection_score") or math.inf),
+                str(item.get("dataset_label") or ""),
+            ),
+        )
+        finite = [item for item in ranked if math.isfinite(float(item.get("_deeph_selection_score") or math.inf))]
+        pool = finite or ranked
+        count = top_count if top_count is not None else max(1, math.ceil(len(pool) * (top_percent / 100.0)))
+        count = min(max(1, count), len(pool))
+        return pool[:count]
+
+    def _deeph_manual_candidate(self, result_dir: Path, rank: int, source: str) -> dict[str, Any]:
+        if not result_dir.exists():
+            raise RuntimeError(f"No existe el result dir de Graph2Mat: {result_dir}")
+        return {
+            "pipeline": "md",
+            "returncode": 0,
+            "dataset_label": result_dir.parent.name,
+            "result_dir": str(result_dir),
+            "_deeph_selection_metric": source,
+            "_deeph_selection_score": rank,
+        }
+
+    def _select_graph2mat_candidates_from_summary_csv(
+        self,
+        path: Path,
+        top_count: int | None,
+    ) -> list[dict[str, Any]]:
+        rows = read_csv_rows(path)
+        candidates: list[dict[str, Any]] = []
+        for index, row in enumerate(rows, start=1):
+            raw_path = row.get("run_dir") or row.get("result_dir") or row.get("graph2mat_result_dir")
+            if not raw_path:
+                continue
+            result_dir = resolve_ui_path(raw_path)
+            if not result_dir.exists():
+                continue
+            score_raw = row.get("score_0_10")
+            try:
+                score = float(score_raw) if score_raw not in (None, "") else math.nan
+            except (TypeError, ValueError):
+                score = math.nan
+            candidates.append(
+                {
+                    "pipeline": "md",
+                    "returncode": 0,
+                    "dataset_label": row.get("method_id") or row.get("dataset_label") or result_dir.parent.name,
+                    "result_dir": str(result_dir),
+                    "dataset_recipe_id": row.get("dataset_recipe_id"),
+                    "_deeph_selection_metric": "score_0_10" if math.isfinite(score) else "summary_csv_order",
+                    "_deeph_selection_score": score if math.isfinite(score) else index,
+                    "_deeph_summary_selected": row.get("selected"),
+                    "_deeph_summary_source": str(path),
+                }
+            )
+        if not candidates:
+            raise RuntimeError(f"No hay candidatos Graph2Mat validos en {path}.")
+
+        def sort_key(candidate: dict[str, Any]) -> tuple[int, float, str]:
+            metric = str(candidate.get("_deeph_selection_metric") or "")
+            score = candidate.get("_deeph_selection_score")
+            try:
+                numeric_score = float(score)
+            except (TypeError, ValueError):
+                numeric_score = math.nan
+            if metric == "score_0_10" and math.isfinite(numeric_score):
+                return (0, -numeric_score, str(candidate.get("dataset_label") or ""))
+            if math.isfinite(numeric_score):
+                return (1, numeric_score, str(candidate.get("dataset_label") or ""))
+            return (2, math.inf, str(candidate.get("dataset_label") or ""))
+
+        ranked = sorted(candidates, key=sort_key)
+        count = top_count if top_count is not None else len(ranked)
+        count = min(max(1, count), len(ranked))
+        return ranked[:count]
+
+    def _deeph_existing_graph2mat_candidates_from_options(self, options: dict[str, Any]) -> list[dict[str, Any]]:
+        manual_dirs = [Path(path) for path in options.get("graph2mat_result_dirs") or []]
+        if manual_dirs:
+            return [
+                self._deeph_manual_candidate(result_dir, rank, "manual_list")
+                for rank, result_dir in enumerate(manual_dirs, start=1)
+            ]
+        summary_csv = str(options.get("graph2mat_candidate_summary_csv") or "")
+        if summary_csv:
+            return self._select_graph2mat_candidates_from_summary_csv(
+                Path(summary_csv),
+                options.get("graph2mat_top_count"),
+            )
+        return []
+
+    def _run_deeph_existing_graph2mat_candidates_comparison(self, run_id: str, options: dict[str, Any]) -> None:
+        started_at = time.time()
+        output_root = Path(str(options["output_root"]))
+        output_dir = output_root / f"ui_existing_graph2mat_deeph_{run_id}"
+        try:
+            candidates = self._deeph_existing_graph2mat_candidates_from_options(options)
+            if not candidates:
+                raise RuntimeError("No hay candidatos Graph2Mat existentes para comparar con DeepH.")
+            with self._lock:
+                self._current = {
+                    "pipeline": DEEPH_COMPARISON_RUN_MODE,
+                    "size": int(options.get("sample_limit_per_split") or 0),
+                    "dataset_label": f"Graph2Mat existing top {len(candidates)} vs DeepH",
+                    "started_at": started_at,
+                }
+                self._progress = {
+                    "stage": "starting_existing_candidates",
+                    "output_dir": str(output_dir),
+                    "graph2mat_candidates": len(candidates),
+                }
+            self._append(
+                f"[UI] Comparacion DeepH para candidatos Graph2Mat existentes iniciada. "
+                f"Candidatos: {len(candidates)}.\n"
+            )
+            result = self._run_deeph_group_for_graph2mat_candidates(
+                run_id,
+                options,
+                candidates,
+                output_dir,
+            )
+            with self._lock:
+                self._results.append(result)
+                self._progress["stage"] = "completed"
+                self._current = None
+                self._returncode = 0
+                self._finished_at = time.time()
+            self._append(f"[UI] Comparacion DeepH multi-candidato completada: {output_dir}\n")
+        except Exception as exc:
+            with self._lock:
+                self._returncode = 1
+                self._finished_at = time.time()
+                self._current = None
+            self._append(f"[ERROR] Comparacion DeepH multi-candidato fallo: {exc}\n")
+
+    def _run_deeph_group_for_graph2mat_candidates(
+        self,
+        run_id: str,
+        options: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        output_dir.mkdir(parents=True, exist_ok=False)
+        comparison_root = output_dir / "comparison"
+        comparison_root.mkdir(parents=True, exist_ok=True)
+        selection_rows = [
+            {
+                "rank": index,
+                "dataset_label": candidate.get("dataset_label"),
+                "result_dir": candidate.get("result_dir"),
+                "selection_metric": candidate.get("_deeph_selection_metric"),
+                "selection_score": candidate.get("_deeph_selection_score"),
+                "split_manifest_hash": candidate.get("split_manifest_hash"),
+            }
+            for index, candidate in enumerate(candidates, start=1)
+        ]
+        write_csv_dicts(comparison_root / "selected_graph2mat_candidates.csv", selection_rows)
+        (comparison_root / "selected_graph2mat_candidates.json").write_text(
+            json.dumps(json_safe(selection_rows), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        self._append(
+            "[DEEPh] One-to-one mode: DeepH se entrenara por separado para cada candidato Graph2Mat top. "
+            f"Candidatos: {len(candidates)}.\n"
+        )
+        comparison_outputs = []
+        for index, candidate in enumerate(candidates, start=1):
+            candidate_root = output_dir / f"top_{index:02d}"
+            comparison_outputs.append(
+                self._run_deeph_one_to_one_candidate(
+                    index,
+                    len(candidates),
+                    options,
+                    candidate,
+                    candidate_root,
+                )
+            )
+        write_csv_dicts(comparison_root / "comparison_outputs.csv", comparison_outputs)
+        (comparison_root / "comparison_outputs.json").write_text(
+            json.dumps(json_safe(comparison_outputs), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "pipeline": GRAPH2MAT_DEEPH_RUN_MODE,
+            "dataset_label": f"Graph2Mat top {len(candidates)} vs DeepH one-to-one",
+            "dataset_size": int(options.get("sample_limit_per_split") or 0),
+            "predicted_hamiltonians": "",
+            "siesta_hamiltonians": "",
+            "result_dir": str(output_dir),
+            "comparison_report": str(comparison_root / "comparison_outputs.csv"),
+            "aggregate_csv": str(comparison_root / "comparison_outputs.csv"),
+            "graph2mat_candidates_compared": len(candidates),
+            "deeph_trainings": len(candidates),
+        }
+
+    def _run_deeph_one_to_one_candidate(
+        self,
+        rank: int,
+        total: int,
+        options: dict[str, Any],
+        candidate: dict[str, Any],
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        graph2mat_result_dir = Path(str(candidate["result_dir"]))
+        deeph_repo = Path(str(options["deeph_repo"]))
+        deeph_python = Path(str(options["deeph_python"]))
+        pipeline_python = Path(str(options["pipeline_python"]))
+        raw_prepare_dir = output_dir / "raw_prepare"
+        preprocess_dir = output_dir / "preprocess"
+        processed_dir = preprocess_dir / "processed"
+        train_dir = output_dir / "train"
+        eval_dir = output_dir / "eval"
+        comparison_dir = output_dir / "comparison"
+        sample_limit = options.get("sample_limit_per_split")
+        output_dir.mkdir(parents=True, exist_ok=False)
+        common_sample_args = ["--sample-limit-per-split", str(sample_limit)] if sample_limit is not None else []
+        self._append(
+            f"[DEEPh] Top {rank}/{total}: entrenando DeepH para "
+            f"{candidate.get('dataset_label')} | {graph2mat_result_dir}\n"
+        )
+        with self._lock:
+            self._current = {
+                "pipeline": GRAPH2MAT_DEEPH_RUN_MODE,
+                "size": int(sample_limit or 0),
+                "dataset_label": f"DeepH top {rank}/{total}",
+                "started_at": time.time(),
+            }
+            self._progress = {
+                "stage": f"top_{rank}_prepare_deeph_raw",
+                "output_dir": str(output_dir),
+                "graph2mat_result_dir": str(graph2mat_result_dir),
+            }
+        prepare_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "prepare_deeph_siesta_dataset.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--output-dir",
+            str(raw_prepare_dir),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--siesta-command",
+            str(options["siesta_command"]),
+            *common_sample_args,
+        ]
+        if options.get("allow_regenerate_siesta"):
+            prepare_command.append("--allow-regenerate-siesta")
+        if options.get("copy_raw"):
+            prepare_command.append("--copy")
+        self._run_deeph_stage(f"top {rank}/{total} 1/5 preparar raw SIESTA", prepare_command)
+
+        with self._lock:
+            self._progress["stage"] = f"top_{rank}_deeph_preprocess"
+        preprocess_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "run_deeph_preprocess.py"),
+            "--raw-dir",
+            str(raw_prepare_dir / "raw"),
+            "--processed-dir",
+            str(processed_dir),
+            "--output-dir",
+            str(preprocess_dir),
+            "--raw-manifest",
+            str(raw_prepare_dir / "deeph_raw_manifest.json"),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--python",
+            str(deeph_python),
+            "--multiprocessing",
+            "0",
+        ]
+        self._run_deeph_stage(f"top {rank}/{total} 2/5 preprocess DeepH", preprocess_command)
+
+        with self._lock:
+            self._progress["stage"] = f"top_{rank}_deeph_train"
+        train_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "run_deeph_benchmark.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--processed-dir",
+            str(processed_dir),
+            "--output-dir",
+            str(train_dir),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--python",
+            str(deeph_python),
+            "--epochs",
+            str(options["epochs"]),
+            "--batch-size",
+            str(options["batch_size"]),
+            "--learning-rate",
+            str(options["learning_rate"]),
+            "--seed",
+            str(options["seed"]),
+            "--device",
+            str(options["device"]),
+            *common_sample_args,
+        ]
+        self._run_deeph_stage(f"top {rank}/{total} 3/5 entrenar DeepH", train_command)
+
+        with self._lock:
+            self._progress["stage"] = f"top_{rank}_deeph_evaluate"
+        eval_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "evaluate_deeph_kpoint_metrics.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--processed-dir",
+            str(processed_dir),
+            "--predictions-dir",
+            str(eval_dir / "predictions"),
+            "--output-dir",
+            str(eval_dir),
+            "--trained-model-dir",
+            str(train_dir / "training"),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--python",
+            str(deeph_python),
+            "--generate-predictions",
+            "--split",
+            "test",
+            "--device",
+            str(options["device"]),
+            *common_sample_args,
+        ]
+        self._run_deeph_stage(f"top {rank}/{total} 4/5 evaluar DeepH k-point", eval_command)
+
+        with self._lock:
+            self._progress["stage"] = f"top_{rank}_aggregate"
+        compare_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "compare_graph2mat_deeph.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--deeph-eval-dir",
+            str(eval_dir),
+            "--output-dir",
+            str(comparison_dir),
+        ]
+        self._run_deeph_stage(f"top {rank}/{total} 5/5 comparar 1 a 1", compare_command)
+        return {
+            "rank": rank,
+            "dataset_label": candidate.get("dataset_label"),
+            "graph2mat_result_dir": str(graph2mat_result_dir),
+            "deeph_output_dir": str(output_dir),
+            "comparison_dir": str(comparison_dir),
+            "report": str(comparison_dir / "final_report.md"),
+            "aggregate_csv": str(comparison_dir / "aggregate_graph2mat_vs_deeph.csv"),
+            "selection_metric": candidate.get("_deeph_selection_metric"),
+            "selection_score": candidate.get("_deeph_selection_score"),
+        }
+
+    def _run_deeph_group_for_graph2mat_candidates_old_single_deeph(
+        self,
+        run_id: str,
+        options: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        representative = candidates[0]
+        graph2mat_result_dir = Path(str(representative["result_dir"]))
+        deeph_repo = Path(str(options["deeph_repo"]))
+        deeph_python = Path(str(options["deeph_python"]))
+        pipeline_python = Path(str(options["pipeline_python"]))
+        raw_prepare_dir = output_dir / "raw_prepare"
+        preprocess_dir = output_dir / "preprocess"
+        processed_dir = preprocess_dir / "processed"
+        train_dir = output_dir / "train"
+        eval_dir = output_dir / "eval"
+        comparison_root = output_dir / "comparison"
+        sample_limit = options.get("sample_limit_per_split")
+        output_dir.mkdir(parents=True, exist_ok=False)
+        common_sample_args = ["--sample-limit-per-split", str(sample_limit)] if sample_limit is not None else []
+        self._append(
+            "[DEEPh] Representative Graph2Mat split for DeepH: "
+            f"{representative.get('dataset_label')} | {graph2mat_result_dir}\n"
+        )
+        self._append(
+            "[DEEPh] Graph2Mat top candidates selected: "
+            f"{len(candidates)} (top {options.get('graph2mat_top_percent')}%).\n"
+        )
+        selection_rows = []
+        for index, candidate in enumerate(candidates, start=1):
+            selection_rows.append(
+                {
+                    "rank": index,
+                    "dataset_label": candidate.get("dataset_label"),
+                    "result_dir": candidate.get("result_dir"),
+                    "selection_metric": candidate.get("_deeph_selection_metric"),
+                    "selection_score": candidate.get("_deeph_selection_score"),
+                    "split_manifest_hash": candidate.get("split_manifest_hash"),
+                }
+            )
+        comparison_root.mkdir(parents=True, exist_ok=True)
+        write_csv_dicts(comparison_root / "selected_graph2mat_candidates.csv", selection_rows)
+        (comparison_root / "selected_graph2mat_candidates.json").write_text(
+            json.dumps(json_safe(selection_rows), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+
+        with self._lock:
+            self._current = {
+                "pipeline": GRAPH2MAT_DEEPH_RUN_MODE,
+                "size": int(sample_limit or 0),
+                "dataset_label": "DeepH on Graph2Mat top candidates",
+                "started_at": time.time(),
+            }
+            self._progress = {
+                "stage": "prepare_deeph_raw",
+                "output_dir": str(output_dir),
+                "graph2mat_result_dir": str(graph2mat_result_dir),
+            }
+        prepare_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "prepare_deeph_siesta_dataset.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--output-dir",
+            str(raw_prepare_dir),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--siesta-command",
+            str(options["siesta_command"]),
+            *common_sample_args,
+        ]
+        if options.get("allow_regenerate_siesta"):
+            prepare_command.append("--allow-regenerate-siesta")
+        if options.get("copy_raw"):
+            prepare_command.append("--copy")
+        self._run_deeph_stage("1/5 preparar dataset raw SIESTA para DeepH", prepare_command)
+
+        with self._lock:
+            self._progress["stage"] = "deeph_preprocess"
+        preprocess_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "run_deeph_preprocess.py"),
+            "--raw-dir",
+            str(raw_prepare_dir / "raw"),
+            "--processed-dir",
+            str(processed_dir),
+            "--output-dir",
+            str(preprocess_dir),
+            "--raw-manifest",
+            str(raw_prepare_dir / "deeph_raw_manifest.json"),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--python",
+            str(deeph_python),
+            "--multiprocessing",
+            "0",
+        ]
+        self._run_deeph_stage("2/5 preprocess DeepH SIESTA", preprocess_command)
+
+        with self._lock:
+            self._progress["stage"] = "deeph_train"
+        train_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "run_deeph_benchmark.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--processed-dir",
+            str(processed_dir),
+            "--output-dir",
+            str(train_dir),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--python",
+            str(deeph_python),
+            "--epochs",
+            str(options["epochs"]),
+            "--batch-size",
+            str(options["batch_size"]),
+            "--learning-rate",
+            str(options["learning_rate"]),
+            "--seed",
+            str(options["seed"]),
+            "--device",
+            str(options["device"]),
+            *common_sample_args,
+        ]
+        self._run_deeph_stage("3/5 entrenar DeepH con el split Graph2Mat", train_command)
+
+        with self._lock:
+            self._progress["stage"] = "deeph_evaluate"
+        eval_command = [
+            str(pipeline_python),
+            str(COMPARISON_ROOT / "scripts" / "evaluate_deeph_kpoint_metrics.py"),
+            "--graph2mat-result-dir",
+            str(graph2mat_result_dir),
+            "--processed-dir",
+            str(processed_dir),
+            "--predictions-dir",
+            str(eval_dir / "predictions"),
+            "--output-dir",
+            str(eval_dir),
+            "--trained-model-dir",
+            str(train_dir / "training"),
+            "--deeph-repo",
+            str(deeph_repo),
+            "--python",
+            str(deeph_python),
+            "--generate-predictions",
+            "--split",
+            "test",
+            "--device",
+            str(options["device"]),
+            *common_sample_args,
+        ]
+        self._run_deeph_stage("4/5 evaluar DeepH con metricas k-point", eval_command)
+
+        comparison_outputs = []
+        for index, candidate in enumerate(candidates, start=1):
+            candidate_result_dir = Path(str(candidate["result_dir"]))
+            safe_label = compact_dataset_label(
+                f"g2m_top{index}_{candidate.get('dataset_label') or candidate_result_dir.parent.name}",
+                {"rank": index, "result_dir": str(candidate_result_dir)},
+                max_length=96,
+            )
+            candidate_comparison_dir = comparison_root / safe_label
+            with self._lock:
+                self._progress["stage"] = f"aggregate_top_{index}_of_{len(candidates)}"
+            compare_command = [
+                str(pipeline_python),
+                str(COMPARISON_ROOT / "scripts" / "compare_graph2mat_deeph.py"),
+                "--graph2mat-result-dir",
+                str(candidate_result_dir),
+                "--deeph-eval-dir",
+                str(eval_dir),
+                "--output-dir",
+                str(candidate_comparison_dir),
+            ]
+            self._run_deeph_stage(
+                f"5/5 agregar comparacion Graph2Mat top {index}/{len(candidates)} vs DeepH",
+                compare_command,
+            )
+            comparison_outputs.append(
+                {
+                    "rank": index,
+                    "dataset_label": candidate.get("dataset_label"),
+                    "result_dir": str(candidate_result_dir),
+                    "comparison_dir": str(candidate_comparison_dir),
+                    "report": str(candidate_comparison_dir / "final_report.md"),
+                    "aggregate_csv": str(candidate_comparison_dir / "aggregate_graph2mat_vs_deeph.csv"),
+                    "selection_metric": candidate.get("_deeph_selection_metric"),
+                    "selection_score": candidate.get("_deeph_selection_score"),
+                }
+            )
+        write_csv_dicts(comparison_root / "comparison_outputs.csv", comparison_outputs)
+        (comparison_root / "comparison_outputs.json").write_text(
+            json.dumps(json_safe(comparison_outputs), indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "pipeline": GRAPH2MAT_DEEPH_RUN_MODE,
+            "dataset_label": f"Graph2Mat top {len(candidates)} vs DeepH",
+            "dataset_size": int(sample_limit or 0),
+            "predicted_hamiltonians": "",
+            "siesta_hamiltonians": "",
+            "result_dir": str(output_dir),
+            "comparison_report": str(comparison_root / "comparison_outputs.csv"),
+            "aggregate_csv": str(comparison_root / "comparison_outputs.csv"),
+            "representative_graph2mat_result_dir": str(graph2mat_result_dir),
+            "graph2mat_candidates_compared": len(candidates),
+        }
 
     def _initial_experiment_manifest(
         self,
@@ -6875,6 +8942,7 @@ class ExperimentRunner:
         training_plan: list[dict[str, Any]] | None = None,
         material: dict[str, Any] | None = None,
         hyperparameter_sweep: dict[str, Any] | None = None,
+        deeph_comparison_options: dict[str, Any] | None = None,
     ) -> None:
         split_ratios = split_ratios or dict(DEFAULT_SPLIT_RATIOS)
         selected_methods = normalize_selected_methods(selected_methods)
@@ -6884,6 +8952,14 @@ class ExperimentRunner:
         validate_training_plan_for_run_mode(training_plan, run_mode)
         hyperparameter_sweep = parse_hyperparameter_sweep(hyperparameter_sweep)
         validate_training_plan_sweep_sources(training_plan, hyperparameter_sweep)
+        deeph_comparison_options = (
+            parse_deeph_comparison_options(
+                deeph_comparison_options or {},
+                require_graph2mat_result=run_mode == DEEPH_COMPARISON_RUN_MODE,
+            )
+            if run_mode in {DEEPH_COMPARISON_RUN_MODE, GRAPH2MAT_DEEPH_RUN_MODE}
+            else None
+        )
         material_config = parse_material_payload(material, required=material is not None)
         material_validation = (
             validate_material_payload(material_config, required=True)
@@ -6984,12 +9060,20 @@ class ExperimentRunner:
                 self._append(f"[WARN] {manifest['siesta_settings_warning']}\n")
             if manifest.get("model_config_warning"):
                 self._append(f"[WARN] {manifest['model_config_warning']}\n")
-            if STRICT_COMPARISON_MODE and manifest.get("siesta_settings_warning"):
+            if (
+                run_mode != DATASET_ONLY_RUN_MODE
+                and STRICT_COMPARISON_MODE
+                and manifest.get("siesta_settings_warning")
+            ):
                 raise RuntimeError(
                     "Strict comparison aborted: MD y AtomDisplacement tienen settings SIESTA distintas. "
                     "Revisa experiment_manifest.yaml: siesta_settings_mismatches."
                 )
-            if STRICT_COMPARISON_MODE and manifest.get("model_config_warning"):
+            if (
+                run_mode != DATASET_ONLY_RUN_MODE
+                and STRICT_COMPARISON_MODE
+                and manifest.get("model_config_warning")
+            ):
                 raise RuntimeError(
                     "Strict comparison aborted: los metodos seleccionados tienen hiperparametros Graph2Mat distintos. "
                     "Revisa experiment_manifest.yaml: model_config_mismatches."
@@ -7298,7 +9382,7 @@ class ExperimentRunner:
                             self._spec_with_training_plan_metadata(random_spec, plan_item),
                             plan_training_settings,
                         )
-            elif training_plan and run_mode == FULL_STRICT_RUN_MODE:
+            elif training_plan and run_mode_uses_planned_dataset_targets(run_mode):
                 planned_targets = self._planned_dataset_targets_for_specs(
                     md_specs=md_task_specs if "md" in pipeline_keys else [],
                     atom_specs=atom_runs if "atom_displacement" in pipeline_keys else [],
@@ -7460,6 +9544,38 @@ class ExperimentRunner:
                         )
                     else:
                         manifest["scientific_status"] = "analysis_completed"
+            if run_mode == GRAPH2MAT_DEEPH_RUN_MODE:
+                if deeph_comparison_options is None:
+                    deeph_comparison_options = parse_deeph_comparison_options(
+                        {},
+                        require_graph2mat_result=False,
+                    )
+                top_percent = float(deeph_comparison_options.get("graph2mat_top_percent") or 10.0)
+                top_count = deeph_comparison_options.get("graph2mat_top_count")
+                candidates = self._select_graph2mat_top_candidates(
+                    manifest,
+                    primary_metric,
+                    top_percent,
+                    int(top_count) if top_count not in (None, "") else None,
+                )
+                self._append(
+                    "[DEEPh] Graph2Mat sweep terminado; "
+                    f"seleccionados {len(candidates)} candidatos top para DeepH one-to-one.\n"
+                )
+                deeph_output_dir = (
+                    Path(str(deeph_comparison_options["output_root"]))
+                    / f"ui_graph2mat_deeph_{run_id}"
+                )
+                deeph_result = self._run_deeph_group_for_graph2mat_candidates(
+                    run_id,
+                    deeph_comparison_options,
+                    candidates,
+                    deeph_output_dir,
+                )
+                manifest["deeph_comparison"] = deeph_result
+                with self._lock:
+                    self._results.append(deeph_result)
+                manifest["scientific_status"] = "graph2mat_deeph_comparison_completed"
             self._write_experiment_manifest(manifest)
             self._append("\n[UI] Comparacion experimental finalizada correctamente.\n")
         except Exception as exc:
@@ -7551,7 +9667,14 @@ class ExperimentRunner:
                     continue
                 if isinstance(payload, dict):
                     result_dir = archived_manifest_result_dir(payload, manifest_path)
-                    if not archived_run_has_plot_metrics(result_dir):
+                    run_mode = str(payload.get("run_mode") or "")
+                    dataset_dir = Path(str(payload.get("dataset_dir") or ""))
+                    reusable_dataset_only = (
+                        run_mode == DATASET_ONLY_RUN_MODE
+                        and int(payload.get("returncode", 0) or 0) == 0
+                        and dataset_dir.exists()
+                    )
+                    if not reusable_dataset_only and not archived_run_has_plot_metrics(result_dir):
                         continue
                     candidate = dict(payload)
                     candidate["_source_manifest_path"] = str(manifest_path)
@@ -8454,13 +10577,16 @@ class ExperimentRunner:
         config["paths"]["training_dir"] = str(training_dir)
         basis_files_pattern = "../dataset/basis/*.ion.xml" if sorted((dataset_dir / "basis").glob("*.ion.xml")) else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
-        config["training"]["data"].setdefault("n_matrix_components", 2)
+        config["training"]["data"].setdefault("matrix_component_policy", "h_only")
+        config["training"]["data"].setdefault("n_matrix_components", 1)
         config["training"]["data"]["val_runs"] = "../dataset/validation_samples/*/RUN.fdf"
         config["testing"]["data"]["basis_files"] = basis_files_pattern
-        config["testing"]["data"].setdefault("n_matrix_components", 2)
+        config["testing"]["data"].setdefault("matrix_component_policy", "h_only")
+        config["testing"]["data"].setdefault("n_matrix_components", 1)
         config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
         config["prediction"]["data"]["basis_files"] = basis_files_pattern
-        config["prediction"]["data"].setdefault("n_matrix_components", 2)
+        config["prediction"]["data"].setdefault("matrix_component_policy", "h_only")
+        config["prediction"]["data"].setdefault("n_matrix_components", 1)
         config["prediction"]["data"]["predict_structs"] = "../dataset/test_samples/*/RUN.fdf"
         config["single_points"]["rerun"] = False
         config["checkpoint"]["path"] = None
@@ -9255,12 +11381,15 @@ class ExperimentRunner:
         config["single_points"]["rerun"] = False
         basis_files_pattern = "../dataset/basis/*.ion.xml" if basis_count else "../relaxed/*.ion.xml"
         config["training"]["data"]["basis_files"] = basis_files_pattern
-        config["training"]["data"].setdefault("n_matrix_components", 2)
+        config["training"]["data"].setdefault("matrix_component_policy", "h_only")
+        config["training"]["data"].setdefault("n_matrix_components", 1)
         config["training"]["data"]["val_runs"] = "../dataset/validation_samples/*/RUN.fdf"
         config["prediction"]["data"]["basis_files"] = basis_files_pattern
-        config["prediction"]["data"].setdefault("n_matrix_components", 2)
+        config["prediction"]["data"].setdefault("matrix_component_policy", "h_only")
+        config["prediction"]["data"].setdefault("n_matrix_components", 1)
         config["testing"]["data"]["basis_files"] = basis_files_pattern
-        config["testing"]["data"].setdefault("n_matrix_components", 2)
+        config["testing"]["data"].setdefault("matrix_component_policy", "h_only")
+        config["testing"]["data"].setdefault("n_matrix_components", 1)
         config["testing"]["test_runs"] = "../dataset/test_samples/*/RUN.fdf"
         config["prediction"]["data"]["predict_structs"] = "../dataset/test_samples/*/RUN.fdf"
         config["checkpoint"]["path"] = None
@@ -9397,6 +11526,7 @@ class ExperimentRunner:
                 label=spec.label,
                 master_fd=master_fd,
                 eta_provider=lambda: self._estimated_seconds(key, size, time.time() - started_at),
+                progress_provider=lambda: lightning_training_progress_from_config(config_path),
             )
         finally:
             if master_fd is not None:
@@ -9980,6 +12110,7 @@ class ExperimentRunner:
             "prediction_matrices": files_content_digest(
                 [path for path in sorted((result_dir / "predicted_hamiltonians").rglob("*")) if path.is_file()]
             ),
+            "metric_manifest": files_content_digest([result_dir / "metrics" / "manifest.json"]),
         }
         graph2mat_config_provenance = read_json_file(training_dir / "config_provenance.json")
         checkpoint_manifest_payload = read_json_file(checkpoint_manifest_path)
@@ -9999,6 +12130,9 @@ class ExperimentRunner:
                 "prediction_matrix_sha256": run_artifact_hashes.get("prediction_matrices"),
             },
         )
+        benchmark_metadata = benchmark_metadata_from_config(config, recipe_metadata)
+        pipeline_git = git_metadata_for_path(REPO_ROOT)
+        graph2mat_git = graph2mat_git_metadata(config)
         dataset_sample_ids: list[str] = []
         for split_manifest in sorted((result_dir / "splits").glob("*_manifest.csv")):
             for row in read_csv_rows(split_manifest):
@@ -10059,6 +12193,10 @@ class ExperimentRunner:
             "checkpoint_manifest": str(checkpoint_manifest_path),
             "checkpoint_selection_warning": checkpoint_warning,
             "artifact_hashes": run_artifact_hashes,
+            "pipeline_git": pipeline_git,
+            "pipeline_commit": pipeline_git.get("commit"),
+            "graph2mat_git": graph2mat_git,
+            "graph2mat_commit": graph2mat_git.get("commit"),
             "material_provenance": material_provenance,
             **{key: material_provenance.get(key) for key in MATERIAL_FLAT_FIELDS if key in material_provenance},
             "dataset_sample_ids": sorted(set(dataset_sample_ids)),
@@ -10087,6 +12225,21 @@ class ExperimentRunner:
             "performance": config.get("performance", {}),
             "training_settings": config.get("training", {}).get("ui_training_settings", {}),
             "training_hyperparameters": config.get("training", {}),
+            "benchmark_metadata": benchmark_metadata,
+            "benchmark_method_id": benchmark_metadata.get("benchmark_method_id"),
+            "architecture": benchmark_metadata.get("architecture"),
+            "readout": benchmark_metadata.get("readout"),
+            "hamiltonian_context": benchmark_metadata.get("hamiltonian_context"),
+            "context_enabled": benchmark_metadata.get("context_enabled"),
+            "loss": benchmark_metadata.get("loss"),
+            "loss_kwargs": benchmark_metadata.get("loss_kwargs"),
+            "training_stages": benchmark_metadata.get("training_stages"),
+            "training_seed": benchmark_metadata.get("seed"),
+            "evaluation_config": {
+                "metric_version": METRIC_VERSION,
+                "hamiltonian_metrics_manifest": str(result_dir / "metrics" / "manifest.json"),
+                "reference_policy": benchmark_metadata.get("dataset_reference_policy"),
+            },
             "generated_samples": prepare_metadata.get("generated_samples"),
             "completed_samples": prepare_metadata.get("completed_samples"),
             "fc_generated_samples": prepare_metadata.get("fc_generated_samples"),
@@ -10123,6 +12276,12 @@ class ExperimentRunner:
         metric_workers = int((config.get("performance", {}) or {}).get("max_parallel_metric_jobs") or 1)
         if metric_workers > 1:
             command.extend(["--workers", str(metric_workers)])
+        if result_dir_needs_kpoint_metrics(result_dir):
+            command.append("--enable-kpoint-metrics")
+            self._append(
+                "[UI] K-grid Monkhorst-Pack no-gamma detectada; "
+                "se activa evaluacion Hamiltoniana k-point-aware.\n"
+            )
         self._append(f"[UI] Calculando metricas sparse/espectro/DOS: {' '.join(command)}\n")
         started_at = time.time()
         result = subprocess.run(
@@ -11404,6 +13563,7 @@ class ExperimentRunner:
 
 
 EXPERIMENT_RUNNER = ExperimentRunner()
+G2M_DEEPH_RUNNER = Graph2MatDeepHBenchmarkRunner()
 
 
 def all_status() -> dict[str, Any]:
@@ -11415,7 +13575,11 @@ def all_status() -> dict[str, Any]:
 
 
 def clear_generated_dataset_outputs(*, dry_run: bool = False) -> dict[str, Any]:
-    if all_status().get("running") or EXPERIMENT_RUNNER.status().get("running"):
+    if (
+        all_status().get("running")
+        or EXPERIMENT_RUNNER.status().get("running")
+        or G2M_DEEPH_RUNNER.status().get("running")
+    ):
         raise RuntimeError("No se pueden borrar datasets mientras hay pipelines o experimentos en ejecucion.")
     return cleanup_generated_datasets(REPO_ROOT, dry_run=dry_run)
 
@@ -11513,6 +13677,178 @@ def plot_metric_dataset_output_records() -> dict[str, Any]:
     }
 
 
+def deeph_comparison_plot_runs() -> list[dict[str, Any]]:
+    """Expose fair Graph2Mat-vs-DeepH aggregate rows to the normal plot feed."""
+    runs: list[dict[str, Any]] = []
+    benchmark_root = RESULTS_ROOT / "graphene_w90_deeph_fair_benchmark"
+    if not benchmark_root.exists():
+        return runs
+    for aggregate_path in sorted(benchmark_root.glob("**/comparison/aggregate_graph2mat_vs_deeph.csv")):
+        comparison_dir = aggregate_path.parent
+        run_dir = comparison_dir.parent
+        rows = read_csv_rows(aggregate_path)
+        manifest_path = comparison_dir / "comparison_manifest.json"
+        comparison_manifest: dict[str, Any] = {}
+        if manifest_path.exists():
+            try:
+                comparison_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                comparison_manifest = {}
+        metric_manifest_path = run_dir / "eval" / "metrics" / "manifest.json"
+        metric_manifest = load_json_object(metric_manifest_path)
+        metric_safety = metric_manifest_safety_summary(metric_manifest)
+        raw_manifest_path = run_dir / "raw_prepare" / "deeph_raw_manifest.json"
+        raw_manifest: dict[str, Any] = {}
+        if raw_manifest_path.exists():
+            try:
+                raw_manifest = json.loads(raw_manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                raw_manifest = {}
+        graph2mat_result_dir = Path(
+            str(
+                comparison_manifest.get("graph2mat_result_dir")
+                or metric_manifest.get("graph2mat_result_dir")
+                or ""
+            )
+        )
+        graph2mat_manifest: dict[str, Any] = {}
+        if graph2mat_result_dir:
+            graph2mat_manifest_path = graph2mat_result_dir / "manifest.json"
+            if graph2mat_manifest_path.exists():
+                try:
+                    graph2mat_manifest = json.loads(graph2mat_manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    graph2mat_manifest = {}
+        benchmark_dataset_size = int(
+            graph2mat_manifest.get("requested_dataset_size")
+            or graph2mat_manifest.get("dataset_size")
+            or raw_manifest.get("samples_requested")
+            or raw_manifest.get("samples_ready")
+            or 0
+        )
+        for row in rows:
+            method = str(row.get("method") or row.get("pipeline") or "").strip()
+            if not method:
+                continue
+            samples_compared = int(row.get("samples_compared") or row.get("test_samples") or 0)
+            plot_dataset_size = benchmark_dataset_size or samples_compared
+            kpoint_matrix_row = {
+                "sample": f"{method}_aggregate",
+                "h_mae_eV": row.get("h_mae_eV_mean"),
+                "h_rmse_eV": row.get("h_rmse_eV_mean"),
+                "relative_frobenius": row.get("relative_frobenius_mean"),
+            }
+            kpoint_spectral_row = {
+                "sample": f"{method}_aggregate",
+                "global_rmse_eV": row.get("global_rmse_eV_mean"),
+                "low_energy_rmse_eV": row.get("low_energy_rmse_eV_mean"),
+                "fermi_window_rmse_eV": row.get("fermi_window_rmse_eV_mean"),
+                "frontier_window_rmse_eV": row.get("frontier_window_rmse_eV_mean"),
+            }
+            kpoint_dos_row = {
+                "sample": f"{method}_aggregate",
+                "dos_mae_500_fermi_window": row.get("dos_mae_500_fermi_window_mean"),
+                "dos_wasserstein_eV": row.get("dos_wasserstein_eV_mean"),
+            }
+            samples_by_group = {
+                "sparse": [],
+                "spectral": [],
+                "dos": [],
+                "kpoint_matrix": [kpoint_matrix_row],
+                "kpoint_matrix_per_k": [],
+                "kpoint_spectral": [kpoint_spectral_row],
+                "kpoint_dos": [kpoint_dos_row],
+                "sparse_sweep": [],
+                "dos_sweep": [],
+                "matrix_spectrum": [],
+                "orbital_pair_summary": [],
+            }
+            run_id = f"{run_dir.name}_{method}"
+            runs.append(
+                {
+                    "pipeline": "deeph_comparison",
+                    "method_id": method,
+                    "label": "Graph2Mat vs DeepH",
+                    "dataset_size": plot_dataset_size,
+                    "effective_dataset_size": plot_dataset_size,
+                    "requested_dataset_size": plot_dataset_size,
+                    "run_id": run_id,
+                    "result_dir": str(comparison_dir),
+                    "dataset_label": f"{run_dir.name} · {method}",
+                    "training_tag": method,
+                    "training_plan_label": method,
+                    "training_plan_display_label": method,
+                    "material_label": "graphene",
+                    "material_display_label": "graphene",
+                    "metric_space": "kpoint_sampled",
+                    **metric_safety,
+                    "metric_manifest_path": str(metric_manifest_path),
+                    "kpoint_metrics_enabled": True,
+                    "kpoint_sampled_supported": True,
+                    "kpoint_mesh": metric_manifest.get("kpoint_mesh") or comparison_manifest.get("kpoint_mesh"),
+                    "kpoint_count": metric_manifest.get("kpoint_count") or comparison_manifest.get("kpoint_count"),
+                    "kpoint_source": metric_manifest.get("kpoint_source") or "DeepH fair benchmark",
+                    "uses_reference_overlap_k": True,
+                    "complex_hamiltonians_supported_for_kpoint_metrics": True,
+                    "means": {
+                        "run": {},
+                        "sparse": {},
+                        "spectral": {},
+                        "dos": {},
+                        "kpoint_matrix": numeric_means([kpoint_matrix_row]),
+                        "kpoint_matrix_per_k": {},
+                        "kpoint_spectral": numeric_means([kpoint_spectral_row]),
+                        "kpoint_dos": numeric_means([kpoint_dos_row]),
+                        "sparse_sweep": {},
+                        "dos_sweep": {},
+                        "matrix_spectrum": {},
+                        "orbital_pair_summary": {},
+                    },
+                    "samples": plot_sample_payload(samples_by_group),
+                    "sample_row_counts": plot_sample_row_counts(samples_by_group),
+                    "diagnostics": {
+                        "severity": "info",
+                        "status": "fair_deeph_comparison",
+                        "warnings": [
+                            "Aggregate Graph2Mat-vs-DeepH rows are plotted as one point per method; per-sample DeepH details live in the comparison directory."
+                        ],
+                    },
+                    "metric_availability": {
+                        "spectral": {},
+                        "kpoint_matrix": metric_availability_for_rows(
+                            [kpoint_matrix_row],
+                            ["h_mae_eV", "h_rmse_eV", "relative_frobenius"],
+                        ),
+                        "kpoint_spectral": metric_availability_for_rows(
+                            [kpoint_spectral_row],
+                            SPECTRAL_PLOT_AVAILABILITY_METRICS + ["global_rmse_eV", "gap_abs_error_eV"],
+                        ),
+                        "kpoint_dos": metric_availability_for_rows(
+                            [kpoint_dos_row],
+                            ["dos_wasserstein_eV", "dos_mae_500_fermi_window"],
+                        ),
+                    },
+                    "summary": {
+                        "source": str(aggregate_path),
+                        "comparison_manifest": str(manifest_path),
+                        "test_samples_compared": samples_compared,
+                        "plot_x_dataset_size": plot_dataset_size,
+                    },
+                    "diagnostic_outputs": {
+                        "aggregate_graph2mat_vs_deeph": {
+                            "exists": True,
+                            "path": str(aggregate_path),
+                        },
+                        "final_report": {
+                            "exists": (comparison_dir / "final_report.md").exists(),
+                            "path": str(comparison_dir / "final_report.md"),
+                        },
+                    },
+                }
+            )
+    return runs
+
+
 def directory_size_bytes(path: Path) -> int:
     if path.is_symlink() or not path.exists():
         return 0
@@ -11582,7 +13918,11 @@ def clear_selected_generated_dataset_outputs(
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    if all_status().get("running") or EXPERIMENT_RUNNER.status().get("running"):
+    if (
+        all_status().get("running")
+        or EXPERIMENT_RUNNER.status().get("running")
+        or G2M_DEEPH_RUNNER.status().get("running")
+    ):
         raise RuntimeError("No se pueden borrar datasets mientras hay pipelines o experimentos en ejecucion.")
     plot_ids = {str(record["id"]) for record in plot_metric_dataset_records()}
     normalized_ids = list(dict.fromkeys(str(target_id) for target_id in target_ids if str(target_id).strip()))
@@ -11671,6 +14011,17 @@ def archived_results_summary() -> dict[str, Any]:
                 continue
             result_dir = archived_manifest_result_dir(manifest, manifest_path)
             item = dict(manifest)
+            metric_manifest_path = result_dir / "metrics" / "manifest.json"
+            metric_manifest = load_json_object(metric_manifest_path)
+            safety_summary = metric_manifest_safety_summary(metric_manifest)
+            for field, value in safety_summary.items():
+                if value in (None, "", "unknown") and item.get(field) not in (None, ""):
+                    continue
+                item[field] = value
+            item["metric_manifest_path"] = str(metric_manifest_path)
+            item.setdefault("run_id", result_dir.name.removeprefix("run_"))
+            item.setdefault("result_dir", str(result_dir))
+            item.setdefault("dataset_label", result_dir.parent.name)
             item["diagnostic_outputs"] = archived_run_diagnostic_outputs(result_dir)
             summary[key].append(item)
     return summary
@@ -11678,10 +14029,12 @@ def archived_results_summary() -> dict[str, Any]:
 
 def archived_result_manifest_paths(root: Path) -> list[Path]:
     """Return archived run manifests for both legacy and recipe-based dataset names."""
-    candidates = list(root.glob("*/run_*/manifest.json"))
-    candidates.extend(root.glob("run_*/manifest.json"))
-    unique = {path.resolve(): path for path in candidates}
-    return sorted(unique.values())
+    selected: dict[Path, Path] = {}
+    for metrics_manifest in list(root.glob("*/run_*/metrics/manifest.json")) + list(root.glob("run_*/metrics/manifest.json")):
+        selected[metrics_manifest.parent.parent.resolve()] = metrics_manifest
+    for run_manifest in list(root.glob("*/run_*/manifest.json")) + list(root.glob("run_*/manifest.json")):
+        selected[run_manifest.parent.resolve()] = run_manifest
+    return sorted(selected.values())
 
 
 def json_response(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -11840,6 +14193,27 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     maximum=MAX_LOG_RESPONSE_LIMIT,
                 )
                 json_response(self, EXPERIMENT_RUNNER.logs(since=since, limit=limit))
+            elif path == "/api/g2m-deeph/status":
+                json_response(self, G2M_DEEPH_RUNNER.status())
+            elif path == "/api/g2m-deeph/datasets":
+                query = parse_qs(parsed_url.query)
+                root = (query.get("root") or [None])[0]
+                json_response(self, G2M_DEEPH_RUNNER.available_datasets_payload(root=root))
+            elif path == "/api/g2m-deeph/logs":
+                query = parse_qs(parsed_url.query)
+                since = int(query.get("since", ["0"])[0])
+                limit = parse_query_int(
+                    query,
+                    "limit",
+                    DEFAULT_LOG_RESPONSE_LIMIT,
+                    minimum=1,
+                    maximum=MAX_LOG_RESPONSE_LIMIT,
+                )
+                json_response(self, G2M_DEEPH_RUNNER.logs(since=since, limit=limit))
+            elif path == "/api/g2m-deeph/results":
+                json_response(self, G2M_DEEPH_RUNNER.results())
+            elif path == "/api/g2m-deeph/plots":
+                json_response(self, G2M_DEEPH_RUNNER.plots())
             elif path == "/":
                 self._serve_file(UI_DIR / "index.html")
             else:
@@ -11888,6 +14262,22 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 payload = read_json_body(self)
                 material_payload = payload.get("material", payload)
                 json_response(self, material_validation_response(material_payload))
+            elif path == "/api/g2m-deeph/validate-dataset":
+                payload = read_json_body(self)
+                json_response(self, G2M_DEEPH_RUNNER.validate_dataset_payload(payload))
+            elif path == "/api/g2m-deeph/run":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    G2M_DEEPH_RUNNER.start(payload),
+                    status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/g2m-deeph/stop":
+                json_response(
+                    self,
+                    G2M_DEEPH_RUNNER.stop(),
+                    status=HTTPStatus.ACCEPTED,
+                )
             elif path == "/api/experiment":
                 payload = read_json_body(self)
                 material_config = parse_material_payload(
@@ -11896,8 +14286,23 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 )
                 if material_config is not None:
                     validate_material_payload(material_config, required=True)
-                selected_methods = normalize_selected_methods(payload.get("selected_methods"))
                 run_mode = parse_run_mode(payload.get("run_mode"))
+                if run_mode == DEEPH_COMPARISON_RUN_MODE:
+                    json_response(
+                        self,
+                        EXPERIMENT_RUNNER.start_deeph_comparison(payload.get("deeph_comparison") or {}),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                    return
+                deeph_comparison_options = (
+                    parse_deeph_comparison_options(
+                        payload.get("deeph_comparison") or {},
+                        require_graph2mat_result=False,
+                    )
+                    if run_mode == GRAPH2MAT_DEEPH_RUN_MODE
+                    else None
+                )
+                selected_methods = normalize_selected_methods(payload.get("selected_methods"))
                 reusable_dataset_ids = parse_reusable_dataset_ids(payload.get("reusable_dataset_ids"))
                 training_plan = parse_training_plan(payload.get("training_plan"))
                 hyperparameter_sweep = parse_hyperparameter_sweep(payload.get("hyperparameter_sweep"))
@@ -12105,7 +14510,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     sweep_dataset_targets = parse_dataset_targets(
                         raw_sweep_payload.get("dataset_targets")
                     )
-                    if run_mode == FULL_STRICT_RUN_MODE and not sweep_dataset_targets:
+                    if run_mode_uses_planned_dataset_targets(run_mode) and not sweep_dataset_targets:
                         planned_targets = EXPERIMENT_RUNNER._planned_dataset_targets_for_specs(
                             md_specs=dataset_recipes_info.get("md_dataset_specs") or [],
                             atom_specs=dataset_recipes_info.get("atom_dataset_specs") or atom_dataset_specs or [],
@@ -12151,6 +14556,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                         training_plan,
                         material_config,
                         hyperparameter_sweep,
+                        deeph_comparison_options,
                     ),
                     status=HTTPStatus.ACCEPTED,
                 )

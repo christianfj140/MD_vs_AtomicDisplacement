@@ -17,10 +17,12 @@ from material_bundle import (
 
 SUPPORTED_COORDINATE_FORMATS = {"ang", "angstrom", "angstroms"}
 DEFAULT_REQUIRED_OUTPUT_FLAGS = {
+    "SaveHS": "true",
     "Save.HS": "T",
     "TS.HS.Save": "T",
     "TS.DE.Save": "T",
     "XML.Write": "T",
+    "Write.OrbitalIndex": "T",
 }
 BOHR_TO_ANG = 0.529177210903
 

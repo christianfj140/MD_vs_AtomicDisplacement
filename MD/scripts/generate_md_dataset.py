@@ -23,8 +23,27 @@ from md_pipeline_config import (
 )
 from material_bundle import file_sha256 as material_file_sha256
 from material_presets import resolve_material_bundle
+from graph2mat_material_config import copy_graph2mat_basis_files, resolve_graph2mat_basis_files
+from joint_artifact_contract import (
+    CONTRACT_NAME,
+    G2M_DEEPH_BENCHMARK_PROFILE,
+    find_artifact,
+    resolve_system_label,
+    snapshot_requirements,
+    validate_dataset,
+)
+from benchmark_manifest import write_benchmark_manifests
 
 BOHR_TO_ANG = 0.529177210903
+JOINT_GRAPH2MAT_DEEPH_STORE_FILES = "*fdf *TSHS *TSDE *XV *HSX *STRUCT_OUT *ORB_INDX *out"
+JOINT_REQUIRED_FDF_OUTPUT_FLAGS = (
+    "SaveHS",
+    "Save.HS",
+    "TS.HS.Save",
+    "TS.DE.Save",
+    "XML.Write",
+    "Write.OrbitalIndex",
+)
 SPREAD_SPLIT_WARNING = (
     "MD split strategy 'spread' interleaves trajectory frames across "
     "train/validation/test and is exploratory/debug only; use "
@@ -105,10 +124,15 @@ def prepare_material_inputs(config: dict) -> dict:
         shutil.copy2(source, destination)
         copied[label] = destination.name
     manifest = resolved.to_manifest_dict()
+    copied_basis = copy_graph2mat_basis_files(
+        resolve_graph2mat_basis_files(validated),
+        dataset_dir / "material_basis",
+    )
     manifest.update(
         {
             "pseudopotentials_copied_to_dataset": copied,
             "pseudopotentials_verified_in_dataset": verified,
+            "graph2mat_basis_files": copied_basis,
         }
     )
     write_json(dataset_dir / "material_provenance.json", manifest)
@@ -170,8 +194,96 @@ def setup_store(config: dict) -> None:
     # mismo directorio. Si el contenido ya existe, el comportamiento depende de
     # graph2mat y se respeta tal cual.
     run_command(
-        [command(config, "graph2mat"), "siesta", "md", "setup-store"],
+        [
+            command(config, "graph2mat"),
+            "siesta",
+            "md",
+            "setup-store",
+            "--files",
+            JOINT_GRAPH2MAT_DEEPH_STORE_FILES,
+        ],
         cwd=pipeline_paths["dataset_dir"],
+    )
+
+
+def validate_joint_benchmark_artifacts(config: dict, steps_dir: Path | None = None) -> None:
+    pipeline_paths = paths(config)
+    steps_dir = steps_dir or pipeline_paths["dataset_dir"] / "MD_steps"
+    summary_path = steps_dir.parent / "artifact_validation.json"
+    if not steps_dir.exists():
+        write_json(
+            summary_path,
+            {
+                "contract_name": CONTRACT_NAME,
+                "valid": False,
+                "benchmark_ready": False,
+                "scientific_status": "missing_md_steps",
+                "steps_dir": str(steps_dir),
+                "errors": [f"missing MD_steps directory: {steps_dir}"],
+            },
+        )
+        raise RuntimeError(f"{CONTRACT_NAME} failed: missing MD_steps directory: {steps_dir}")
+    snapshot_dirs = sorted(
+        (path for path in steps_dir.iterdir() if path.is_dir() and path.name.isdigit()),
+        key=lambda path: int(path.name),
+    )
+    dataset_dir = pipeline_paths["dataset_dir"]
+    material_provenance = dataset_dir / "material_provenance.json"
+    result = validate_dataset(
+        steps_dir,
+        snapshot_dirs=snapshot_dirs,
+        basis_dirs=[dataset_dir / "basis", steps_dir / "basis"],
+        pseudopotential_provenance_paths=[material_provenance],
+        material_identity_paths=[material_provenance],
+        siesta_input_paths=[dataset_dir / "RUN.fdf", material_provenance],
+        validation_profile=G2M_DEEPH_BENCHMARK_PROFILE,
+    )
+    update_joint_snapshot_validation_metadata(result)
+    summary = result.to_dict()
+    summary.update(
+        {
+            "benchmark_ready": result.valid,
+            "scientific_status": "benchmark_ready" if result.valid else "repair_required",
+            "steps_dir": str(steps_dir),
+            "artifact_validation_path": str(summary_path),
+            "generation_contract_diagnostics": {
+                "required_fdf_output_flags": list(JOINT_REQUIRED_FDF_OUTPUT_FLAGS),
+                "store_files": JOINT_GRAPH2MAT_DEEPH_STORE_FILES,
+                "store_file_patterns": JOINT_GRAPH2MAT_DEEPH_STORE_FILES.split(),
+            },
+        }
+    )
+    write_json(summary_path, summary)
+    if result.valid:
+        print(
+            f"[OK] {CONTRACT_NAME}: {result.valid_snapshots}/{result.total_snapshots} "
+            f"snapshots listos para Graph2Mat+DeepH. Summary: {summary_path}"
+        )
+        return
+    dataset_errors = [str(error) for error in result.errors]
+    details = []
+    for snapshot in result.snapshots:
+        if snapshot.valid:
+            continue
+        reason = ", ".join(snapshot.missing_required or snapshot.errors or ["invalid"])
+        flags = read_joint_fdf_output_flags(snapshot.snapshot_dir / "RUN.fdf")
+        details.append(
+            f"{snapshot.snapshot_dir.name}: {reason}; "
+            f"SystemLabel={snapshot.system_label or 'unknown'}; "
+            f"FDF flags={flags}; store_files={JOINT_GRAPH2MAT_DEEPH_STORE_FILES}"
+        )
+        if len(details) >= 5:
+            break
+    detail_parts = []
+    if dataset_errors:
+        detail_parts.append("Dataset-level errors: " + "; ".join(dataset_errors))
+    if details:
+        detail_parts.append("Snapshot examples: " + "; ".join(details))
+    detail_text = " ".join(detail_parts) or "No extra diagnostics available."
+    raise RuntimeError(
+        f"{CONTRACT_NAME} failed for {steps_dir}: "
+        f"{result.invalid_snapshots}/{result.total_snapshots} snapshots are incomplete. "
+        f"{detail_text}"
     )
 
 
@@ -325,6 +437,34 @@ def _link_or_copy_file(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _graph2mat_basis_files_for_dataset(dataset_dir: Path) -> list[Path]:
+    by_name: dict[str, Path] = {}
+    for basis_dir in (
+        dataset_dir / "material_basis",
+        dataset_dir / "basis",
+        dataset_dir / "MD_steps" / "basis",
+    ):
+        if not basis_dir.exists():
+            continue
+        for basis_file in sorted(basis_dir.glob("*.ion.xml")):
+            by_name.setdefault(basis_file.name, basis_file)
+    return [by_name[name] for name in sorted(by_name)]
+
+
+def _materialize_graph2mat_basis_files(dataset_dir: Path, sample_dirs: list[Path]) -> int:
+    basis_files = _graph2mat_basis_files_for_dataset(dataset_dir)
+    if not basis_files:
+        return 0
+    materialized = 0
+    for sample_dir in sample_dirs:
+        if not sample_dir.exists() or not sample_dir.is_dir():
+            continue
+        for basis_file in basis_files:
+            _link_or_copy_file(basis_file, sample_dir / basis_file.name)
+            materialized += 1
+    return materialized
+
+
 def _prepare_split_sample(src_dir: Path, dst_dir: Path) -> None:
     dst_dir.mkdir(parents=True, exist_ok=True)
     for src in src_dir.iterdir():
@@ -468,6 +608,120 @@ def read_sample_metadata(sample_dir: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def read_joint_fdf_output_flags(run_fdf_path: Path) -> dict[str, str]:
+    """Return the joint benchmark output directives present in a RUN.fdf."""
+
+    if not run_fdf_path.exists():
+        return {}
+    wanted = {flag.lower(): flag for flag in JOINT_REQUIRED_FDF_OUTPUT_FLAGS}
+    found: dict[str, str] = {}
+    for line in run_fdf_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        clean = line.split("#", 1)[0].strip()
+        if not clean:
+            continue
+        parts = clean.split(None, 1)
+        key = wanted.get(parts[0].lower())
+        if key:
+            found[key] = parts[1].strip() if len(parts) > 1 else ""
+    return found
+
+
+def _expected_artifact_name(requirement, system_label: str) -> str:
+    if requirement.filenames:
+        return requirement.filenames[0]
+    if requirement.system_label_suffix:
+        return f"{system_label}{requirement.system_label_suffix}"
+    return requirement.key
+
+
+def write_joint_snapshot_metadata(
+    sample_dir: Path,
+    config: dict,
+    *,
+    extra: dict | None = None,
+    validation_status: str = "pending_joint_artifact_validation",
+) -> dict:
+    """Write per-snapshot provenance for the joint Graph2Mat/DeepH contract."""
+
+    metadata = read_sample_metadata(sample_dir)
+    if extra:
+        metadata.update(extra)
+
+    system_label, label_errors, label_warnings = resolve_system_label(sample_dir)
+    if system_label is None:
+        fallback_label = str((config.get("md") or {}).get("system_label") or "").strip() or None
+        system_label, label_errors, label_warnings = resolve_system_label(
+            sample_dir,
+            default=fallback_label,
+        )
+    system_label = system_label or str((config.get("md") or {}).get("system_label") or "siesta")
+
+    artifacts: dict[str, dict[str, object]] = {}
+    for requirement in snapshot_requirements(system_label):
+        expected_name = _expected_artifact_name(requirement, system_label)
+        artifact_path = (
+            sample_dir / "metadata.json"
+            if requirement.key == "metadata"
+            else find_artifact(sample_dir, requirement, system_label)
+        )
+        artifact_info: dict[str, object] = {
+            "filename": artifact_path.name if artifact_path else expected_name,
+            "path": str(artifact_path if artifact_path else sample_dir / expected_name),
+            "required": requirement.required,
+            "present": bool(requirement.key == "metadata" or (artifact_path and artifact_path.exists())),
+        }
+        if artifact_path and artifact_path.exists() and artifact_path.is_file() and requirement.key != "metadata":
+            artifact_info["sha256"] = material_file_sha256(artifact_path)
+        artifacts[requirement.key] = artifact_info
+
+    run_fdf_path = sample_dir / "RUN.fdf"
+    source_run_fdf = Path(str(metadata.get("source_run_fdf") or ""))
+    if source_run_fdf and not source_run_fdf.is_absolute():
+        source_run_fdf = sample_dir / source_run_fdf
+    frame_index = metadata.get("frame_index", metadata.get("source_frame_index", sample_dir.name))
+    metadata.update(
+        {
+            "sample_id": str(metadata.get("sample_id") or metadata.get("global_sample_id") or f"md_{sample_dir.name}"),
+            "snapshot_dir": str(sample_dir),
+            "system_label": system_label,
+            "siesta_system_label": system_label,
+            "artifact_contract_name": CONTRACT_NAME,
+            "artifact_contract_version": CONTRACT_NAME,
+            "artifact_contract_validation_status": validation_status,
+            "generation_mode": "clean_one_pass",
+            "source": "graph2mat_vs_deeph_dataset_generation",
+            "artifacts": artifacts,
+            "joint_store_files": JOINT_GRAPH2MAT_DEEPH_STORE_FILES,
+            "joint_store_file_patterns": JOINT_GRAPH2MAT_DEEPH_STORE_FILES.split(),
+            "fdf_output_flags": read_joint_fdf_output_flags(run_fdf_path),
+            "fdf_output_flags_required": list(JOINT_REQUIRED_FDF_OUTPUT_FLAGS),
+            "frame_index": str(frame_index),
+            "time_index": str(metadata.get("time_index", frame_index)),
+        }
+    )
+    if label_errors:
+        metadata["system_label_resolution_errors"] = label_errors
+    if label_warnings:
+        metadata["system_label_resolution_warnings"] = label_warnings
+    if run_fdf_path.exists():
+        metadata["run_fdf_sha256"] = material_file_sha256(run_fdf_path)
+    if source_run_fdf.exists() and source_run_fdf.is_file():
+        metadata["source_run_fdf_sha256"] = material_file_sha256(source_run_fdf)
+
+    write_json(sample_dir / "metadata.json", metadata)
+    return metadata
+
+
+def update_joint_snapshot_validation_metadata(result) -> None:
+    for snapshot in result.snapshots:
+        metadata = read_sample_metadata(snapshot.snapshot_dir)
+        if not metadata:
+            continue
+        metadata["artifact_contract_validation_status"] = "valid" if snapshot.valid else "invalid"
+        metadata["artifact_contract_validation"] = snapshot.to_dict()
+        write_json(snapshot.snapshot_dir / "metadata.json", metadata)
+
+
 def md_sample_manifest_fields(sample_dir: Path) -> dict[str, str]:
     metadata = read_sample_metadata(sample_dir)
     def text(key: str) -> str:
@@ -567,7 +821,7 @@ def refresh_md_step_geometries(config: dict) -> None:
                 "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
             }
         )
-        write_json(step_dir / "metadata.json", metadata)
+        write_joint_snapshot_metadata(step_dir, config, extra=metadata)
         rewritten += 1
 
     signatures = {effective_fdf_geometry_signature(step_dir / "RUN.fdf") for step_dir in step_dirs}
@@ -576,12 +830,22 @@ def refresh_md_step_geometries(config: dict) -> None:
             "MD geometry validation failed: multiple MD frames still expose the same "
             "effective RUN.fdf geometry to Graph2Mat."
         )
+    materialized = _materialize_graph2mat_basis_files(pipeline_paths["dataset_dir"], step_dirs)
     print(f"[OK] Geometrias MD por frame escritas en RUN.fdf: {rewritten} muestras.")
+    if materialized:
+        print(f"[OK] Basis Graph2Mat materializada en snapshots MD: {materialized} enlaces/copias.")
 
 
 def _copy_pseudopotentials_for_block(source_dir: Path, block_dir: Path) -> None:
+    block_dir.mkdir(parents=True, exist_ok=True)
     for pseudo in sorted(list(source_dir.glob("*.psf")) + list(source_dir.glob("*.psml"))):
         shutil.copy2(pseudo, block_dir / pseudo.name)
+    material_provenance = source_dir / "material_provenance.json"
+    if material_provenance.exists():
+        shutil.copy2(material_provenance, block_dir / material_provenance.name)
+    material_basis = source_dir / "material_basis"
+    if material_basis.exists():
+        shutil.copytree(material_basis, block_dir / "material_basis", dirs_exist_ok=True)
 
 
 def _block_config(config: dict, block_dir: Path, block: dict) -> dict:
@@ -602,6 +866,7 @@ def run_temperature_block(config: dict, block: dict, block_dir: Path) -> None:
     write_run_fdf(block_config, block=block)
     run_siesta_with_venv(block_config)
     refresh_md_step_geometries(block_config)
+    validate_joint_benchmark_artifacts(block_config)
 
 
 def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
@@ -639,32 +904,35 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
         for sample_index, source_sample in enumerate(step_dirs[:expected]):
             target_sample = final_steps_dir / str(global_index)
             shutil.copytree(source_sample, target_sample)
-            metadata = {
-                "generation_method": "md_temperature_block",
-                "method": "md",
-                "temperature_K": block.get("temperature_K"),
-                "n_snapshots_in_block": expected,
-                "source_block_id": block_id,
-                "source_block_label": block_label,
-                "source_block_dir": str(block_dir),
-                "source_frame_index": source_sample.name,
-                "sample_index_within_block": sample_index,
-                "global_sample_id": str(global_index),
-                "seed": block.get("seed"),
-                "timestep_fs": block.get("timestep_fs", config["md"].get("timestep_fs")),
-                "ensemble": block.get("ensemble", config["md"].get("ensemble", "nve")),
-                "thermostat": block.get("thermostat", config["md"].get("thermostat")),
-                "type_of_run": block.get("type_of_run", config["md"].get("type_of_run", "Verlet")),
-                "source_run_fdf": str(block_dir / "RUN.fdf"),
-                "source_run_out": str(block_dir / "RUN.out"),
-                "run_fdf_geometry_source": read_sample_metadata(source_sample).get(
-                    "run_fdf_geometry_source",
-                    "XV",
-                ),
-                "run_fdf_rewritten_from_xv": True,
-                "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
-            }
-            write_json(target_sample / "metadata.json", metadata)
+            metadata = read_sample_metadata(source_sample)
+            metadata.update(
+                {
+                    "generation_method": "md_temperature_block",
+                    "method": "md",
+                    "temperature_K": block.get("temperature_K"),
+                    "n_snapshots_in_block": expected,
+                    "source_block_id": block_id,
+                    "source_block_label": block_label,
+                    "source_block_dir": str(block_dir),
+                    "source_frame_index": source_sample.name,
+                    "sample_index_within_block": sample_index,
+                    "global_sample_id": str(global_index),
+                    "seed": block.get("seed"),
+                    "timestep_fs": block.get("timestep_fs", config["md"].get("timestep_fs")),
+                    "ensemble": block.get("ensemble", config["md"].get("ensemble", "nve")),
+                    "thermostat": block.get("thermostat", config["md"].get("thermostat")),
+                    "type_of_run": block.get("type_of_run", config["md"].get("type_of_run", "Verlet")),
+                    "source_run_fdf": str(block_dir / "RUN.fdf"),
+                    "source_run_out": str(block_dir / "RUN.out"),
+                    "run_fdf_geometry_source": read_sample_metadata(source_sample).get(
+                        "run_fdf_geometry_source",
+                        "XV",
+                    ),
+                    "run_fdf_rewritten_from_xv": True,
+                    "run_fdf_rewrite_time_policy": "post_siesta_geometry_materialization",
+                }
+            )
+            metadata = write_joint_snapshot_metadata(target_sample, config, extra=metadata)
             samples.append(metadata)
             global_index += 1
         run_out = block_dir / "RUN.out"
@@ -674,6 +942,13 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
 
     if global_index != md_total_steps(config):
         raise RuntimeError(f"Total MD combinado incorrecto: {global_index} != {md_total_steps(config)}")
+    materialized = _materialize_graph2mat_basis_files(
+        dataset_dir,
+        sorted((path for path in final_steps_dir.iterdir() if path.is_dir() and path.name.isdigit()), key=lambda path: int(path.name)),
+    )
+    if materialized:
+        print(f"[OK] Basis Graph2Mat materializada en dataset combinado: {materialized} enlaces/copias.")
+    validate_joint_benchmark_artifacts(config, final_steps_dir)
     write_json(
         dataset_dir / "md_temperature_blocks_manifest.json",
         {
@@ -930,6 +1205,10 @@ def prepare_dataset_splits(config: dict) -> None:
     for split_name, samples in split_ranges.items():
         for sample_dir in samples:
             _prepare_split_sample(sample_dir, split_root / split_name / sample_dir.name)
+    split_sample_dirs = sorted(path for path in split_root.glob("*/*") if path.is_dir())
+    materialized = _materialize_graph2mat_basis_files(pipeline_paths["dataset_dir"], split_sample_dirs)
+    if materialized:
+        print(f"[OK] Basis Graph2Mat materializada en splits MD: {materialized} enlaces/copias.")
     write_split_manifests(config, split_root, split_ranges, strategy=strategy, temporal_gap=temporal_gap)
     if excluded_gap_samples:
         write_excluded_gap_manifest(
@@ -947,12 +1226,27 @@ def prepare_dataset_splits(config: dict) -> None:
         temporal_gap=temporal_gap,
         warnings=warnings,
     )
-
     print(
         "[OK] Split MD preparado: "
         f"{train_count} train, {test_count} test, {validation_count} validation "
         f"en {split_root} (strategy={strategy})"
     )
+    artifact_validation_path = pipeline_paths["dataset_dir"] / "artifact_validation.json"
+    if artifact_validation_path.exists():
+        dataset_manifest, frozen_split = write_benchmark_manifests(
+            dataset_root=pipeline_paths["dataset_dir"],
+            split_root=split_root,
+            generation_mode="clean_one_pass",
+        )
+        print(
+            "[OK] Benchmark dataset congelado: "
+            f"{dataset_manifest['benchmark_dataset_id']} split_hash={frozen_split['split_hash']}"
+        )
+    else:
+        print(
+            "[INFO] No se escribe benchmark_dataset_manifest.json: "
+            f"no existe {artifact_validation_path}."
+        )
     print(f"[INFO] MD train samples: {_sample_names(split_ranges['train'])}")
     print(f"[INFO] MD test samples: {_sample_names(split_ranges['test'])}")
     print(f"[INFO] MD validation samples: {_sample_names(split_ranges['validation'])}")
@@ -979,6 +1273,7 @@ def main() -> int:
         write_run_fdf(config)
         run_siesta_with_venv(config)
         refresh_md_step_geometries(config)
+        validate_joint_benchmark_artifacts(config)
     prepare_dataset_splits(config)
 
     print("\n=== Pipeline completado correctamente ===")

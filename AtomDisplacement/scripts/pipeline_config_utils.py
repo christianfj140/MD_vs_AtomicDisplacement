@@ -230,6 +230,18 @@ def render_training_config(config: dict[str, Any]) -> str:
         "model": config["training"]["model"],
         "trainer": config["training"]["trainer"],
     }
+    for key in (
+        "optimizer",
+        "lr_scheduler",
+        "seed_everything",
+        "multiprocessing_sharing_strategy",
+        "ckpt_path",
+        "weights_only",
+        "training_stages",
+        "stages",
+    ):
+        if key in config["training"]:
+            training_config[key] = config["training"][key]
     return GENERATED_HEADER + yaml.safe_dump(
         training_config,
         sort_keys=False,

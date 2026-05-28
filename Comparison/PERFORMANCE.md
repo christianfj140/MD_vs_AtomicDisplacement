@@ -19,6 +19,29 @@ Evita oversubscription: si ejecutas `N` SIESTA jobs en paralelo y cada uno usa `
 
 Si `gpu` se solicita explícitamente y CUDA no está disponible, el experimento falla de forma clara. Con `auto`, se usa GPU si Torch la detecta y CPU si no.
 
+## Seguridad cientifica
+
+Los controles de rendimiento no relajan la semantica cientifica del benchmark.
+Los runs oficiales deben conservar:
+
+```yaml
+data:
+  out_matrix: hamiltonian
+  matrix_component_policy: h_only
+  n_matrix_components: 1
+```
+
+Las metricas espectrales/DOS oficiales usan el solape de referencia SIESTA
+`S_ref` salvo que el solape de la prediccion se haya validado explicitamente.
+Un `ML_prediction.HSX` marcado con
+`prediction_self_contained_hsx_safe=false` no debe usarse como Hamiltoniano+S
+autonomo para bandas o DOS externas.
+
+Los flags de depuracion que permiten matrices no validadas o resultados
+incompletos deben dejar advertencias severas en manifests/resultados. Esos
+resultados pueden servir para diagnostico de rendimiento, pero no para una
+recomendacion robusta.
+
 ## Orquestacion
 
 - `max_parallel_dataset_jobs` puede ejecutar jobs independientes metodo/dataset

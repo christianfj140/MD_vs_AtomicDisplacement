@@ -229,24 +229,25 @@ def apply_material_graph2mat_config(
         if isinstance(data, dict):
             data["basis_files"] = basis_glob
             updated_sections.append(f"{section_name}.data")
-    training_data = (config.get("training", {}) or {}).get("data", {}) or {}
-    if isinstance(training_data, dict):
-        training_data["basis_files"] = basis_glob
-        updated_sections.append("training.data")
-        matrix_target = str(training_data.get("out_matrix", "hamiltonian"))
-        if matrix_target != "hamiltonian":
-            raise RuntimeError(
-                "Only Graph2Mat data.out_matrix='hamiltonian' is supported by this "
-                f"benchmark material-aware config path; got {matrix_target!r}."
-            )
-        matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
-            training_data,
-            context="training.data",
+    training_section = config.get("training")
+    if not isinstance(training_section, dict) or not isinstance(training_section.get("data"), dict):
+        raise RuntimeError(
+            "training.data is required for Graph2Mat material-aware config generation; "
+            "it must include out_matrix, matrix_component_policy and n_matrix_components."
         )
-    else:
-        matrix_target = "hamiltonian"
-        matrix_component_policy = DEFAULT_MATRIX_COMPONENT_POLICY
-        n_matrix_components = 1
+    training_data = training_section["data"]
+    training_data["basis_files"] = basis_glob
+    updated_sections.append("training.data")
+    matrix_target = str(training_data.get("out_matrix") or "")
+    if matrix_target != "hamiltonian":
+        raise RuntimeError(
+            "Only Graph2Mat data.out_matrix='hamiltonian' is supported by this "
+            f"benchmark material-aware config path; got {matrix_target!r}."
+        )
+    matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
+        training_data,
+        context="training.data",
+    )
 
     return {
         "material": resolved.to_manifest_dict(),

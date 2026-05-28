@@ -1,0 +1,359 @@
+{
+  "description": "Graphene W90 Graph2Mat-vs-DeepH full strict pipeline payload adapted from the latest compatible Experiment MD continuation payload. It preserves the Experiment MD dataset recipes as-is, generates joint Graph2Mat+DeepH SIESTA artifacts, then runs a compact Graph2Mat/DeepH training sweep over every validated frozen-split dataset.",
+  "source_experiment_payload": "Comparison/config/graphene_w90_phase1_md_continuation_plus_aggressive_compact_20260525_payload.json",
+  "source_experiment_description": "Compact aggressive graphene W90 MD continuation payload. Same configs as aggressive payload, but shorter metadata to avoid slow UI training-plan logging.",
+  "material_preset": "graphene",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene"
+  },
+  "dataset_mode": "full_strict_pipeline",
+  "run_mode": "full_strict_pipeline",
+  "dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_w90_joint",
+  "output_root": "${REPO_ROOT}/Comparison/results/graphene_w90_g2m_deeph_benchmark",
+  "system_label": "graphene",
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": false,
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "split_mode": "blocked_with_gap",
+  "temporal_gap": 1,
+  "block_order": "train,validation,test",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "performance": {
+    "preset": "parallel_trains",
+    "compute_accelerator": "gpu",
+    "batch_size": 1024,
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 3,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "omp_num_threads": 1,
+    "mkl_num_threads": 1,
+    "openblas_num_threads": 1,
+    "numexpr_num_threads": 1,
+    "torch_num_threads": 1,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 10,
+    "graph2mat_check_val_every_n_epoch": 5,
+    "graph2mat_checkpoint_every_n_epochs": 5,
+    "graph2mat_require_cuequivariance": true,
+    "max_parallel_graph2mat_training_jobs": 4,
+    "max_parallel_deeph_training_jobs": 2,
+    "error_policy": "fail_fast"
+  },
+  "dataset_sweep": {
+    "enabled": true,
+    "max_datasets": 5,
+    "recipes": [
+      {
+        "recipe_id": "graphene_w90_phase1_iid300",
+        "label": "graphene_w90_phase1_iid300",
+        "size": 300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid300_T150_60_1",
+            "label": "60 snapshots @ 150 K",
+            "n_snapshots": 60,
+            "temperature_K": 150,
+            "seed": 150300
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid300_T300_180_2",
+            "label": "180 snapshots @ 300 K",
+            "n_snapshots": 180,
+            "temperature_K": 300,
+            "seed": 300300
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid300_T450_60_3",
+            "label": "60 snapshots @ 450 K",
+            "n_snapshots": 60,
+            "temperature_K": 450,
+            "seed": 450300
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_iid600",
+        "label": "graphene_w90_phase1_iid600",
+        "size": 600,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid600_T150_120_1",
+            "label": "120 snapshots @ 150 K",
+            "n_snapshots": 120,
+            "temperature_K": 150,
+            "seed": 150600
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid600_T300_360_2",
+            "label": "360 snapshots @ 300 K",
+            "n_snapshots": 360,
+            "temperature_K": 300,
+            "seed": 300600
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid600_T450_120_3",
+            "label": "120 snapshots @ 450 K",
+            "n_snapshots": 120,
+            "temperature_K": 450,
+            "seed": 450600
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_iid1000",
+        "label": "graphene_w90_phase1_iid1000",
+        "size": 1000,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid1000_T150_200_1",
+            "label": "200 snapshots @ 150 K",
+            "n_snapshots": 200,
+            "temperature_K": 150,
+            "seed": 151000
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1000_T300_600_2",
+            "label": "600 snapshots @ 300 K",
+            "n_snapshots": 600,
+            "temperature_K": 300,
+            "seed": 301000
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1000_T450_200_3",
+            "label": "200 snapshots @ 450 K",
+            "n_snapshots": 200,
+            "temperature_K": 450,
+            "seed": 451000
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_iid1500",
+        "label": "graphene_w90_phase1_iid1500",
+        "size": 1500,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid1500_T150_300_1",
+            "label": "300 snapshots @ 150 K",
+            "n_snapshots": 300,
+            "temperature_K": 150,
+            "seed": 151500
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1500_T300_900_2",
+            "label": "900 snapshots @ 300 K",
+            "n_snapshots": 900,
+            "temperature_K": 300,
+            "seed": 301500
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1500_T450_300_3",
+            "label": "300 snapshots @ 450 K",
+            "n_snapshots": 300,
+            "temperature_K": 450,
+            "seed": 451500
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_ood1000",
+        "label": "graphene_w90_phase1_ood1000",
+        "size": 1000,
+        "thermal_regime": "thermal_ood_ordered",
+        "split_intent": "Blocked split with temporal gap: train is 300 K, validation is 200 K, test is an explicit mixed low/high-temperature OOD set at 100 K and 400 K.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T300_799_1",
+            "label": "799 snapshots @ 300 K; 798 train + 1 train/val gap",
+            "n_snapshots": 799,
+            "temperature_K": 300,
+            "seed": 311000
+          },
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T200_101_2",
+            "label": "101 snapshots @ 200 K; 100 validation + 1 val/test gap",
+            "n_snapshots": 101,
+            "temperature_K": 200,
+            "seed": 211000
+          },
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T100_50_3",
+            "label": "50 test snapshots @ 100 K",
+            "n_snapshots": 50,
+            "temperature_K": 100,
+            "seed": 111000
+          },
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T400_50_4",
+            "label": "50 test snapshots @ 400 K",
+            "n_snapshots": 50,
+            "temperature_K": 400,
+            "seed": 411000
+          }
+        ]
+      }
+    ]
+  },
+  "graph2mat_overrides": {
+    "max_epochs": 600,
+    "optim_lr": 0.0012,
+    "batch_size": 512,
+    "loader_threads": 4,
+    "num_interactions": 3,
+    "correlation": 2,
+    "max_ell": 3,
+    "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+    "loss": "graph2mat.core.data.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.01
+    },
+    "seed_everything": 0
+  },
+  "deeph": {
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "epochs": 100,
+    "batch_size": 4,
+    "learning_rate": 0.001
+  },
+  "training_sweep": {
+    "enabled": true,
+    "max_runs": 100,
+    "apply_to_datasets": [
+      "all"
+    ],
+    "error_policy": "continue_on_error",
+    "common": {
+      "seeds": [
+        0
+      ]
+    },
+    "graph2mat": {
+      "enabled": true,
+      "max_epochs": [
+        600,
+        900
+      ],
+      "optim_lr": [
+        0.005,
+        0.0012
+      ],
+      "batch_size": [
+        1024
+      ],
+      "loader_threads": [
+        4
+      ],
+      "num_interactions": [
+        3
+      ],
+      "correlation": [
+        2
+      ],
+      "max_ell": [
+        3
+      ],
+      "hidden_irreps": [
+        "32x0e + 32x1o + 32x2e + 32x3o",
+        "48x0e + 48x1o + 48x2e + 48x3o"
+      ],
+      "loss": [
+        "graph2mat.core.data.metrics.block_type_huber"
+      ],
+      "loss_kwargs": [
+        {
+          "beta": 0.01
+        }
+      ]
+    },
+    "deeph": {
+      "enabled": true,
+      "epochs": [
+        100,
+        200
+      ],
+      "learning_rate": [
+        0.001,
+        0.0005
+      ],
+      "batch_size": [
+        4
+      ],
+      "optimizer": [
+        "adam"
+      ],
+      "weight_decay": [
+        0.0
+      ],
+      "criterion": [
+        "MaskMSELoss"
+      ],
+      "atom_fea_len": [
+        64,
+        128
+      ],
+      "edge_fea_len": [
+        128
+      ],
+      "gauss_stop": [
+        6
+      ],
+      "num_l": [
+        4
+      ],
+      "if_edge_update": [
+        true
+      ],
+      "if_lcmp": [
+        true
+      ],
+      "normalization": [
+        "LayerNorm"
+      ],
+      "atom_update_net": [
+        "CGConv"
+      ],
+      "retain_edge_fea": [
+        true
+      ]
+    }
+  },
+  "notes": {
+    "expected_dataset_count": 5,
+    "expected_dataset_recipe_ids": [
+      "graphene_w90_phase1_iid300",
+      "graphene_w90_phase1_iid600",
+      "graphene_w90_phase1_iid1000",
+      "graphene_w90_phase1_iid1500",
+      "graphene_w90_phase1_ood1000"
+    ],
+    "expected_total_snapshots": 4400,
+    "expected_training_runs": 80,
+    "graph2mat_training_sweep_source": "Compact grid distilled from the source Experiment training_plan: epochs 600/900, lr 0.005/0.0012, hidden irreps 32/48, huber beta=0.01.",
+    "deeph_discovery": "Set DEEPH_PACK_ROOT or install deeph-preprocess/deeph-train/deeph-inference in PATH before running.",
+    "scientific_policy": "Full strict mode generates one-pass joint SIESTA artifacts, validates every dataset, freezes splits and runs training sweeps without repair mode."
+  }
+}

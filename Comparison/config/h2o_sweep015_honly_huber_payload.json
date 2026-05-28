@@ -1,0 +1,153 @@
+{
+  "material": {
+    "mode": "preset",
+    "preset": "h2o"
+  },
+  "selected_methods": [
+    "md"
+  ],
+  "run_mode": "train_test_metrics_plots_only",
+  "reusable_dataset_ids": [
+    "98c89bd85937f6a2"
+  ],
+  "reusable_split_policy": "preserve_archived_splits",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "split_mode": "blocked_with_gap",
+  "test_sets": [
+    "test_md"
+  ],
+  "primary_metric": "mae_ref_meV",
+  "compute_budget_mode": "equal_sample_count",
+  "compute_accelerator": "gpu",
+  "performance": {
+    "preset": "aggressive",
+    "max_parallel_siesta_jobs": 8,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 8,
+    "max_parallel_metric_jobs": 24,
+    "omp_num_threads": 3,
+    "mkl_num_threads": 3,
+    "openblas_num_threads": 3,
+    "numexpr_num_threads": 24,
+    "torch_num_threads": 12,
+    "compute_accelerator": "gpu",
+    "batch_size": 256,
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "error_policy": "fail_fast",
+    "torch_float32_matmul_precision": "high"
+  },
+  "training_settings": {
+    "loader_threads": 4
+  },
+  "training_plan": [
+    {
+      "label": "s15_honly_huber_b0p01",
+      "display_label": "sweep015 H-only Huber beta=0.01",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        }
+      }
+    },
+    {
+      "label": "s15_honly_huber_b0p003",
+      "display_label": "sweep015 H-only Huber beta=0.003",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        }
+      }
+    },
+    {
+      "label": "s15_honly_huber_b0p03",
+      "display_label": "sweep015 H-only Huber beta=0.03",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.03
+        }
+      }
+    },
+    {
+      "label": "s15_honly_mse",
+      "display_label": "sweep015 H-only block MSE",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_mse",
+        "loss_kwargs": {}
+      }
+    },
+    {
+      "label": "s15_honly_mae_baseline",
+      "display_label": "sweep015 H-only MAE baseline",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_mae",
+        "loss_kwargs": {}
+      }
+    }
+  ],
+  "venv_activate_command": "source /home/christian/repositorios/MD_vs_AtomicDisplacement/.venv/bin/activate"
+}

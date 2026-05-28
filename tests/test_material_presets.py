@@ -36,12 +36,16 @@ class MaterialPresetTests(unittest.TestCase):
         self.assertIn("H.ion.xml", manifest["basis_file_sha256"])
         self.assertIn("O.ion.xml", manifest["basis_file_sha256"])
 
-    def test_pipeline_configs_explicitly_select_h2o_preset(self) -> None:
-        for relative in ("MD/pipeline_config.yaml", "AtomDisplacement/pipeline_config.yaml"):
+    def test_pipeline_configs_explicitly_select_supported_preset(self) -> None:
+        expected_labels = {
+            "MD/pipeline_config.yaml": "graphene",
+            "AtomDisplacement/pipeline_config.yaml": "h2o",
+        }
+        for relative, expected_label in expected_labels.items():
             with self.subTest(relative=relative):
                 config = yaml.safe_load((REPO_ROOT / relative).read_text(encoding="utf-8"))
                 resolved = resolve_material_bundle(config, base_dir=REPO_ROOT)
-                self.assertEqual(resolved.to_manifest_dict()["label"], "h2o")
+                self.assertEqual(resolved.to_manifest_dict()["label"], expected_label)
                 self.assertEqual(resolved.source, "explicit_preset")
 
     def test_legacy_config_without_material_uses_h2o_preset_with_warning(self) -> None:

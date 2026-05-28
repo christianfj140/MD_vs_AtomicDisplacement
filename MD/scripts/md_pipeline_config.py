@@ -27,6 +27,7 @@ if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
 from siesta_run_fdf import md_common_settings, render_common_run_fdf, render_md_layer
+from fdf_materialization import ensure_required_output_flags
 from graph2mat_material_config import (
     load_graph2mat_config_provenance,
     resolve_matrix_component_policy,
@@ -171,8 +172,130 @@ def md_total_steps(config: dict[str, Any]) -> int:
     return int(config["md"]["steps"])
 
 
+def _strip_fdf_comment(line: str) -> str:
+    return line.split("#", 1)[0].strip()
+
+
+def _coordinate_row_signature(value: Any) -> tuple[float, float, float, int]:
+    if isinstance(value, str):
+        parts = value.split()
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        raise RuntimeError(f"Invalid coordinate row removal entry: {value!r}")
+    if len(parts) < 4:
+        raise RuntimeError(f"Coordinate row removal entries need x y z species: {value!r}")
+    try:
+        return float(parts[0]), float(parts[1]), float(parts[2]), int(parts[3])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid coordinate row removal entry: {value!r}") from exc
+
+
+def _fdf_coordinate_row_signature(line: str) -> tuple[float, float, float, int] | None:
+    clean = _strip_fdf_comment(line)
+    if not clean:
+        return None
+    parts = clean.split()
+    if len(parts) < 4:
+        return None
+    try:
+        return float(parts[0]), float(parts[1]), float(parts[2]), int(parts[3])
+    except ValueError:
+        return None
+
+
+def _same_coordinate_row(
+    left: tuple[float, float, float, int],
+    right: tuple[float, float, float, int],
+    *,
+    tolerance: float = 1e-10,
+) -> bool:
+    return (
+        left[3] == right[3]
+        and abs(left[0] - right[0]) <= tolerance
+        and abs(left[1] - right[1]) <= tolerance
+        and abs(left[2] - right[2]) <= tolerance
+    )
+
+
+def _set_fdf_directive_once(text: str, key: str, value: str) -> str:
+    lines = text.splitlines()
+    output: list[str] = []
+    inserted = False
+    lower_key = key.lower()
+    for line in lines:
+        clean = _strip_fdf_comment(line)
+        first = clean.split(None, 1)[0].lower() if clean else ""
+        if first == lower_key:
+            if not inserted:
+                output.append(f"{key} {value}")
+                inserted = True
+            continue
+        output.append(line)
+    if not inserted:
+        output.append(f"{key} {value}")
+    return "\n".join(output).rstrip() + "\n"
+
+
+def sanitize_run_fdf_template(text: str, remove_coordinate_rows: list[Any] | None = None) -> str:
+    targets = [_coordinate_row_signature(row) for row in (remove_coordinate_rows or [])]
+    if not targets:
+        return text.rstrip() + "\n"
+
+    lines = text.splitlines()
+    output: list[str] = []
+    in_coordinates = False
+    remaining_coordinate_rows = 0
+    removed_targets: list[tuple[float, float, float, int]] = []
+    for line in lines:
+        clean_lower = _strip_fdf_comment(line).lower()
+        if clean_lower == "%block atomiccoordinatesandatomicspecies":
+            in_coordinates = True
+            output.append(line)
+            continue
+        if in_coordinates and clean_lower == "%endblock atomiccoordinatesandatomicspecies":
+            in_coordinates = False
+            output.append(line)
+            continue
+        if in_coordinates:
+            signature = _fdf_coordinate_row_signature(line)
+            if signature is not None and any(
+                _same_coordinate_row(signature, target) for target in targets
+            ):
+                removed_targets.append(signature)
+                continue
+            if signature is not None:
+                remaining_coordinate_rows += 1
+        output.append(line)
+
+    missing = [
+        target
+        for target in targets
+        if not any(_same_coordinate_row(target, removed) for removed in removed_targets)
+    ]
+    if missing:
+        raise RuntimeError(f"FDF template coordinate rows to remove were not found: {missing}")
+    return _set_fdf_directive_once("\n".join(output), "NumberOfAtoms", str(remaining_coordinate_rows))
+
+
+def render_run_fdf_template(config: dict[str, Any], block: dict[str, Any] | None = None) -> str:
+    md = config["md"]
+    template_path = resolve_path(config, md["run_fdf_template"])
+    if not template_path.is_file():
+        raise RuntimeError(f"md.run_fdf_template does not exist: {template_path}")
+    text = template_path.read_text(encoding="utf-8", errors="ignore")
+    text = sanitize_run_fdf_template(
+        text,
+        md.get("run_fdf_template_remove_coordinate_rows"),
+    )
+    text = ensure_required_output_flags(text)
+    return text.rstrip() + render_md_layer(md, block)
+
+
 def render_run_fdf(config: dict[str, Any], block: dict[str, Any] | None = None) -> str:
     md = config["md"]
+    if md.get("run_fdf_template") not in (None, ""):
+        return render_run_fdf_template(config, block=block)
     base = render_common_run_fdf(
         system_name=str(md.get("system_name", "MD dataset")),
         system_label=str((block or {}).get("system_label", md.get("system_label", "siesta"))),
@@ -199,6 +322,8 @@ def render_training_config(config: dict[str, Any]) -> str:
         "multiprocessing_sharing_strategy",
         "ckpt_path",
         "weights_only",
+        "training_stages",
+        "stages",
     )
     training_config = {
         key: config["training"][key]

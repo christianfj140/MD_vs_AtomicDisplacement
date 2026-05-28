@@ -274,6 +274,8 @@ def resolve_pseudopotentials(
             for extension in PSEUDOPOTENTIAL_EXTENSIONS
             if (pseudopotential_dir / f"{item.label}{extension}").is_file()
         ]
+        if item.atomic_number < 0 and not candidates:
+            continue
         if not candidates:
             extensions = ", ".join(PSEUDOPOTENTIAL_EXTENSIONS)
             raise MaterialBundleError(

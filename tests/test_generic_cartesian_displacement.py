@@ -135,6 +135,7 @@ class GenericCartesianDisplacementTests(unittest.TestCase):
         self.assertEqual(structure.positions_ang[2], (0.0, 1.0, 0.0))
         self.assertEqual(structure.positions_ang[3], (0.0, 0.0, 1.0))
         run_text = (output_dir / "sample_0000" / "RUN.fdf").read_text(encoding="utf-8")
+        self.assertIn("SaveHS", run_text)
         self.assertIn("Save.HS", run_text)
         self.assertIn("TS.HS.Save", run_text)
 

@@ -51,6 +51,7 @@ def validate_steps(root: Path, label: str, *, strict_validation: bool) -> dict[s
                 sample,
                 require_spectral=False,
                 allow_missing_hamiltonian_debug=not strict_validation,
+                allow_unvalidated_matrices=not strict_validation,
             )
         )
     invalid = [row for row in rows if row["status"] != "valid"]

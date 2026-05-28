@@ -55,10 +55,12 @@ def md_common_settings(md: dict[str, Any]) -> dict[str, Any]:
         "SpinPolarized": md.get("spin_polarized", "F"),
         "FixSpin": md.get("fix_spin", "F"),
         "NonCollinearSpin": md.get("non_collinear_spin", "F"),
+        "SaveHS": "true" if bool(md.get("save_hs_file", True)) else "false",
         "Save.HS": fdf_bool(md.get("save_hs_file", True)),
         "TS.HS.Save": fdf_bool(md.get("save_hs", True)),
         "TS.DE.Save": fdf_bool(md.get("save_de", True)),
         "XML.Write": fdf_bool(md.get("xml_write", True)),
+        "Write.OrbitalIndex": "T",
     }
 
 

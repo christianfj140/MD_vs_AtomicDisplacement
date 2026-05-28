@@ -1,0 +1,95 @@
+{
+  "material": {
+    "mode": "preset",
+    "preset": "h2o"
+  },
+  "selected_methods": [
+    "md"
+  ],
+  "md_sizes": [
+    1000
+  ],
+  "run_mode": "train_test_metrics_plots_only",
+  "reusable_dataset_ids": [
+    "98c89bd85937f6a2"
+  ],
+  "reusable_split_policy": "preserve_archived_splits",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "split_mode": "blocked_with_gap",
+  "test_sets": [
+    "test_md"
+  ],
+  "primary_metric": "mae_ref_meV",
+  "compute_budget_mode": "equal_sample_count",
+  "compute_accelerator": "gpu",
+  "performance": {
+    "preset": "aggressive",
+    "max_parallel_siesta_jobs": 8,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 8,
+    "max_parallel_metric_jobs": 24,
+    "omp_num_threads": 3,
+    "mkl_num_threads": 3,
+    "openblas_num_threads": 3,
+    "numexpr_num_threads": 24,
+    "torch_num_threads": 12,
+    "compute_accelerator": "gpu",
+    "batch_size": 256,
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "error_policy": "fail_fast",
+    "torch_float32_matmul_precision": "high"
+  },
+  "training_plan": [
+    {
+      "label": "phase6_default_block_normalized_huber_b0p01_seed0",
+      "display_label": "Phase6 default readout H-only block-normalized Huber beta 0.01 seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_normalized_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "default_block_normalized_huber_0p01_honly",
+          "architecture": "default_mace_graph2mat",
+          "readout": "default",
+          "hamiltonian_context": false,
+          "context_enabled": false,
+          "hamiltonian_specific_readout": false,
+          "diagnostic_only": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.block_normalized_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    }
+  ],
+  "venv_activate_command": "source /home/christian/repositorios/MD_vs_AtomicDisplacement/.venv/bin/activate"
+}

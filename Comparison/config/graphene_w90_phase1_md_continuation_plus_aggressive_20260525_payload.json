@@ -1,0 +1,4102 @@
+{
+  "description": "Graphene W90 Phase 1 MD continuation from stopped run 20260525_145541 plus extra 36h and moderate aggressive Graph2Mat configs. Reuses existing MD datasets and skips configs with valid k-point metrics.",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene"
+  },
+  "selected_methods": [
+    "md"
+  ],
+  "md_sizes": [
+    300,
+    600,
+    1000,
+    1500
+  ],
+  "atomdisplacement_sizes": [],
+  "run_mode": "train_test_metrics_plots_only",
+  "dataset_recipes": {
+    "md": [
+      {
+        "recipe_id": "graphene_w90_phase1_iid300",
+        "label": "graphene_w90_phase1_iid300",
+        "size": 300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid300_T150_60_1",
+            "label": "60 snapshots @ 150 K",
+            "n_snapshots": 60,
+            "temperature_K": 150,
+            "seed": 150300
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid300_T300_180_2",
+            "label": "180 snapshots @ 300 K",
+            "n_snapshots": 180,
+            "temperature_K": 300,
+            "seed": 300300
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid300_T450_60_3",
+            "label": "60 snapshots @ 450 K",
+            "n_snapshots": 60,
+            "temperature_K": 450,
+            "seed": 450300
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_iid600",
+        "label": "graphene_w90_phase1_iid600",
+        "size": 600,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid600_T150_120_1",
+            "label": "120 snapshots @ 150 K",
+            "n_snapshots": 120,
+            "temperature_K": 150,
+            "seed": 150600
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid600_T300_360_2",
+            "label": "360 snapshots @ 300 K",
+            "n_snapshots": 360,
+            "temperature_K": 300,
+            "seed": 300600
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid600_T450_120_3",
+            "label": "120 snapshots @ 450 K",
+            "n_snapshots": 120,
+            "temperature_K": 450,
+            "seed": 450600
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_iid1000",
+        "label": "graphene_w90_phase1_iid1000",
+        "size": 1000,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid1000_T150_200_1",
+            "label": "200 snapshots @ 150 K",
+            "n_snapshots": 200,
+            "temperature_K": 150,
+            "seed": 151000
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1000_T300_600_2",
+            "label": "600 snapshots @ 300 K",
+            "n_snapshots": 600,
+            "temperature_K": 300,
+            "seed": 301000
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1000_T450_200_3",
+            "label": "200 snapshots @ 450 K",
+            "n_snapshots": 200,
+            "temperature_K": 450,
+            "seed": 451000
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_iid1500",
+        "label": "graphene_w90_phase1_iid1500",
+        "size": 1500,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_iid1500_T150_300_1",
+            "label": "300 snapshots @ 150 K",
+            "n_snapshots": 300,
+            "temperature_K": 150,
+            "seed": 151500
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1500_T300_900_2",
+            "label": "900 snapshots @ 300 K",
+            "n_snapshots": 900,
+            "temperature_K": 300,
+            "seed": 301500
+          },
+          {
+            "block_id": "graphene_w90_phase1_iid1500_T450_300_3",
+            "label": "300 snapshots @ 450 K",
+            "n_snapshots": 300,
+            "temperature_K": 450,
+            "seed": 451500
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_phase1_ood1000",
+        "label": "graphene_w90_phase1_ood1000",
+        "size": 1000,
+        "thermal_regime": "thermal_ood_ordered",
+        "split_intent": "Blocked split with temporal gap: train is 300 K, validation is 200 K, test is an explicit mixed low/high-temperature OOD set at 100 K and 400 K.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T300_799_1",
+            "label": "799 snapshots @ 300 K; 798 train + 1 train/val gap",
+            "n_snapshots": 799,
+            "temperature_K": 300,
+            "seed": 311000
+          },
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T200_101_2",
+            "label": "101 snapshots @ 200 K; 100 validation + 1 val/test gap",
+            "n_snapshots": 101,
+            "temperature_K": 200,
+            "seed": 211000
+          },
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T100_50_3",
+            "label": "50 test snapshots @ 100 K",
+            "n_snapshots": 50,
+            "temperature_K": 100,
+            "seed": 111000
+          },
+          {
+            "block_id": "graphene_w90_phase1_ood1000_T400_50_4",
+            "label": "50 test snapshots @ 400 K",
+            "n_snapshots": 50,
+            "temperature_K": 400,
+            "seed": 411000
+          }
+        ]
+      }
+    ]
+  },
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "split_mode": "blocked_with_gap",
+  "test_sets": [
+    "test_md"
+  ],
+  "primary_metric": "fermi_window_rmse_eV",
+  "compute_budget_mode": "equal_sample_count",
+  "compute_accelerator": "gpu",
+  "performance": {
+    "preset": "aggressive",
+    "compute_accelerator": "gpu",
+    "batch_size": 64,
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 4,
+    "max_parallel_metric_jobs": 12,
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 12,
+    "torch_num_threads": 8,
+    "torch_float32_matmul_precision": "high",
+    "error_policy": "continue_on_error"
+  },
+  "training_settings": {
+    "seed_everything": 0,
+    "loader_threads": 4,
+    "data": {
+      "out_matrix": "hamiltonian",
+      "matrix_component_policy": "h_only",
+      "n_matrix_components": 1,
+      "symmetric_matrix": true
+    }
+  },
+  "training_plan": [
+    {
+      "method_id": "iid600_default_huber_b0p01_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_default_huber_b0p01_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid600_default_huber_b0p01_w48_lr0p0012_ep600",
+      "display_label": "iid600_default_huber_b0p01_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 1,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_mse_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_mse_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_mse_w32_lr0p005_ep600",
+      "display_label": "iid600_edge_node_mix_mse_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 2,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_mse_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_mse_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_mse_w32_lr0p0012_ep600",
+      "display_label": "iid600_edge_node_mix_mse_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 3,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_mse_w48_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_mse_w48_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_mse_w48_lr0p005_ep600",
+      "display_label": "iid600_edge_node_mix_mse_w48_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 4,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_mse_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "display_label": "iid600_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 5,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+      "display_label": "iid600_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 6,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+      "display_label": "iid600_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 7,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_huber_b0p01_w48_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_huber_b0p01_w48_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_huber_b0p01_w48_lr0p005_ep600",
+      "display_label": "iid600_edge_node_mix_huber_b0p01_w48_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 8,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid600_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid600_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid600",
+          "selection_group": "mid_screen",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid600_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "display_label": "iid600_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "dce20360f79c54a9"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid600",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 9,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_mse_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_default_mse_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_mse_w32_lr0p005_ep600",
+      "display_label": "iid1000_default_mse_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 10,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_mse_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_default_mse_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_mse_w32_lr0p0012_ep600",
+      "display_label": "iid1000_default_mse_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 11,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_mse_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_default_mse_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_mse_w48_lr0p0012_ep600",
+      "display_label": "iid1000_default_mse_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 12,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p01_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_default_huber_b0p01_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p01_w32_lr0p005_ep600",
+      "display_label": "iid1000_default_huber_b0p01_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 13,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p01_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_default_huber_b0p01_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p01_w32_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p01_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 14,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p01_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_default_huber_b0p01_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p01_w48_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p01_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 15,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_mse_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_edge_node_mix_mse_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_mse_w32_lr0p005_ep600",
+      "display_label": "iid1000_edge_node_mix_mse_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 16,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_mse_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_edge_node_mix_mse_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_mse_w32_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_mse_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 17,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 18,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 19,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p01_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 20,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "h2o_saturation_check",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 21,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1500_default_mse_w32_lr0p005_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1500_default_mse_w32_lr0p005_ep900",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "saturation_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1500_default_mse_w32_lr0p005_ep900",
+      "display_label": "iid1500_default_mse_w32_lr0p005_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 22,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1500_default_mse_w48_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1500_default_mse_w48_lr0p0012_ep900",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "saturation_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1500_default_mse_w48_lr0p0012_ep900",
+      "display_label": "iid1500_default_mse_w48_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 23,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1500_default_huber_b0p01_w32_lr0p005_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1500_default_huber_b0p01_w32_lr0p005_ep900",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "saturation_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1500_default_huber_b0p01_w32_lr0p005_ep900",
+      "display_label": "iid1500_default_huber_b0p01_w32_lr0p005_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 24,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1500_default_huber_b0p01_w48_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1500_default_huber_b0p01_w48_lr0p0012_ep900",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "saturation_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1500_default_huber_b0p01_w48_lr0p0012_ep900",
+      "display_label": "iid1500_default_huber_b0p01_w48_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 25,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1500_edge_node_mix_mse_w48_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1500_edge_node_mix_mse_w48_lr0p0012_ep900",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "saturation_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1500_edge_node_mix_mse_w48_lr0p0012_ep900",
+      "display_label": "iid1500_edge_node_mix_mse_w48_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 26,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1500_edge_node_mix_huber_b0p01_w48_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "iid1500_edge_node_mix_huber_b0p01_w48_lr0p0012_ep900",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "saturation_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1500_edge_node_mix_huber_b0p01_w48_lr0p0012_ep900",
+      "display_label": "iid1500_edge_node_mix_huber_b0p01_w48_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 27,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "ood1000_default_mse_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "ood1000_default_mse_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "thermal_ood_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "ood1000_default_mse_w32_lr0p005_ep600",
+      "display_label": "ood1000_default_mse_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 28,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "ood1000_default_mse_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "ood1000_default_mse_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "thermal_ood_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "ood1000_default_mse_w48_lr0p0012_ep600",
+      "display_label": "ood1000_default_mse_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 29,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "ood1000_default_huber_b0p01_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "ood1000_default_huber_b0p01_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "thermal_ood_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "ood1000_default_huber_b0p01_w32_lr0p005_ep600",
+      "display_label": "ood1000_default_huber_b0p01_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 30,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "ood1000_default_huber_b0p01_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "ood1000_default_huber_b0p01_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "thermal_ood_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "ood1000_default_huber_b0p01_w48_lr0p0012_ep600",
+      "display_label": "ood1000_default_huber_b0p01_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 31,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "ood1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "ood1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "thermal_ood_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "ood1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "display_label": "ood1000_edge_node_mix_mse_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 32,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "ood1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1",
+          "method_id": "ood1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "thermal_ood_probe",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "phase1",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "ood1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "display_label": "ood1000_edge_node_mix_huber_b0p01_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 33,
+      "source_payload": "phase1"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p003_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p003_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p003_w32_lr0p005_ep600",
+      "display_label": "iid1000_default_huber_b0p003_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 34,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p003_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p003_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p003_w32_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p003_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 35,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p003_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p003_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p003_w48_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p003_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 36,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p005_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p005_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p005_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p005_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 37,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p003_w32_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 38,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 39,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_mse_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_mse_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_mse_w64_lr0p0012_ep600",
+      "display_label": "iid1000_default_mse_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 40,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p01_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p01_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p01_w64_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p01_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 41,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p003_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p003_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p003_w64_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p003_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 42,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_mse_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_mse_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_mse_w64_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_mse_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 43,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 44,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p003_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p003_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p003_w64_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p003_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 45,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p01_w48_corr3_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p01_w48_corr3_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p01_w48_corr3_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p01_w48_corr3_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 46,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p01_w48_corr3_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p01_w48_corr3_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p01_w48_corr3_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p01_w48_corr3_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 47,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_default_huber_b0p01_w48_i4_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 4,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_default_huber_b0p01_w48_i4_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1000_default_huber_b0p01_w48_i4_lr0p0012_ep600",
+      "display_label": "iid1000_default_huber_b0p01_w48_i4_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 48,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1000_edge_node_mix_huber_b0p01_w48_i4_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 4,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p01_w48_i4_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1000_edge_node_mix_huber_b0p01_w48_i4_lr0p0012_ep600",
+      "display_label": "iid1000_edge_node_mix_huber_b0p01_w48_i4_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 49,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1500_default_huber_b0p003_w32_lr0p005_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.005,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1500_default_huber_b0p003_w32_lr0p005_ep900",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1500_default_huber_b0p003_w32_lr0p005_ep900",
+      "display_label": "iid1500_default_huber_b0p003_w32_lr0p005_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 50,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1500_default_huber_b0p003_w48_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1500_default_huber_b0p003_w48_lr0p0012_ep900",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "iid1500_default_huber_b0p003_w48_lr0p0012_ep900",
+      "display_label": "iid1500_default_huber_b0p003_w48_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 51,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1500_edge_node_mix_huber_b0p003_w48_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1500_edge_node_mix_huber_b0p003_w48_lr0p0012_ep900",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1500_edge_node_mix_huber_b0p003_w48_lr0p0012_ep900",
+      "display_label": "iid1500_edge_node_mix_huber_b0p003_w48_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 52,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1500_edge_node_mix_mse_w64_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1500_edge_node_mix_mse_w64_lr0p0012_ep900",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1500_edge_node_mix_mse_w64_lr0p0012_ep900",
+      "display_label": "iid1500_edge_node_mix_mse_w64_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 53,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "iid1500_edge_node_mix_huber_b0p01_w64_lr0p0012_ep900",
+      "training_settings": {
+        "max_epochs": 900,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "iid1500_edge_node_mix_huber_b0p01_w64_lr0p0012_ep900",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "iid1500_edge_node_mix_huber_b0p01_w64_lr0p0012_ep900",
+      "display_label": "iid1500_edge_node_mix_huber_b0p01_w64_lr0p0012_ep900",
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_iid1500",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 54,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "ood1000_default_huber_b0p003_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "ood1000_default_huber_b0p003_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        }
+      },
+      "label": "ood1000_default_huber_b0p003_w48_lr0p0012_ep600",
+      "display_label": "ood1000_default_huber_b0p003_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 55,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "ood1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "ood1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "ood1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+      "display_label": "ood1000_edge_node_mix_huber_b0p003_w48_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 56,
+      "source_payload": "extra36h"
+    },
+    {
+      "method_id": "ood1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+      "training_settings": {
+        "max_epochs": 600,
+        "optim_lr": 0.0012,
+        "batch_size": 64,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "seed_everything": 0,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_36h_extension",
+          "method_id": "ood1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "phase1_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "continuation_source_payload": "extra36h",
+          "continuation_skipped_completed_run_ids": [
+            "20260525_104036",
+            "20260525_145541"
+          ]
+        },
+        "model": {
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "label": "ood1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+      "display_label": "ood1000_edge_node_mix_huber_b0p01_w64_lr0p0012_ep600",
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_recipe_id": "graphene_w90_phase1_ood1000",
+      "source_dataset_run_id": "20260522_165439",
+      "index": 57,
+      "source_payload": "extra36h"
+    },
+    {
+      "index": 58,
+      "label": "iid1000_default_huber_b0p003_w64_i4_c3_lr0p0012_",
+      "display_label": "iid1000_default_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1000_default_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        }
+      },
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 59,
+      "label": "iid1000_default_huber_b0p01_w64_i4_c3_lr0p0008_e",
+      "display_label": "iid1000_default_huber_b0p01_w64_i4_c3_lr0p0008_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0008,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1000_default_huber_b0p01_w64_i4_c3_lr0p0008_ep900_aggr",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        }
+      },
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 60,
+      "label": "iid1000_edge_node_mix_huber_b0p003_w64_i4_c3_lr0",
+      "display_label": "iid1000_edge_node_mix_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1000_edge_node_mix_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "model": {
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 61,
+      "label": "iid1000_edge_node_mix_mse_w64_i4_c3_lr0p0012_ep9",
+      "display_label": "iid1000_edge_node_mix_mse_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1000_edge_node_mix_mse_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "model": {
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "reusable_dataset_ids": [
+        "4e4bac0e2e480dfd"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 62,
+      "label": "iid1500_default_huber_b0p003_w64_i4_c3_lr0p0012_",
+      "display_label": "iid1500_default_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1500_default_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        }
+      },
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 63,
+      "label": "iid1500_default_huber_b0p01_w64_i4_c3_lr0p0008_e",
+      "display_label": "iid1500_default_huber_b0p01_w64_i4_c3_lr0p0008_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0008,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1500_default_huber_b0p01_w64_i4_c3_lr0p0008_ep900_aggr",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        }
+      },
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 64,
+      "label": "iid1500_edge_node_mix_huber_b0p003_w64_i4_c3_lr0",
+      "display_label": "iid1500_edge_node_mix_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1500_edge_node_mix_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "model": {
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 65,
+      "label": "iid1500_edge_node_mix_mse_w64_i4_c3_lr0p0008_ep9",
+      "display_label": "iid1500_edge_node_mix_mse_w64_i4_c3_lr0p0008_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0008,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "iid1500_edge_node_mix_mse_w64_i4_c3_lr0p0008_ep900_aggr",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_iid1500",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "model": {
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "reusable_dataset_ids": [
+        "3fefe7c2fe9f8128"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 66,
+      "label": "ood1000_default_huber_b0p003_w64_i4_c3_lr0p0012_",
+      "display_label": "ood1000_default_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "ood1000_default_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "default",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        }
+      },
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 67,
+      "label": "ood1000_edge_node_mix_huber_b0p003_w64_i4_c3_lr0",
+      "display_label": "ood1000_edge_node_mix_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0012,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "ood1000_edge_node_mix_huber_b0p003_w64_i4_c3_lr0p0012_ep900_aggr",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.003
+        },
+        "model": {
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 68,
+      "label": "ood1000_default_mse_w64_i4_c3_lr0p0008_ep900_agg",
+      "display_label": "ood1000_default_mse_w64_i4_c3_lr0p0008_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0008,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "ood1000_default_mse_w64_i4_c3_lr0p0008_ep900_aggr",
+          "graph2mat_readout_family": "default",
+          "loss_family": "mse",
+          "loss_kwargs": {},
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.metrics.block_type_mse",
+        "loss_kwargs": {}
+      },
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_payload": "aggressive36h"
+    },
+    {
+      "index": 69,
+      "label": "ood1000_edge_node_mix_huber_b0p01_w64_i4_c3_lr0p",
+      "display_label": "ood1000_edge_node_mix_huber_b0p01_w64_i4_c3_lr0p0008_ep900_aggr",
+      "training_settings": {
+        "seed_everything": 0,
+        "loader_threads": 4,
+        "batch_size": 48,
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "max_epochs": 900,
+        "num_interactions": 4,
+        "correlation": 3,
+        "max_ell": 3,
+        "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+        "optim_lr": 0.0008,
+        "benchmark_metadata": {
+          "phase": "graphene_w90_phase1_aggressive_extension",
+          "method_id": "ood1000_edge_node_mix_huber_b0p01_w64_i4_c3_lr0p0008_ep900_aggr",
+          "graph2mat_readout_family": "edge_node_mix",
+          "loss_family": "huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_recipe_id": "graphene_w90_phase1_ood1000",
+          "selection_group": "aggressive_36h_extension",
+          "seed": 0,
+          "reference_policy": "real_siesta_only_no_ml_prediction_hsx",
+          "evaluation_policy": "kpoint_aware_when_non_gamma_use_s_ref_k",
+          "aggressive_extension_note": "w64, num_interactions=4, correlation=3, max_epochs=900, moderate batch size"
+        },
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "model": {
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.E3nnEdgeBlockNodeMix",
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.E3nnSimpleNodeBlock",
+          "preprocessing_edges": "graph2mat.bindings.e3nn.modules.E3nnEdgeMessageBlock",
+          "preprocessing_edges_reuse_nodes": true
+        }
+      },
+      "reusable_dataset_ids": [
+        "605e282a68c6a210"
+      ],
+      "source_payload": "aggressive36h"
+    }
+  ],
+  "kpoint_metrics_policy": {
+    "non_gamma_behavior": "auto_enable_kpoint_metrics_for_graphene_runs",
+    "use_reference_overlap_for_spectra": true,
+    "forbidden_reference_filenames": [
+      "ML_prediction.HSX"
+    ]
+  },
+  "phase1_selection_policy": {
+    "select_top_n_per_metric": 3,
+    "metrics": [
+      "h_mae_meV_mean",
+      "h_rmse_meV_mean",
+      "relative_frobenius_union_mean",
+      "global_rmse_eV_mean",
+      "low_energy_rmse_eV_mean",
+      "fermi_window_rmse_eV_mean",
+      "frontier_window_rmse_eV_mean",
+      "dos_mae_500_fermi_window_mean"
+    ],
+    "score_0_10_weights": {
+      "fermi_window_rmse_eV_mean": 0.22,
+      "low_energy_rmse_eV_mean": 0.18,
+      "global_rmse_eV_mean": 0.15,
+      "dos_mae_500_fermi_window_mean": 0.15,
+      "h_mae_meV_mean": 0.12,
+      "h_rmse_meV_mean": 0.08,
+      "relative_frobenius_union_mean": 0.06,
+      "frontier_window_rmse_eV_mean": 0.04
+    },
+    "deduplicate_selected_configs": true,
+    "deeph_followup_target_unique_configs": "approximately_8_to_15",
+    "screening_caveats": {
+      "iid300": "Cheap 200-epoch broad screen; use as exploratory signal, not as final DeepH follow-up unless confirmed at larger size.",
+      "checkpoint_policy": "Graph2Mat saves best validation checkpoint via ModelCheckpoint monitor=val_loss; this is checkpoint selection, not true early stopping."
+    },
+    "preferred_deeph_followup_pool": [
+      "graphene_w90_phase1_iid600",
+      "graphene_w90_phase1_iid1000",
+      "graphene_w90_phase1_iid1500",
+      "graphene_w90_phase1_ood1000"
+    ]
+  },
+  "deeph_followup_plan": {
+    "launch_in_this_payload": false,
+    "groups": [
+      "canonical_paper_like",
+      "training_matched",
+      "capacity_matched"
+    ],
+    "total_runs_target": "10_to_15_after_graph2mat_selection",
+    "comparison_principle": "same_siesta_w90_snapshots_splits_references_and_kpoint_evaluator"
+  },
+  "scientific_caveat": "This is not a reproduction of the DeepH paper; it is a controlled cross-architecture benchmark under the local SIESTA/W90 pipeline.",
+  "venv_activate_command": "source /home/christian/repositorios/MD_vs_AtomicDisplacement/.venv/bin/activate",
+  "reusable_split_policy": "preserve_archived_splits",
+  "reusable_dataset_ids": [
+    "4264777e8cbf25fb",
+    "dce20360f79c54a9",
+    "4e4bac0e2e480dfd",
+    "3fefe7c2fe9f8128",
+    "605e282a68c6a210"
+  ],
+  "source_dataset_run_id": "20260522_165439",
+  "source_dataset_reuse_map": {
+    "graphene_w90_phase1_iid300": "4264777e8cbf25fb",
+    "graphene_w90_phase1_iid600": "dce20360f79c54a9",
+    "graphene_w90_phase1_iid1000": "4e4bac0e2e480dfd",
+    "graphene_w90_phase1_iid1500": "3fefe7c2fe9f8128",
+    "graphene_w90_phase1_ood1000": "605e282a68c6a210"
+  },
+  "continuation_metadata": {
+    "created_after_stop_run_id": "20260525_145541",
+    "completed_method_count_skipped": 31,
+    "completed_runs": [
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_mse_w32_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_mse_w32_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p003_w32_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p003_w32_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_mse_w24_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_mse_w24_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p003_w24_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p003_w24_f33034cf07/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid600_default_huber_b0p01_w32_lr0p005_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_huber_b0p01_w32_lr0p005_ep600/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p01_w24_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p01_w24_378d734845/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p01_w32_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p01_w32_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_mse_w32_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_mse_w32_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p003_w32_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p003_w32_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p01_w32_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p01_w32_b2fe9003f8/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p003_w32_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p003_w32_1fc237ee4a/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_mse_w32_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_mse_w32_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p003_w32_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p003_w32_546c3d950a/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_mse_w32_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_mse_w32_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_mse_w24_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_mse_w24_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p01_w24_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p01_w24_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid600_default_mse_w32_lr0p005_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_mse_w32_lr0p005_ep600/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p01_w24_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p01_w24_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid600_default_mse_w32_lr0p0012_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_mse_w32_lr0p0012_ep600/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p003_w24_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p003_w24_5bf3ca3371/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_mse_w24_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_mse_w24_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p01_w32_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p01_w32_4341bfcc3b/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_edge_node_mix_huber_b0p01_w24_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_edge_node_mix_huber_b0p01_w24_e744a30cbf/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p01_w32_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p01_w32_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p003_w24_lr0p005_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p003_w24_lr0p005_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid600_default_mse_w48_lr0p005_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_mse_w48_lr0p005_ep600/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_huber_b0p003_w24_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_huber_b0p003_w24_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid600_default_mse_w48_lr0p0012_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_mse_w48_lr0p0012_ep600/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_104036",
+        "method_id": "iid300_default_mse_w24_lr0p0012_ep200",
+        "run_dir": "Comparison/results/results_md/md_dataset1_d9umtl_iid300_default_mse_w24_lr0p0012_ep200/run_20260525_104036"
+      },
+      {
+        "run_id": "20260525_145541",
+        "method_id": "iid600_default_huber_b0p01_w32_lr0p0012_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_huber_b0p01_w32_lr0p0012_ep600/run_20260525_145541"
+      },
+      {
+        "run_id": "20260525_145541",
+        "method_id": "iid600_default_huber_b0p01_w48_lr0p005_ep600",
+        "run_dir": "Comparison/results/results_md/md_dataset2_eird9u_iid600_default_huber_b0p01_w48_lr0p005_ep600/run_20260525_145541"
+      }
+    ],
+    "remaining_plus_extra_count": 57,
+    "source_payloads": [
+      "Comparison/config/graphene_w90_phase1_graph2mat_sweep_reuse_20260522_165439_payload.json",
+      "Comparison/config/graphene_w90_phase1_graph2mat_extra36h_payload.json"
+    ],
+    "note": "FC/RC cannot be mixed with reused MD datasets in a single standard UI payload; use the companion bundle launcher for automatic FC/RC follow-up.",
+    "aggressive_extension_count": 12,
+    "aggressive_extension_policy": "Add only moderate w64/correlation3/interaction4/900epoch probes on iid1000/iid1500/ood1000; no w96/w128 to avoid excessive compute.",
+    "remaining_plus_extra_plus_aggressive_count": 69,
+    "error_policy_note": "continue_on_error: failed configs are recorded and later configs continue."
+  }
+}

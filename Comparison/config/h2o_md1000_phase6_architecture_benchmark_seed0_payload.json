@@ -1,0 +1,354 @@
+{
+  "material": {
+    "mode": "preset",
+    "preset": "h2o"
+  },
+  "selected_methods": [
+    "md"
+  ],
+  "md_sizes": [
+    1000
+  ],
+  "run_mode": "train_test_metrics_plots_only",
+  "reusable_dataset_ids": [
+    "98c89bd85937f6a2"
+  ],
+  "reusable_split_policy": "preserve_archived_splits",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "split_mode": "blocked_with_gap",
+  "test_sets": [
+    "test_md"
+  ],
+  "primary_metric": "mae_ref_meV",
+  "compute_budget_mode": "equal_sample_count",
+  "compute_accelerator": "gpu",
+  "performance": {
+    "preset": "aggressive",
+    "max_parallel_siesta_jobs": 8,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 8,
+    "max_parallel_metric_jobs": 24,
+    "omp_num_threads": 3,
+    "mkl_num_threads": 3,
+    "openblas_num_threads": 3,
+    "numexpr_num_threads": 24,
+    "torch_num_threads": 12,
+    "compute_accelerator": "gpu",
+    "batch_size": 256,
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "error_policy": "fail_fast",
+    "torch_float32_matmul_precision": "high"
+  },
+  "training_settings": {
+    "loader_threads": 4
+  },
+  "training_plan": [
+    {
+      "label": "phase6_default_mse_seed0",
+      "display_label": "Phase6 default readout H-only block MSE seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_mse",
+        "loss_kwargs": {},
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "default_mse_honly",
+          "architecture": "default_mace_graph2mat",
+          "readout": "default",
+          "hamiltonian_context": false,
+          "context_enabled": false,
+          "hamiltonian_specific_readout": false,
+          "diagnostic_only": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.block_type_mse",
+          "loss_kwargs": {},
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    },
+    {
+      "label": "phase6_default_mae_seed0",
+      "display_label": "Phase6 default readout H-only block MAE seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_mae",
+        "loss_kwargs": {},
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "default_mae_honly",
+          "architecture": "default_mace_graph2mat",
+          "readout": "default",
+          "hamiltonian_context": false,
+          "context_enabled": false,
+          "hamiltonian_specific_readout": false,
+          "diagnostic_only": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.block_type_mae",
+          "loss_kwargs": {},
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    },
+    {
+      "label": "phase6_context_default_huber_seed0",
+      "display_label": "Phase6 Hamiltonian context plus default readout Huber beta 0.01 seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "model": {
+          "hamiltonian_local_context": true
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "hamiltonian_context_default_huber_0p01",
+          "architecture": "mace_graph2mat_hamiltonian_local_context",
+          "readout": "default",
+          "hamiltonian_context": true,
+          "context_enabled": true,
+          "hamiltonian_specific_readout": false,
+          "diagnostic_only": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    },
+    {
+      "label": "phase6_context_hamreadout_huber_seed0",
+      "display_label": "Phase6 Hamiltonian context plus Hamiltonian readout Huber beta 0.01 seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.block_type_huber",
+        "loss_kwargs": {
+          "beta": 0.01
+        },
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "model": {
+          "hamiltonian_local_context": true,
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.hamiltonian_readout.E3nnHamiltonianNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.hamiltonian_readout.E3nnHamiltonianEdgeBlock"
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "hamiltonian_context_readout_huber_0p01",
+          "architecture": "mace_graph2mat_hamiltonian_local_context_readout",
+          "readout": "hamiltonian_specific",
+          "hamiltonian_context": true,
+          "context_enabled": true,
+          "hamiltonian_specific_readout": true,
+          "diagnostic_only": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    },
+    {
+      "label": "phase6_context_hamreadout_staged_seed0",
+      "display_label": "Phase6 Hamiltonian context plus Hamiltonian readout staged composite seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.hamiltonian_composite_loss",
+        "loss_kwargs": {
+          "beta": 0.01,
+          "coefficient_mse_weight": 0.05
+        },
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "model": {
+          "return_coefficients": true,
+          "hamiltonian_local_context": true,
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.hamiltonian_readout.E3nnHamiltonianNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.hamiltonian_readout.E3nnHamiltonianEdgeBlock"
+        },
+        "training": {
+          "training_stages": [
+            {
+              "name": "coefficient_warmup",
+              "train": [
+                "readout",
+                "hamiltonian_context"
+              ],
+              "freeze": [
+                "mace"
+              ],
+              "loss": "coefficient_space_mse",
+              "max_epochs": 150,
+              "optim_lr": 0.005
+            },
+            {
+              "name": "composite_finetune",
+              "loss": "hamiltonian_composite_loss",
+              "loss_kwargs": {
+                "beta": 0.01,
+                "coefficient_mse_weight": 0.05
+              },
+              "max_epochs": 400,
+              "optim_lr": 0.005
+            }
+          ]
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "hamiltonian_context_readout_staged_composite",
+          "architecture": "mace_graph2mat_hamiltonian_local_context_readout",
+          "readout": "hamiltonian_specific",
+          "hamiltonian_context": true,
+          "context_enabled": true,
+          "hamiltonian_specific_readout": true,
+          "training_stages": [
+            "coefficient_warmup",
+            "composite_finetune"
+          ],
+          "diagnostic_only": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.hamiltonian_composite_loss",
+          "loss_kwargs": {
+            "beta": 0.01,
+            "coefficient_mse_weight": 0.05
+          },
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    },
+    {
+      "label": "phase6_dense_upper_bound_seed0",
+      "display_label": "Phase6 dense diagnostic upper bound coefficient MSE seed0",
+      "reusable_dataset_ids": [
+        "98c89bd85937f6a2"
+      ],
+      "training_settings": {
+        "seed_everything": 0,
+        "max_epochs": 550,
+        "optim_lr": 0.005,
+        "batch_size": 96,
+        "loader_threads": 4,
+        "num_interactions": 3,
+        "correlation": 2,
+        "max_ell": 3,
+        "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+        "loss": "graph2mat.core.data.metrics.coefficient_space_mse",
+        "loss_kwargs": {},
+        "data": {
+          "out_matrix": "hamiltonian",
+          "matrix_component_policy": "h_only",
+          "n_matrix_components": 1,
+          "symmetric_matrix": true
+        },
+        "model": {
+          "return_coefficients": true,
+          "node_block_readout": "graph2mat.bindings.e3nn.modules.dense_readout.E3nnDiagnosticDenseNodeBlock",
+          "edge_block_readout": "graph2mat.bindings.e3nn.modules.dense_readout.E3nnDiagnosticDenseEdgeBlock"
+        },
+        "benchmark_metadata": {
+          "benchmark_method_id": "diagnostic_dense_upper_bound",
+          "architecture": "diagnostic_dense_non_equivariant",
+          "readout": "dense_diagnostic",
+          "hamiltonian_context": false,
+          "context_enabled": false,
+          "hamiltonian_specific_readout": false,
+          "diagnostic_only": true,
+          "production_compatible": false,
+          "seed": 0,
+          "loss": "graph2mat.core.data.metrics.coefficient_space_mse",
+          "loss_kwargs": {},
+          "dataset_reference_policy": "real_siesta_tshs_or_hsx_only_no_ml_prediction"
+        }
+      }
+    }
+  ],
+  "venv_activate_command": "source /home/christian/repositorios/MD_vs_AtomicDisplacement/.venv/bin/activate"
+}

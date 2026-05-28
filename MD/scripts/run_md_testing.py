@@ -84,7 +84,8 @@ def main() -> int:
     callbacks_config = config["testing"]["callbacks"]
     allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(
-        str(pipeline_paths["training_dir"] / ckpt_path)
+        str(pipeline_paths["training_dir"] / ckpt_path),
+        weights_only=False,
     )
     datamodule_kwargs = {
         "out_matrix": training_data["out_matrix"],
@@ -131,7 +132,7 @@ def main() -> int:
     trainer.test(
         model,
         datamodule=datamodule,
-        ckpt_path=str(pipeline_paths["training_dir"] / ckpt_path),
+        ckpt_path=None,
     )
     print("\n=== Testeo completado correctamente ===")
     return 0

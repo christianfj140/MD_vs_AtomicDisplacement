@@ -16,6 +16,8 @@ for path in (SHARED_DIR, MD_SCRIPTS_DIR):
 
 from graph2mat_material_config import (  # noqa: E402
     apply_material_graph2mat_config,
+    resolve_matrix_component_policy,
+    validate_model_matrix_component_policy,
     write_graph2mat_config_provenance,
 )
 
@@ -144,6 +146,72 @@ class Graph2MatMaterialConfigTests(unittest.TestCase):
         self.assertEqual(provenance["graph2mat"]["matrix_target"], "hamiltonian")
         self.assertEqual(provenance["graph2mat"]["matrix_component_policy"], "h_only")
         self.assertEqual(provenance["graph2mat"]["n_matrix_components"], 1)
+
+    def test_h_only_policy_with_one_component_passes(self) -> None:
+        policy, n_components = resolve_matrix_component_policy(
+            {"matrix_component_policy": "h_only", "n_matrix_components": 1},
+            context="training.data",
+        )
+
+        self.assertEqual(policy, "h_only")
+        self.assertEqual(n_components, 1)
+
+    def test_h_only_policy_with_two_components_fails(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "training.data.*h_only.*n_matrix_components=1"):
+            resolve_matrix_component_policy(
+                {"matrix_component_policy": "h_only", "n_matrix_components": 2},
+                context="training.data",
+            )
+
+    def test_missing_matrix_component_policy_fails(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "training.data.matrix_component_policy"):
+            resolve_matrix_component_policy(
+                {"n_matrix_components": 1},
+                context="training.data",
+            )
+
+    def test_missing_n_matrix_components_fails(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "training.data.n_matrix_components"):
+            resolve_matrix_component_policy(
+                {"matrix_component_policy": "h_only"},
+                context="training.data",
+            )
+
+    def test_checkpoint_policy_mismatch_fails_when_metadata_available(self) -> None:
+        class Model:
+            hparams = {"data": {"matrix_component_policy": "h_and_overlap", "n_matrix_components": 2}}
+
+        with self.assertRaisesRegex(RuntimeError, "checkpoint policy"):
+            validate_model_matrix_component_policy(
+                Model(),
+                matrix_component_policy="h_only",
+                n_matrix_components=1,
+                context="prediction",
+            )
+
+    def test_checkpoint_component_count_mismatch_fails_when_metadata_available(self) -> None:
+        class Model:
+            hparams = {"data": {"matrix_component_policy": "h_only", "n_matrix_components": 2}}
+
+        with self.assertRaisesRegex(RuntimeError, "checkpoint n_matrix_components=2"):
+            validate_model_matrix_component_policy(
+                Model(),
+                matrix_component_policy="h_only",
+                n_matrix_components=1,
+                context="testing",
+            )
+
+    def test_material_config_generation_requires_training_data(self) -> None:
+        config = self.config()
+        config.pop("training")
+
+        with self.assertRaisesRegex(RuntimeError, "training.data is required"):
+            apply_material_graph2mat_config(
+                config,
+                base_dir=self.root,
+                dataset_dir=self.root / "dataset",
+                training_dir=self.root / "training",
+            )
 
     def test_missing_basis_file_fails_clearly(self) -> None:
         (self.root / "materials" / "sic" / "basis" / "C.ion.xml").unlink()
