@@ -12,25 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from graph2mat_sweep_config import normalize_graph2mat_overrides
+from graph2mat_sweep_config import GRAPH2MAT_SWEEP_KEYS, normalize_graph2mat_overrides
 
 
 COMMON_KEYS = {"seeds", "seed", "epochs", "learning_rate", "batch_size"}
-GRAPH2MAT_KEYS = {
-    "enabled",
-    "max_epochs",
-    "optim_lr",
-    "batch_size",
-    "loader_threads",
-    "seed_everything",
-    "loss",
-    "loss_kwargs",
-    "num_interactions",
-    "correlation",
-    "max_ell",
-    "hidden_irreps",
-    "hidden_irreps_channels",
-}
+GRAPH2MAT_KEYS = {"enabled", *GRAPH2MAT_SWEEP_KEYS}
 DEEPH_KEYS = {
     "enabled",
     "epochs",

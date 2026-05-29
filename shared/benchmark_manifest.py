@@ -33,6 +33,21 @@ SIESTA_FLAG_KEYS = (
     "XML.Write",
     "Write.OrbitalIndex",
 )
+SPIN_FLAG_KEYS = (
+    "SpinPolarized",
+    "FixSpin",
+    "NonCollinearSpin",
+)
+ENVIRONMENT_PROVENANCE_KEYS = (
+    "python_version",
+    "platform",
+    "executable",
+    "package_versions",
+    "conda_env_export_path",
+    "pip_freeze_path",
+    "container_image",
+    "container_digest",
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -236,9 +251,89 @@ def _non_empty_text(payload: dict[str, Any], *keys: str) -> bool:
     return False
 
 
-def provenance_status(dataset_root: Path, material: dict[str, Any]) -> dict[str, Any]:
+def _non_empty_text_or_sequence(payload: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (list, tuple)) and any(str(item).strip() for item in value):
+            return True
+    return False
+
+
+def _existing_material_path(dataset_root: Path, material: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = material.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            path = dataset_root / path
+        if path.exists() and path.is_file():
+            return True
+    return False
+
+
+def sanitized_environment_provenance(material: dict[str, Any]) -> dict[str, Any]:
+    environment = material.get("environment")
+    if not isinstance(environment, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key in ENVIRONMENT_PROVENANCE_KEYS:
+        value = environment.get(key)
+        if value in (None, "", {}, []):
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
+def _environment_provenance_present(material: dict[str, Any]) -> bool:
+    environment = sanitized_environment_provenance(material)
+    return _non_empty_text(environment, "python_version") and _non_empty_text(environment, "platform")
+
+
+def fdf_block_lines(path: Path, block_name: str) -> list[str]:
+    if not path.exists():
+        return []
+    lower_name = block_name.lower()
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    inside = False
+    output: list[str] = []
+    for line in lines:
+        clean = _strip_fdf_comment(line)
+        if not clean:
+            continue
+        lower = clean.lower()
+        if lower == f"%block {lower_name}":
+            inside = True
+            continue
+        if inside and lower == f"%endblock {lower_name}":
+            return output
+        if inside:
+            output.append(clean)
+    return output
+
+
+def kpoint_summary(path: Path) -> dict[str, Any]:
+    rows = fdf_block_lines(path, "kgrid_Monkhorst_Pack")
+    return {
+        "kgrid_monkhorst_pack": rows,
+        "present": bool(rows),
+    }
+
+
+def spin_summary(path: Path) -> dict[str, str]:
+    return fdf_directives(path, keys=SPIN_FLAG_KEYS)
+
+
+def provenance_status(
+    dataset_root: Path,
+    material: dict[str, Any],
+    *,
+    strict_paper_ready: bool = False,
+) -> dict[str, Any]:
     run_fdf_path = dataset_root / "RUN.fdf"
-    status = {
+    status: dict[str, Any] = {
         "basis_provenance": _non_empty_mapping(material, "basis_file_sha256", "basis_hashes"),
         "pseudopotential_provenance": _non_empty_mapping(
             material,
@@ -252,10 +347,38 @@ def provenance_status(dataset_root: Path, material: dict[str, Any]) -> dict[str,
             "fdf_sha256",
             "siesta_input_sha256",
         ),
+        "siesta_version_provenance": _non_empty_text(
+            material,
+            "siesta_version",
+        ) or _existing_material_path(dataset_root, material, "siesta_version_source_file"),
+        "siesta_command_line_provenance": _non_empty_text_or_sequence(material, "siesta_command_line"),
+        "siesta_environment_provenance": _environment_provenance_present(material),
+        "siesta_execution_log_provenance": _existing_material_path(
+            dataset_root,
+            material,
+            "siesta_stdout_path",
+            "run_out_path",
+        ),
     }
-    missing = [key for key, present in status.items() if not present]
+    required_keys = [
+        "basis_provenance",
+        "pseudopotential_provenance",
+        "material_identity",
+        "siesta_input_provenance",
+    ]
+    if strict_paper_ready:
+        required_keys.extend(
+            [
+                "siesta_version_provenance",
+                "siesta_command_line_provenance",
+                "siesta_environment_provenance",
+                "siesta_execution_log_provenance",
+            ]
+        )
+    missing = [key for key in required_keys if not status.get(key)]
     return {
         **status,
+        "strict_paper_ready": strict_paper_ready,
         "valid": not missing,
         "missing": missing,
     }
@@ -268,6 +391,7 @@ def build_benchmark_dataset_manifest(
     frozen_split_manifest: dict[str, Any] | None = None,
     material_provenance: dict[str, Any] | None = None,
     generation_mode: str = "clean_one_pass",
+    strict_paper_ready_provenance: bool = False,
 ) -> dict[str, Any]:
     dataset_root = Path(dataset_root)
     material = material_provenance or {}
@@ -281,7 +405,11 @@ def build_benchmark_dataset_manifest(
         warnings.append(f"ambiguous dataset SystemLabel values: {labels}")
 
     run_fdf_path = dataset_root / "RUN.fdf"
-    provenance = provenance_status(dataset_root, material)
+    provenance = provenance_status(
+        dataset_root,
+        material,
+        strict_paper_ready=strict_paper_ready_provenance,
+    )
     for missing_key in provenance["missing"]:
         warnings.append(f"missing dataset-level {missing_key}")
     split_hash = (frozen_split_manifest or {}).get("split_hash")
@@ -321,6 +449,18 @@ def build_benchmark_dataset_manifest(
         "siesta_input_path": str(run_fdf_path) if run_fdf_path.exists() else "",
         "siesta_input_sha256": file_sha256(run_fdf_path) if run_fdf_path.exists() else "",
         "siesta_flags": fdf_directives(run_fdf_path),
+        "siesta_version": material.get("siesta_version", ""),
+        "siesta_version_source_file": material.get("siesta_version_source_file", ""),
+        "siesta_executable": material.get("siesta_executable", ""),
+        "siesta_command_line": material.get("siesta_command_line", ""),
+        "siesta_stdout_path": material.get("siesta_stdout_path") or material.get("run_out_path") or "",
+        "siesta_returncode": material.get("siesta_returncode"),
+        "siesta_build_info": material.get("siesta_build_info", ""),
+        "kpoint_summary": kpoint_summary(run_fdf_path),
+        "spin_summary": spin_summary(run_fdf_path),
+        "environment": sanitized_environment_provenance(material),
+        "graph2mat_commit": material.get("graph2mat_commit", ""),
+        "deeph_pack_commit": material.get("deeph_pack_commit", ""),
         "basis_hashes": material.get("basis_file_sha256") or {},
         "pseudopotential_hashes": material.get("pseudopotential_sha256") or {},
         "provenance_status": provenance,
@@ -342,6 +482,7 @@ def write_benchmark_manifests(
     generation_mode: str = "clean_one_pass",
     artifact_validation_path: Path | None = None,
     material_provenance_path: Path | None = None,
+    strict_paper_ready_provenance: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     dataset_root = Path(dataset_root)
     artifact_validation = read_json(artifact_validation_path or dataset_root / "artifact_validation.json")
@@ -353,6 +494,7 @@ def write_benchmark_manifests(
         frozen_split_manifest=frozen_split,
         material_provenance=material_provenance,
         generation_mode=generation_mode,
+        strict_paper_ready_provenance=strict_paper_ready_provenance,
     )
     write_json(dataset_root / "frozen_split_manifest.json", frozen_split)
     write_json(dataset_root / "benchmark_dataset_manifest.json", dataset_manifest)

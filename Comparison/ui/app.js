@@ -5229,8 +5229,21 @@ function finiteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-const PLOT_COLORS = ["#4b6f8f", "#2a7f62", "#9467bd", "#d7a021", "#4f8f84", "#b15c5f", "#6370aa"];
-const DEEPH_REFERENCE_COLORS = ["#b45309", "#9f1239", "#6d28d9", "#0f766e", "#374151"];
+const SCIENCE_PLOT_AXIS_COLOR = "#111827";
+const SCIENCE_PLOT_GRID_COLOR = "rgba(17, 24, 39, 0.10)";
+const SCIENCE_PLOT_FONT_FAMILY = '"STIX Two Text", "Latin Modern Roman", "Times New Roman", Georgia, serif';
+const PLOT_COLORS = [
+  "#4477aa",
+  "#228833",
+  "#cc6677",
+  "#ee7733",
+  "#66ccee",
+  "#aa3377",
+  "#bbbbbb",
+  "#009988",
+  "#997700",
+];
+const DEEPH_REFERENCE_COLORS = ["#cc3311", "#882255", "#332288", "#117733", "#666666"];
 const DEEPH_PAPER_REFERENCE_LINES = {
   "plot-kpoint-h": [
     {
@@ -5315,6 +5328,111 @@ function plotColor(index) {
 
 function deephReferenceColor(index) {
   return DEEPH_REFERENCE_COLORS[index % DEEPH_REFERENCE_COLORS.length];
+}
+
+function sciencePlotAxis(axis = {}, fallbackTitle = "") {
+  const rawTitle = axis.title == null && fallbackTitle ? fallbackTitle : axis.title;
+  const title = typeof rawTitle === "object"
+    ? {
+        ...rawTitle,
+        font: { size: 13, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
+      }
+    : { text: rawTitle || "", font: { size: 13, color: SCIENCE_PLOT_AXIS_COLOR } };
+  return {
+    showline: true,
+    linecolor: SCIENCE_PLOT_AXIS_COLOR,
+    linewidth: 1.1,
+    mirror: false,
+    ticks: "outside",
+    ticklen: 4,
+    tickwidth: 1,
+    tickcolor: SCIENCE_PLOT_AXIS_COLOR,
+    tickfont: { size: 11, color: SCIENCE_PLOT_AXIS_COLOR },
+    zeroline: false,
+    showgrid: true,
+    gridcolor: SCIENCE_PLOT_GRID_COLOR,
+    gridwidth: 0.7,
+    automargin: true,
+    ...axis,
+    title,
+  };
+}
+
+function sciencePlotLayout(layout = {}) {
+  const rawTitle = typeof layout.title === "object" ? layout.title : { text: layout.title || "" };
+  const annotations = (layout.annotations || []).map((annotation) => ({
+    font: { size: 12, color: "#374151", ...(annotation.font || {}) },
+    ...annotation,
+  }));
+  return {
+    colorway: PLOT_COLORS,
+    autosize: true,
+    paper_bgcolor: "#ffffff",
+    plot_bgcolor: "#ffffff",
+    font: { family: SCIENCE_PLOT_FONT_FAMILY, color: SCIENCE_PLOT_AXIS_COLOR, size: 12 },
+    ...layout,
+    margin: { l: 64, r: 24, t: 50, b: 58, ...(layout.margin || {}) },
+    title: {
+      x: 0.02,
+      xanchor: "left",
+      ...rawTitle,
+      font: { size: 15, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
+    },
+    legend: {
+      orientation: "h",
+      y: -0.22,
+      x: 0,
+      xanchor: "left",
+      yanchor: "top",
+      bgcolor: "rgba(255,255,255,0)",
+      borderwidth: 0,
+      font: { size: 11, color: SCIENCE_PLOT_AXIS_COLOR },
+      ...(layout.legend || {}),
+    },
+    hoverlabel: {
+      bgcolor: "#ffffff",
+      bordercolor: "rgba(17, 24, 39, 0.22)",
+      font: { family: SCIENCE_PLOT_FONT_FAMILY, size: 12, color: SCIENCE_PLOT_AXIS_COLOR },
+      ...(layout.hoverlabel || {}),
+    },
+    annotations,
+    xaxis: sciencePlotAxis(layout.xaxis, "Dataset size"),
+    yaxis: sciencePlotAxis(layout.yaxis),
+  };
+}
+
+function sciencePlotTrace(trace = {}, index = 0) {
+  const color = trace.marker?.color || trace.line?.color || plotColor(index);
+  const marker = trace.marker
+    ? {
+        size: 8,
+        opacity: 0.88,
+        color,
+        line: { color: "#ffffff", width: 0.7, ...(trace.marker.line || {}) },
+        ...trace.marker,
+      }
+    : undefined;
+  const line = trace.line
+    ? {
+        color,
+        width: trace.type === "bar" ? undefined : 1.65,
+        ...trace.line,
+      }
+    : undefined;
+  const styled = {
+    ...trace,
+    ...(marker ? { marker } : {}),
+    ...(line ? { line } : {}),
+  };
+  if (trace.type === "bar") {
+    styled.marker = {
+      color,
+      opacity: 0.84,
+      line: { color: "rgba(17,24,39,0.34)", width: 0.7 },
+      ...(trace.marker || {}),
+    };
+  }
+  return styled;
 }
 
 function mean(values) {
@@ -5574,17 +5692,17 @@ function lineTraces(runs, group, metrics) {
 }
 
 function plotLayout(title, yTitle, extra = {}) {
-  return {
+  return sciencePlotLayout({
     title: { text: title, x: 0.02, xanchor: "left", font: { size: 15 } },
-    margin: { l: 56, r: 18, t: 46, b: 48 },
+    margin: { l: 64, r: 24, t: 50, b: 58 },
     paper_bgcolor: "#ffffff",
     plot_bgcolor: "#ffffff",
-    xaxis: { title: "Dataset size", gridcolor: "#edf1f4", zeroline: false },
-    yaxis: { title: yTitle, gridcolor: "#edf1f4", zeroline: false },
-    legend: { orientation: "h", y: -0.25 },
-    font: { family: "Inter, sans-serif", color: "#17202a" },
+    xaxis: { title: "Dataset size", showgrid: false, zeroline: false },
+    yaxis: { title: yTitle, gridcolor: SCIENCE_PLOT_GRID_COLOR, zeroline: false },
+    legend: { orientation: "h", y: -0.25, x: 0 },
+    font: { family: SCIENCE_PLOT_FONT_FAMILY, color: SCIENCE_PLOT_AXIS_COLOR },
     ...extra,
-  };
+  });
 }
 
 function traceYValues(traces) {
@@ -5845,16 +5963,21 @@ function schedulePlotResize(id = null) {
 function renderPlot(id, traces, layout, config = {}) {
   const node = plotNode(id);
   if (!node || !window.Plotly) return;
-  const nextLayout = {
-    autosize: true,
-    ...layout,
-  };
+  const nextLayout = sciencePlotLayout(layout || {});
+  const nextTraces = (traces || []).map((trace, index) => sciencePlotTrace(trace, index));
   const nextConfig = {
     responsive: true,
     displaylogo: false,
+    modeBarButtonsToRemove: ["lasso2d", "select2d"],
+    toImageButtonOptions: {
+      format: "svg",
+      filename: "graph2mat_deeph_plot",
+      scale: 2,
+      ...(config.toImageButtonOptions || {}),
+    },
     ...config,
   };
-  Plotly.react(node, traces, nextLayout, nextConfig).then(() => {
+  Plotly.react(node, nextTraces, nextLayout, nextConfig).then(() => {
     installPlotInfoBubble(node);
     schedulePlotResize(node);
   });

@@ -57,6 +57,10 @@ def write_dataset_provenance(
     include_pseudo: bool = True,
     include_material: bool = True,
     include_fdf: bool = True,
+    include_siesta_version: bool = True,
+    include_siesta_command: bool = True,
+    include_environment: bool = True,
+    include_run_log: bool = True,
 ) -> None:
     payload = {}
     if include_material:
@@ -67,6 +71,15 @@ def write_dataset_provenance(
         payload["pseudopotential_sha256"] = {"C": "pseudo-hash"}
     if include_fdf:
         payload["fdf_sha256"] = "fdf-hash"
+    if include_siesta_version:
+        payload["siesta_version"] = "SIESTA test-version"
+    if include_siesta_command:
+        payload["siesta_command_line"] = "bash -lc 'siesta < RUN.fdf'"
+    if include_environment:
+        payload["environment"] = {"python_version": "3.11.0", "platform": "test-platform"}
+    if include_run_log:
+        (dataset / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+        payload["run_out_path"] = str(dataset / "RUN.out")
     (dataset / "material_provenance.json").write_text(
         json.dumps(payload, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -220,6 +233,40 @@ class JointArtifactContractTests(unittest.TestCase):
         self.assertTrue(result.pseudopotential_provenance_present)
         self.assertTrue(result.material_identity_present)
         self.assertTrue(result.siesta_input_provenance_present)
+        self.assertTrue(result.siesta_version_provenance_present)
+        self.assertTrue(result.siesta_command_line_provenance_present)
+        self.assertTrue(result.siesta_environment_provenance_present)
+        self.assertTrue(result.siesta_execution_log_present)
+
+    def test_strict_profile_requires_siesta_version_provenance(self) -> None:
+        dataset = self.root / "dataset"
+        write_snapshot(dataset / "sample_0001")
+        write_dataset_provenance(dataset, include_siesta_version=False)
+
+        result = validate_dataset(dataset, validation_profile=G2M_DEEPH_BENCHMARK_PROFILE)
+
+        self.assertFalse(result.valid)
+        self.assertIn("dataset-level SIESTA version provenance is missing", result.errors)
+
+    def test_strict_profile_requires_siesta_command_line_provenance(self) -> None:
+        dataset = self.root / "dataset"
+        write_snapshot(dataset / "sample_0001")
+        write_dataset_provenance(dataset, include_siesta_command=False)
+
+        result = validate_dataset(dataset, validation_profile=G2M_DEEPH_BENCHMARK_PROFILE)
+
+        self.assertFalse(result.valid)
+        self.assertIn("dataset-level SIESTA command-line provenance is missing", result.errors)
+
+    def test_strict_profile_requires_environment_provenance(self) -> None:
+        dataset = self.root / "dataset"
+        write_snapshot(dataset / "sample_0001")
+        write_dataset_provenance(dataset, include_environment=False)
+
+        result = validate_dataset(dataset, validation_profile=G2M_DEEPH_BENCHMARK_PROFILE)
+
+        self.assertFalse(result.valid)
+        self.assertIn("dataset-level execution environment provenance is missing", result.errors)
 
     def test_non_strict_fixture_can_skip_dataset_provenance_explicitly(self) -> None:
         dataset = self.root / "dataset"

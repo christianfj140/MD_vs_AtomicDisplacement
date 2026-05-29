@@ -29,6 +29,7 @@ from g2m_deeph_topk import (
     write_selection_artifacts,
 )
 from g2m_deeph_training_sweep import expand_training_sweep, json_safe, training_sweep_from_protocol
+from g2m_deeph_verify_protocol_datasets import verify_protocol_datasets
 
 
 WORKFLOW_SCHEMA = "graph2mat_deeph_final_workflow_v1"
@@ -131,6 +132,58 @@ def generate_training_plan(protocol: dict[str, Any]) -> tuple[dict[str, Any], di
     return training_sweep, plan
 
 
+def protocol_dataset_ids(protocol: dict[str, Any]) -> list[str]:
+    return [str(dataset.get("dataset_id") or "").strip() for dataset in protocol.get("datasets") or []]
+
+
+def selected_protocol_dataset(protocol: dict[str, Any], dataset_id: str | None) -> dict[str, Any]:
+    datasets = [dict(dataset) for dataset in protocol.get("datasets") or [] if isinstance(dataset, dict)]
+    if not datasets:
+        raise RuntimeError("Protocol contains no datasets.")
+    ids = [str(dataset.get("dataset_id") or "").strip() for dataset in datasets]
+    requested = str(dataset_id or "").strip()
+    if not requested:
+        if len(datasets) == 1:
+            return datasets[0]
+        raise RuntimeError(
+            "Protocol declares multiple datasets ("
+            + ", ".join(ids)
+            + "); pass --dataset-id for stages that launch a runner."
+        )
+    for dataset in datasets:
+        if str(dataset.get("dataset_id") or "").strip() == requested:
+            return dataset
+    raise RuntimeError(f"Unknown protocol dataset_id {requested!r}. Available datasets: {', '.join(ids)}")
+
+
+def filter_plan_for_dataset(plan: dict[str, Any], dataset_id: str) -> dict[str, Any]:
+    filtered = json.loads(json.dumps(json_safe(plan)))
+    planned = [
+        dict(record)
+        for record in filtered.get("planned_runs") or []
+        if str(record.get("dataset_id") or "") == dataset_id
+    ]
+    if not planned:
+        raise RuntimeError(f"Training plan contains no runs for dataset_id={dataset_id!r}.")
+    filtered["planned_runs"] = planned
+    search_plan = filtered.get("search_plan")
+    if isinstance(search_plan, dict):
+        search_plan["planned_runs"] = [
+            dict(record)
+            for record in search_plan.get("planned_runs") or []
+            if str(record.get("dataset_id") or "") == dataset_id
+        ]
+        search_plan["planned_run_count"] = len(search_plan["planned_runs"])
+        duplicates = [
+            dict(record)
+            for record in search_plan.get("duplicate_configs") or []
+            if str(record.get("dataset_id") or "") == dataset_id
+        ]
+        search_plan["duplicate_configs"] = duplicates
+        search_plan["duplicate_config_count"] = len(duplicates)
+    return filtered
+
+
 def build_runner_payload(
     *,
     protocol: dict[str, Any],
@@ -139,17 +192,21 @@ def build_runner_payload(
     run_id: str,
     protocol_stage: str,
     dry_run: bool,
+    dataset_id: str | None = None,
 ) -> dict[str, Any]:
-    datasets = list(protocol.get("datasets") or [])
-    if not datasets:
-        raise RuntimeError("Protocol contains no datasets.")
+    selected_dataset = selected_protocol_dataset(protocol, dataset_id)
+    selected_dataset_id = str(selected_dataset.get("dataset_id") or "").strip()
+    selected_plan = filter_plan_for_dataset(plan, selected_dataset_id)
     payload: dict[str, Any] = {
         "benchmark_mode": "final_publication",
         "protocol_stage": protocol_stage,
         "protocol": protocol,
         "run_id": run_id,
         "output_root": str(workflow_root / "runs"),
-        "dataset_root": str(datasets[0]["dataset_root"]),
+        "dataset_root": str(selected_dataset["dataset_root"]),
+        "selected_dataset_id": selected_dataset_id,
+        "protocol_dataset_ids": protocol_dataset_ids(protocol),
+        "executed_dataset_ids": [selected_dataset_id],
         "dataset_mode": "reuse_validated",
         "metric_fail_policy": "fail_closed",
         "allow_diagnostic_metrics": False,
@@ -157,7 +214,7 @@ def build_runner_payload(
         "early_stopping": dict(protocol.get("early_stopping") or {}),
         "selection_metric": (protocol.get("selection") or {}).get("metric"),
         "selection_mode": (protocol.get("selection") or {}).get("mode"),
-        "_training_sweep_plan": plan,
+        "_training_sweep_plan": selected_plan,
     }
     if isinstance(protocol.get("performance"), dict):
         payload["performance"] = dict(protocol["performance"])
@@ -265,6 +322,7 @@ def build_evidence_bundle_manifest(
         "run_root": str(run_root),
         "protocol_id": protocol.get("protocol_id"),
         "protocol_hash": protocol.get("protocol_hash"),
+        "protocol_dataset_ids": protocol_dataset_ids(protocol),
         "status": "complete" if not missing_required else "partial",
         "missing_required": missing_required,
         "files": entries,
@@ -280,12 +338,25 @@ def stage_validate_protocol(args: argparse.Namespace) -> dict[str, Any]:
     protocol = load_protocol(args.protocol)
     path = canonical_protocol_path(workflow_root)
     write_json(path, protocol)
+    outputs: dict[str, Any] = {"validated_protocol": str(path), "protocol_hash": protocol["protocol_hash"]}
+    if args.verify_datasets:
+        verification_path = workflow_root / "dataset_verification.json"
+        verification = verify_protocol_datasets(
+            protocol_path=args.protocol,
+            output_path=verification_path,
+            strict=True,
+            write_manifests=bool(args.write_dataset_manifests),
+        )
+        outputs["dataset_verification"] = str(verification_path)
+        outputs["dataset_verification_status"] = verification.get("status")
+        if verification.get("status") != "valid":
+            raise RuntimeError("Protocol dataset verification failed: " + "; ".join(verification.get("blockers") or []))
     return stage_manifest(
         workflow_root=workflow_root,
         stage=args.stage,
         status="completed",
         inputs={"protocol": str(args.protocol)},
-        outputs={"validated_protocol": str(path), "protocol_hash": protocol["protocol_hash"]},
+        outputs=outputs,
         message="Protocol validated and canonicalized.",
     )
 
@@ -308,6 +379,8 @@ def stage_generate_search_plan(args: argparse.Namespace) -> dict[str, Any]:
             "training_sweep_plan": str(search_dir / "training_sweep_plan.json"),
             "search_plan": str(search_dir / "search_plan.json"),
             "planned_run_count": len(plan.get("planned_runs") or []),
+            "protocol_dataset_ids": protocol_dataset_ids(protocol),
+            "planned_dataset_ids": sorted({str(row.get("dataset_id") or "") for row in plan.get("planned_runs") or []}),
         },
         message="Preregistered search plan generated.",
     )
@@ -325,7 +398,9 @@ def stage_run_search(args: argparse.Namespace) -> dict[str, Any]:
         run_id=run_id,
         protocol_stage=SEARCH_STAGE,
         dry_run=bool(args.dry_run),
+        dataset_id=args.dataset_id,
     )
+    selected_plan = payload["_training_sweep_plan"]
     search_dir = workflow_root / "search"
     write_json(search_dir / "run_search_payload.json", payload)
     if args.dry_run:
@@ -334,15 +409,24 @@ def stage_run_search(args: argparse.Namespace) -> dict[str, Any]:
             "stage": "run-search",
             "status": "planned_dry_run",
             "run_id": run_id,
+            "selected_dataset_id": payload["selected_dataset_id"],
+            "executed_dataset_ids": payload["executed_dataset_ids"],
+            "protocol_dataset_ids": payload["protocol_dataset_ids"],
             "runner_payload": str(search_dir / "run_search_payload.json"),
-            "planned_run_count": len(plan.get("planned_runs") or []),
+            "planned_run_count": len(selected_plan.get("planned_runs") or []),
         }
         write_json(search_dir / "run_search_manifest.json", manifest)
         return stage_manifest(
             workflow_root=workflow_root,
             stage=args.stage,
             status="planned_dry_run",
-            outputs={"run_search_manifest": str(search_dir / "run_search_manifest.json")},
+            outputs={
+                "run_search_manifest": str(search_dir / "run_search_manifest.json"),
+                "selected_dataset_id": payload["selected_dataset_id"],
+                "executed_dataset_ids": payload["executed_dataset_ids"],
+                "protocol_dataset_ids": payload["protocol_dataset_ids"],
+                "planned_run_count": len(selected_plan.get("planned_runs") or []),
+            },
             message="Search runner payload written; no subprocesses launched.",
         )
     runner = Graph2MatDeepHBenchmarkRunner()
@@ -363,6 +447,9 @@ def stage_run_search(args: argparse.Namespace) -> dict[str, Any]:
             "run_search_manifest": str(search_dir / "run_search_manifest.json"),
             "search_run_root": str(run_root),
             "training_sweep_manifest": copied,
+            "selected_dataset_id": payload["selected_dataset_id"],
+            "executed_dataset_ids": payload["executed_dataset_ids"],
+            "protocol_dataset_ids": payload["protocol_dataset_ids"],
         },
         message="Search completed test-blind.",
     )
@@ -462,7 +549,9 @@ def stage_run_final(args: argparse.Namespace) -> dict[str, Any]:
         run_id=run_id,
         protocol_stage=ROBUST_VALIDATION_STAGE,
         dry_run=bool(args.dry_run),
+        dataset_id=args.dataset_id,
     )
+    selected_plan = payload["_training_sweep_plan"]
     final_dir = workflow_root / "final"
     write_json(final_dir / "run_final_payload.json", payload)
     if args.dry_run:
@@ -471,15 +560,24 @@ def stage_run_final(args: argparse.Namespace) -> dict[str, Any]:
             "stage": "run-final",
             "status": "planned_dry_run",
             "run_id": run_id,
+            "selected_dataset_id": payload["selected_dataset_id"],
+            "executed_dataset_ids": payload["executed_dataset_ids"],
+            "protocol_dataset_ids": payload["protocol_dataset_ids"],
             "runner_payload": str(final_dir / "run_final_payload.json"),
-            "planned_run_count": len(plan["planned_runs"]),
+            "planned_run_count": len(selected_plan.get("planned_runs") or []),
         }
         write_json(final_dir / "run_final_manifest.json", manifest)
         return stage_manifest(
             workflow_root=workflow_root,
             stage=args.stage,
             status="planned_dry_run",
-            outputs={"run_final_manifest": str(final_dir / "run_final_manifest.json")},
+            outputs={
+                "run_final_manifest": str(final_dir / "run_final_manifest.json"),
+                "selected_dataset_id": payload["selected_dataset_id"],
+                "executed_dataset_ids": payload["executed_dataset_ids"],
+                "protocol_dataset_ids": payload["protocol_dataset_ids"],
+                "planned_run_count": len(selected_plan.get("planned_runs") or []),
+            },
             message="Robust/final runner payload written; no subprocesses launched.",
         )
     runner = Graph2MatDeepHBenchmarkRunner()
@@ -500,6 +598,9 @@ def stage_run_final(args: argparse.Namespace) -> dict[str, Any]:
             "run_final_manifest": str(final_dir / "run_final_manifest.json"),
             "final_run_root": str(run_root),
             "training_sweep_manifest": copied,
+            "selected_dataset_id": payload["selected_dataset_id"],
+            "executed_dataset_ids": payload["executed_dataset_ids"],
+            "protocol_dataset_ids": payload["protocol_dataset_ids"],
         },
         message="Robust/final training completed test-blind; final test metrics remain locked.",
     )
@@ -515,6 +616,26 @@ def final_run_root(args: argparse.Namespace) -> Path:
     return Path(root)
 
 
+def final_evaluation_metric(protocol: dict[str, Any]) -> str:
+    section = protocol.get("final_evaluation")
+    if not isinstance(section, dict):
+        raise RuntimeError("final_evaluation is required for final-test claims.")
+    metric = str(section.get("primary_metric") or "").strip()
+    if not metric:
+        raise RuntimeError("final_evaluation.primary_metric is required for final-test claims.")
+    return metric
+
+
+def final_evaluation_mode(protocol: dict[str, Any]) -> str:
+    section = protocol.get("final_evaluation")
+    if not isinstance(section, dict):
+        raise RuntimeError("final_evaluation is required for final-test claims.")
+    mode = str(section.get("mode") or "").strip()
+    if not mode:
+        raise RuntimeError("final_evaluation.mode is required for final-test claims.")
+    return mode
+
+
 def stage_evaluate_final_test(args: argparse.Namespace) -> dict[str, Any]:
     workflow_root = args.workflow_root
     protocol = load_workflow_protocol(args.protocol, workflow_root)
@@ -524,7 +645,8 @@ def stage_evaluate_final_test(args: argparse.Namespace) -> dict[str, Any]:
     )
     robust_plan = read_json(robust_plan_path)
     root = final_run_root(args)
-    metric = str(protocol["selection"]["metric"])
+    metric = final_evaluation_metric(protocol)
+    mode = final_evaluation_mode(protocol)
     rows = load_rows(root)
     validate_final_evaluation_inputs(
         selected_runs=list(robust_plan.get("planned_runs") or []),
@@ -536,7 +658,7 @@ def stage_evaluate_final_test(args: argparse.Namespace) -> dict[str, Any]:
         run_root=root,
         output_dir=workflow_root / "final_test",
         metric=metric,
-        mode=str(protocol["selection"]["mode"]),
+        mode=mode,
         expected_seeds=[int(seed) for seed in protocol["final_seeds"]],
         min_final_seeds=min(3, len(protocol["final_seeds"])),
     )
@@ -554,12 +676,16 @@ def stage_generate_report(args: argparse.Namespace) -> dict[str, Any]:
     workflow_root = args.workflow_root
     protocol = load_workflow_protocol(args.protocol, workflow_root)
     root = args.report_run_root or args.final_run_root or final_run_root(args)
+    metric = final_evaluation_metric(protocol)
+    mode = final_evaluation_mode(protocol)
     report = generate_report(
         run_root=root,
         output_dir=workflow_root / "report",
-        metric=str(protocol["selection"]["metric"]),
-        mode=str(protocol["selection"]["mode"]),
+        metric=metric,
+        mode=mode,
         compute_threshold=args.compute_threshold,
+        final_statistics_path=workflow_root / "final_test" / "final_statistics.json",
+        gate_status_path=workflow_root / "gate_status.json",
     )
     evidence = build_evidence_bundle_manifest(
         workflow_root=workflow_root,
@@ -595,6 +721,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--protocol", type=Path, default=None)
     parser.add_argument("--workflow-root", type=Path, required=True)
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--dataset-id", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--search-manifest", type=Path, default=None)
@@ -603,6 +730,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--final-run-root", type=Path, default=None)
     parser.add_argument("--report-run-root", type=Path, default=None)
     parser.add_argument("--compute-threshold", type=float, default=None)
+    parser.add_argument("--verify-datasets", action="store_true")
+    parser.add_argument("--write-dataset-manifests", action="store_true")
     return parser.parse_args(argv)
 
 

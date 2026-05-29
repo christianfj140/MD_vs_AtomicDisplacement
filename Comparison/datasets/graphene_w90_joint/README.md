@@ -21,3 +21,8 @@ dataset should contain, at minimum:
 
 The normal benchmark workflow must validate this directory and must not repair
 missing DeepH artifacts with silent per-snapshot SIESTA reruns.
+
+For a publicable run, keep this directory immutable after freezing the split
+and archive a release manifest with hashes for the dataset, SIESTA artifacts,
+DeepH processed files, predictions, telemetry and final reports. See
+`docs/graph2mat_deeph_benchmark.md` for the strict runbook and claim checklist.

@@ -69,6 +69,7 @@ class BenchmarkManifestTests(unittest.TestCase):
         self.split_root = self.dataset / "splits"
         self.dataset.mkdir(parents=True)
         (self.dataset / "RUN.fdf").write_text("SystemLabel graphene\nSave.HS T\n", encoding="utf-8")
+        (self.dataset / "RUN.out").write_text("Job completed\n", encoding="utf-8")
         (self.dataset / "material_provenance.json").write_text(
             json.dumps(
                 {
@@ -77,6 +78,16 @@ class BenchmarkManifestTests(unittest.TestCase):
                     "fdf_sha256": "fdfhash",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
+                    "siesta_version": "SIESTA test-version",
+                    "siesta_executable": "siesta",
+                    "siesta_command_line": "bash -lc 'siesta < RUN.fdf'",
+                    "run_out_path": str(self.dataset / "RUN.out"),
+                    "siesta_returncode": 0,
+                    "environment": {
+                        "python_version": "3.11.0",
+                        "platform": "test-platform",
+                        "SECRET_TOKEN": "must-not-serialize",
+                    },
                 },
                 sort_keys=True,
             )
@@ -137,6 +148,11 @@ class BenchmarkManifestTests(unittest.TestCase):
         self.assertEqual(dataset_manifest["generation_mode"], "clean_one_pass")
         self.assertEqual(dataset_manifest["validation_status"], "valid")
         self.assertTrue(dataset_manifest["siesta_input_sha256"])
+        self.assertEqual(dataset_manifest["siesta_version"], "SIESTA test-version")
+        self.assertEqual(dataset_manifest["siesta_command_line"], "bash -lc 'siesta < RUN.fdf'")
+        self.assertEqual(dataset_manifest["siesta_returncode"], 0)
+        self.assertEqual(dataset_manifest["environment"]["python_version"], "3.11.0")
+        self.assertNotIn("SECRET_TOKEN", dataset_manifest["environment"])
         self.assertEqual(dataset_manifest["basis_hashes"], {"C.ion.xml": "basis"})
         self.assertEqual(dataset_manifest["pseudopotential_hashes"], {"C": "pseudo"})
         self.assertTrue(dataset_manifest["provenance_status"]["valid"])
@@ -241,6 +257,69 @@ class BenchmarkManifestTests(unittest.TestCase):
 
         self.assertFalse(dataset_manifest["benchmark_ready"])
         self.assertIn("material_identity", dataset_manifest["provenance_status"]["missing"])
+
+    def test_strict_paper_ready_manifest_requires_siesta_version(self) -> None:
+        artifact_validation = self.prepare_dataset()
+        frozen_split = build_frozen_split_manifest(self.dataset, self.split_root)
+
+        dataset_manifest = build_benchmark_dataset_manifest(
+            self.dataset,
+            artifact_validation=artifact_validation,
+            frozen_split_manifest=frozen_split,
+            material_provenance={
+                "label": "graphene",
+                "basis_file_sha256": {"C.ion.xml": "basis"},
+                "pseudopotential_sha256": {"C": "pseudo"},
+                "fdf_sha256": "fdfhash",
+                "siesta_command_line": "bash -lc 'siesta < RUN.fdf'",
+                "run_out_path": str(self.dataset / "RUN.out"),
+                "environment": {"python_version": "3.11.0", "platform": "test-platform"},
+            },
+            strict_paper_ready_provenance=True,
+        )
+
+        self.assertFalse(dataset_manifest["benchmark_ready"])
+        self.assertIn("siesta_version_provenance", dataset_manifest["provenance_status"]["missing"])
+
+    def test_strict_paper_ready_manifest_requires_command_line(self) -> None:
+        artifact_validation = self.prepare_dataset()
+        frozen_split = build_frozen_split_manifest(self.dataset, self.split_root)
+
+        dataset_manifest = build_benchmark_dataset_manifest(
+            self.dataset,
+            artifact_validation=artifact_validation,
+            frozen_split_manifest=frozen_split,
+            material_provenance={
+                "label": "graphene",
+                "basis_file_sha256": {"C.ion.xml": "basis"},
+                "pseudopotential_sha256": {"C": "pseudo"},
+                "fdf_sha256": "fdfhash",
+                "siesta_version": "SIESTA test-version",
+                "run_out_path": str(self.dataset / "RUN.out"),
+                "environment": {"python_version": "3.11.0", "platform": "test-platform"},
+            },
+            strict_paper_ready_provenance=True,
+        )
+
+        self.assertFalse(dataset_manifest["benchmark_ready"])
+        self.assertIn("siesta_command_line_provenance", dataset_manifest["provenance_status"]["missing"])
+
+    def test_strict_paper_ready_manifest_passes_with_execution_provenance(self) -> None:
+        artifact_validation = self.prepare_dataset()
+        frozen_split = build_frozen_split_manifest(self.dataset, self.split_root)
+        material = json.loads((self.dataset / "material_provenance.json").read_text(encoding="utf-8"))
+
+        dataset_manifest = build_benchmark_dataset_manifest(
+            self.dataset,
+            artifact_validation=artifact_validation,
+            frozen_split_manifest=frozen_split,
+            material_provenance=material,
+            strict_paper_ready_provenance=True,
+        )
+
+        self.assertTrue(dataset_manifest["benchmark_ready"])
+        self.assertTrue(dataset_manifest["provenance_status"]["siesta_environment_provenance"])
+        self.assertTrue(dataset_manifest["provenance_status"]["siesta_execution_log_provenance"])
 
 
 if __name__ == "__main__":

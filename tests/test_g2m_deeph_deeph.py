@@ -138,12 +138,22 @@ class DeepHRunnerIntegrationTests(unittest.TestCase):
         self.output_root = self.root / "results"
         self.dataset.mkdir(parents=True)
         (self.dataset / "RUN.fdf").write_text("SystemLabel graphene\nSave.HS T\n", encoding="utf-8")
+        (self.dataset / "RUN.out").write_text("Siesta version: test-siesta\nJob completed\n", encoding="utf-8")
         (self.dataset / "material_provenance.json").write_text(
             json.dumps(
                 {
                     "label": "graphene",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
+                    "siesta_version": "test-siesta",
+                    "siesta_executable": "/usr/bin/siesta-test",
+                    "siesta_command_line": ["siesta-test", "RUN.fdf"],
+                    "siesta_stdout_path": str(self.dataset / "RUN.out"),
+                    "siesta_returncode": 0,
+                    "environment": {
+                        "python_version": "3.test",
+                        "platform": "test-platform",
+                    },
                 },
                 sort_keys=True,
             )

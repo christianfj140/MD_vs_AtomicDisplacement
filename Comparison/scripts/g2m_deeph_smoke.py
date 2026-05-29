@@ -9,6 +9,7 @@ available only behind RUN_G2M_DEEPH_REAL_SMOKE=1 and explicit --tiny-real.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shlex
@@ -22,15 +23,24 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
+SHARED_DIR = REPO_ROOT / "shared"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
 
+from benchmark_manifest import write_benchmark_manifests  # noqa: E402
+from g2m_deeph_final_workflow import parse_args as workflow_parse_args  # noqa: E402
+from g2m_deeph_final_workflow import run_stage as workflow_run_stage  # noqa: E402
+from g2m_deeph_gate_check import build_gate_status  # noqa: E402
+from g2m_deeph_release_manifest import build_release_manifest  # noqa: E402
 from g2m_deeph_runner import (  # noqa: E402
     DATASET_SWEEP_RUN_MODE,
     DEEPH_CLI_NAMES,
     METRIC_FAIL_POLICY_FAIL_CLOSED,
     Graph2MatDeepHBenchmarkRunner,
 )
+from joint_artifact_contract import validate_dataset  # noqa: E402
 
 
 REAL_SMOKE_ENV = "RUN_G2M_DEEPH_REAL_SMOKE"
@@ -45,6 +55,7 @@ REQUIRED_SNAPSHOT_ARTIFACTS = (
     "SystemLabel.ORB_INDX",
     "metadata.json",
 )
+PAPER_WORKFLOW_SCIENTIFIC_STATUS = "not_a_scientific_run"
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -261,6 +272,309 @@ def _write_smoke_outputs(
     (logs_dir / "smoke.log").write_text("".join(logs), encoding="utf-8")
 
 
+def _write_workflow_snapshot(path: Path, *, label: str = "graphene") -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "RUN.fdf").write_text(
+        "\n".join(
+            [
+                f"SystemLabel {label}",
+                "SaveHS true",
+                "Save.HS T",
+                "TS.HS.Save T",
+                "TS.DE.Save T",
+                "XML.Write T",
+                "Write.OrbitalIndex T",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (path / "RUN.out").write_text("Synthetic smoke output\n", encoding="utf-8")
+    write_json(path / "metadata.json", {"system_label": label, "smoke_fixture": True})
+    for suffix in (".TSHS", ".TSDE", ".HSX", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
+        (path / f"{label}{suffix}").write_text(f"synthetic {suffix}\n", encoding="utf-8")
+
+
+def _write_workflow_split_csv(path: Path, *, sample_id: str, sample_dir: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    split = path.stem.replace("_manifest", "")
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["sample_id", "split", "sample_dir"])
+        writer.writeheader()
+        writer.writerow({"sample_id": sample_id, "split": split, "sample_dir": str(sample_dir)})
+
+
+def _create_paper_workflow_dataset(dataset_root: Path) -> None:
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    (dataset_root / "RUN.out").write_text("Synthetic dataset-level SIESTA output\n", encoding="utf-8")
+    write_json(
+        dataset_root / "material_provenance.json",
+        {
+            "label": "graphene_smoke",
+            "fdf_sha256": "synthetic-fdf-hash",
+            "basis_file_sha256": {"C.ion.xml": "synthetic-basis-hash"},
+            "pseudopotential_sha256": {"C": "synthetic-pseudo-hash"},
+            "siesta_version": "SIESTA synthetic-smoke",
+            "siesta_command_line": "siesta < RUN.fdf",
+            "run_out_path": str(dataset_root / "RUN.out"),
+            "siesta_returncode": 0,
+            "environment": {"python_version": sys.version.split()[0], "platform": sys.platform},
+        },
+    )
+    sample_dirs: list[Path] = []
+    for index, split in enumerate(("train", "validation", "test")):
+        sample_dir = dataset_root / "samples" / f"s{index}"
+        _write_workflow_snapshot(sample_dir)
+        sample_dirs.append(sample_dir)
+        _write_workflow_split_csv(dataset_root / "splits" / f"{split}_manifest.csv", sample_id=f"s{index}", sample_dir=sample_dir)
+    artifact_validation = validate_dataset(dataset_root, snapshot_dirs=sample_dirs).to_dict()
+    write_json(dataset_root / "artifact_validation.json", artifact_validation)
+    write_benchmark_manifests(
+        dataset_root=dataset_root,
+        split_root=dataset_root / "splits",
+        strict_paper_ready_provenance=True,
+    )
+
+
+def _paper_workflow_protocol(dataset_root: Path) -> dict[str, Any]:
+    return {
+        "protocol_id": "paper_workflow_smoke_protocol",
+        "version": "1.0",
+        "datasets": [
+            {
+                "dataset_id": "joint_smoke",
+                "dataset_root": str(dataset_root),
+                "benchmark_dataset_manifest": str(dataset_root / "benchmark_dataset_manifest.json"),
+                "frozen_split_manifest": str(dataset_root / "frozen_split_manifest.json"),
+                "split_root": str(dataset_root / "splits"),
+            }
+        ],
+        "reference_artifacts": {
+            "required": required_snapshot_artifacts(),
+            "forbidden": ["ML_prediction.HSX"],
+            "forbid_as_reference": "ML_prediction.HSX",
+        },
+        "models": {
+            "graph2mat": {
+                "enabled": True,
+                "search_space": {
+                    "optim_lr": {"choices": [0.001]},
+                    "batch_size": {"choices": [64]},
+                    "max_epochs": {"value": 2},
+                    "hidden_irreps": {"choices": ["16x0e + 16x1o + 16x2e"]},
+                    "num_interactions": {"value": 2},
+                    "correlation": {"value": 2},
+                    "max_ell": {"value": 2},
+                },
+            },
+            "deeph": {
+                "enabled": True,
+                "search_space": {
+                    "learning_rate": {"choices": [0.0001]},
+                    "batch_size": {"choices": [2]},
+                    "epochs": {"value": 2},
+                    "atom_fea_len": {"value": 64},
+                    "edge_fea_len": {"value": 128},
+                    "num_l": {"value": 4},
+                    "if_lcmp": {"value": True},
+                },
+            },
+        },
+        "selection": {"split": "validation", "metric": "low_energy_rmse_eV", "mode": "min", "source": "validation_only"},
+        "early_stopping": {"metric": "low_energy_rmse_eV", "mode": "min", "patience": 1, "min_delta": 0.0, "max_epochs": 2},
+        "search_policy": {"strategy": "random", "n_trials_per_model": 1, "random_seed": 1},
+        "budget_policy": {"mode": "equal_n_trials", "n_trials_per_model": 1},
+        "final_seeds": [0, 1, 2],
+        "top_k_selection": {"k_per_model": 1, "split": "validation", "metric": "low_energy_rmse_eV", "uses_test_metrics": False},
+        "final_evaluation": {"primary_metric": "low_energy_rmse_eV", "mode": "min", "secondary_metrics": ["h_mae_eV"]},
+        "final_test_policy": {
+            "policy": "locked_until_final",
+            "test_split": "test",
+            "locked_during_search": True,
+            "evaluate_once_after_selection": True,
+        },
+        "required_telemetry": [
+            "wall_clock_seconds",
+            "gpu_hours",
+            "peak_gpu_memory_mb",
+            "samples_per_second",
+            "matrix_blocks_per_second",
+            "best_validation_epoch",
+        ],
+        "deeph_comparability": {
+            "adapter_equivalence_policy": "fail_closed_unless_proven",
+            "robust_winner_requires_proven_equivalence": True,
+            "diagnostic_if_unproven": True,
+        },
+    }
+
+
+def _workflow_stage(workflow_root: Path, *args: str) -> dict[str, Any]:
+    return workflow_run_stage(workflow_parse_args(["--workflow-root", str(workflow_root), *args]))
+
+
+def _synthetic_search_record(model: str, *, value: float) -> dict[str, Any]:
+    return {
+        "status": "completed",
+        "model": model,
+        "dataset_id": "joint_smoke",
+        "dataset_root": "",
+        "config_id": f"{model}_smoke_config",
+        "config_hash": f"{model}-hash",
+        "run_root": f"synthetic/{model}",
+        "protocol_stage": "search",
+        "metric_split": "validation",
+        "low_energy_rmse_eV": value,
+        "validation_metrics": {"low_energy_rmse_eV": value},
+        "common": {"seed": 0, "epochs": 2},
+        "overrides": {"seed_everything": 0} if model == "graph2mat" else {"seed": 0},
+    }
+
+
+def _synthetic_final_rows(robust_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for planned in robust_plan.get("planned_runs") or []:
+        if not isinstance(planned, dict):
+            continue
+        model = str(planned.get("model") or "")
+        seed = planned.get("seed", (planned.get("common") or {}).get("seed"))
+        value = 0.20 if model == "graph2mat" else 0.19
+        row = {
+            **planned,
+            "status": "completed",
+            "protocol_stage": "final_test",
+            "metric_split": "test",
+            "low_energy_rmse_eV_mean": value,
+            "telemetry": {
+                "gpu_hours_total": 0.01 if model == "graph2mat" else 0.02,
+                "peak_gpu_memory_mb": 128.0,
+                "samples_per_second": 10.0,
+                "matrix_blocks_per_second": 100.0,
+            },
+            "per_system_metrics": [{"sample_id": "s2", "low_energy_rmse_eV_mean": value}],
+            "seed": seed,
+        }
+        if model == "deeph":
+            row.update(
+                {
+                    "adapter_equivalence_status": "diagnostic_local_frame_only",
+                    "equivalence_status": "unproven",
+                    "comparability_status": "diagnostic_only",
+                    "diagnostic_only": True,
+                }
+            )
+        rows.append(row)
+    return rows
+
+
+def run_paper_workflow_dry_run(*, output_root: Path | None = None, run_id: str | None = None) -> dict[str, Any]:
+    output_root = (output_root or _default_output_root()).resolve()
+    workflow_root = output_root / "paper_workflow"
+    dataset_root = output_root / "synthetic_dataset"
+    final_run_root = workflow_root / "runs" / "synthetic_final"
+    output_root.mkdir(parents=True, exist_ok=True)
+    run_id = run_id or f"paper_workflow_smoke_{_timestamp()}"
+    logs: list[str] = [
+        "[PAPER-SMOKE] control-plane dry run only; no scientific benchmark was run.\n",
+        f"[PAPER-SMOKE] output_root={output_root}\n",
+    ]
+
+    _create_paper_workflow_dataset(dataset_root)
+    protocol_path = output_root / "paper_workflow_protocol.json"
+    write_json(protocol_path, _paper_workflow_protocol(dataset_root))
+    stage_results: list[dict[str, Any]] = []
+    for args in (
+        ("--stage", "validate-protocol", "--protocol", str(protocol_path), "--verify-datasets"),
+        ("--stage", "generate-search-plan"),
+        ("--stage", "run-search", "--dry-run", "--dataset-id", "joint_smoke", "--run-id", f"{run_id}_search"),
+    ):
+        stage_results.append(_workflow_stage(workflow_root, *args))
+
+    write_json(
+        workflow_root / "search" / "training_sweep_manifest.json",
+        {"runs": [_synthetic_search_record("graph2mat", value=0.20), _synthetic_search_record("deeph", value=0.19)]},
+    )
+    stage_results.append(_workflow_stage(workflow_root, "--stage", "select-top-k"))
+    stage_results.append(_workflow_stage(workflow_root, "--stage", "generate-final-seeds"))
+    stage_results.append(
+        _workflow_stage(
+            workflow_root,
+            "--stage",
+            "run-final",
+            "--dry-run",
+            "--dataset-id",
+            "joint_smoke",
+            "--run-id",
+            f"{run_id}_final",
+        )
+    )
+
+    robust_plan = json.loads((workflow_root / "selection" / "robust_rerun_plan.json").read_text(encoding="utf-8"))
+    write_json(final_run_root / "sweep" / "training_sweep_manifest.json", {"runs": _synthetic_final_rows(robust_plan)})
+    stage_results.append(_workflow_stage(workflow_root, "--stage", "evaluate-final-test", "--final-run-root", str(final_run_root)))
+    stage_results.append(_workflow_stage(workflow_root, "--stage", "generate-report", "--final-run-root", str(final_run_root)))
+
+    gate_status = build_gate_status(protocol_path=protocol_path, workflow_root=workflow_root, run_root=final_run_root)
+    write_json(workflow_root / "gate_status.json", gate_status)
+    release_manifest = build_release_manifest(
+        dataset_root=dataset_root,
+        run_root=final_run_root,
+        workflow_root=workflow_root,
+        strict=False,
+    )
+    write_json(workflow_root / "artifact_release_manifest.json", release_manifest)
+
+    summary = {
+        "schema": "graph2mat_deeph_paper_workflow_smoke_v1",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "mode": "paper_workflow_dry_run",
+        "status": "passed_control_plane",
+        "ok": True,
+        "scientific_status": PAPER_WORKFLOW_SCIENTIFIC_STATUS,
+        "robust_claim_allowed": bool(gate_status.get("robust_claim_allowed")),
+        "diagnostic_only": True,
+        "reason": "Synthetic dry-run smoke checks workflow wiring only; it is not benchmark evidence.",
+        "run_id": run_id,
+        "protocol": str(protocol_path),
+        "workflow_root": str(workflow_root),
+        "dataset_root": str(dataset_root),
+        "final_run_root": str(final_run_root),
+        "stage_results": stage_results,
+        "gate_status": {
+            "path": str(workflow_root / "gate_status.json"),
+            "claim_status": gate_status.get("claim_status"),
+            "robust_claim_allowed": gate_status.get("robust_claim_allowed"),
+            "blockers": gate_status.get("blockers") or [],
+        },
+        "release_manifest": {
+            "path": str(workflow_root / "artifact_release_manifest.json"),
+            "status": release_manifest.get("status"),
+            "missing_required": release_manifest.get("missing_required") or [],
+        },
+        "outputs": {
+            "smoke_summary": str(output_root / "smoke_summary.json"),
+            "protocol": str(protocol_path),
+            "dataset_verification": str(workflow_root / "dataset_verification.json"),
+            "search_plan": str(workflow_root / "search" / "search_plan.json"),
+            "selected_configs": str(workflow_root / "selection" / "selected_configs.json"),
+            "robust_rerun_plan": str(workflow_root / "selection" / "robust_rerun_plan.json"),
+            "run_search_manifest": str(workflow_root / "search" / "run_search_manifest.json"),
+            "run_final_manifest": str(workflow_root / "final" / "run_final_manifest.json"),
+            "final_statistics": str(workflow_root / "final_test" / "final_statistics.json"),
+            "report_summary": str(workflow_root / "report" / "report_summary.json"),
+            "final_report": str(workflow_root / "report" / "final_report.json"),
+            "gate_status": str(workflow_root / "gate_status.json"),
+            "release_manifest": str(workflow_root / "artifact_release_manifest.json"),
+            "log": str(output_root / "logs" / "paper_workflow_smoke.log"),
+        },
+    }
+    write_json(output_root / "smoke_summary.json", summary)
+    logs_dir = output_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "paper_workflow_smoke.log").write_text("".join(logs), encoding="utf-8")
+    return summary
+
+
 def _first_generated_dataset_root(runner_result: dict[str, Any]) -> Path | None:
     results = runner_result.get("results") or {}
     sweep = results.get("dataset_sweep") if isinstance(results, dict) else None
@@ -450,7 +764,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Plan the smoke without external executables.")
     mode.add_argument("--tiny-real", action="store_true", help=f"Run real tiny smoke only when {REAL_SMOKE_ENV}=1.")
-    parser.add_argument("--output-root", type=Path, default=None, help="Directory for smoke outputs.")
+    mode.add_argument(
+        "--paper-workflow-dry-run",
+        action="store_true",
+        help="Exercise the final benchmark control plane using synthetic fixtures only.",
+    )
+    parser.add_argument("--output-root", "--output-dir", dest="output_root", type=Path, default=None, help="Directory for smoke outputs.")
     parser.add_argument("--sample-limit", type=int, default=DEFAULT_SAMPLE_LIMIT, help="Tiny snapshot count target.")
     parser.add_argument("--epochs", type=int, default=1, help="Tiny training epoch count for --tiny-real.")
     parser.add_argument("--skip-training", action="store_true", help="For --tiny-real, stop after dataset generation.")
@@ -462,6 +781,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if args.paper_workflow_dry_run:
+        manifest = run_paper_workflow_dry_run(output_root=args.output_root, run_id=args.run_id)
+        print(json.dumps(_json_safe(manifest), indent=2, sort_keys=True))
+        return 0 if manifest.get("ok") else 1
     tiny_real = bool(args.tiny_real)
     dry_run = not tiny_real
     manifest = run_smoke(

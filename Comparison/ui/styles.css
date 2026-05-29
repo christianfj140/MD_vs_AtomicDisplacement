@@ -1367,12 +1367,11 @@ pre {
   min-width: 0;
   height: 480px;
   min-height: 480px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 253, 0.98));
+  border: 1px solid rgba(17, 24, 39, 0.16);
+  border-radius: 6px;
+  background: #ffffff;
   overflow: visible;
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 8px 22px rgba(17, 24, 39, 0.05);
 }
 
 .plot-card.js-plotly-plot,
@@ -1507,6 +1506,15 @@ pre {
 
 .plot-card .modebar {
   right: 42px !important;
+  top: 8px !important;
+}
+
+.plot-card .modebar-btn path {
+  fill: #374151 !important;
+}
+
+.plot-card .modebar-btn:hover path {
+  fill: #111827 !important;
 }
 
 .api-list {

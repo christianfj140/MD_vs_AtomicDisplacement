@@ -7,9 +7,11 @@ import os
 import csv
 import copy
 import json
+import platform
 import shutil
 import subprocess
 import sys
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 
 from md_pipeline_config import (
@@ -102,6 +104,105 @@ def require_command(command_name: str) -> None:
         )
 
 
+def _package_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for name in ("numpy", "sisl", "torch", "graph2mat", "deeph"):
+        try:
+            versions[name] = importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            continue
+    return versions
+
+
+def execution_environment_provenance() -> dict[str, object]:
+    """Return a small, whitelisted execution environment summary."""
+
+    return {
+        "python_version": sys.version.split()[0],
+        "platform": platform.platform(),
+        "executable": sys.executable,
+        "package_versions": _package_versions(),
+    }
+
+
+def probe_siesta_version(siesta_command: str) -> dict[str, object]:
+    """Best-effort SIESTA version probe; unknown versions remain unknown."""
+
+    attempts: list[dict[str, object]] = []
+    for flag in ("--version", "-V", "-v"):
+        cmd = [siesta_command, flag]
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            attempts.append({"command": cmd, "error": str(exc)})
+            continue
+        output = (result.stdout or "").strip()
+        attempts.append({"command": cmd, "returncode": result.returncode, "output": output[:2000]})
+        if result.returncode == 0 and output:
+            first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
+            if first_line:
+                return {
+                    "siesta_version": first_line,
+                    "siesta_build_info": output,
+                    "siesta_version_probe": {"status": "detected", "attempts": attempts},
+                }
+    return {
+        "siesta_version": "",
+        "siesta_build_info": "",
+        "siesta_version_probe": {"status": "unavailable", "attempts": attempts},
+    }
+
+
+def siesta_command_line(config: dict) -> str:
+    pipeline_paths = paths(config)
+    venv_activate = pipeline_paths["venv_activate"]
+    bash_cmd = (
+        f"source '{venv_activate}' "
+        f"&& {command(config, 'siesta')} < {pipeline_paths['run_fdf_path'].name}"
+    )
+    return f"{command(config, 'shell')} -lc {json.dumps(bash_cmd)}"
+
+
+def siesta_run_provenance(config: dict, *, returncode: int | None = None) -> dict[str, object]:
+    pipeline_paths = paths(config)
+    try:
+        siesta_executable = command(config, "siesta")
+        command_line = siesta_command_line(config)
+    except KeyError:
+        return {"environment": execution_environment_provenance()}
+    payload: dict[str, object] = {
+        "siesta_executable": siesta_executable,
+        "siesta_command_line": command_line,
+        "siesta_stdout_path": str(pipeline_paths["run_out_path"]),
+        "run_out_path": str(pipeline_paths["run_out_path"]),
+        "environment": execution_environment_provenance(),
+    }
+    payload.update(probe_siesta_version(siesta_executable))
+    if returncode is not None:
+        payload["siesta_returncode"] = returncode
+    return payload
+
+
+def update_material_provenance(config: dict, updates: dict[str, object]) -> None:
+    material_path = paths(config)["dataset_dir"] / "material_provenance.json"
+    current: dict[str, object] = {}
+    if material_path.exists():
+        try:
+            payload = json.loads(material_path.read_text(encoding="utf-8"))
+            current = payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            current = {}
+    current.update(updates)
+    write_json(material_path, current)
+
+
 def prepare_material_inputs(config: dict) -> dict:
     pipeline_paths = paths(config)
     dataset_dir = pipeline_paths["dataset_dir"]
@@ -135,6 +236,7 @@ def prepare_material_inputs(config: dict) -> dict:
             "graph2mat_basis_files": copied_basis,
         }
     )
+    manifest.update(siesta_run_provenance(config))
     write_json(dataset_dir / "material_provenance.json", manifest)
     return manifest
 
@@ -326,6 +428,14 @@ def run_siesta_with_venv(config: dict) -> None:
 
         return_code = process.wait()
 
+    update_material_provenance(
+        config,
+        {
+            "siesta_stdout_path": str(pipeline_paths["run_out_path"]),
+            "run_out_path": str(pipeline_paths["run_out_path"]),
+            "siesta_returncode": return_code,
+        },
+    )
     if return_code != 0:
         raise RuntimeError(f"siesta terminó con código {return_code}.")
 
@@ -1248,6 +1358,7 @@ def prepare_dataset_splits(config: dict) -> None:
             dataset_root=pipeline_paths["dataset_dir"],
             split_root=split_root,
             generation_mode="clean_one_pass",
+            strict_paper_ready_provenance=True,
         )
         print(
             "[OK] Benchmark dataset congelado: "

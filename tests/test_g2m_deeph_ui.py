@@ -230,6 +230,17 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn('"triangle-up"', self.app_js)
         self.assertIn('"circle"', self.app_js)
 
+    def test_plotly_science_style_theme_is_applied_without_matplotlib(self) -> None:
+        self.assertIn("SCIENCE_PLOT_FONT_FAMILY", self.app_js)
+        self.assertIn("sciencePlotLayout", self.app_js)
+        self.assertIn("sciencePlotTrace", self.app_js)
+        self.assertIn("SCIENCE_PLOT_GRID_COLOR", self.app_js)
+        self.assertIn('format: "svg"', self.app_js)
+        self.assertIn("#4477aa", self.app_js)
+        self.assertNotIn("matplotlib", self.app_js.lower())
+        self.assertIn("border-radius: 6px", self.styles_css)
+        self.assertIn("background: #ffffff", self.styles_css)
+
 
 if __name__ == "__main__":
     unittest.main()

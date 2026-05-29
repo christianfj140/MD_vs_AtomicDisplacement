@@ -101,6 +101,14 @@ Training loss is not the primary scientific comparison metric. Reports should
 use the explicit H matrix, spectral, DOS, block/orbital, and safety provenance
 fields described below.
 
+For the paper-ready Graph2Mat-vs-DeepH workflow, final winner claims are made
+only by the preregistered `final_evaluation.primary_metric` together with
+`g2m_deeph_final_stats.py` and `g2m_deeph_gate_check.py`. Common H-MAE
+summaries and UI recommendations are supporting Hamiltonian diagnostics unless
+H-MAE itself was preregistered as the final metric. They must not override a
+failed gate status, missing final statistics, or diagnostic-only DeepH
+equivalence.
+
 ## DeepH Comparability Status
 
 The repository exposes DeepH-comparable diagnostics, not a complete

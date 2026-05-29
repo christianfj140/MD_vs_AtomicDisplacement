@@ -68,6 +68,10 @@ class DatasetValidationResult:
     pseudopotential_provenance_present: bool | None = None
     material_identity_present: bool | None = None
     siesta_input_provenance_present: bool | None = None
+    siesta_version_provenance_present: bool | None = None
+    siesta_command_line_provenance_present: bool | None = None
+    siesta_environment_provenance_present: bool | None = None
+    siesta_execution_log_present: bool | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     snapshots: list[SnapshotValidationResult] = field(default_factory=list)
@@ -306,6 +310,43 @@ def _non_empty_text(payloads: list[dict[str, Any]], *keys: str) -> bool:
     return False
 
 
+def _non_empty_text_or_sequence(payloads: list[dict[str, Any]], *keys: str) -> bool:
+    for payload in payloads:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+            if isinstance(value, (list, tuple)) and any(str(item).strip() for item in value):
+                return True
+    return False
+
+
+def _existing_path_value(payloads: list[dict[str, Any]], dataset_root: Path, *keys: str) -> bool:
+    for payload in payloads:
+        for key in keys:
+            value = payload.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            path = Path(value)
+            if not path.is_absolute():
+                path = dataset_root / path
+            if path.exists() and path.is_file():
+                return True
+    return False
+
+
+def _environment_provenance_present(payloads: list[dict[str, Any]]) -> bool:
+    for payload in payloads:
+        environment = payload.get("environment")
+        if not isinstance(environment, dict):
+            continue
+        python_version = environment.get("python_version")
+        platform_value = environment.get("platform")
+        if isinstance(python_version, str) and python_version.strip() and isinstance(platform_value, str) and platform_value.strip():
+            return True
+    return False
+
+
 def validate_dataset(
     dataset_root: Path,
     *,
@@ -322,6 +363,10 @@ def validate_dataset(
     require_pseudopotential_provenance: bool = False,
     require_material_identity: bool = False,
     require_siesta_input_provenance: bool = False,
+    require_siesta_version_provenance: bool = False,
+    require_siesta_command_line_provenance: bool = False,
+    require_siesta_environment_provenance: bool = False,
+    require_siesta_execution_log: bool = False,
     require_dataset_provenance: bool = False,
     validation_profile: str | None = None,
 ) -> DatasetValidationResult:
@@ -331,6 +376,10 @@ def validate_dataset(
         require_pseudopotential_provenance = True
         require_material_identity = True
         require_siesta_input_provenance = True
+        require_siesta_version_provenance = True
+        require_siesta_command_line_provenance = True
+        require_siesta_environment_provenance = True
+        require_siesta_execution_log = True
     result = DatasetValidationResult(dataset_root=dataset_root)
     snapshots = snapshot_dirs if snapshot_dirs is not None else discover_snapshot_dirs(dataset_root)
     result.snapshots = [
@@ -388,6 +437,25 @@ def validate_dataset(
         "fdf_sha256",
         "siesta_input_sha256",
     )
+    result.siesta_version_provenance_present = _non_empty_text(
+        provenance_payloads,
+        "siesta_version",
+    ) or _existing_path_value(
+        provenance_payloads,
+        dataset_root,
+        "siesta_version_source_file",
+    )
+    result.siesta_command_line_provenance_present = _non_empty_text_or_sequence(
+        provenance_payloads,
+        "siesta_command_line",
+    )
+    result.siesta_environment_provenance_present = _environment_provenance_present(provenance_payloads)
+    result.siesta_execution_log_present = _existing_path_value(
+        provenance_payloads,
+        dataset_root,
+        "siesta_stdout_path",
+        "run_out_path",
+    )
 
     if require_basis and not result.basis_present:
         result.errors.append("dataset-level basis provenance or basis file hashes are missing")
@@ -397,6 +465,14 @@ def validate_dataset(
         result.errors.append("dataset-level material identity is missing")
     if require_siesta_input_provenance and not result.siesta_input_provenance_present:
         result.errors.append("dataset-level SIESTA/FDF input provenance is missing")
+    if require_siesta_version_provenance and not result.siesta_version_provenance_present:
+        result.errors.append("dataset-level SIESTA version provenance is missing")
+    if require_siesta_command_line_provenance and not result.siesta_command_line_provenance_present:
+        result.errors.append("dataset-level SIESTA command-line provenance is missing")
+    if require_siesta_environment_provenance and not result.siesta_environment_provenance_present:
+        result.errors.append("dataset-level execution environment provenance is missing")
+    if require_siesta_execution_log and not result.siesta_execution_log_present:
+        result.errors.append("dataset-level SIESTA execution log provenance is missing")
 
     result.valid = not result.errors and result.invalid_snapshots == 0
     if result.invalid_snapshots:

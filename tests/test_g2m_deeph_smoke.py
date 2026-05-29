@@ -132,6 +132,71 @@ class Graph2MatDeepHSmokeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "dry_run_passed")
         self.assertTrue((output_root / "smoke_manifest.json").exists())
 
+    def test_paper_workflow_dry_run_writes_blocked_control_plane_summary(self) -> None:
+        output_root = self.root / "paper_smoke"
+        summary = self.module.run_paper_workflow_dry_run(
+            output_root=output_root,
+            run_id="unit_paper_smoke",
+        )
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["status"], "passed_control_plane")
+        self.assertEqual(summary["scientific_status"], "not_a_scientific_run")
+        self.assertFalse(summary["robust_claim_allowed"])
+        self.assertTrue(summary["diagnostic_only"])
+        self.assertTrue((output_root / "smoke_summary.json").exists())
+        self.assertTrue(Path(summary["outputs"]["search_plan"]).exists())
+        self.assertTrue(Path(summary["outputs"]["selected_configs"]).exists())
+        self.assertTrue(Path(summary["outputs"]["robust_rerun_plan"]).exists())
+        self.assertTrue(Path(summary["outputs"]["run_search_manifest"]).exists())
+        self.assertTrue(Path(summary["outputs"]["run_final_manifest"]).exists())
+        self.assertTrue(Path(summary["outputs"]["final_statistics"]).exists())
+        self.assertTrue(Path(summary["outputs"]["final_report"]).exists())
+        self.assertTrue(Path(summary["outputs"]["gate_status"]).exists())
+        self.assertTrue(Path(summary["outputs"]["release_manifest"]).exists())
+
+        gate_status = json.loads(Path(summary["outputs"]["gate_status"]).read_text(encoding="utf-8"))
+        self.assertFalse(gate_status["robust_claim_allowed"])
+        self.assertIn(gate_status["claim_status"], {"diagnostic_only", "invalid_equivalence"})
+
+    def test_smoke_cli_paper_workflow_dry_run(self) -> None:
+        output_root = self.root / "cli_paper_smoke"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--paper-workflow-dry-run",
+                "--output-dir",
+                str(output_root),
+                "--run-id",
+                "unit_cli_paper_smoke",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr + result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scientific_status"], "not_a_scientific_run")
+        self.assertFalse(payload["robust_claim_allowed"])
+        self.assertTrue((output_root / "smoke_summary.json").exists())
+        self.assertTrue((output_root / "paper_workflow" / "gate_status.json").exists())
+
+    def test_smoke_cli_help_mentions_paper_workflow_dry_run(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--help"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr + result.stdout)
+        self.assertIn("--paper-workflow-dry-run", result.stdout)
+        self.assertIn("--output-dir", result.stdout)
+
     def test_smoke_command_is_documented(self) -> None:
         doc = DOC_PATH.read_text(encoding="utf-8")
 
@@ -139,6 +204,8 @@ class Graph2MatDeepHSmokeTests(unittest.TestCase):
         self.assertIn("RUN_G2M_DEEPH_REAL_SMOKE", doc)
         self.assertIn("--dry-run", doc)
         self.assertIn("--tiny-real", doc)
+        self.assertIn("--paper-workflow-dry-run", doc)
+        self.assertIn("not_a_scientific_run", doc)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from typing import Any
 
 
 REPORT_SCHEMA = "graph2mat_deeph_report_v1"
+FINAL_REPORT_SCHEMA = "graph2mat_deeph_final_report_v1"
 SEARCH_STAGE = "search"
 FINAL_TEST_STAGE = "final_test"
 VALIDATION_SPLITS = {"validation", "val"}
@@ -36,6 +37,13 @@ def read_json(path: Path | None) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _first_existing_path(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
 
 
 def json_safe(value: Any) -> Any:
@@ -499,6 +507,152 @@ def final_comparison_table(
     return comparison
 
 
+def _diagnostic_reason(
+    *,
+    final_statistics: dict[str, Any],
+    gate_status: dict[str, Any],
+    final_statistics_path: Path | None,
+    gate_status_path: Path | None,
+) -> str:
+    reasons: list[str] = []
+    if not final_statistics:
+        reasons.append(
+            f"final_statistics missing at {final_statistics_path}"
+            if final_statistics_path
+            else "final_statistics missing"
+        )
+    if not gate_status:
+        reasons.append(f"gate_status missing at {gate_status_path}" if gate_status_path else "gate_status missing")
+    winners = final_statistics.get("winner_decision") if isinstance(final_statistics.get("winner_decision"), dict) else {}
+    if final_statistics and winners.get("robust_claim_allowed") is not True:
+        failed = winners.get("gates_failed") or []
+        reason = str(winners.get("diagnostic_only_reason") or "")
+        if failed:
+            reasons.append("final_statistics gates failed: " + ", ".join(str(item) for item in failed))
+        elif reason:
+            reasons.append("final_statistics diagnostic_only_reason: " + reason)
+        else:
+            reasons.append("final_statistics winner_decision.robust_claim_allowed is not true")
+    if gate_status and gate_status.get("robust_claim_allowed") is not True:
+        blockers = gate_status.get("blockers") or gate_status.get("required_next_actions") or []
+        if blockers:
+            reasons.append("gate_check blocked robust claims: " + "; ".join(str(item) for item in blockers[:6]))
+        else:
+            reasons.append("gate_check robust_claim_allowed is not true")
+    return "; ".join(reasons)
+
+
+def _gate_passed(gate_status: dict[str, Any], gate_id: str) -> bool:
+    for item in gate_status.get("gates") or []:
+        if isinstance(item, dict) and item.get("id") == gate_id and item.get("status") == "pass":
+            return True
+    return False
+
+
+def final_claim_report(
+    *,
+    metric: str,
+    mode: str,
+    final_statistics: dict[str, Any],
+    gate_status: dict[str, Any],
+    final_statistics_path: Path | None,
+    gate_status_path: Path | None,
+) -> dict[str, Any]:
+    """Build a fail-closed final claim report from final stats and gate status."""
+
+    winners = final_statistics.get("winner_decision") if isinstance(final_statistics.get("winner_decision"), dict) else {}
+    stats_allow = bool(final_statistics) and winners.get("robust_claim_allowed") is True
+    gate_allow = bool(gate_status) and gate_status.get("robust_claim_allowed") is True
+    robust_claim_allowed = stats_allow and gate_allow
+    telemetry_gate_passed = _gate_passed(gate_status, "telemetry_complete")
+    cost_claim_allowed = robust_claim_allowed and telemetry_gate_passed
+    diagnostic_only_reason = _diagnostic_reason(
+        final_statistics=final_statistics,
+        gate_status=gate_status,
+        final_statistics_path=final_statistics_path,
+        gate_status_path=gate_status_path,
+    )
+    return {
+        "schema": FINAL_REPORT_SCHEMA,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "primary_final_metric": metric,
+        "mode": mode,
+        "final_statistics_path": str(final_statistics_path) if final_statistics_path else "",
+        "gate_status_path": str(gate_status_path) if gate_status_path else "",
+        "claim_status": gate_status.get("claim_status") if gate_status else "missing_gate_status",
+        "robust_claim_allowed": robust_claim_allowed,
+        "diagnostic_only": not robust_claim_allowed,
+        "diagnostic_only_reason": "" if robust_claim_allowed else diagnostic_only_reason,
+        "accuracy_winner": winners.get("precision_winner") if robust_claim_allowed else None,
+        "precision_winner": winners.get("precision_winner") if robust_claim_allowed else None,
+        "cost_claim_allowed": cost_claim_allowed,
+        "cost_winner": winners.get("compute_winner") if cost_claim_allowed else None,
+        "compute_winner": winners.get("compute_winner") if cost_claim_allowed else None,
+        "pareto_winner": winners.get("pareto_winner") if robust_claim_allowed else None,
+        "practical_pareto_winner": winners.get("practical_pareto_winner") if robust_claim_allowed else None,
+        "winner_decision": winners,
+        "gate_status": {
+            "claim_status": gate_status.get("claim_status"),
+            "robust_claim_allowed": gate_status.get("robust_claim_allowed"),
+            "blockers": gate_status.get("blockers") or [],
+            "warnings": gate_status.get("warnings") or [],
+        }
+        if gate_status
+        else {},
+        "supporting_metric_policy": {
+            "h_mae": "supporting Hamiltonian metric unless explicitly predeclared as final_evaluation.primary_metric",
+            "common_metrics_recommendation": "diagnostic/supporting only; final claims require final_statistics and gate_status",
+            "deeph": "diagnostic-only unless raw/global equivalence is proven by the gate checker",
+        },
+    }
+
+
+def final_claim_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Graph2Mat vs DeepH Final Claim Report",
+        "",
+        f"- Primary final metric: `{report.get('primary_final_metric')}`",
+        f"- Metric mode: `{report.get('mode')}`",
+        f"- Claim status: `{report.get('claim_status')}`",
+        f"- Robust claim allowed: `{str(bool(report.get('robust_claim_allowed'))).lower()}`",
+        "",
+        "## Winner Claims",
+        "",
+    ]
+    if report.get("robust_claim_allowed"):
+        lines.extend(
+            [
+                f"- Accuracy winner: `{report.get('accuracy_winner')}`",
+                f"- Compute winner: `{report.get('cost_winner')}`"
+                if report.get("cost_claim_allowed")
+                else "- Compute winner: unavailable because cost gates did not pass.",
+                f"- Pareto/practical winner: `{report.get('practical_pareto_winner')}`",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- Accuracy winner: not declared.",
+                "- Compute winner: not declared.",
+                "- Pareto/practical winner: not declared.",
+                "",
+                "No robust winner is declared because the final statistics and gate-check evidence did not both pass.",
+                f"Diagnostic-only reason: {report.get('diagnostic_only_reason') or 'not provided'}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Claim Policy",
+            "",
+            "- H-MAE/common metric summaries are supporting Hamiltonian diagnostics unless H-MAE is explicitly preregistered as the final metric.",
+            "- DeepH rows remain diagnostic-only unless raw/global equivalence is proven.",
+            "- Training or validation loss cannot be used as a final scientific winner metric.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def generate_report(
     *,
     run_root: Path | str,
@@ -506,14 +660,38 @@ def generate_report(
     metric: str = "val_loss",
     mode: str = "min",
     compute_threshold: float | None = None,
+    final_statistics_path: Path | None = None,
+    gate_status_path: Path | None = None,
 ) -> dict[str, Any]:
     root = Path(str(run_root))
     output = output_dir or root / "summary" / "report"
+    final_statistics_path = final_statistics_path or _first_existing_path(
+        [
+            root / "summary" / "final_statistics" / "final_statistics.json",
+            output.parent / "final_test" / "final_statistics.json",
+        ]
+    )
+    gate_status_path = gate_status_path or _first_existing_path(
+        [
+            root / "summary" / "gate_status.json",
+            output.parent / "gate_status.json",
+        ]
+    )
+    final_statistics = read_json(final_statistics_path)
+    gate_status = read_json(gate_status_path)
     records = load_training_records(root)
     curve_rows = learning_curve_rows(records, metric=metric, mode=mode)
     best_rows = best_validation_summary(records, curve_rows, metric=metric, mode=mode)
     pareto_rows = pareto_report_rows(best_rows, mode=mode)
     comparison = final_comparison_table(best_rows, pareto_rows, mode=mode, compute_threshold=compute_threshold)
+    claim_report = final_claim_report(
+        metric=metric,
+        mode=mode,
+        final_statistics=final_statistics,
+        gate_status=gate_status,
+        final_statistics_path=final_statistics_path,
+        gate_status_path=gate_status_path,
+    )
     outputs = {
         "learning_curve_csv": str(output / "learning_curve.csv"),
         "learning_curve_json": str(output / "learning_curve.json"),
@@ -522,6 +700,8 @@ def generate_report(
         "pareto_accuracy_cost_csv": str(output / "pareto_accuracy_cost.csv"),
         "pareto_accuracy_cost_json": str(output / "pareto_accuracy_cost.json"),
         "final_comparison_json": str(output / "final_comparison.json"),
+        "final_report_json": str(output / "final_report.json"),
+        "final_report_md": str(output / "final_report.md"),
         "report_summary_json": str(output / "report_summary.json"),
     }
     write_csv(output / "learning_curve.csv", curve_rows)
@@ -531,6 +711,8 @@ def generate_report(
     write_csv(output / "pareto_accuracy_cost.csv", pareto_rows)
     write_json(output / "pareto_accuracy_cost.json", {"rows": pareto_rows})
     write_json(output / "final_comparison.json", {"rows": comparison})
+    write_json(output / "final_report.json", claim_report)
+    (output / "final_report.md").write_text(final_claim_markdown(claim_report), encoding="utf-8")
     manifest = {
         "schema": REPORT_SCHEMA,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -538,13 +720,23 @@ def generate_report(
         "output_dir": str(output),
         "metric": metric,
         "mode": mode,
+        "primary_final_metric": metric,
         "compute_threshold": compute_threshold,
+        "final_statistics_path": str(final_statistics_path) if final_statistics_path else "",
+        "gate_status_path": str(gate_status_path) if gate_status_path else "",
+        "claim_status": claim_report["claim_status"],
+        "robust_claim_allowed": claim_report["robust_claim_allowed"],
+        "diagnostic_only_reason": claim_report["diagnostic_only_reason"],
+        "accuracy_winner": claim_report["accuracy_winner"],
+        "cost_winner": claim_report["cost_winner"],
+        "pareto_winner": claim_report["pareto_winner"],
         "records_count": len(records),
         "learning_curve_rows": len(curve_rows),
         "best_validation_rows": len(best_rows),
         "pareto_rows": len(pareto_rows),
         "outputs": outputs,
         "final_comparison": comparison,
+        "final_report": claim_report,
         "warnings": sorted(
             {
                 warning
@@ -565,6 +757,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metric", default="val_loss")
     parser.add_argument("--mode", choices=("min", "max"), default="min")
     parser.add_argument("--compute-threshold", type=float, default=None)
+    parser.add_argument("--final-statistics", type=Path, default=None)
+    parser.add_argument("--gate-status", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -576,6 +770,8 @@ def main() -> None:
         metric=args.metric,
         mode=args.mode,
         compute_threshold=args.compute_threshold,
+        final_statistics_path=args.final_statistics,
+        gate_status_path=args.gate_status,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False))
 

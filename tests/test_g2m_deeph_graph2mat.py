@@ -18,6 +18,12 @@ for path in (SCRIPTS_DIR, SHARED_DIR):
 
 from benchmark_manifest import write_benchmark_manifests  # noqa: E402
 from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner  # noqa: E402
+from graph2mat_sweep_config import (  # noqa: E402
+    GRAPH2MAT_EDGE_BLOCK_NODE_MIX,
+    GRAPH2MAT_EDGE_MESSAGE_BLOCK,
+    GRAPH2MAT_SIMPLE_NODE_BLOCK,
+    normalize_graph2mat_overrides,
+)
 from joint_artifact_contract import validate_dataset  # noqa: E402
 
 
@@ -58,12 +64,19 @@ class Graph2MatBenchmarkIntegrationTests(unittest.TestCase):
         self.output_root = self.root / "results"
         self.dataset.mkdir(parents=True)
         (self.dataset / "RUN.fdf").write_text("SystemLabel graphene\nSave.HS T\n", encoding="utf-8")
+        (self.dataset / "RUN.out").write_text("SIESTA test log\n", encoding="utf-8")
         (self.dataset / "material_provenance.json").write_text(
             json.dumps(
                 {
                     "label": "graphene",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
+                    "siesta_version": "SIESTA test-version",
+                    "siesta_executable": "siesta",
+                    "siesta_command_line": "bash -lc 'siesta < RUN.fdf'",
+                    "siesta_stdout_path": str(self.dataset / "RUN.out"),
+                    "siesta_returncode": 0,
+                    "environment": {"python_version": "3.11.0", "platform": "test-platform"},
                 },
                 sort_keys=True,
             )
@@ -126,22 +139,35 @@ class Graph2MatBenchmarkIntegrationTests(unittest.TestCase):
 
         self.assertEqual(config["paths"]["dataset_dir"], str(self.dataset))
         self.assertEqual(config["paths"]["training_dir"], str(context.training_dir))
-        self.assertEqual(
-            config["training"]["data"]["train_runs"],
-            os.path.relpath(str(self.dataset / "splits/train/*/RUN.fdf"), str(context.training_dir)),
-        )
-        self.assertEqual(
-            config["training"]["data"]["val_runs"],
-            os.path.relpath(str(self.dataset / "splits/validation/*/RUN.fdf"), str(context.training_dir)),
-        )
+        self.assertEqual(config["training"]["data"]["runs_json"], "runs.json")
+        runs_json = json.loads(context.runs_json_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(runs_json["train"]), 1)
+        self.assertEqual(len(runs_json["val"]), 1)
+        self.assertEqual(len(runs_json["test"]), 1)
         self.assertEqual(config["training"]["data"]["matrix_component_policy"], "h_only")
         self.assertEqual(config["training"]["data"]["n_matrix_components"], 1)
         self.assertEqual(
             config["prediction"]["predict_structs"],
             os.path.relpath(str(context.prediction_structs_dir / "*/RUN.fdf"), str(context.training_dir)),
         )
-        self.assertFalse(Path(config["training"]["data"]["train_runs"]).is_absolute())
+        self.assertFalse(Path(config["training"]["data"]["runs_json"]).is_absolute())
         self.assertEqual(config["prediction"]["output_file"], "ML_prediction.HSX")
+
+    def test_graph2mat_readout_override_is_rendered_to_model_config(self) -> None:
+        runner = Graph2MatDeepHBenchmarkRunner()
+        config: dict = {"training": {"model": {}, "trainer": {}, "data": {}}}
+
+        runner._apply_graph2mat_overrides(
+            config,
+            normalize_graph2mat_overrides({"readout": "edge_node_mix"}),
+        )
+
+        model = config["training"]["model"]
+        self.assertEqual(model["node_block_readout"], GRAPH2MAT_SIMPLE_NODE_BLOCK)
+        self.assertEqual(model["edge_block_readout"], GRAPH2MAT_EDGE_BLOCK_NODE_MIX)
+        self.assertEqual(model["preprocessing_edges"], GRAPH2MAT_EDGE_MESSAGE_BLOCK)
+        self.assertTrue(model["preprocessing_edges_reuse_nodes"])
+        self.assertNotIn("readout", model)
 
     def test_graph2mat_context_materializes_basis_files_next_to_run_fdf(self) -> None:
         basis_dir = self.dataset / "material_basis"

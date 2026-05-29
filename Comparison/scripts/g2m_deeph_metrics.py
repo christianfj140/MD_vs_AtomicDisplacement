@@ -597,7 +597,10 @@ def build_recommendation(summary_rows: list[dict[str, Any]], status: str, warnin
         "status": "robust_candidate",
         "primary_metric": PRIMARY_METRIC,
         "primary_metric_values": values,
-        "reason": f"{winner} has the lower {PRIMARY_METRIC}.",
+        "claim_scope": "common_metric_diagnostic_supporting",
+        "supports_final_winner_claim": False,
+        "final_claim_source": "Use final_statistics + gate_status + final_evaluation for paper-ready claims.",
+        "reason": f"{winner} has the lower {PRIMARY_METRIC}; this is a supporting H-MAE recommendation, not a final spectral winner claim.",
         "severe_warnings": severe,
     }
 

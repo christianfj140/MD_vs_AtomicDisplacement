@@ -79,6 +79,7 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
         dataset = Path(config["paths"]["dataset_dir"])
         dataset.mkdir(parents=True, exist_ok=True)
         (dataset / "RUN.fdf").write_text("SystemLabel graphene\nSave.HS T\n", encoding="utf-8")
+        (dataset / "RUN.out").write_text("Job completed\n", encoding="utf-8")
         (dataset / "material_provenance.json").write_text(
             json.dumps(
                 {
@@ -86,6 +87,12 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
                     "fdf_sha256": "fdfhash",
+                    "siesta_version": "SIESTA test-version",
+                    "siesta_executable": "siesta",
+                    "siesta_command_line": "bash -lc 'siesta < RUN.fdf'",
+                    "run_out_path": str(dataset / "RUN.out"),
+                    "siesta_returncode": 0,
+                    "environment": {"python_version": "3.11.0", "platform": "test-platform"},
                 },
                 sort_keys=True,
             )
@@ -289,6 +296,14 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
             self.generate.validate_joint_benchmark_artifacts(config)
 
         self.assertFalse((Path(config["paths"]["dataset_dir"]) / "splits").exists())
+
+    def test_execution_environment_provenance_does_not_capture_secrets(self) -> None:
+        with mock.patch.dict(os.environ, {"SECRET_TOKEN": "do-not-record"}, clear=False):
+            environment = self.generate.execution_environment_provenance()
+
+        self.assertIn("python_version", environment)
+        self.assertIn("platform", environment)
+        self.assertNotIn("SECRET_TOKEN", environment)
 
 
 if __name__ == "__main__":

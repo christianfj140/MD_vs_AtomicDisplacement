@@ -57,6 +57,8 @@ from g2m_deeph_rank_runs import rank_graph2mat_deeph_runs  # noqa: E402
 from g2m_deeph_live_metrics import dedupe_metric_rows, live_metric_scaling_rows  # noqa: E402
 from g2m_deeph_telemetry import (  # noqa: E402
     GpuTelemetryMonitor,
+    ProcResourceMonitor,
+    classify_failure,
     compute_gpu_hours,
     optimizer_update_accounting,
     summarize_run_telemetry,
@@ -149,6 +151,14 @@ RUNNER_PHASES = (
     "plots_and_summary",
     "complete",
 )
+
+
+class CommandRunError(RuntimeError):
+    """Subprocess failure that preserves the structured command record."""
+
+    def __init__(self, message: str, run_record: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.run_record = run_record
 
 
 @dataclass
@@ -1496,7 +1506,18 @@ class Graph2MatDeepHBenchmarkRunner:
         for key in ("max_epochs", "accelerator", "log_every_n_steps"):
             if key in overrides:
                 trainer[key] = overrides[key]
-        for key in ("optim_lr", "hidden_irreps", "num_interactions", "correlation", "max_ell", "loss"):
+        for key in (
+            "optim_lr",
+            "hidden_irreps",
+            "num_interactions",
+            "correlation",
+            "max_ell",
+            "loss",
+            "node_block_readout",
+            "edge_block_readout",
+            "preprocessing_edges",
+            "preprocessing_edges_reuse_nodes",
+        ):
             if key in overrides:
                 model[key] = overrides[key]
         if "loss_kwargs" in overrides:
@@ -1559,20 +1580,48 @@ class Graph2MatDeepHBenchmarkRunner:
         controlled_stop_reason: str | None = None
         with self._lock:
             self._logs.append(f"[G2M-DEEPH][RUN] {label}: {' '.join(command)}\n")
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            finished_at = time.time()
+            failure = classify_failure(returncode=127, output_excerpt=str(exc))
+            run_record = {
+                "label": label,
+                "command": command,
+                "cwd": str(cwd),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "elapsed_seconds": finished_at - started_at,
+                "returncode": 127,
+                "controlled_stop_reason": None,
+                "telemetry": {
+                    "telemetry_status": "unavailable",
+                    "warnings": ["subprocess failed to start"],
+                    **failure,
+                },
+            }
+            raise CommandRunError(f"{label} failed to start: {exc}", run_record) from exc
         telemetry_monitor = GpuTelemetryMonitor()
+        resource_monitor = ProcResourceMonitor()
         telemetry_monitor.start(process.pid)
+        resource_monitor.start(process.pid)
         with self._lock:
             self._processes.append(process)
+        output_tail: list[str] = []
+
+        def remember_output(line: str) -> None:
+            output_tail.append(str(line).strip())
+            del output_tail[:-40]
+
         try:
             assert process.stdout is not None
             fd = process.stdout.fileno()
@@ -1592,6 +1641,7 @@ class Graph2MatDeepHBenchmarkRunner:
                         pending += chunk.replace("\r", "\n")
                         while "\n" in pending:
                             line, pending = pending.split("\n", 1)
+                            remember_output(line)
                             with self._lock:
                                 self._logs.append(line + "\n")
                             if line_observer is not None and process.poll() is None:
@@ -1638,6 +1688,7 @@ class Graph2MatDeepHBenchmarkRunner:
                         pending += chunk.replace("\r", "\n")
                         while "\n" in pending:
                             line, pending = pending.split("\n", 1)
+                            remember_output(line)
                             with self._lock:
                                 self._logs.append(line + "\n")
                             if line_observer is not None and controlled_stop_reason is None:
@@ -1646,19 +1697,44 @@ class Graph2MatDeepHBenchmarkRunner:
                                     controlled_stop_reason = str(reason)
                     break
             if pending:
+                remember_output(pending)
                 with self._lock:
                     self._logs.append(pending)
             returncode = process.wait()
         finally:
-            command_telemetry = telemetry_monitor.stop()
+            gpu_telemetry = telemetry_monitor.stop()
+            proc_telemetry = resource_monitor.stop()
             if process.stdout is not None:
                 process.stdout.close()
             with self._lock:
                 self._processes = [item for item in self._processes if item is not process]
         finished_at = time.time()
-        if returncode not in allowed_returncodes and controlled_stop_reason is None:
-            raise RuntimeError(f"{label} failed with exit code {returncode}")
-        return {
+        output_excerpt = "\n".join(line for line in output_tail if line)
+        failure = classify_failure(
+            returncode=returncode,
+            output_excerpt=output_excerpt,
+            controlled_stop_reason=controlled_stop_reason,
+            stop_requested=bool(self._state.stop_requested),
+        )
+        command_warnings: list[str] = []
+        for warning in [*(gpu_telemetry.get("warnings") or []), *(proc_telemetry.get("warnings") or [])]:
+            if warning and warning not in command_warnings:
+                command_warnings.append(str(warning))
+        observed_resource = any(
+            proc_telemetry.get(key) is not None
+            for key in ("cpu_time_seconds", "cpu_peak_percent", "peak_rss_mb")
+        ) or any(
+            gpu_telemetry.get(key) is not None
+            for key in ("peak_gpu_memory_mb", "gpu_active_seconds", "observed_gpu_count")
+        )
+        telemetry_status = (
+            "complete"
+            if observed_resource and not command_warnings
+            else "partial"
+            if observed_resource or command_warnings
+            else "unavailable"
+        )
+        run_record = {
             "label": label,
             "command": command,
             "cwd": str(cwd),
@@ -1668,13 +1744,20 @@ class Graph2MatDeepHBenchmarkRunner:
             "returncode": returncode,
             "controlled_stop_reason": controlled_stop_reason,
             "telemetry": {
-                **command_telemetry,
+                **gpu_telemetry,
+                **{key: value for key, value in proc_telemetry.items() if key != "warnings"},
                 "gpu_hours": compute_gpu_hours(
-                    command_telemetry.get("gpu_active_seconds"),
-                    command_telemetry.get("observed_gpu_count"),
+                    gpu_telemetry.get("gpu_active_seconds"),
+                    gpu_telemetry.get("observed_gpu_count"),
                 ),
+                "telemetry_status": telemetry_status,
+                "warnings": command_warnings,
+                **failure,
             },
         }
+        if returncode not in allowed_returncodes and controlled_stop_reason is None:
+            raise CommandRunError(f"{label} failed with exit code {returncode}", run_record)
+        return run_record
 
     def _md_generation_python(self, payload: dict[str, Any]) -> str:
         raw = payload.get("python") or payload.get("graph2mat_python")
@@ -3265,6 +3348,16 @@ class Graph2MatDeepHBenchmarkRunner:
         def record_failure(record: dict[str, Any], exc: Exception) -> None:
             budget_tracker.release(record)
             failed = {**record, "status": "failed", "error": str(exc)}
+            command_record = getattr(exc, "run_record", None)
+            if isinstance(command_record, dict):
+                telemetry = command_record.get("telemetry") if isinstance(command_record.get("telemetry"), dict) else {}
+                failed["failed_command"] = command_record
+                failed["failure_category"] = telemetry.get("failure_category") or "unknown_failure"
+                failed["failure_evidence_excerpt"] = telemetry.get("failure_evidence_excerpt") or ""
+                failed["telemetry"] = telemetry
+            else:
+                failed["failure_category"] = "unknown_failure"
+                failed["failure_evidence_excerpt"] = str(exc)
             summary["runs"].append(failed)
             summary["failed_runs"].append(failed)
             with self._lock:

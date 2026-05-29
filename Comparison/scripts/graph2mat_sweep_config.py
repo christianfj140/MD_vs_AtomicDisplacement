@@ -14,6 +14,32 @@ from typing import Any
 
 HIDDEN_IRREPS_TERM_RE = re.compile(r"^(?:(\d+)\s*x\s*)?(\d+)\s*([eoEO])$")
 
+GRAPH2MAT_SIMPLE_NODE_BLOCK = "graph2mat.bindings.e3nn.E3nnSimpleNodeBlock"
+GRAPH2MAT_SIMPLE_EDGE_BLOCK = "graph2mat.bindings.e3nn.E3nnSimpleEdgeBlock"
+GRAPH2MAT_EDGE_BLOCK_NODE_MIX = "graph2mat.bindings.e3nn.E3nnEdgeBlockNodeMix"
+GRAPH2MAT_EDGE_MESSAGE_BLOCK = "graph2mat.bindings.e3nn.E3nnEdgeMessageBlock"
+GRAPH2MAT_READOUT_FAMILIES = {"default", "edge_node_mix"}
+GRAPH2MAT_READOUT_MODEL_KEYS = {
+    "node_block_readout",
+    "edge_block_readout",
+    "preprocessing_edges",
+    "preprocessing_edges_reuse_nodes",
+}
+GRAPH2MAT_READOUT_OVERRIDES = {
+    "default": {
+        "node_block_readout": GRAPH2MAT_SIMPLE_NODE_BLOCK,
+        "edge_block_readout": GRAPH2MAT_SIMPLE_EDGE_BLOCK,
+        "preprocessing_edges": GRAPH2MAT_EDGE_MESSAGE_BLOCK,
+        "preprocessing_edges_reuse_nodes": False,
+    },
+    "edge_node_mix": {
+        "node_block_readout": GRAPH2MAT_SIMPLE_NODE_BLOCK,
+        "edge_block_readout": GRAPH2MAT_EDGE_BLOCK_NODE_MIX,
+        "preprocessing_edges": GRAPH2MAT_EDGE_MESSAGE_BLOCK,
+        "preprocessing_edges_reuse_nodes": True,
+    },
+}
+
 GRAPH2MAT_SWEEP_KEYS = {
     "max_epochs",
     "optim_lr",
@@ -27,6 +53,8 @@ GRAPH2MAT_SWEEP_KEYS = {
     "max_ell",
     "hidden_irreps",
     "hidden_irreps_channels",
+    "readout",
+    *GRAPH2MAT_READOUT_MODEL_KEYS,
 }
 
 
@@ -99,6 +127,30 @@ def validate_hidden_irreps(value: str, max_ell: int | None, name: str = "hidden_
         raise RuntimeError(f"{name}: missing ell values {missing}. Use {expected}.")
 
 
+def _normalize_readout_family(value: Any) -> str:
+    family = str(value).strip().lower()
+    if family not in GRAPH2MAT_READOUT_FAMILIES:
+        raise RuntimeError(
+            "graph2mat.readout must be one of: "
+            + ", ".join(sorted(GRAPH2MAT_READOUT_FAMILIES))
+            + "."
+        )
+    return family
+
+
+def _apply_readout_family(normalized: dict[str, Any]) -> None:
+    if "readout" not in normalized:
+        return
+    family = _normalize_readout_family(normalized["readout"])
+    normalized["readout"] = family
+    for key, value in GRAPH2MAT_READOUT_OVERRIDES[family].items():
+        if key in normalized and normalized[key] != value:
+            raise RuntimeError(
+                f"graph2mat.readout={family} conflicts with explicit {key}={normalized[key]!r}."
+            )
+        normalized[key] = value
+
+
 def normalize_graph2mat_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
     unknown = sorted(set(overrides) - GRAPH2MAT_SWEEP_KEYS)
     if unknown:
@@ -121,4 +173,5 @@ def normalize_graph2mat_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
             int(max_ell) if max_ell is not None else None,
             "graph2mat.hidden_irreps",
         )
+    _apply_readout_family(normalized)
     return normalized

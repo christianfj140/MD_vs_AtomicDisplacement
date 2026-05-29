@@ -95,10 +95,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     g2m = rows[0]
     deeph = rows[1]
     report = [
-        "# Graph2Mat vs DeepH Fair Benchmark",
+        "# Graph2Mat vs DeepH Diagnostic H-MAE Summary",
         "",
         "This report compares only metrics produced on the same repository k-point schema.",
-        "It is scientifically valid only if the preparation manifests confirm identical SIESTA references, splits, basis and k-grid.",
+        "It is a supporting/diagnostic summary, not the final paper-ready winner report.",
+        "Robust scientific claims must come from final_statistics, gate_check and the preregistered final_evaluation metric.",
         "",
         "## Aggregate Metrics",
         "",
@@ -126,8 +127,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "",
             "## Verdict",
             "",
-            f"Primary H(k) MAE comparison: `{verdict}`.",
+            f"Supporting H(k) MAE diagnostic comparison: `{verdict}`.",
             "",
+            "Do not use this H-MAE diagnostic verdict as a final spectral-quality or winner claim.",
             "Do not use DeepH training loss or Graph2Mat training loss as the primary scientific comparison.",
         ]
     )
@@ -138,6 +140,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "deeph_eval_dir": str(args.deeph_eval_dir.resolve()),
         "output_dir": str(args.output_dir.resolve()),
         "pipeline_git": run_git_commit(Path.cwd()),
+        "claim_scope": "diagnostic_supporting_h_mae_only",
+        "robust_winner_claim_allowed": False,
+        "final_claim_source": "g2m_deeph_final_stats + g2m_deeph_gate_check + g2m_deeph_report",
     }
     write_json(args.output_dir / "comparison_manifest.json", manifest)
     return manifest
@@ -158,4 +163,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

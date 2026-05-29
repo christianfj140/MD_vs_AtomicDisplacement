@@ -10,6 +10,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from g2m_deeph_protocol import validate_protocol  # noqa: E402
 from g2m_deeph_training_sweep import expand_training_sweep, training_sweep_from_protocol  # noqa: E402
+from graph2mat_sweep_config import (  # noqa: E402
+    GRAPH2MAT_EDGE_BLOCK_NODE_MIX,
+    GRAPH2MAT_EDGE_MESSAGE_BLOCK,
+    GRAPH2MAT_SIMPLE_EDGE_BLOCK,
+    GRAPH2MAT_SIMPLE_NODE_BLOCK,
+    normalize_graph2mat_overrides,
+)
 
 
 DATASETS = [{"dataset_id": "joint_a", "dataset_root": "/tmp/joint_a"}]
@@ -53,6 +60,41 @@ class Graph2MatDeepHTrainingSweepTests(unittest.TestCase):
         self.assertNotIn("atom_fea_len", graph2mat["overrides"])
         self.assertEqual(deeph["overrides"]["atom_fea_len"], 64)
         self.assertNotIn("hidden_irreps", deeph["overrides"])
+
+    def test_graph2mat_readout_family_expands_to_supported_model_keys(self) -> None:
+        sweep = expand_training_sweep(
+            {
+                "enabled": True,
+                "max_runs": 4,
+                "graph2mat": {
+                    "enabled": True,
+                    "readout": ["default", "edge_node_mix"],
+                    "batch_size": [64],
+                },
+                "deeph": {"enabled": False},
+            },
+            datasets=DATASETS,
+        )
+
+        rows = {row["overrides"]["readout"]: row["overrides"] for row in sweep["planned_runs"]}
+        self.assertEqual(set(rows), {"default", "edge_node_mix"})
+        self.assertEqual(rows["default"]["node_block_readout"], GRAPH2MAT_SIMPLE_NODE_BLOCK)
+        self.assertEqual(rows["default"]["edge_block_readout"], GRAPH2MAT_SIMPLE_EDGE_BLOCK)
+        self.assertEqual(rows["default"]["preprocessing_edges"], GRAPH2MAT_EDGE_MESSAGE_BLOCK)
+        self.assertFalse(rows["default"]["preprocessing_edges_reuse_nodes"])
+        self.assertEqual(rows["edge_node_mix"]["node_block_readout"], GRAPH2MAT_SIMPLE_NODE_BLOCK)
+        self.assertEqual(rows["edge_node_mix"]["edge_block_readout"], GRAPH2MAT_EDGE_BLOCK_NODE_MIX)
+        self.assertEqual(rows["edge_node_mix"]["preprocessing_edges"], GRAPH2MAT_EDGE_MESSAGE_BLOCK)
+        self.assertTrue(rows["edge_node_mix"]["preprocessing_edges_reuse_nodes"])
+
+    def test_graph2mat_readout_conflict_fails(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "conflicts with explicit edge_block_readout"):
+            normalize_graph2mat_overrides(
+                {
+                    "readout": "edge_node_mix",
+                    "edge_block_readout": GRAPH2MAT_SIMPLE_EDGE_BLOCK,
+                }
+            )
 
     def test_max_runs_guard_and_deterministic_ids(self) -> None:
         payload = {
@@ -250,6 +292,11 @@ class Graph2MatDeepHTrainingSweepTests(unittest.TestCase):
                 "budget_policy": {"mode": "equal_n_trials", "n_trials_per_model": 2},
                 "final_seeds": [0, 1, 2],
                 "top_k_selection": {"k_per_model": 1, "split": "validation", "metric": "low_energy_rmse_eV", "uses_test_metrics": False},
+                "final_evaluation": {
+                    "primary_metric": "low_energy_rmse_eV",
+                    "mode": "min",
+                    "secondary_metrics": ["fermi_window_rmse_eV", "dos_wasserstein_eV", "h_mae_eV"],
+                },
                 "final_test_policy": {"policy": "locked_until_final", "test_split": "test", "locked_during_search": True, "evaluate_once_after_selection": True},
                 "required_telemetry": [
                     "wall_clock_seconds",

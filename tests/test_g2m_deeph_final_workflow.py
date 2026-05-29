@@ -99,6 +99,21 @@ def protocol_payload() -> dict:
             "metric": "low_energy_rmse_eV",
             "uses_test_metrics": False,
         },
+        "final_evaluation": {
+            "primary_metric": "low_energy_rmse_eV",
+            "mode": "min",
+            "secondary_metrics": [
+                "fermi_window_rmse_eV",
+                "frontier_window_rmse_eV",
+                "dos_wasserstein_eV",
+                "h_mae_eV",
+            ],
+            "practical_match": {
+                "relative_gap_max": 1.10,
+                "absolute_gap_meV_max": None,
+                "requires_cost_noninferior": True,
+            },
+        },
         "final_test_policy": {
             "policy": "locked_until_final",
             "test_split": "test",
@@ -119,6 +134,19 @@ def protocol_payload() -> dict:
             "diagnostic_if_unproven": True,
         },
     }
+
+
+def multi_dataset_protocol_payload() -> dict:
+    protocol = protocol_payload()
+    protocol["datasets"].append(
+        {
+            "dataset_id": "joint_b",
+            "dataset_root": "/tmp/joint_b",
+            "benchmark_dataset_manifest": "/tmp/joint_b/benchmark_dataset_manifest.json",
+            "frozen_split_manifest": "/tmp/joint_b/frozen_split_manifest.json",
+        }
+    )
+    return protocol
 
 
 def search_record(model: str, config_id: str, value: float, *, split: str = "validation") -> dict:
@@ -170,7 +198,34 @@ class Graph2MatDeepHFinalWorkflowTests(unittest.TestCase):
         run_manifest = self.workflow / "search" / "run_search_manifest.json"
         self.assertEqual(manifest["status"], "planned_dry_run")
         self.assertTrue(payload.exists())
+        payload_data = json.loads(payload.read_text(encoding="utf-8"))
+        self.assertEqual(payload_data["selected_dataset_id"], "joint_a")
+        self.assertEqual(payload_data["executed_dataset_ids"], ["joint_a"])
         self.assertEqual(json.loads(run_manifest.read_text(encoding="utf-8"))["planned_run_count"], 4)
+
+    def test_multi_dataset_run_search_requires_explicit_dataset_id(self) -> None:
+        write_json(self.protocol_path, multi_dataset_protocol_payload())
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        self.run_cli("--stage", "generate-search-plan")
+
+        with self.assertRaisesRegex(RuntimeError, "pass --dataset-id"):
+            self.run_cli("--stage", "run-search", "--dry-run")
+
+    def test_multi_dataset_run_search_filters_payload_to_selected_dataset(self) -> None:
+        write_json(self.protocol_path, multi_dataset_protocol_payload())
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        planned = self.run_cli("--stage", "generate-search-plan")
+
+        manifest = self.run_cli("--stage", "run-search", "--dry-run", "--dataset-id", "joint_b")
+
+        payload = json.loads((self.workflow / "search" / "run_search_payload.json").read_text(encoding="utf-8"))
+        planned_runs = payload["_training_sweep_plan"]["planned_runs"]
+        self.assertEqual(planned["outputs"]["planned_run_count"], 8)
+        self.assertEqual(manifest["outputs"]["selected_dataset_id"], "joint_b")
+        self.assertEqual(manifest["outputs"]["planned_run_count"], 4)
+        self.assertEqual(payload["dataset_root"], "/tmp/joint_b")
+        self.assertEqual(payload["executed_dataset_ids"], ["joint_b"])
+        self.assertEqual({row["dataset_id"] for row in planned_runs}, {"joint_b"})
 
     def test_select_top_k_requires_search_manifest(self) -> None:
         self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
@@ -209,6 +264,46 @@ class Graph2MatDeepHFinalWorkflowTests(unittest.TestCase):
         self.assertEqual(robust["outputs"]["planned_run_count"], 6)
         self.assertTrue((self.workflow / "selection" / "robust_rerun_plan.json").exists())
 
+    def test_multi_dataset_run_final_requires_explicit_dataset_id(self) -> None:
+        write_json(self.protocol_path, multi_dataset_protocol_payload())
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        write_json(
+            self.workflow / "selection" / "robust_rerun_plan.json",
+            {
+                "planned_runs": [
+                    {"model": "graph2mat", "dataset_id": "joint_a", "config_id": "g_best"},
+                    {"model": "graph2mat", "dataset_id": "joint_b", "config_id": "g_best"},
+                ],
+                "planned_run_count": 2,
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "pass --dataset-id"):
+            self.run_cli("--stage", "run-final", "--dry-run")
+
+    def test_multi_dataset_run_final_filters_payload_to_selected_dataset(self) -> None:
+        write_json(self.protocol_path, multi_dataset_protocol_payload())
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        write_json(
+            self.workflow / "selection" / "robust_rerun_plan.json",
+            {
+                "planned_runs": [
+                    {"model": "graph2mat", "dataset_id": "joint_a", "config_id": "g_a", "dataset_root": "/tmp/joint_a"},
+                    {"model": "graph2mat", "dataset_id": "joint_b", "config_id": "g_b", "dataset_root": "/tmp/joint_b"},
+                ],
+                "planned_run_count": 2,
+            },
+        )
+
+        manifest = self.run_cli("--stage", "run-final", "--dry-run", "--dataset-id", "joint_b")
+
+        payload = json.loads((self.workflow / "final" / "run_final_payload.json").read_text(encoding="utf-8"))
+        planned_runs = payload["_training_sweep_plan"]["planned_runs"]
+        self.assertEqual(manifest["outputs"]["selected_dataset_id"], "joint_b")
+        self.assertEqual(manifest["outputs"]["planned_run_count"], 1)
+        self.assertEqual(payload["dataset_root"], "/tmp/joint_b")
+        self.assertEqual({row["dataset_id"] for row in planned_runs}, {"joint_b"})
+
     def test_evaluate_final_test_requires_test_metrics(self) -> None:
         self.test_top_k_and_final_seed_plan_are_stage_artifacts()
         final_root = self.workflow / "fake_final_run"
@@ -245,16 +340,121 @@ class Graph2MatDeepHFinalWorkflowTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "completed")
         self.assertTrue((self.workflow / "final_test" / "final_statistics.json").exists())
 
+    def test_evaluate_final_test_uses_final_metric_not_selection_metric(self) -> None:
+        protocol = protocol_payload()
+        protocol["selection"]["metric"] = "val_loss"
+        protocol["early_stopping"]["metric"] = "val_loss"
+        protocol["top_k_selection"]["metric"] = "val_loss"
+        protocol["final_evaluation"]["primary_metric"] = "low_energy_rmse_eV"
+        write_json(self.protocol_path, protocol)
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        write_json(
+            self.workflow / "selection" / "robust_rerun_plan.json",
+            {
+                "planned_runs": [
+                    {"model": "graph2mat", "dataset_id": "joint_a", "config_id": "g_best"},
+                    {"model": "deeph", "dataset_id": "joint_a", "config_id": "d_best"},
+                ]
+            },
+        )
+        final_root = self.workflow / "fake_final_run"
+        write_json(
+            final_root / "sweep" / "training_sweep_manifest.json",
+            {
+                "runs": [
+                    {
+                        "status": "completed",
+                        "model": "graph2mat",
+                        "dataset_id": "joint_a",
+                        "config_id": "g_best",
+                        "seed": 0,
+                        "protocol_stage": "final_test",
+                        "metric_split": "test",
+                        "low_energy_rmse_eV_mean": 0.2,
+                    },
+                    {
+                        "status": "completed",
+                        "model": "deeph",
+                        "dataset_id": "joint_a",
+                        "config_id": "d_best",
+                        "seed": 0,
+                        "protocol_stage": "final_test",
+                        "metric_split": "test",
+                        "low_energy_rmse_eV_mean": 0.3,
+                        "adapter_equivalence_status": "proven_raw_global_hamiltonian_equivalent",
+                        "equivalence_status": "proven",
+                        "comparability_status": "valid",
+                    },
+                ]
+            },
+        )
+
+        self.run_cli("--stage", "evaluate-final-test", "--final-run-root", str(final_root))
+
+        stats = json.loads((self.workflow / "final_test" / "final_statistics.json").read_text(encoding="utf-8"))
+        self.assertEqual(stats["metric"], "low_energy_rmse_eV")
+        self.assertNotEqual(stats["metric"], protocol["selection"]["metric"])
+
+    def test_generate_report_uses_final_metric_not_selection_metric(self) -> None:
+        protocol = protocol_payload()
+        protocol["selection"]["metric"] = "val_loss"
+        protocol["early_stopping"]["metric"] = "val_loss"
+        protocol["top_k_selection"]["metric"] = "val_loss"
+        protocol["final_evaluation"]["primary_metric"] = "low_energy_rmse_eV"
+        write_json(self.protocol_path, protocol)
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        final_root = self.workflow / "fake_final_run"
+        write_json(
+            final_root / "sweep" / "training_sweep_manifest.json",
+            {
+                "runs": [
+                    {
+                        "status": "completed",
+                        "model": "graph2mat",
+                        "dataset_id": "joint_a",
+                        "config_id": "g_best",
+                        "seed": 0,
+                        "protocol_stage": "final_test",
+                        "metric_split": "test",
+                        "low_energy_rmse_eV_mean": 0.2,
+                    }
+                ]
+            },
+        )
+        write_json(
+            self.workflow / "selection" / "robust_rerun_plan.json",
+            {"planned_runs": [{"model": "graph2mat", "dataset_id": "joint_a", "config_id": "g_best"}]},
+        )
+
+        self.run_cli("--stage", "generate-report", "--final-run-root", str(final_root))
+
+        report = json.loads((self.workflow / "report" / "report_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["metric"], "low_energy_rmse_eV")
+        self.assertNotEqual(report["metric"], protocol["selection"]["metric"])
+
     def test_evidence_bundle_manifest_records_required_dataset_files(self) -> None:
         protocol = protocol_payload()
         dataset_root = self.root / "joint_a"
+        dataset_root_b = self.root / "joint_b"
         dataset_root.mkdir(parents=True)
+        dataset_root_b.mkdir(parents=True)
         protocol["datasets"][0]["dataset_root"] = str(dataset_root)
         protocol["datasets"][0]["benchmark_dataset_manifest"] = str(dataset_root / "benchmark_dataset_manifest.json")
         protocol["datasets"][0]["frozen_split_manifest"] = str(dataset_root / "frozen_split_manifest.json")
+        protocol["datasets"].append(
+            {
+                "dataset_id": "joint_b",
+                "dataset_root": str(dataset_root_b),
+                "benchmark_dataset_manifest": str(dataset_root_b / "benchmark_dataset_manifest.json"),
+                "frozen_split_manifest": str(dataset_root_b / "frozen_split_manifest.json"),
+            }
+        )
         write_json(dataset_root / "benchmark_dataset_manifest.json", {"benchmark_ready": True})
         write_json(dataset_root / "frozen_split_manifest.json", {"split_hash": "abc"})
         write_json(dataset_root / "artifact_validation.json", {"valid": True})
+        write_json(dataset_root_b / "benchmark_dataset_manifest.json", {"benchmark_ready": True})
+        write_json(dataset_root_b / "frozen_split_manifest.json", {"split_hash": "def"})
+        write_json(dataset_root_b / "artifact_validation.json", {"valid": True})
         run_root = self.workflow / "runs" / "final"
         write_json(run_root / "sweep" / "training_sweep_manifest.json", {"runs": []})
 
@@ -267,8 +467,10 @@ class Graph2MatDeepHFinalWorkflowTests(unittest.TestCase):
 
         self.assertEqual(bundle["status"], "complete")
         self.assertTrue((self.workflow / "evidence" / "evidence_bundle_manifest.json").exists())
+        self.assertEqual(bundle["protocol_dataset_ids"], ["joint_a", "joint_b"])
         labels = {entry["label"] for entry in bundle["files"]}
         self.assertIn("joint_a:artifact_validation", labels)
+        self.assertIn("joint_b:artifact_validation", labels)
 
 
 if __name__ == "__main__":

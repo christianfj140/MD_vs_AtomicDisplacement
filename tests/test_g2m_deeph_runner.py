@@ -19,6 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from g2m_deeph_runner import (  # noqa: E402
+    CommandRunError,
     DEFAULT_DATASET_ROOT,
     METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY,
     METRIC_FAIL_POLICY_FAIL_CLOSED,
@@ -68,6 +69,7 @@ def _write_snapshot(root: Path, sample_id: str, *, complete: bool) -> Path:
 def _write_dataset_provenance(dataset: Path) -> None:
     dataset.mkdir(parents=True, exist_ok=True)
     (dataset / "RUN.fdf").write_text("SystemLabel graphene\nSave.HS T\n", encoding="utf-8")
+    (dataset / "RUN.out").write_text("SIESTA test log\n", encoding="utf-8")
     (dataset / "material_provenance.json").write_text(
         json.dumps(
             {
@@ -75,6 +77,12 @@ def _write_dataset_provenance(dataset: Path) -> None:
                 "basis_file_sha256": {"C.ion.xml": "basis"},
                 "pseudopotential_sha256": {"C": "pseudo"},
                 "fdf_sha256": "fdfhash",
+                "siesta_version": "SIESTA test-version",
+                "siesta_executable": "siesta",
+                "siesta_command_line": "bash -lc 'siesta < RUN.fdf'",
+                "siesta_stdout_path": str(dataset / "RUN.out"),
+                "siesta_returncode": 0,
+                "environment": {"python_version": "3.11.0", "platform": "test-platform"},
             },
             sort_keys=True,
         )
@@ -317,6 +325,26 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                 allowed_returncodes=_metric_allowed_returncodes(METRIC_FAIL_POLICY_FAIL_CLOSED),
             )
 
+    def test_run_command_failure_record_classifies_cuda_oom(self):
+        runner = Graph2MatDeepHBenchmarkRunner()
+
+        with self.assertRaises(CommandRunError) as ctx:
+            runner._run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('RuntimeError: CUDA out of memory'); sys.exit(1)",
+                ],
+                cwd=REPO_ROOT,
+                env=os.environ.copy(),
+                label="unit cuda oom",
+            )
+
+        telemetry = ctx.exception.run_record["telemetry"]
+        self.assertEqual(telemetry["failure_category"], "cuda_oom_detected")
+        self.assertIn("CUDA out of memory", telemetry["failure_evidence_excerpt"])
+        self.assertIn("returncode", ctx.exception.run_record)
+
     def test_diagnostic_metric_policy_may_accept_returncode_two(self):
         runner = Graph2MatDeepHBenchmarkRunner()
 
@@ -329,6 +357,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(result["returncode"], 2)
+        self.assertEqual(result["telemetry"]["failure_category"], "nonzero_exit")
 
     def test_run_command_emits_training_progress_heartbeat(self):
         runner = Graph2MatDeepHBenchmarkRunner()

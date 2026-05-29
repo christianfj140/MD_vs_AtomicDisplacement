@@ -13,11 +13,15 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from g2m_deeph_telemetry import (  # noqa: E402
     GpuTelemetryMonitor,
+    ProcResourceMonitor,
     TELEMETRY_SCHEMA,
     best_validation_cost_from_events,
+    classify_failure,
     compute_gpu_hours,
     compute_throughput,
     optimizer_update_accounting,
+    parse_proc_meminfo,
+    parse_proc_status,
     summarize_run_telemetry,
     write_telemetry,
 )
@@ -70,6 +74,25 @@ class Graph2MatDeepHTelemetryTests(unittest.TestCase):
         self.assertEqual(best["best_validation_step"], 20)
         self.assertAlmostEqual(best["wall_clock_seconds_to_best_validation"], 40.0)
 
+    def test_failure_classification_cuda_oom_and_generic_nonzero(self) -> None:
+        cuda = classify_failure(returncode=1, output_excerpt="RuntimeError: CUDA out of memory")
+        generic = classify_failure(returncode=2, output_excerpt="validation failed")
+        missing = classify_failure(returncode=127, output_excerpt="/bin/sh: deeph-train: command not found")
+
+        self.assertEqual(cuda["failure_category"], "cuda_oom_detected")
+        self.assertIn("CUDA out of memory", cuda["failure_evidence_excerpt"])
+        self.assertEqual(generic["failure_category"], "nonzero_exit")
+        self.assertEqual(missing["failure_category"], "missing_dependency")
+
+    def test_proc_parsers_work_on_synthetic_text(self) -> None:
+        status = parse_proc_status("Name:\tpython\nVmRSS:\t2048 kB\nVmHWM:\t4096 kB\n")
+        meminfo = parse_proc_meminfo("MemTotal: 1048576 kB\nMemAvailable: 524288 kB\n")
+
+        self.assertEqual(status["VmRSS_mb"], 2.0)
+        self.assertEqual(status["VmHWM_mb"], 4.0)
+        self.assertEqual(meminfo["MemTotal_mb"], 1024.0)
+        self.assertEqual(meminfo["MemAvailable_mb"], 512.0)
+
     def test_gpu_monitor_uses_mocked_process_memory(self) -> None:
         calls = []
 
@@ -91,6 +114,20 @@ class Graph2MatDeepHTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry["observed_gpu_count"], 1)
         self.assertGreater(telemetry["gpu_active_seconds"], 0)
 
+    def test_proc_monitor_unavailable_path_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            monitor = ProcResourceMonitor(
+                poll_interval_seconds=0.01,
+                proc_root=Path(tmp) / "missing_proc",
+                pid_tree=lambda root: {root},
+            )
+            monitor.start(123456)
+            time.sleep(0.02)
+            telemetry = monitor.stop()
+
+        self.assertIsNone(telemetry["peak_rss_mb"])
+        self.assertTrue(any("unavailable" in warning for warning in telemetry["warnings"]))
+
     def test_unavailable_telemetry_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -109,6 +146,8 @@ class Graph2MatDeepHTelemetryTests(unittest.TestCase):
             self.assertEqual(telemetry["schema"], TELEMETRY_SCHEMA)
             self.assertEqual(telemetry["telemetry_status"], "partial")
             self.assertIsNone(telemetry["gpu_hours_total"])
+            self.assertIn("peak_rss_mb", telemetry)
+            self.assertIn("cpu_time_seconds_total", telemetry)
             self.assertEqual(telemetry["total_optimizer_updates"], 4)
             self.assertIn("gpu_hours_total unavailable", telemetry["telemetry_warnings"])
             self.assertIn("train: nvidia-smi unavailable", telemetry["telemetry_warnings"])

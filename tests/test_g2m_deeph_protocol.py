@@ -49,6 +49,7 @@ def valid_protocol() -> dict:
                     "num_interactions": [3],
                     "correlation": [2],
                     "max_ell": [3],
+                    "readout": {"choices": ["default", "edge_node_mix"]},
                 },
             },
             "deeph": {
@@ -93,6 +94,21 @@ def valid_protocol() -> dict:
             "metric": "low_energy_rmse_eV",
             "uses_test_metrics": False,
         },
+        "final_evaluation": {
+            "primary_metric": "low_energy_rmse_eV",
+            "mode": "min",
+            "secondary_metrics": [
+                "fermi_window_rmse_eV",
+                "frontier_window_rmse_eV",
+                "dos_wasserstein_eV",
+                "h_mae_eV",
+            ],
+            "practical_match": {
+                "relative_gap_max": 1.10,
+                "absolute_gap_meV_max": None,
+                "requires_cost_noninferior": True,
+            },
+        },
         "final_test_policy": {
             "policy": "locked_until_final",
             "test_split": "test",
@@ -122,6 +138,7 @@ class Graph2MatDeepHProtocolTests(unittest.TestCase):
         self.assertEqual(protocol["schema"], SCHEMA_NAME)
         self.assertIn("protocol_hash", protocol)
         self.assertEqual(protocol["selection"]["split"], "validation")
+        self.assertEqual(protocol["final_evaluation"]["primary_metric"], "low_energy_rmse_eV")
 
     def test_example_protocol_loads(self) -> None:
         protocol = load_protocol(REPO_ROOT / "Comparison" / "config" / "g2m_deeph_paper_protocol_v1_example.json")
@@ -138,6 +155,30 @@ class Graph2MatDeepHProtocolTests(unittest.TestCase):
         protocol.pop("final_test_policy")
 
         with self.assertRaisesRegex(RuntimeError, "Missing protocol fields: final_test_policy"):
+            validate_protocol(protocol)
+
+    def test_missing_final_evaluation_fails(self) -> None:
+        protocol = valid_protocol()
+        protocol.pop("final_evaluation")
+
+        with self.assertRaisesRegex(RuntimeError, "Missing protocol fields: final_evaluation"):
+            validate_protocol(protocol)
+
+    def test_final_evaluation_rejects_validation_loss(self) -> None:
+        protocol = valid_protocol()
+        protocol["selection"]["metric"] = "val_loss"
+        protocol["early_stopping"]["metric"] = "val_loss"
+        protocol["top_k_selection"]["metric"] = "val_loss"
+        protocol["final_evaluation"]["primary_metric"] = "val_loss"
+
+        with self.assertRaisesRegex(RuntimeError, "final_evaluation.primary_metric"):
+            validate_protocol(protocol)
+
+    def test_final_evaluation_rejects_unsupported_metrics(self) -> None:
+        protocol = valid_protocol()
+        protocol["final_evaluation"]["primary_metric"] = "private_dashboard_metric"
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported for final scientific claims"):
             validate_protocol(protocol)
 
     def test_invalid_budget_policy_fails(self) -> None:
@@ -178,8 +219,16 @@ class Graph2MatDeepHProtocolTests(unittest.TestCase):
 
         self.assertEqual(graph2mat_space["optim_lr"], [0.0003, 0.001])
         self.assertEqual(graph2mat_space["batch_size"], [64, 128, 256])
+        self.assertEqual(graph2mat_space["readout"]["choices"], ["default", "edge_node_mix"])
         self.assertEqual(deeph_space["learning_rate"], [0.0001, 0.0003])
         self.assertNotEqual(graph2mat_space["batch_size"], deeph_space["batch_size"])
+
+    def test_graph2mat_readout_search_space_rejects_unknown_family(self) -> None:
+        protocol = valid_protocol()
+        protocol["models"]["graph2mat"]["search_space"]["readout"] = {"choices": ["edge_node_mix", "mystery"]}
+
+        with self.assertRaisesRegex(RuntimeError, "search_space.readout has unsupported values"):
+            validate_protocol(protocol)
 
     def test_graph2mat_final_protocol_requires_small_batch_search(self) -> None:
         protocol = valid_protocol()

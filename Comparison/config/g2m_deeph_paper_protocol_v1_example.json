@@ -95,6 +95,12 @@
               "beta": 0.01
             }
           ]
+        },
+        "readout": {
+          "choices": [
+            "default",
+            "edge_node_mix"
+          ]
         }
       }
     },
@@ -196,6 +202,21 @@
     "split": "validation",
     "metric": "val_loss",
     "uses_test_metrics": false
+  },
+  "final_evaluation": {
+    "primary_metric": "low_energy_rmse_eV",
+    "mode": "min",
+    "secondary_metrics": [
+      "fermi_window_rmse_eV",
+      "frontier_window_rmse_eV",
+      "dos_wasserstein_eV",
+      "h_mae_eV"
+    ],
+    "practical_match": {
+      "relative_gap_max": 1.1,
+      "absolute_gap_meV_max": null,
+      "requires_cost_noninferior": true
+    }
   },
   "final_test_policy": {
     "policy": "locked_until_final",

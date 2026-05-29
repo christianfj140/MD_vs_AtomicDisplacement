@@ -92,6 +92,7 @@ class SiestaMaterialProvenanceTests(unittest.TestCase):
         basis_dir = material_root / "basis"
         basis_dir.mkdir()
         (basis_dir / "Si.ion.xml").write_text("<ion />\n", encoding="utf-8")
+        (basis_dir / "C.ion.xml").write_text("<ion />\n", encoding="utf-8")
 
     def config(self) -> dict:
         return {
@@ -162,7 +163,7 @@ class SiestaMaterialProvenanceTests(unittest.TestCase):
         self.assertEqual(metadata["material"]["label"], "sic")
         self.assertEqual(len(metadata["material"]["fdf_sha256"]), 64)
         self.assertEqual(sorted(metadata["pseudopotential_sha256"]), ["C", "Si"])
-        self.assertEqual(sorted(metadata["basis_file_sha256"]), ["Si.ion.xml"])
+        self.assertEqual(sorted(metadata["basis_file_sha256"]), ["C.ion.xml", "Si.ion.xml"])
         self.assertTrue(metadata["siesta_output_flags"]["valid"])
         self.assertTrue(metadata["siesta_execution"]["job_completed"])
         self.assertTrue(metadata["siesta_execution"]["scf_converged"])

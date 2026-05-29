@@ -12,6 +12,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from g2m_deeph_report import (  # noqa: E402
     best_validation_summary,
+    final_claim_report,
     generate_report,
     learning_curve_rows,
     pareto_report_rows,
@@ -72,6 +73,46 @@ def run_record(
             "validation_metric": "val_loss",
             "telemetry_warnings": [] if gpu_hours is not None and peak_memory is not None else ["gpu telemetry partial"],
         },
+    }
+
+
+def final_statistics_payload(
+    *,
+    robust: bool = True,
+    precision_winner: str = "graph2mat",
+    compute_winner: str | None = "deeph",
+    pareto_winner: str | None = "graph2mat",
+) -> dict:
+    return {
+        "schema": "graph2mat_deeph_final_statistics_v1",
+        "metric": "low_energy_rmse_eV",
+        "mode": "min",
+        "winner_decision": {
+            "robust_claim_allowed": robust,
+            "precision_winner": precision_winner if robust else None,
+            "compute_winner": compute_winner if robust else None,
+            "pareto_winner": pareto_winner if robust else None,
+            "practical_pareto_winner": pareto_winner if robust else None,
+            "gates_failed": [] if robust else ["diagnostic_only:deeph"],
+            "diagnostic_only_reason": "" if robust else "deeph adapter equivalence not proven",
+        },
+    }
+
+
+def gate_status_payload(*, robust: bool = True, claim_status: str | None = None) -> dict:
+    return {
+        "schema": "graph2mat_deeph_gate_status_v1",
+        "claim_status": claim_status or ("robust_allowed" if robust else "invalid_equivalence"),
+        "robust_claim_allowed": robust,
+        "blockers": [] if robust else ["deeph_equivalence_proven: raw/global equivalence is not proven"],
+        "warnings": [],
+        "gates": [
+            {
+                "id": "telemetry_complete",
+                "status": "pass" if robust else "fail",
+                "message": "GPU-hours and peak GPU memory are present." if robust else "Missing telemetry fields",
+            }
+        ],
     }
 
 
@@ -169,6 +210,97 @@ class Graph2MatDeepHReportTests(unittest.TestCase):
             self.assertEqual(claims["accuracy_winner"]["winner"], "graph2mat")
             self.assertEqual(claims["compute_winner"]["winner"], "deeph")
             self.assertIn("practical_pareto_winner", claims)
+
+    def test_failed_gate_produces_no_winner_in_final_report(self) -> None:
+        report = final_claim_report(
+            metric="low_energy_rmse_eV",
+            mode="min",
+            final_statistics=final_statistics_payload(robust=True),
+            gate_status=gate_status_payload(robust=False),
+            final_statistics_path=Path("final_statistics.json"),
+            gate_status_path=Path("gate_status.json"),
+        )
+
+        self.assertFalse(report["robust_claim_allowed"])
+        self.assertIsNone(report["precision_winner"])
+        self.assertIsNone(report["cost_winner"])
+        self.assertIn("gate_check blocked robust claims", report["diagnostic_only_reason"])
+
+    def test_passed_gate_and_final_stats_can_report_winner(self) -> None:
+        report = final_claim_report(
+            metric="low_energy_rmse_eV",
+            mode="min",
+            final_statistics=final_statistics_payload(robust=True),
+            gate_status=gate_status_payload(robust=True),
+            final_statistics_path=Path("final_statistics.json"),
+            gate_status_path=Path("gate_status.json"),
+        )
+
+        self.assertTrue(report["robust_claim_allowed"])
+        self.assertEqual(report["precision_winner"], "graph2mat")
+        self.assertEqual(report["cost_winner"], "deeph")
+        self.assertEqual(report["practical_pareto_winner"], "graph2mat")
+
+    def test_common_h_mae_recommendation_cannot_override_failed_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = run_record(model="deeph", config_id="dh", values=[0.05], gpu_hours=1.0)
+            write_json(root / "sweep" / "training_sweep_manifest.json", {"runs": [record]})
+            final_stats_path = root / "summary" / "final_statistics" / "final_statistics.json"
+            gate_path = root / "summary" / "gate_status.json"
+            write_json(final_stats_path, final_statistics_payload(robust=True, precision_winner="deeph"))
+            write_json(gate_path, gate_status_payload(robust=False))
+
+            manifest = generate_report(
+                run_root=root,
+                metric="low_energy_rmse_eV",
+                final_statistics_path=final_stats_path,
+                gate_status_path=gate_path,
+            )
+
+            self.assertFalse(manifest["robust_claim_allowed"])
+            self.assertIsNone(manifest["final_report"]["precision_winner"])
+            self.assertTrue((root / "summary" / "report" / "final_report.json").exists())
+            self.assertTrue((root / "summary" / "report" / "final_report.md").exists())
+
+    def test_missing_cost_telemetry_blocks_cost_winner(self) -> None:
+        gate = gate_status_payload(robust=False, claim_status="invalid_telemetry")
+        gate["gates"] = [{"id": "telemetry_complete", "status": "fail", "message": "Missing telemetry fields"}]
+        report = final_claim_report(
+            metric="low_energy_rmse_eV",
+            mode="min",
+            final_statistics=final_statistics_payload(robust=True, compute_winner="deeph"),
+            gate_status=gate,
+            final_statistics_path=Path("final_statistics.json"),
+            gate_status_path=Path("gate_status.json"),
+        )
+
+        self.assertFalse(report["cost_claim_allowed"])
+        self.assertIsNone(report["cost_winner"])
+        self.assertEqual(report["claim_status"], "invalid_telemetry")
+
+    def test_final_report_includes_required_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_json(root / "sweep" / "training_sweep_manifest.json", {"runs": [run_record()]})
+            final_stats_path = root / "summary" / "final_statistics" / "final_statistics.json"
+            gate_path = root / "summary" / "gate_status.json"
+            write_json(final_stats_path, final_statistics_payload())
+            write_json(gate_path, gate_status_payload())
+
+            manifest = generate_report(
+                run_root=root,
+                metric="low_energy_rmse_eV",
+                final_statistics_path=final_stats_path,
+                gate_status_path=gate_path,
+            )
+            final_report = json.loads((root / "summary" / "report" / "final_report.json").read_text(encoding="utf-8"))
+            markdown = (root / "summary" / "report" / "final_report.md").read_text(encoding="utf-8")
+
+            self.assertEqual(final_report["primary_final_metric"], "low_energy_rmse_eV")
+            self.assertIn("supporting_metric_policy", final_report)
+            self.assertIn("H-MAE/common metric summaries are supporting", markdown)
+            self.assertIn("final_report_json", manifest["outputs"])
 
 
 if __name__ == "__main__":

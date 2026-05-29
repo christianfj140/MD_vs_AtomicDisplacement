@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from g2m_deeph_training_sweep import DEEPH_KEYS, FORBIDDEN_DEEPH_KEYS, GRAPH2MAT_KEYS, json_safe
+from graph2mat_sweep_config import GRAPH2MAT_READOUT_FAMILIES
 
 
 SCHEMA_NAME = "graph2mat_deeph_benchmark_protocol_v1"
@@ -20,6 +21,38 @@ ALLOWED_BUDGET_MODES = {"equal_n_trials", "equal_gpu_hours_per_model"}
 ALLOWED_MODES = {"min", "max"}
 ALLOWED_FINAL_TEST_POLICIES = {"locked_until_final"}
 ALLOWED_DEEPH_EQUIVALENCE_POLICIES = {"fail_closed_unless_proven"}
+DISALLOWED_FINAL_CLAIM_METRICS = {
+    "loss",
+    "metric_value",
+    "test_loss",
+    "train_loss",
+    "training_loss",
+    "val_loss",
+    "validation_loss",
+    "validation_metric",
+}
+ALLOWED_FINAL_CLAIM_METRICS = {
+    "dos_mae_500_fermi_window",
+    "dos_mae_500_fermi_window_mean",
+    "dos_wasserstein_eV",
+    "dos_wasserstein_eV_mean",
+    "fermi_window_rmse_eV",
+    "fermi_window_rmse_eV_mean",
+    "frontier_window_rmse_eV",
+    "frontier_window_rmse_eV_mean",
+    "global_rmse_eV",
+    "global_rmse_eV_mean",
+    "h_mae_eV",
+    "h_mae_eV_mean",
+    "h_mse_eV",
+    "h_mse_eV_mean",
+    "h_rmse_eV",
+    "h_rmse_eV_mean",
+    "low_energy_rmse_eV",
+    "low_energy_rmse_eV_mean",
+    "relative_frobenius",
+    "relative_frobenius_mean",
+}
 
 REQUIRED_REFERENCE_ARTIFACTS = {
     "RUN.fdf",
@@ -51,6 +84,7 @@ REQUIRED_TOP_LEVEL_FIELDS = {
     "budget_policy",
     "final_seeds",
     "top_k_selection",
+    "final_evaluation",
     "final_test_policy",
     "required_telemetry",
     "deeph_comparability",
@@ -133,6 +167,20 @@ def _numeric_values_from_space_spec(value: Any) -> list[float]:
     return numbers
 
 
+def _values_from_space_spec(value: Any) -> list[Any]:
+    if isinstance(value, dict):
+        if "choices" in value and isinstance(value["choices"], list):
+            return list(value["choices"])
+        if "value" in value:
+            return [value["value"]]
+        if "fixed" in value:
+            return [value["fixed"]]
+        return []
+    if isinstance(value, list):
+        return list(value)
+    return [value]
+
+
 def protocol_hash(protocol: dict[str, Any]) -> str:
     """Return a stable hash for a validated or raw protocol dictionary."""
     payload = copy.deepcopy(protocol)
@@ -194,6 +242,26 @@ def _validate_models(protocol: dict[str, Any]) -> None:
                     "models.graph2mat.search_space.batch_size must include at least one small/medium "
                     "batch size <= 128 for paper-ready fairness."
                 )
+            if "readout" in search_space:
+                raw_readout_values = _values_from_space_spec(search_space.get("readout"))
+                if not raw_readout_values:
+                    raise RuntimeError(
+                        "models.graph2mat.search_space.readout must use choices, value, or fixed."
+                    )
+                readout_values = {
+                    str(item).strip().lower()
+                    for item in raw_readout_values
+                    if str(item).strip()
+                }
+                unsupported = sorted(readout_values - GRAPH2MAT_READOUT_FAMILIES)
+                if unsupported:
+                    raise RuntimeError(
+                        "models.graph2mat.search_space.readout has unsupported values: "
+                        + ", ".join(unsupported)
+                        + ". Use one of: "
+                        + ", ".join(sorted(GRAPH2MAT_READOUT_FAMILIES))
+                        + "."
+                    )
 
 
 def _validate_selection(protocol: dict[str, Any]) -> str:
@@ -280,6 +348,54 @@ def _validate_top_k_selection(protocol: dict[str, Any], *, selection_metric: str
         raise RuntimeError("top_k_selection must not reference test metrics.")
 
 
+def _validate_final_metric_name(metric: str, *, field: str) -> None:
+    normalized = metric.strip()
+    if normalized in DISALLOWED_FINAL_CLAIM_METRICS:
+        raise RuntimeError(f"{field} must be a scientific final metric, not {normalized}.")
+    if normalized not in ALLOWED_FINAL_CLAIM_METRICS:
+        raise RuntimeError(
+            f"{field} is unsupported for final scientific claims: {normalized}. "
+            "Use one of: " + ", ".join(sorted(ALLOWED_FINAL_CLAIM_METRICS)) + "."
+        )
+
+
+def _validate_final_evaluation(protocol: dict[str, Any]) -> None:
+    section = _require_object(protocol.get("final_evaluation"), field="final_evaluation")
+    primary_metric = _require_nonempty_string(
+        section.get("primary_metric"),
+        field="final_evaluation.primary_metric",
+    )
+    _validate_final_metric_name(primary_metric, field="final_evaluation.primary_metric")
+    mode = _require_nonempty_string(section.get("mode"), field="final_evaluation.mode")
+    if mode not in ALLOWED_MODES:
+        raise RuntimeError(f"final_evaluation.mode must be one of: {', '.join(sorted(ALLOWED_MODES))}.")
+    secondary = section.get("secondary_metrics", [])
+    if secondary is None:
+        secondary = []
+    if not isinstance(secondary, list):
+        raise RuntimeError("final_evaluation.secondary_metrics must be a list.")
+    for index, metric in enumerate(secondary):
+        name = _require_nonempty_string(metric, field=f"final_evaluation.secondary_metrics[{index}]")
+        _validate_final_metric_name(name, field=f"final_evaluation.secondary_metrics[{index}]")
+    practical = section.get("practical_match")
+    if practical is not None:
+        practical_section = _require_object(practical, field="final_evaluation.practical_match")
+        if practical_section.get("relative_gap_max") is not None:
+            value = practical_section.get("relative_gap_max")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise RuntimeError("final_evaluation.practical_match.relative_gap_max must be a positive number.")
+        if practical_section.get("absolute_gap_meV_max") is not None:
+            _require_nonnegative_number(
+                practical_section.get("absolute_gap_meV_max"),
+                field="final_evaluation.practical_match.absolute_gap_meV_max",
+            )
+        if "requires_cost_noninferior" in practical_section and not isinstance(
+            practical_section.get("requires_cost_noninferior"),
+            bool,
+        ):
+            raise RuntimeError("final_evaluation.practical_match.requires_cost_noninferior must be boolean.")
+
+
 def _validate_final_test_policy(protocol: dict[str, Any]) -> None:
     section = _require_object(protocol.get("final_test_policy"), field="final_test_policy")
     policy = _require_nonempty_string(section.get("policy"), field="final_test_policy.policy")
@@ -337,6 +453,7 @@ def validate_protocol(value: Any) -> dict[str, Any]:
     _validate_budget_policy(protocol)
     _validate_final_seeds(protocol)
     _validate_top_k_selection(protocol, selection_metric=selection_metric)
+    _validate_final_evaluation(protocol)
     _validate_final_test_policy(protocol)
     _validate_required_telemetry(protocol)
     _validate_deeph_comparability(protocol)

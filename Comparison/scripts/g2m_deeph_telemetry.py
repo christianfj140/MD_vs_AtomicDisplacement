@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -26,6 +27,39 @@ REQUIRED_TELEMETRY_FIELDS = (
     "matrix_blocks_per_second",
     "best_validation_epoch",
 )
+FAILURE_CATEGORIES = {
+    "ok",
+    "nonzero_exit",
+    "oom_detected",
+    "cuda_oom_detected",
+    "timeout",
+    "missing_dependency",
+    "user_stopped",
+    "unknown_failure",
+}
+CUDA_OOM_PATTERNS = (
+    "cuda out of memory",
+    "cublas_status_alloc_failed",
+    "cudnn_status_alloc_failed",
+    "cuda error: out of memory",
+    "tried to allocate",
+)
+OOM_PATTERNS = (
+    "out of memory",
+    "oom-kill",
+    "oom killed",
+    "killed process",
+    "killed",
+)
+MISSING_DEPENDENCY_PATTERNS = (
+    "command not found",
+    "no such file or directory",
+    "no se encontró",
+    "no se encontro",
+    "module not found",
+    "modulenotfounderror",
+    "importerror",
+)
 
 
 def finite_number(value: Any) -> float | None:
@@ -34,6 +68,54 @@ def finite_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _short_excerpt(text: str | None, *, max_chars: int = 1200) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= max_chars:
+        return clean
+    return "..." + clean[-max_chars:]
+
+
+def classify_failure(
+    *,
+    returncode: int | None,
+    output_excerpt: str | None = None,
+    controlled_stop_reason: str | None = None,
+    stop_requested: bool = False,
+    timed_out: bool = False,
+) -> dict[str, str]:
+    """Classify subprocess failure without changing subprocess semantics."""
+
+    excerpt = _short_excerpt(output_excerpt)
+    text = excerpt.lower()
+    if controlled_stop_reason:
+        return {"failure_category": "ok", "failure_evidence_excerpt": _short_excerpt(controlled_stop_reason)}
+    if returncode == 0:
+        return {"failure_category": "ok", "failure_evidence_excerpt": ""}
+    if timed_out:
+        return {"failure_category": "timeout", "failure_evidence_excerpt": excerpt or "timeout"}
+    if stop_requested:
+        return {"failure_category": "user_stopped", "failure_evidence_excerpt": excerpt or "stop requested"}
+    if any(pattern in text for pattern in CUDA_OOM_PATTERNS):
+        return {"failure_category": "cuda_oom_detected", "failure_evidence_excerpt": excerpt}
+    if any(pattern in text for pattern in OOM_PATTERNS):
+        return {"failure_category": "oom_detected", "failure_evidence_excerpt": excerpt}
+    if any(pattern in text for pattern in MISSING_DEPENDENCY_PATTERNS):
+        return {"failure_category": "missing_dependency", "failure_evidence_excerpt": excerpt}
+    if returncode is None:
+        return {"failure_category": "unknown_failure", "failure_evidence_excerpt": excerpt}
+    if returncode < 0:
+        signal_name = ""
+        try:
+            signal_name = signal.Signals(-int(returncode)).name
+        except (ValueError, TypeError):
+            signal_name = f"signal {-int(returncode)}"
+        return {
+            "failure_category": "unknown_failure",
+            "failure_evidence_excerpt": excerpt or f"process terminated by {signal_name}; OOM not confirmed",
+        }
+    return {"failure_category": "nonzero_exit", "failure_evidence_excerpt": excerpt}
 
 
 def compute_gpu_hours(gpu_active_seconds: float | int | None, gpu_count: int | None) -> float | None:
@@ -259,6 +341,172 @@ def descendant_pids(root_pid: int) -> set[int]:
     return seen
 
 
+def parse_proc_status(text: str) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        if key not in {"VmRSS", "VmHWM"}:
+            continue
+        parts = raw_value.strip().split()
+        if not parts:
+            continue
+        number = finite_number(parts[0])
+        if number is not None:
+            values[f"{key}_mb"] = number / 1024.0
+    return values
+
+
+def parse_proc_meminfo(text: str) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        if key not in {"MemTotal", "MemAvailable"}:
+            continue
+        parts = raw_value.strip().split()
+        if not parts:
+            continue
+        number = finite_number(parts[0])
+        if number is not None:
+            values[f"{key}_mb"] = number / 1024.0
+    return values
+
+
+def proc_cpu_seconds(pid: int, *, proc_root: Path = Path("/proc")) -> float | None:
+    stat_path = proc_root / str(int(pid)) / "stat"
+    try:
+        text = stat_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        after_comm = text.rsplit(")", 1)[1].strip().split()
+        utime_ticks = finite_number(after_comm[11])
+        stime_ticks = finite_number(after_comm[12])
+        clk_tck = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", "SC_CLK_TCK"))
+    except (IndexError, OSError, ValueError, TypeError):
+        return None
+    if utime_ticks is None or stime_ticks is None or not clk_tck:
+        return None
+    return (utime_ticks + stime_ticks) / float(clk_tck)
+
+
+def proc_memory_mb(pid: int, *, proc_root: Path = Path("/proc")) -> dict[str, float]:
+    try:
+        return parse_proc_status((proc_root / str(int(pid)) / "status").read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
+def system_memory_mb(*, proc_root: Path = Path("/proc")) -> dict[str, float]:
+    try:
+        return parse_proc_meminfo((proc_root / "meminfo").read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
+@dataclass
+class ProcResourceMonitor:
+    """Poll Linux procfs CPU/RAM usage for one subprocess tree."""
+
+    poll_interval_seconds: float = 1.0
+    proc_root: Path = Path("/proc")
+    pid_tree: Callable[[int], set[int]] = descendant_pids
+    _root_pid: int | None = None
+    _thread: threading.Thread | None = None
+    _stop: threading.Event = field(default_factory=threading.Event)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _peak_rss_mb: float | None = None
+    _cpu_peak_percent: float | None = None
+    _cpu_time_seconds: float | None = None
+    _last_cpu_seconds: float | None = None
+    _system_ram_total_mb: float | None = None
+    _system_ram_available_mb_start: float | None = None
+    _system_ram_available_mb_end: float | None = None
+    _warnings: list[str] = field(default_factory=list)
+
+    def start(self, root_pid: int) -> None:
+        self._root_pid = int(root_pid)
+        meminfo = system_memory_mb(proc_root=self.proc_root)
+        with self._lock:
+            self._system_ram_total_mb = meminfo.get("MemTotal_mb")
+            self._system_ram_available_mb_start = meminfo.get("MemAvailable_mb")
+            if not self.proc_root.exists():
+                self._warnings.append(f"{self.proc_root} unavailable; CPU/RAM telemetry unavailable")
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="g2m-deeph-proc-telemetry", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        last_poll = time.time()
+        self._poll(0.0)
+        while not self._stop.wait(self.poll_interval_seconds):
+            now = time.time()
+            self._poll(now - last_poll)
+            last_poll = now
+        self._poll(max(0.0, time.time() - last_poll))
+
+    def _poll(self, elapsed_since_last_poll: float) -> None:
+        root_pid = self._root_pid
+        if root_pid is None or not self.proc_root.exists():
+            return
+        tracked = self.pid_tree(root_pid)
+        rss_values: list[float] = []
+        hwm_values: list[float] = []
+        cpu_values: list[float] = []
+        for pid in tracked:
+            memory = proc_memory_mb(pid, proc_root=self.proc_root)
+            if memory.get("VmRSS_mb") is not None:
+                rss_values.append(float(memory["VmRSS_mb"]))
+            if memory.get("VmHWM_mb") is not None:
+                hwm_values.append(float(memory["VmHWM_mb"]))
+            cpu_seconds = proc_cpu_seconds(pid, proc_root=self.proc_root)
+            if cpu_seconds is not None:
+                cpu_values.append(cpu_seconds)
+        meminfo = system_memory_mb(proc_root=self.proc_root)
+        cpu_total = sum(cpu_values) if cpu_values else None
+        rss_total = sum(rss_values) if rss_values else None
+        hwm_total = sum(hwm_values) if hwm_values else None
+        peak_memory = max(value for value in (rss_total, hwm_total) if value is not None) if any(
+            value is not None for value in (rss_total, hwm_total)
+        ) else None
+        with self._lock:
+            if peak_memory is not None:
+                self._peak_rss_mb = max(self._peak_rss_mb or 0.0, peak_memory)
+            if cpu_total is not None:
+                if self._last_cpu_seconds is not None and elapsed_since_last_poll > 0:
+                    delta = max(0.0, cpu_total - self._last_cpu_seconds)
+                    percent = 100.0 * delta / float(elapsed_since_last_poll)
+                    self._cpu_peak_percent = max(self._cpu_peak_percent or 0.0, percent)
+                self._last_cpu_seconds = cpu_total
+                self._cpu_time_seconds = max(self._cpu_time_seconds or 0.0, cpu_total)
+            if meminfo.get("MemTotal_mb") is not None:
+                self._system_ram_total_mb = meminfo.get("MemTotal_mb")
+            if meminfo.get("MemAvailable_mb") is not None:
+                self._system_ram_available_mb_end = meminfo.get("MemAvailable_mb")
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(2.0, self.poll_interval_seconds * 2.0))
+        with self._lock:
+            if self._peak_rss_mb is None and self._cpu_time_seconds is None and self.proc_root.exists():
+                warning = "procfs CPU/RAM telemetry unavailable for subprocess tree"
+                if warning not in self._warnings:
+                    self._warnings.append(warning)
+            return {
+                "cpu_peak_percent": self._cpu_peak_percent,
+                "cpu_time_seconds": self._cpu_time_seconds,
+                "peak_rss_mb": self._peak_rss_mb,
+                "system_ram_total_mb": self._system_ram_total_mb,
+                "system_ram_available_mb_start": self._system_ram_available_mb_start,
+                "system_ram_available_mb_end": self._system_ram_available_mb_end,
+                "warnings": list(self._warnings),
+            }
+
+
 @dataclass
 class GpuTelemetryMonitor:
     """Poll per-process GPU memory for one subprocess tree."""
@@ -464,6 +712,26 @@ def _command_peak_memory(command_run: dict[str, Any]) -> float | None:
     return finite_number(telemetry.get("peak_gpu_memory_mb"))
 
 
+def _command_peak_rss(command_run: dict[str, Any]) -> float | None:
+    telemetry = command_run.get("telemetry") if isinstance(command_run.get("telemetry"), dict) else {}
+    return finite_number(telemetry.get("peak_rss_mb"))
+
+
+def _command_cpu_time(command_run: dict[str, Any]) -> float | None:
+    telemetry = command_run.get("telemetry") if isinstance(command_run.get("telemetry"), dict) else {}
+    return finite_number(telemetry.get("cpu_time_seconds"))
+
+
+def _command_cpu_peak(command_run: dict[str, Any]) -> float | None:
+    telemetry = command_run.get("telemetry") if isinstance(command_run.get("telemetry"), dict) else {}
+    return finite_number(telemetry.get("cpu_peak_percent"))
+
+
+def _command_system_ram(command_run: dict[str, Any], key: str) -> float | None:
+    telemetry = command_run.get("telemetry") if isinstance(command_run.get("telemetry"), dict) else {}
+    return finite_number(telemetry.get(key))
+
+
 def _phase_seconds(command_run: dict[str, Any] | None) -> float | None:
     return finite_number((command_run or {}).get("elapsed_seconds"))
 
@@ -518,6 +786,27 @@ def summarize_run_telemetry(
     ]
     gpu_hours_total = sum(gpu_hours_values) if gpu_hours_values else None
     peak_gpu_memory_mb = max(peak_values) if peak_values else None
+    command_runs = [run for run in [preprocess_run, train_run, predict_run, metrics_run, *inference_runs] if isinstance(run, dict)]
+    cpu_time_values = [value for value in (_command_cpu_time(run) for run in command_runs) if value is not None]
+    cpu_peak_values = [value for value in (_command_cpu_peak(run) for run in command_runs) if value is not None]
+    peak_rss_values = [value for value in (_command_peak_rss(run) for run in command_runs) if value is not None]
+    ram_total_values = [value for value in (_command_system_ram(run, "system_ram_total_mb") for run in command_runs) if value is not None]
+    ram_start_values = [
+        value for value in (_command_system_ram(run, "system_ram_available_mb_start") for run in command_runs) if value is not None
+    ]
+    ram_end_values = [
+        value for value in (_command_system_ram(run, "system_ram_available_mb_end") for run in command_runs) if value is not None
+    ]
+    failure_categories_by_phase = {
+        name: (run.get("telemetry") or {}).get("failure_category")
+        for name, run in (
+            ("preprocess", preprocess_run),
+            ("train", train_run),
+            ("predict", predict_run),
+            ("metrics", metrics_run),
+        )
+        if isinstance(run, dict) and isinstance(run.get("telemetry"), dict)
+    }
     training_samples = split_sample_count(frozen_split_manifest_path, splits={"train", "validation"})
     throughput = compute_throughput(
         samples=training_samples,
@@ -546,6 +835,13 @@ def summarize_run_telemetry(
         "gpu_hours_to_best_validation": gpu_hours_to_best,
         "wall_clock_seconds_to_best_validation": seconds_to_best,
         "peak_gpu_memory_mb": peak_gpu_memory_mb,
+        "cpu_time_seconds_total": sum(cpu_time_values) if cpu_time_values else None,
+        "cpu_peak_percent": max(cpu_peak_values) if cpu_peak_values else None,
+        "peak_rss_mb": max(peak_rss_values) if peak_rss_values else None,
+        "system_ram_total_mb": max(ram_total_values) if ram_total_values else None,
+        "system_ram_available_mb_start": ram_start_values[0] if ram_start_values else None,
+        "system_ram_available_mb_end": ram_end_values[-1] if ram_end_values else None,
+        "failure_categories_by_phase": failure_categories_by_phase,
         "samples_per_second": throughput["samples_per_second"],
         "matrix_blocks_per_second": throughput["matrix_blocks_per_second"],
         "training_sample_count": training_samples,

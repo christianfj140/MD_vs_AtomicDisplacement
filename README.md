@@ -46,7 +46,8 @@ backend usa el default historico `["md", "siesta_fc_cartesian"]`.
 ## Graph2Mat vs DeepH para grafeno
 
 El flujo dedicado `G2M vs DeepH` vive en una pestaña propia de la UI. Su guia
-operativa esta en `docs/graph2mat_deeph_benchmark.md`.
+operativa y el checklist paper-ready estan en
+`docs/graph2mat_deeph_benchmark.md`.
 
 Los datasets reutilizables de este flujo viven por defecto en
 `Comparison/datasets/`, separados de `Comparison/workspaces/` y
@@ -67,6 +68,8 @@ marcada en los manifests. `ML_prediction.HSX` nunca es ground truth y las
 metricas espectrales usan `S_ref`/`S_ref(k)` cuando esta disponible. Si la
 equivalencia DeepH/Graph2Mat no esta probada en base, unidades, orden orbital,
 convencion R-vector o frame, la comparacion se marca `diagnostic_only`.
+Las metricas del paper DeepH solo son contexto externo: no son un baseline
+directo para claims robustos en este pipeline.
 
 ## Estructura actual del repositorio
 
