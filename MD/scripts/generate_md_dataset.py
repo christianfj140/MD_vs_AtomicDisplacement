@@ -430,6 +430,17 @@ def _sample_names(samples: list[Path]) -> str:
 
 def _link_or_copy_file(src: Path, dst: Path) -> None:
     if dst.exists() or dst.is_symlink():
+        try:
+            if src.resolve(strict=True) == dst.resolve(strict=True):
+                return
+        except OSError:
+            pass
+        try:
+            if src.is_file() and dst.exists() and dst.is_file() and material_file_sha256(src) == material_file_sha256(dst):
+                return
+        except OSError:
+            pass
+    if dst.exists() or dst.is_symlink():
         dst.unlink()
     try:
         os.symlink(os.path.relpath(src, dst.parent), dst)

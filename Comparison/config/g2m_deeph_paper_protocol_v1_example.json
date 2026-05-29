@@ -1,0 +1,219 @@
+{
+  "protocol_id": "graphene_w90_g2m_deeph_final_v1",
+  "version": "1.0",
+  "datasets": [
+    {
+      "dataset_id": "graphene_w90_phase1_iid300",
+      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300",
+      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/benchmark_dataset_manifest.json",
+      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/frozen_split_manifest.json",
+      "compatibility_hash": "recorded_in_benchmark_dataset_manifest"
+    },
+    {
+      "dataset_id": "graphene_w90_phase1_iid600",
+      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600",
+      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/benchmark_dataset_manifest.json",
+      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/frozen_split_manifest.json",
+      "compatibility_hash": "recorded_in_benchmark_dataset_manifest"
+    }
+  ],
+  "reference_artifacts": {
+    "contract": "joint_graph2mat_deeph_artifact_contract_v1",
+    "required": [
+      "RUN.fdf",
+      "SystemLabel.TSHS",
+      "SystemLabel.TSDE",
+      "SystemLabel.HSX",
+      "SystemLabel.STRUCT_OUT",
+      "SystemLabel.XV",
+      "SystemLabel.ORB_INDX",
+      "metadata.json"
+    ],
+    "forbidden": [
+      "ML_prediction.HSX"
+    ],
+    "forbid_as_reference": "ML_prediction.HSX"
+  },
+  "models": {
+    "graph2mat": {
+      "enabled": true,
+      "search_space": {
+        "optim_lr": {
+          "choices": [
+            0.0012,
+            0.003,
+            0.005,
+            0.01
+          ]
+        },
+        "batch_size": {
+          "choices": [
+            32,
+            48,
+            64,
+            96,
+            128,
+            256
+          ]
+        },
+        "max_epochs": {
+          "value": 600
+        },
+        "hidden_irreps": {
+      "choices": [
+        "24x0e + 24x1o + 24x2e + 24x3o",
+        "32x0e + 32x1o + 32x2e + 32x3o",
+        "48x0e + 48x1o + 48x2e + 48x3o",
+        "64x0e + 64x1o + 64x2e + 64x3o"
+      ]
+        },
+        "num_interactions": {
+          "value": 3
+        },
+        "correlation": {
+          "choices": [
+            2,
+            3
+          ]
+        },
+        "max_ell": {
+          "value": 3
+        },
+        "loss": {
+          "choices": [
+            "graph2mat.metrics.block_type_mse",
+            "graph2mat.metrics.block_type_huber"
+          ]
+        },
+        "loss_kwargs": {
+          "choices": [
+            {},
+            {
+              "beta": 0.003
+            },
+            {
+              "beta": 0.01
+            }
+          ]
+        }
+      }
+    },
+    "deeph": {
+      "enabled": true,
+      "search_space": {
+        "learning_rate": {
+          "distribution": "loguniform",
+          "min": 0.00003,
+          "max": 0.001
+        },
+        "batch_size": {
+          "choices": [
+            4,
+            8
+          ]
+        },
+        "epochs": {
+          "value": 600
+        },
+        "optimizer": {
+          "value": "AdamW"
+        },
+        "weight_decay": {
+          "choices": [
+            0.0,
+            0.0001
+          ]
+        },
+        "criterion": {
+          "value": "MSELoss"
+        },
+        "atom_fea_len": {
+          "choices": [
+            64,
+            128
+          ]
+        },
+        "edge_fea_len": {
+          "value": 128
+        },
+        "gauss_stop": {
+          "value": 6
+        },
+        "num_l": {
+          "choices": [
+            4
+          ]
+        },
+        "if_edge_update": {
+          "value": true
+        },
+        "if_lcmp": {
+          "value": true
+        },
+        "normalization": {
+          "value": "LayerNorm"
+        },
+        "atom_update_net": {
+          "value": "CGConv"
+        },
+        "retain_edge_fea": {
+          "value": true
+        }
+      }
+    }
+  },
+  "selection": {
+    "split": "validation",
+    "metric": "val_loss",
+    "mode": "min",
+    "source": "validation_only"
+  },
+  "early_stopping": {
+    "metric": "val_loss",
+    "mode": "min",
+    "patience": 30,
+    "min_delta": 0.0,
+    "max_epochs": 600
+  },
+  "search_policy": {
+    "strategy": "latin_hypercube",
+    "n_trials_per_model": 40,
+    "random_seed": 20260528
+  },
+  "budget_policy": {
+    "mode": "equal_n_trials",
+    "n_trials_per_model": 40
+  },
+  "final_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "top_k_selection": {
+    "k_per_model": 2,
+    "split": "validation",
+    "metric": "val_loss",
+    "uses_test_metrics": false
+  },
+  "final_test_policy": {
+    "policy": "locked_until_final",
+    "test_split": "test",
+    "locked_during_search": true,
+    "evaluate_once_after_selection": true
+  },
+  "required_telemetry": [
+    "wall_clock_seconds",
+    "gpu_hours",
+    "peak_gpu_memory_mb",
+    "samples_per_second",
+    "matrix_blocks_per_second",
+    "best_validation_epoch"
+  ],
+  "deeph_comparability": {
+    "adapter_equivalence_policy": "fail_closed_unless_proven",
+    "robust_winner_requires_proven_equivalence": true,
+    "diagnostic_if_unproven": true
+  }
+}

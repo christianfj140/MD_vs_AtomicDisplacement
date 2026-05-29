@@ -17,7 +17,11 @@ from typing import Any
 from deeph_prediction_adapter import (
     EQUIVALENCE_INVALID_MISSING_REFERENCE,
     EQUIVALENCE_PROVEN_RAW_GLOBAL,
+    EQUIVALENCE_STATUS_FAILED,
+    EQUIVALENCE_STATUS_PROVEN,
     PROVEN_ADAPTER_EQUIVALENCE_STATUSES,
+    equivalence_scope_from_adapter_status,
+    equivalence_status_from_adapter_status,
 )
 
 
@@ -35,16 +39,29 @@ STATUS_VALUES = {
 }
 PRIMARY_METRIC = "h_mae_eV_mean"
 
-MATRIX_METRIC_GROUP = {
-    "id": "matrix",
-    "title": "Matrix metrics",
-    "y_title": "error",
-    "metrics": [
-        {"key": "h_mae_eV_mean", "label": "H MAE", "unit": "eV", "direction": "lower_is_better"},
-        {"key": "h_rmse_eV_mean", "label": "H RMSE", "unit": "eV", "direction": "lower_is_better"},
-        {"key": "h_mse_eV2_mean", "label": "H MSE", "unit": "eV^2", "direction": "lower_is_better"},
-        {"key": "r2_mean", "label": "R2", "unit": "", "direction": "higher_is_better"},
-    ],
+H_MAE_METRIC_GROUP = {
+    "id": "h_mae",
+    "title": "Hamiltonian MAE",
+    "y_title": "MAE eV",
+    "metrics": [{"key": "h_mae_eV_mean", "label": "H MAE", "unit": "eV", "direction": "lower_is_better"}],
+}
+H_RMSE_METRIC_GROUP = {
+    "id": "h_rmse",
+    "title": "Hamiltonian RMSE",
+    "y_title": "RMSE eV",
+    "metrics": [{"key": "h_rmse_eV_mean", "label": "H RMSE", "unit": "eV", "direction": "lower_is_better"}],
+}
+H_MSE_METRIC_GROUP = {
+    "id": "h_mse",
+    "title": "Hamiltonian MSE",
+    "y_title": "MSE eV^2",
+    "metrics": [{"key": "h_mse_eV2_mean", "label": "H MSE", "unit": "eV^2", "direction": "lower_is_better"}],
+}
+R2_METRIC_GROUP = {
+    "id": "r2",
+    "title": "Sparse support R2",
+    "y_title": "R2",
+    "metrics": [{"key": "r2_mean", "label": "R2", "unit": "", "direction": "higher_is_better"}],
 }
 FROBENIUS_METRIC_GROUP = {
     "id": "frobenius",
@@ -59,21 +76,55 @@ FROBENIUS_METRIC_GROUP = {
         },
     ],
 }
-SPECTRAL_METRIC_GROUP = {
-    "id": "spectral",
-    "title": "Spectral metrics",
+HERMITICITY_METRIC_GROUP = {
+    "id": "hermiticity",
+    "title": "Predicted Hamiltonian hermiticity",
+    "y_title": "Hermiticity residual",
+    "metrics": [
+        {
+            "key": "hermiticity_pred_mean",
+            "label": "Hermiticity residual",
+            "unit": "",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+SPECTRAL_GLOBAL_METRIC_GROUP = {
+    "id": "spectral_global",
+    "title": "Global spectral RMSE",
     "y_title": "RMSE eV",
     "metrics": [
         {"key": "global_rmse_eV_mean", "label": "Global RMSE", "unit": "eV", "direction": "lower_is_better"},
+    ],
+}
+SPECTRAL_LOW_ENERGY_METRIC_GROUP = {
+    "id": "spectral_low_energy",
+    "title": "Low-energy spectral RMSE",
+    "y_title": "RMSE eV",
+    "metrics": [
         {"key": "low_energy_rmse_eV_mean", "label": "Low-energy RMSE", "unit": "eV", "direction": "lower_is_better"},
+    ],
+}
+SPECTRAL_FERMI_METRIC_GROUP = {
+    "id": "spectral_fermi",
+    "title": "Fermi-window spectral RMSE",
+    "y_title": "RMSE eV",
+    "metrics": [
         {"key": "fermi_window_rmse_eV_mean", "label": "Fermi-window RMSE", "unit": "eV", "direction": "lower_is_better"},
+    ],
+}
+SPECTRAL_FRONTIER_METRIC_GROUP = {
+    "id": "spectral_frontier",
+    "title": "Frontier-window spectral RMSE",
+    "y_title": "RMSE eV",
+    "metrics": [
         {"key": "frontier_window_rmse_eV_mean", "label": "Frontier RMSE", "unit": "eV", "direction": "lower_is_better"},
     ],
 }
-DOS_METRIC_GROUP = {
-    "id": "dos",
-    "title": "DOS metrics",
-    "y_title": "DOS error",
+DOS_MAE_METRIC_GROUP = {
+    "id": "dos_mae",
+    "title": "DOS Fermi-window MAE",
+    "y_title": "DOS MAE",
     "metrics": [
         {
             "key": "dos_mae_500_fermi_window_mean",
@@ -83,11 +134,32 @@ DOS_METRIC_GROUP = {
         },
     ],
 }
+DOS_WASSERSTEIN_METRIC_GROUP = {
+    "id": "dos_wasserstein",
+    "title": "DOS Wasserstein distance",
+    "y_title": "Wasserstein eV",
+    "metrics": [
+        {
+            "key": "dos_wasserstein_eV_mean",
+            "label": "DOS Wasserstein",
+            "unit": "eV",
+            "direction": "lower_is_better",
+        },
+    ],
+}
 COMMON_METRIC_GROUPS = [
-    MATRIX_METRIC_GROUP,
+    H_MAE_METRIC_GROUP,
+    H_RMSE_METRIC_GROUP,
+    H_MSE_METRIC_GROUP,
+    R2_METRIC_GROUP,
     FROBENIUS_METRIC_GROUP,
-    SPECTRAL_METRIC_GROUP,
-    DOS_METRIC_GROUP,
+    HERMITICITY_METRIC_GROUP,
+    SPECTRAL_GLOBAL_METRIC_GROUP,
+    SPECTRAL_LOW_ENERGY_METRIC_GROUP,
+    SPECTRAL_FERMI_METRIC_GROUP,
+    SPECTRAL_FRONTIER_METRIC_GROUP,
+    DOS_MAE_METRIC_GROUP,
+    DOS_WASSERSTEIN_METRIC_GROUP,
 ]
 
 
@@ -314,6 +386,16 @@ def adapter_equivalence_summary(metrics_root: Path) -> dict[str, Any]:
             "adapter_manifest_path": str(adapter_manifest_path),
             "adapter_equivalence_status": EQUIVALENCE_INVALID_MISSING_REFERENCE,
             "adapter_equivalence_statuses": [EQUIVALENCE_INVALID_MISSING_REFERENCE],
+            "equivalence_status": EQUIVALENCE_STATUS_FAILED,
+            "equivalence_statuses": [EQUIVALENCE_STATUS_FAILED],
+            "equivalence_scope": "unknown",
+            "equivalence_scopes": ["unknown"],
+            "equivalence_evidence_paths": [],
+            "equivalence_gate": {
+                "robust_claim_allowed": False,
+                "diagnostic_only": True,
+                "diagnostic_only_reason": "DeepH adapter manifest is missing.",
+            },
             "raw_global_equivalence_proven": False,
             "robust_matrix_metrics_allowed": False,
         }
@@ -332,19 +414,63 @@ def adapter_equivalence_summary(metrics_root: Path) -> dict[str, Any]:
         )
     if not statuses:
         statuses = [EQUIVALENCE_INVALID_MISSING_REFERENCE]
+    equivalence_statuses = [
+        str(status)
+        for status in adapter_manifest.get("equivalence_statuses") or []
+        if str(status).strip()
+    ]
+    if not equivalence_statuses:
+        equivalence_statuses = sorted(
+            {
+                str(sample.get("equivalence_status"))
+                for sample in adapter_manifest.get("samples") or []
+                if str(sample.get("equivalence_status") or "").strip()
+            }
+        )
+    if not equivalence_statuses:
+        equivalence_statuses = sorted({equivalence_status_from_adapter_status(status) for status in statuses})
+    equivalence_scopes = [
+        str(scope)
+        for scope in adapter_manifest.get("equivalence_scopes") or []
+        if str(scope).strip()
+    ]
+    if not equivalence_scopes:
+        equivalence_scopes = sorted(
+            {
+                str(sample.get("equivalence_scope"))
+                for sample in adapter_manifest.get("samples") or []
+                if str(sample.get("equivalence_scope") or "").strip()
+            }
+        )
+    if not equivalence_scopes:
+        equivalence_scopes = sorted({equivalence_scope_from_adapter_status(status) for status in statuses})
     raw_global_equivalence_proven = (
         bool(adapter_manifest.get("robust_matrix_metrics_allowed"))
         and all(status in PROVEN_ADAPTER_EQUIVALENCE_STATUSES for status in statuses)
+        and all(status == EQUIVALENCE_STATUS_PROVEN for status in equivalence_statuses)
     )
     primary_status = (
         EQUIVALENCE_PROVEN_RAW_GLOBAL
         if raw_global_equivalence_proven
         else next((status for status in statuses if status not in PROVEN_ADAPTER_EQUIVALENCE_STATUSES), statuses[0])
     )
+    primary_equivalence_status = (
+        EQUIVALENCE_STATUS_PROVEN
+        if raw_global_equivalence_proven
+        else next((status for status in equivalence_statuses if status != EQUIVALENCE_STATUS_PROVEN), equivalence_statuses[0])
+    )
+    primary_equivalence_scope = equivalence_scopes[0] if len(equivalence_scopes) == 1 else ",".join(equivalence_scopes)
+    equivalence_gate = adapter_manifest.get("equivalence_gate") if isinstance(adapter_manifest.get("equivalence_gate"), dict) else {}
     return {
         "adapter_manifest_path": str(adapter_manifest_path),
         "adapter_equivalence_status": primary_status,
         "adapter_equivalence_statuses": statuses,
+        "equivalence_status": primary_equivalence_status,
+        "equivalence_statuses": equivalence_statuses,
+        "equivalence_scope": primary_equivalence_scope,
+        "equivalence_scopes": equivalence_scopes,
+        "equivalence_evidence_paths": adapter_manifest.get("equivalence_evidence_paths") or [],
+        "equivalence_gate": equivalence_gate,
         "raw_global_equivalence_proven": raw_global_equivalence_proven,
         "robust_matrix_metrics_allowed": raw_global_equivalence_proven,
     }
@@ -376,6 +502,8 @@ def summarize_method(method: str, metrics_root: Path) -> dict[str, Any]:
                 "severity": "severe",
                 "kind": "deeph_adapter_equivalence_not_proven",
                 "adapter_equivalence_status": adapter_summary.get("adapter_equivalence_status"),
+                "equivalence_status": adapter_summary.get("equivalence_status"),
+                "equivalence_scope": adapter_summary.get("equivalence_scope"),
                 "message": "DeepH prediction equivalence to Graph2Mat raw/global HSX is not proven.",
             }
         )
@@ -409,6 +537,7 @@ def summarize_method(method: str, metrics_root: Path) -> dict[str, Any]:
     row["fermi_window_rmse_eV_mean"] = mean([number(item.get("fermi_window_rmse_eV")) for item in spectral_rows])
     row["frontier_window_rmse_eV_mean"] = mean([number(item.get("frontier_window_rmse_eV")) for item in spectral_rows])
     row["dos_mae_500_fermi_window_mean"] = mean([number(item.get("dos_mae_500_fermi_window")) for item in dos_rows])
+    row["dos_wasserstein_eV_mean"] = mean([number(item.get("dos_wasserstein_eV")) for item in dos_rows])
     return row
 
 

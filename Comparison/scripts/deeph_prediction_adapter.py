@@ -28,11 +28,57 @@ EQUIVALENCE_INVALID_ORBITAL_ORDER = "invalid_orbital_order_unknown"
 EQUIVALENCE_INVALID_UNITS = "invalid_units_unknown"
 EQUIVALENCE_INVALID_R_VECTOR = "invalid_r_vector_convention_unknown"
 EQUIVALENCE_INVALID_MISSING_REFERENCE = "invalid_missing_reference_mapping"
+EQUIVALENCE_INVALID_EVIDENCE = "invalid_raw_global_equivalence_evidence"
 PROVEN_ADAPTER_EQUIVALENCE_STATUSES = {EQUIVALENCE_PROVEN_RAW_GLOBAL}
+EQUIVALENCE_STATUS_PROVEN = "proven"
+EQUIVALENCE_STATUS_FAILED = "failed"
+EQUIVALENCE_STATUS_UNPROVEN = "unproven"
+EQUIVALENCE_STATUS_NOT_APPLICABLE = "not_applicable"
+EQUIVALENCE_SCOPE_RAW_GLOBAL = "raw_global"
+EQUIVALENCE_SCOPE_DEEPH_PROCESSED_BLOCKWISE = "deeph_processed_blockwise_global_hdf5"
+EQUIVALENCE_SCOPE_LOCAL_FRAME = "local_frame_hprime"
+EQUIVALENCE_SCOPE_UNKNOWN = "unknown"
+RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME = "raw_global_equivalence_evidence.json"
+RAW_GLOBAL_EQUIVALENCE_EVIDENCE_SCHEMA = "deeph_raw_global_equivalence_evidence_v1"
+RAW_GLOBAL_EQUIVALENCE_REQUIRED_CHECKS = (
+    "shape",
+    "units",
+    "orbital_order",
+    "atom_order",
+    "r_vectors",
+    "spin",
+    "sparse_support",
+    "hk",
+    "s_ref",
+    "eigenvalues",
+)
 
 
 class DeepHPredictionAdapterError(RuntimeError):
     """Raised when a DeepH prediction cannot be safely adapted."""
+
+
+def equivalence_status_from_adapter_status(adapter_status: str) -> str:
+    status = str(adapter_status or "").strip()
+    if status in PROVEN_ADAPTER_EQUIVALENCE_STATUSES:
+        return EQUIVALENCE_STATUS_PROVEN
+    if status == EQUIVALENCE_DIAGNOSTIC_LOCAL_FRAME:
+        return EQUIVALENCE_STATUS_NOT_APPLICABLE
+    if status in {EQUIVALENCE_INVALID_SHAPE, EQUIVALENCE_INVALID_MISSING_REFERENCE, EQUIVALENCE_INVALID_EVIDENCE}:
+        return EQUIVALENCE_STATUS_FAILED
+    return EQUIVALENCE_STATUS_UNPROVEN
+
+
+def equivalence_scope_from_adapter_status(adapter_status: str, target_space: str = "") -> str:
+    status = str(adapter_status or "").strip()
+    target = str(target_space or "").strip()
+    if status in PROVEN_ADAPTER_EQUIVALENCE_STATUSES:
+        return EQUIVALENCE_SCOPE_RAW_GLOBAL
+    if status == EQUIVALENCE_DIAGNOSTIC_LOCAL_FRAME or "local_coordinate" in target:
+        return EQUIVALENCE_SCOPE_LOCAL_FRAME
+    if "global_hamiltonian_h5_blocks" in target:
+        return EQUIVALENCE_SCOPE_DEEPH_PROCESSED_BLOCKWISE
+    return EQUIVALENCE_SCOPE_UNKNOWN
 
 
 @dataclass
@@ -62,10 +108,43 @@ class DeepHPredictionAdapterResult:
     orbital_order_status: str = "unknown"
     r_vector_convention_status: str = "unknown"
     support_semantics_status: str = "unknown"
+    equivalence_status: str = ""
+    equivalence_scope: str = ""
+    equivalence_evidence_paths: list[str] = field(default_factory=list)
+    equivalence_reason: str = ""
     adapter_name: str = ADAPTER_NAME
     adapter_version: str = ADAPTER_VERSION
     provenance: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.equivalence_status:
+            self.equivalence_status = equivalence_status_from_adapter_status(self.adapter_equivalence_status)
+        if not self.equivalence_scope:
+            self.equivalence_scope = equivalence_scope_from_adapter_status(
+                self.adapter_equivalence_status,
+                self.target_space,
+            )
+        if not self.equivalence_reason:
+            if self.equivalence_status == EQUIVALENCE_STATUS_PROVEN:
+                self.equivalence_reason = "raw/global Hamiltonian equivalence evidence is recorded."
+            elif self.diagnostic_reason:
+                self.equivalence_reason = self.diagnostic_reason
+            else:
+                self.equivalence_reason = "DeepH raw/global equivalence evidence is unavailable."
+        if not self.equivalence_evidence_paths:
+            self.equivalence_evidence_paths = [
+                str(path)
+                for path in (
+                    self.prediction_path,
+                    self.reference_hamiltonian_path,
+                    self.reference_overlap_path,
+                    self.orbital_types_path,
+                )
+                if path
+            ]
+        if self.equivalence_status != EQUIVALENCE_STATUS_PROVEN:
+            self.diagnostic_only = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,8 +155,13 @@ class DeepHPredictionAdapterResult:
             "prediction_adapter_version": self.adapter_version,
             "deeph_comparability_status": self.comparability_status,
             "deeph_adapter_equivalence_status": self.adapter_equivalence_status,
+            "deeph_equivalence_status": self.equivalence_status,
+            "deeph_equivalence_scope": self.equivalence_scope,
+            "deeph_equivalence_evidence_paths": list(self.equivalence_evidence_paths),
+            "deeph_equivalence_reason": self.equivalence_reason,
             "deeph_raw_global_equivalence_proven": self.adapter_equivalence_status
-            in PROVEN_ADAPTER_EQUIVALENCE_STATUSES,
+            in PROVEN_ADAPTER_EQUIVALENCE_STATUSES
+            and self.equivalence_status == EQUIVALENCE_STATUS_PROVEN,
             "deeph_diagnostic_only": self.diagnostic_only,
             "deeph_diagnostic_reason": self.diagnostic_reason,
             "deeph_prediction_target_space": self.target_space,
@@ -108,6 +192,114 @@ def file_sha256(path: Path | None) -> str | None:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DeepHPredictionAdapterError(f"{EQUIVALENCE_INVALID_EVIDENCE}: cannot read {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DeepHPredictionAdapterError(f"{EQUIVALENCE_INVALID_EVIDENCE}: evidence must be a JSON object: {path}")
+    return payload
+
+
+def find_raw_global_equivalence_evidence(
+    *,
+    work_dir: Path,
+    processed_sample_dir: Path,
+    sample_id: str,
+) -> Path | None:
+    candidates = [
+        work_dir / RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME,
+        processed_sample_dir / RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME,
+        work_dir / f"{sample_id}_{RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME}",
+        processed_sample_dir / f"{sample_id}_{RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME}",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _bool_check(checks: dict[str, Any], key: str) -> bool:
+    value = checks.get(key)
+    if isinstance(value, dict):
+        return value.get("status") in {True, "pass", "passed", "ok", "proven"}
+    return value is True or str(value).strip().lower() in {"true", "pass", "passed", "ok", "proven"}
+
+
+def validate_raw_global_equivalence_evidence(
+    path: Path,
+    *,
+    sample_id: str,
+) -> dict[str, Any]:
+    payload = read_json(path)
+    status = str(payload.get("equivalence_status") or payload.get("status") or "").strip().lower()
+    scope = str(payload.get("equivalence_scope") or payload.get("scope") or "").strip().lower()
+    if payload.get("sample_id") not in (None, "", sample_id):
+        return {
+            "status": EQUIVALENCE_STATUS_FAILED,
+            "reason": (
+                f"{EQUIVALENCE_INVALID_EVIDENCE}: sample_id mismatch in {path}: "
+                f"{payload.get('sample_id')!r} != {sample_id!r}"
+            ),
+            "payload": payload,
+        }
+    if status != EQUIVALENCE_STATUS_PROVEN or scope != EQUIVALENCE_SCOPE_RAW_GLOBAL:
+        return {
+            "status": EQUIVALENCE_STATUS_FAILED,
+            "reason": (
+                f"{EQUIVALENCE_INVALID_EVIDENCE}: evidence must declare "
+                f"status=proven and scope=raw_global."
+            ),
+            "payload": payload,
+        }
+    checks = payload.get("checks")
+    if not isinstance(checks, dict):
+        return {
+            "status": EQUIVALENCE_STATUS_FAILED,
+            "reason": f"{EQUIVALENCE_INVALID_EVIDENCE}: missing checks object.",
+            "payload": payload,
+        }
+    missing_or_failed = [key for key in RAW_GLOBAL_EQUIVALENCE_REQUIRED_CHECKS if not _bool_check(checks, key)]
+    if missing_or_failed:
+        return {
+            "status": EQUIVALENCE_STATUS_FAILED,
+            "reason": (
+                f"{EQUIVALENCE_INVALID_EVIDENCE}: required checks failed or missing: "
+                + ", ".join(missing_or_failed)
+            ),
+            "payload": payload,
+        }
+    errors = payload.get("errors") or {}
+    tolerances = payload.get("tolerances") or {}
+    if isinstance(errors, dict) and isinstance(tolerances, dict):
+        for key, raw_error in errors.items():
+            if key not in tolerances:
+                continue
+            try:
+                error = abs(float(raw_error))
+                tolerance = abs(float(tolerances[key]))
+            except (TypeError, ValueError):
+                return {
+                    "status": EQUIVALENCE_STATUS_FAILED,
+                    "reason": f"{EQUIVALENCE_INVALID_EVIDENCE}: non-numeric error/tolerance for {key}.",
+                    "payload": payload,
+                }
+            if not math.isfinite(error) or not math.isfinite(tolerance) or error > tolerance:
+                return {
+                    "status": EQUIVALENCE_STATUS_FAILED,
+                    "reason": (
+                        f"{EQUIVALENCE_INVALID_EVIDENCE}: {key}={error} exceeds tolerance {tolerance}."
+                    ),
+                    "payload": payload,
+                }
+    return {
+        "status": EQUIVALENCE_STATUS_PROVEN,
+        "reason": "raw/global Hamiltonian equivalence evidence passed all required checks.",
+        "payload": payload,
+    }
 
 
 def count_orbitals_from_orbital_types(path: Path) -> list[int]:
@@ -278,6 +470,9 @@ def adapt_deeph_prediction_sample(
             orbital_order_status="not_validated",
             r_vector_convention_status="not_validated",
             support_semantics_status="not_validated",
+            equivalence_status=EQUIVALENCE_STATUS_NOT_APPLICABLE,
+            equivalence_scope=EQUIVALENCE_SCOPE_LOCAL_FRAME,
+            equivalence_reason="DeepH local-coordinate H' output is not a raw/global Hamiltonian.",
             provenance=_provenance(
                 prediction_path=prediction_path,
                 reference_hamiltonian=reference_hamiltonian if reference_hamiltonian.exists() else None,
@@ -310,12 +505,80 @@ def adapt_deeph_prediction_sample(
 
     pred_gamma = assemble_hk(prediction_path, orbital_types, (0.0, 0.0, 0.0))
     ref_gamma = assemble_hk(reference_hamiltonian, orbital_types, (0.0, 0.0, 0.0))
+    evidence_path = find_raw_global_equivalence_evidence(
+        work_dir=work_dir,
+        processed_sample_dir=processed_sample_dir,
+        sample_id=sample_id,
+    )
+    evidence: dict[str, Any] | None = None
+    evidence_reason = ""
+    evidence_status = ""
+    if evidence_path is not None:
+        evidence = validate_raw_global_equivalence_evidence(evidence_path, sample_id=sample_id)
+        evidence_status = str(evidence.get("status") or "")
+        evidence_reason = str(evidence.get("reason") or "")
+        if evidence_status == EQUIVALENCE_STATUS_PROVEN:
+            provenance = _provenance(
+                prediction_path=prediction_path,
+                reference_hamiltonian=reference_hamiltonian,
+                reference_overlap=reference_overlap,
+                orbital_types=orbital_types,
+            )
+            provenance["raw_global_equivalence_evidence"] = {
+                "path": str(evidence_path),
+                "sha256": file_sha256(evidence_path),
+                "schema": (evidence.get("payload") or {}).get("schema"),
+            }
+            return DeepHPredictionAdapterResult(
+                sample_id=sample_id,
+                status="ok",
+                metrics_ready=True,
+                diagnostic_only=False,
+                diagnostic_reason="",
+                prediction_path=str(prediction_path),
+                processed_sample_dir=str(processed_sample_dir),
+                reference_hamiltonian_path=str(reference_hamiltonian),
+                reference_overlap_path=str(reference_overlap),
+                orbital_types_path=str(orbital_types),
+                n_orbitals=n_orbitals,
+                block_count=len(pred_shapes),
+                prediction_key_count=len(pred_shapes),
+                reference_key_count=len(ref_shapes),
+                missing_reference_keys=missing_reference_keys,
+                extra_prediction_keys=extra_prediction_keys,
+                gamma_hermiticity_defect=hermiticity_defect(pred_gamma),
+                reference_gamma_hermiticity_defect=hermiticity_defect(ref_gamma),
+                comparability_status="raw_global_equivalence_proven",
+                adapter_equivalence_status=EQUIVALENCE_PROVEN_RAW_GLOBAL,
+                target_space="deeph_rotate_back_global_hamiltonian_h5_blocks_verified_raw_global",
+                units_status="verified_by_raw_global_equivalence_evidence",
+                orbital_order_status="verified_by_raw_global_equivalence_evidence",
+                r_vector_convention_status="verified_by_raw_global_equivalence_evidence",
+                support_semantics_status="verified_by_raw_global_equivalence_evidence",
+                equivalence_status=EQUIVALENCE_STATUS_PROVEN,
+                equivalence_scope=EQUIVALENCE_SCOPE_RAW_GLOBAL,
+                equivalence_evidence_paths=[str(evidence_path)],
+                equivalence_reason=evidence_reason,
+                provenance=provenance,
+            )
     warnings = [
         "DeepH HDF5 blocks were validated against DeepH processed SIESTA HDF5 artifacts only.",
         "Equivalence to Graph2Mat raw HSX orbital order/sign convention is not independently proven.",
         f"{EQUIVALENCE_INVALID_UNITS}: DeepH processed energy units were not independently checked against Graph2Mat HSX.",
         f"{EQUIVALENCE_INVALID_R_VECTOR}: DeepH HDF5 R-vector convention was not independently checked against Graph2Mat HSX.",
     ]
+    provenance = _provenance(
+        prediction_path=prediction_path,
+        reference_hamiltonian=reference_hamiltonian,
+        reference_overlap=reference_overlap,
+        orbital_types=orbital_types,
+    )
+    if evidence_path is not None:
+        provenance["raw_global_equivalence_evidence"] = {
+            "path": str(evidence_path),
+            "sha256": file_sha256(evidence_path),
+            "schema": (evidence or {}).get("payload", {}).get("schema") if isinstance(evidence, dict) else None,
+        }
     return DeepHPredictionAdapterResult(
         sample_id=sample_id,
         status="ok",
@@ -336,26 +599,45 @@ def adapt_deeph_prediction_sample(
         gamma_hermiticity_defect=hermiticity_defect(pred_gamma),
         reference_gamma_hermiticity_defect=hermiticity_defect(ref_gamma),
         comparability_status="diagnostic_deeph_processed_global_hdf5_blocks_shape_validated",
-        adapter_equivalence_status=EQUIVALENCE_INVALID_ORBITAL_ORDER,
+        adapter_equivalence_status=EQUIVALENCE_INVALID_EVIDENCE if evidence_path is not None else EQUIVALENCE_INVALID_ORBITAL_ORDER,
         target_space="deeph_rotate_back_global_hamiltonian_h5_blocks",
         units_status="deeph_siesta_preprocess_internal_energy_units_unverified_against_graph2mat_hsx",
         orbital_order_status="validated_against_deeph_processed_reference_only",
         r_vector_convention_status="validated_against_deeph_processed_reference_only",
         support_semantics_status="prediction_and_processed_reference_key_sets_match",
-        provenance=_provenance(
-            prediction_path=prediction_path,
-            reference_hamiltonian=reference_hamiltonian,
-            reference_overlap=reference_overlap,
-            orbital_types=orbital_types,
+        equivalence_status=EQUIVALENCE_STATUS_FAILED if evidence_path is not None else EQUIVALENCE_STATUS_UNPROVEN,
+        equivalence_scope=EQUIVALENCE_SCOPE_DEEPH_PROCESSED_BLOCKWISE,
+        equivalence_evidence_paths=[str(evidence_path)] if evidence_path is not None else [],
+        equivalence_reason=evidence_reason
+        or (
+            "DeepH prediction was validated only against DeepH processed SIESTA HDF5 blocks; "
+            "raw/global HSX units, orbital order, and R-vector convention are not proven."
         ),
+        provenance=provenance,
         warnings=warnings,
     )
 
 
 def write_adapter_manifest(path: Path, results: list[DeepHPredictionAdapterResult]) -> dict[str, Any]:
-    equivalence_statuses = sorted({result.adapter_equivalence_status for result in results})
+    adapter_equivalence_statuses = sorted({result.adapter_equivalence_status for result in results})
+    equivalence_statuses = sorted({result.equivalence_status for result in results})
+    equivalence_scopes = sorted({result.equivalence_scope for result in results})
+    equivalence_evidence_paths = sorted(
+        {path for result in results for path in result.equivalence_evidence_paths if path}
+    )
     proven_count = sum(
-        1 for result in results if result.adapter_equivalence_status in PROVEN_ADAPTER_EQUIVALENCE_STATUSES
+        1
+        for result in results
+        if result.adapter_equivalence_status in PROVEN_ADAPTER_EQUIVALENCE_STATUSES
+        and result.equivalence_status == EQUIVALENCE_STATUS_PROVEN
+    )
+    robust_allowed = bool(results) and proven_count == len(results)
+    blocked_reasons = sorted(
+        {
+            result.equivalence_reason
+            for result in results
+            if result.equivalence_status != EQUIVALENCE_STATUS_PROVEN and result.equivalence_reason
+        }
     )
     payload = {
         "schema": ADAPTER_VERSION,
@@ -364,9 +646,21 @@ def write_adapter_manifest(path: Path, results: list[DeepHPredictionAdapterResul
         "sample_count": len(results),
         "metrics_ready_count": sum(1 for result in results if result.metrics_ready),
         "diagnostic_only_count": sum(1 for result in results if result.diagnostic_only),
-        "adapter_equivalence_statuses": equivalence_statuses,
+        "adapter_equivalence_statuses": adapter_equivalence_statuses,
+        "equivalence_statuses": equivalence_statuses,
+        "equivalence_scopes": equivalence_scopes,
+        "equivalence_evidence_paths": equivalence_evidence_paths,
         "raw_global_equivalence_proven_count": proven_count,
-        "robust_matrix_metrics_allowed": bool(results) and proven_count == len(results),
+        "robust_matrix_metrics_allowed": robust_allowed,
+        "equivalence_gate": {
+            "robust_claim_allowed": robust_allowed,
+            "diagnostic_only": not robust_allowed,
+            "required_status": EQUIVALENCE_STATUS_PROVEN,
+            "required_scope": EQUIVALENCE_SCOPE_RAW_GLOBAL,
+            "diagnostic_only_reason": "; ".join(blocked_reasons)
+            if blocked_reasons
+            else ("" if robust_allowed else "DeepH equivalence evidence is missing."),
+        },
         "samples": [result.to_dict() for result in results],
     }
     path.parent.mkdir(parents=True, exist_ok=True)

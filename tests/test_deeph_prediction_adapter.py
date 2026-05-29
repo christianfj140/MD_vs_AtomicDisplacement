@@ -27,7 +27,17 @@ from deeph_prediction_adapter import (  # noqa: E402
     EQUIVALENCE_INVALID_ORBITAL_ORDER,
     EQUIVALENCE_INVALID_SHAPE,
     EQUIVALENCE_INVALID_UNITS,
+    EQUIVALENCE_INVALID_EVIDENCE,
     EQUIVALENCE_PROVEN_RAW_GLOBAL,
+    RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME,
+    RAW_GLOBAL_EQUIVALENCE_REQUIRED_CHECKS,
+    EQUIVALENCE_SCOPE_DEEPH_PROCESSED_BLOCKWISE,
+    EQUIVALENCE_SCOPE_LOCAL_FRAME,
+    EQUIVALENCE_SCOPE_RAW_GLOBAL,
+    EQUIVALENCE_STATUS_FAILED,
+    EQUIVALENCE_STATUS_NOT_APPLICABLE,
+    EQUIVALENCE_STATUS_PROVEN,
+    EQUIVALENCE_STATUS_UNPROVEN,
     adapt_deeph_prediction_sample,
     write_adapter_manifest,
 )
@@ -92,8 +102,14 @@ class DeepHPredictionAdapterMetadataTests(unittest.TestCase):
         fields = result.metric_fields()
 
         self.assertEqual(fields["deeph_adapter_equivalence_status"], EQUIVALENCE_PROVEN_RAW_GLOBAL)
+        self.assertEqual(fields["deeph_equivalence_status"], EQUIVALENCE_STATUS_PROVEN)
+        self.assertEqual(fields["deeph_equivalence_scope"], EQUIVALENCE_SCOPE_RAW_GLOBAL)
         self.assertTrue(fields["deeph_raw_global_equivalence_proven"])
         self.assertFalse(fields["deeph_diagnostic_only"])
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = write_adapter_manifest(Path(tmp) / "adapter_manifest.json", [result])
+        self.assertTrue(manifest["equivalence_gate"]["robust_claim_allowed"])
+        self.assertEqual(manifest["equivalence_statuses"], [EQUIVALENCE_STATUS_PROVEN])
 
     def test_unit_uncertainty_forces_diagnostic_only(self) -> None:
         result = minimal_result(status=EQUIVALENCE_INVALID_UNITS, diagnostic_only=True)
@@ -101,6 +117,7 @@ class DeepHPredictionAdapterMetadataTests(unittest.TestCase):
         fields = result.metric_fields()
 
         self.assertEqual(fields["deeph_adapter_equivalence_status"], EQUIVALENCE_INVALID_UNITS)
+        self.assertEqual(fields["deeph_equivalence_status"], EQUIVALENCE_STATUS_UNPROVEN)
         self.assertFalse(fields["deeph_raw_global_equivalence_proven"])
         self.assertTrue(fields["deeph_diagnostic_only"])
 
@@ -112,8 +129,22 @@ class DeepHPredictionAdapterMetadataTests(unittest.TestCase):
             manifest = write_adapter_manifest(root / "adapter_manifest.json", [result])
 
             self.assertEqual(manifest["adapter_equivalence_statuses"], [EQUIVALENCE_INVALID_ORBITAL_ORDER])
+            self.assertEqual(manifest["equivalence_statuses"], [EQUIVALENCE_STATUS_UNPROVEN])
+            self.assertFalse(manifest["equivalence_gate"]["robust_claim_allowed"])
+            self.assertTrue(manifest["equivalence_gate"]["diagnostic_only"])
             self.assertEqual(manifest["raw_global_equivalence_proven_count"], 0)
             self.assertFalse(manifest["robust_matrix_metrics_allowed"])
+
+    def test_manifest_records_failed_equivalence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = minimal_result(status=EQUIVALENCE_INVALID_SHAPE, diagnostic_only=True)
+
+            manifest = write_adapter_manifest(root / "adapter_manifest.json", [result])
+
+            self.assertEqual(manifest["equivalence_statuses"], [EQUIVALENCE_STATUS_FAILED])
+            self.assertFalse(manifest["equivalence_gate"]["robust_claim_allowed"])
+            self.assertIn("invalid_shape_mismatch", manifest["equivalence_gate"]["diagnostic_only_reason"])
 
 
 @unittest.skipUnless(H5PY_AVAILABLE, "h5py/numpy are required for DeepH adapter tests")
@@ -183,9 +214,61 @@ class DeepHPredictionAdapterTests(unittest.TestCase):
         self.assertTrue(result.diagnostic_only)
         self.assertEqual(result.comparability_status, "diagnostic_deeph_processed_global_hdf5_blocks_shape_validated")
         self.assertEqual(result.adapter_equivalence_status, EQUIVALENCE_INVALID_ORBITAL_ORDER)
+        self.assertEqual(result.equivalence_status, EQUIVALENCE_STATUS_UNPROVEN)
+        self.assertEqual(result.equivalence_scope, EQUIVALENCE_SCOPE_DEEPH_PROCESSED_BLOCKWISE)
+        self.assertTrue(result.equivalence_evidence_paths)
         self.assertIn("not_proven", result.diagnostic_reason)
         self.assertEqual(result.support_semantics_status, "prediction_and_processed_reference_key_sets_match")
         self.assertFalse(result.metric_fields()["deeph_raw_global_equivalence_proven"])
+
+    def write_raw_global_evidence(self, *, checks: dict[str, object] | None = None) -> Path:
+        payload = {
+            "schema": "deeph_raw_global_equivalence_evidence_v1",
+            "sample_id": "sample0",
+            "equivalence_status": "proven",
+            "equivalence_scope": "raw_global",
+            "checks": {key: True for key in RAW_GLOBAL_EQUIVALENCE_REQUIRED_CHECKS},
+            "errors": {"max_abs_hk_error_eV": 0.0, "max_abs_eigenvalue_error_eV": 0.0},
+            "tolerances": {"max_abs_hk_error_eV": 1e-8, "max_abs_eigenvalue_error_eV": 1e-8},
+        }
+        if checks:
+            payload["checks"].update(checks)
+        path = self.work_dir / RAW_GLOBAL_EQUIVALENCE_EVIDENCE_FILENAME
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+
+    def test_raw_global_equivalence_evidence_marks_deeph_as_robust_ready(self) -> None:
+        self.write_prediction()
+        evidence_path = self.write_raw_global_evidence()
+
+        result = adapt_deeph_prediction_sample(
+            work_dir=self.work_dir,
+            processed_sample_dir=self.processed,
+            sample_id="sample0",
+        )
+
+        self.assertFalse(result.diagnostic_only)
+        self.assertEqual(result.adapter_equivalence_status, EQUIVALENCE_PROVEN_RAW_GLOBAL)
+        self.assertEqual(result.equivalence_status, EQUIVALENCE_STATUS_PROVEN)
+        self.assertEqual(result.equivalence_scope, EQUIVALENCE_SCOPE_RAW_GLOBAL)
+        self.assertEqual(result.equivalence_evidence_paths, [str(evidence_path)])
+        self.assertTrue(result.metric_fields()["deeph_raw_global_equivalence_proven"])
+
+    def test_failed_raw_global_equivalence_evidence_blocks_robust_claim(self) -> None:
+        self.write_prediction()
+        evidence_path = self.write_raw_global_evidence(checks={"orbital_order": False})
+
+        result = adapt_deeph_prediction_sample(
+            work_dir=self.work_dir,
+            processed_sample_dir=self.processed,
+            sample_id="sample0",
+        )
+
+        self.assertTrue(result.diagnostic_only)
+        self.assertEqual(result.adapter_equivalence_status, EQUIVALENCE_INVALID_EVIDENCE)
+        self.assertEqual(result.equivalence_status, EQUIVALENCE_STATUS_FAILED)
+        self.assertEqual(result.equivalence_evidence_paths, [str(evidence_path)])
+        self.assertIn("orbital_order", result.equivalence_reason)
 
     def test_local_frame_prediction_is_not_common_metric_ready(self) -> None:
         write_h5(self.work_dir / "rh_pred.h5", {"[0, 0, 0, 1, 1]": [[0.0]]})
@@ -200,6 +283,8 @@ class DeepHPredictionAdapterTests(unittest.TestCase):
         self.assertTrue(result.diagnostic_only)
         self.assertEqual(result.target_space, "deeph_local_coordinate_hprime")
         self.assertEqual(result.adapter_equivalence_status, EQUIVALENCE_DIAGNOSTIC_LOCAL_FRAME)
+        self.assertEqual(result.equivalence_status, EQUIVALENCE_STATUS_NOT_APPLICABLE)
+        self.assertEqual(result.equivalence_scope, EQUIVALENCE_SCOPE_LOCAL_FRAME)
 
     def test_adapter_manifest_preserves_sample_pairing(self) -> None:
         self.write_prediction()
@@ -214,7 +299,10 @@ class DeepHPredictionAdapterTests(unittest.TestCase):
         self.assertEqual(manifest["sample_count"], 1)
         self.assertEqual(manifest["metrics_ready_count"], 1)
         self.assertEqual(manifest["adapter_equivalence_statuses"], [EQUIVALENCE_INVALID_ORBITAL_ORDER])
+        self.assertEqual(manifest["equivalence_statuses"], [EQUIVALENCE_STATUS_UNPROVEN])
+        self.assertEqual(manifest["equivalence_scopes"], [EQUIVALENCE_SCOPE_DEEPH_PROCESSED_BLOCKWISE])
         self.assertFalse(manifest["robust_matrix_metrics_allowed"])
+        self.assertFalse(manifest["equivalence_gate"]["robust_claim_allowed"])
         self.assertEqual(manifest["samples"][0]["sample_id"], "frozen_sample_id")
         self.assertEqual(manifest["samples"][0]["processed_sample_dir"], str(self.processed))
 

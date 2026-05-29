@@ -11,7 +11,6 @@ from configparser import ConfigParser
 from pathlib import Path
 from typing import Any
 
-import h5py
 import numpy as np
 
 from deeph_fair_utils import (
@@ -31,14 +30,18 @@ from deeph_fair_utils import (
 )
 from deeph_prediction_adapter import DeepHPredictionAdapterError, adapt_deeph_prediction_sample
 from evaluate_hamiltonian_metrics import (
+    LOW_ENERGY_ALIGNMENT,
+    LOW_ENERGY_N_STATES,
     complex_generalized_eigenvalues,
     complex_hermiticity_defect,
     complex_matrix_error_metrics,
     eigen_error_metrics,
     kpoint_weighted_dos_metrics,
+    low_energy_metrics_from_eigenvalues,
     parse_monkhorst_pack_kgrid,
     read_matrix,
     weighted_metric_mean,
+    weighted_metric_rmse,
 )
 
 
@@ -50,6 +53,8 @@ def parse_block_key(key: str) -> tuple[tuple[int, int, int], int, int]:
 
 
 def assemble_hk(block_h5: Path, sample_dir: Path, kpoint: tuple[float, float, float]) -> np.ndarray:
+    import h5py
+
     orbital_counts = count_orbitals_from_orbital_types(sample_dir / "orbital_types.dat")
     offsets = np.cumsum([0, *orbital_counts])
     matrix = np.zeros((int(offsets[-1]), int(offsets[-1])), dtype=np.complex128)
@@ -239,12 +244,35 @@ def evaluate_sample(args: argparse.Namespace, sample, rows: dict[str, list[dict[
         all_pred_eigs.extend(pred_eig.tolist())
         all_weights.extend([float(weight)] * min(ref_eig.size, pred_eig.size))
         band_rows, spectral = eigen_error_metrics(ref_eig, pred_eig, fermi_level, fermi_source)
+        low_energy = (
+            {
+                "low_energy_requested_states": args.low_energy_n_states,
+                "low_energy_n_states": None,
+                "low_energy_mae_eV": math.nan,
+                "low_energy_rmse_eV": math.nan,
+                "low_energy_max_abs_error_eV": math.nan,
+                "low_energy_alignment": args.low_energy_alignment,
+                "low_energy_aligned_rmse_eV": math.nan,
+                "low_energy_overlap_used": True,
+                "low_energy_overlap_required": True,
+                "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+                "low_energy_warning": "low-energy metrics disabled by CLI option.",
+            }
+            if args.disable_low_energy
+            else low_energy_metrics_from_eigenvalues(
+                ref_eig,
+                pred_eig,
+                n_states=args.low_energy_n_states,
+                alignment=args.low_energy_alignment,
+            )
+        )
         spectral_row = {
             "sample": sample.sample,
             "k_index": k_index,
             "k_weight": weight,
             "uses_reference_overlap_k": True,
             **spectral,
+            **low_energy,
         }
         per_k_spectral.append(spectral_row)
         write_csv_rows(eigen_root / "siesta" / f"{sample.sample}_k{k_index:04d}.csv", [{"band": i, "eigenvalue_eV": v} for i, v in enumerate(ref_eig)])
@@ -282,10 +310,35 @@ def evaluate_sample(args: argparse.Namespace, sample, rows: dict[str, list[dict[
         "kpoint_source": kgrid.source_directive,
         "uses_reference_overlap_k": True,
         "global_mae_eV": weighted_metric_mean(per_k_spectral, "global_mae_eV"),
-        "global_rmse_eV": weighted_metric_mean(per_k_spectral, "global_rmse_eV"),
-        "low_energy_rmse_eV": math.nan,
-        "fermi_window_rmse_eV": weighted_metric_mean(per_k_spectral, "fermi_window_rmse_eV"),
-        "frontier_window_rmse_eV": weighted_metric_mean(per_k_spectral, "frontier_window_rmse_eV"),
+        "global_rmse_eV": weighted_metric_rmse(per_k_spectral, "global_rmse_eV"),
+        "low_energy_requested_states": args.low_energy_n_states,
+        "low_energy_n_states": weighted_metric_mean(per_k_spectral, "low_energy_n_states"),
+        "low_energy_mae_eV": weighted_metric_mean(per_k_spectral, "low_energy_mae_eV"),
+        "low_energy_rmse_eV": weighted_metric_rmse(per_k_spectral, "low_energy_rmse_eV"),
+        "low_energy_max_abs_error_eV": max(
+            (
+                float(row["low_energy_max_abs_error_eV"])
+                for row in per_k_spectral
+                if math.isfinite(float(row["low_energy_max_abs_error_eV"]))
+            ),
+            default=math.nan,
+        ),
+        "low_energy_alignment": args.low_energy_alignment,
+        "low_energy_aligned_rmse_eV": weighted_metric_rmse(per_k_spectral, "low_energy_aligned_rmse_eV"),
+        "low_energy_overlap_used": True,
+        "low_energy_overlap_required": True,
+        "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+        "low_energy_warning": "; ".join(
+            sorted(
+                {
+                    str(row.get("low_energy_warning"))
+                    for row in per_k_spectral
+                    if str(row.get("low_energy_warning") or "").strip()
+                }
+            )
+        ),
+        "fermi_window_rmse_eV": weighted_metric_rmse(per_k_spectral, "fermi_window_rmse_eV"),
+        "frontier_window_rmse_eV": weighted_metric_rmse(per_k_spectral, "frontier_window_rmse_eV"),
         "gap_abs_error_eV": weighted_metric_mean(per_k_spectral, "gap_abs_error_eV"),
         "fermi_ref_eV": fermi_level,
         "fermi_level_source": fermi_source,
@@ -395,6 +448,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--disable-cuda", action="store_true")
     parser.add_argument("--fail-closed", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--disable-low-energy", action="store_true")
+    parser.add_argument("--low-energy-n-states", type=int, default=LOW_ENERGY_N_STATES)
+    parser.add_argument("--low-energy-alignment", default=LOW_ENERGY_ALIGNMENT, choices=["none", "global_shift"])
     args = parser.parse_args()
     if args.generate_predictions and args.trained_model_dir is None:
         parser.error("--generate-predictions requires --trained-model-dir")

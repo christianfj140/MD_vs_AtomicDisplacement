@@ -357,6 +357,8 @@ def render_train_config(
     multiprocessing: int = 0,
     radius: float = -1.0,
     orbital: str | list[dict[str, list[int]]] | None = None,
+    early_stopping_loss: float | None = None,
+    early_stopping_loss_epoch: list[float | int] | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> Path:
     config = configparser.ConfigParser()
@@ -388,6 +390,10 @@ def render_train_config(
         "val_ratio": split_ratios["val_ratio"],
         "test_ratio": split_ratios["test_ratio"],
     }
+    if early_stopping_loss is not None:
+        config["train"]["early_stopping_loss"] = str(float(early_stopping_loss))
+    if early_stopping_loss_epoch is not None:
+        config["train"]["early_stopping_loss_epoch"] = json.dumps(list(early_stopping_loss_epoch))
     config["hyperparameter"] = {
         "batch_size": str(int(batch_size)),
         "learning_rate": str(float(learning_rate)),

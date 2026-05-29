@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -155,6 +156,25 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
         split_sample = dataset / "splits" / "train" / "0"
         self.generate._prepare_split_sample(sample, split_sample)
         self.assertTrue((split_sample / "C.ion.xml").exists())
+
+    def test_graph2mat_basis_materialization_keeps_equivalent_existing_link(self) -> None:
+        config = self.config()
+        dataset = Path(config["paths"]["dataset_dir"])
+        material_basis = dataset / "material_basis"
+        shared_basis = dataset / "MD_steps" / "basis"
+        material_basis.mkdir(parents=True)
+        shared_basis.mkdir(parents=True)
+        (material_basis / "C.ion.xml").write_text("<basis />\n", encoding="utf-8")
+        (shared_basis / "C.ion.xml").write_text("<basis />\n", encoding="utf-8")
+        sample = dataset / "MD_steps" / "0"
+        write_joint_snapshot(sample)
+        destination = sample / "C.ion.xml"
+        os.symlink(os.path.relpath(shared_basis / "C.ion.xml", sample), destination)
+
+        materialized = self.generate._materialize_graph2mat_basis_files(dataset, [sample])
+
+        self.assertEqual(materialized, 1)
+        self.assertEqual(destination.resolve(), (shared_basis / "C.ion.xml").resolve())
 
     def test_old_default_graph2mat_store_list_is_not_used(self) -> None:
         config = self.config()

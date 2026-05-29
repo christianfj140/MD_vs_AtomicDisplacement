@@ -21,7 +21,11 @@ from analyze_winners import (
     valid_stability_seeds,
     warning_items,
 )
-from deeph_prediction_adapter import EQUIVALENCE_PROVEN_RAW_GLOBAL
+from deeph_prediction_adapter import (
+    EQUIVALENCE_PROVEN_RAW_GLOBAL,
+    EQUIVALENCE_STATUS_PROVEN,
+    EQUIVALENCE_STATUS_UNPROVEN,
+)
 from g2m_deeph_metrics import summarize_method
 
 
@@ -236,11 +240,18 @@ def metric_fail_policy_warning(policy: str) -> dict[str, str] | None:
     }
 
 
-def deeph_adapter_equivalence_warning(status: str) -> dict[str, str]:
+def deeph_adapter_equivalence_warning(
+    status: str,
+    *,
+    equivalence_status: str = "",
+    reason: str = "",
+) -> dict[str, str]:
     return {
         "severity": "severe",
         "kind": "deeph_adapter_equivalence_not_proven",
         "adapter_equivalence_status": status or "missing",
+        "equivalence_status": equivalence_status or "missing",
+        "diagnostic_only_reason": reason or "DeepH raw/global equivalence evidence is not proven.",
         "message": "DeepH prediction equivalence to Graph2Mat raw/global HSX is not proven.",
     }
 
@@ -248,7 +259,11 @@ def deeph_adapter_equivalence_warning(status: str) -> dict[str, str]:
 def deeph_adapter_equivalence_proven(row: dict[str, Any]) -> bool:
     if normalize_model(row.get("model")) != "deeph":
         return True
-    return str(row.get("adapter_equivalence_status") or "") == EQUIVALENCE_PROVEN_RAW_GLOBAL
+    adapter_status = str(row.get("adapter_equivalence_status") or "")
+    equivalence_status = str(row.get("equivalence_status") or "")
+    if equivalence_status:
+        return adapter_status == EQUIVALENCE_PROVEN_RAW_GLOBAL and equivalence_status == EQUIVALENCE_STATUS_PROVEN
+    return adapter_status == EQUIVALENCE_PROVEN_RAW_GLOBAL
 
 
 def deeph_adapter_status(rows: list[dict[str, Any]]) -> str:
@@ -260,6 +275,20 @@ def deeph_adapter_status(rows: list[dict[str, Any]]) -> str:
         }
     )
     return statuses[0] if len(statuses) == 1 else ",".join(statuses) if statuses else "missing"
+
+
+def deeph_equivalence_status(rows: list[dict[str, Any]]) -> str:
+    statuses = sorted(
+        {
+            str(row.get("equivalence_status") or "")
+            for row in rows
+            if normalize_model(row.get("model")) == "deeph" and str(row.get("equivalence_status") or "")
+        }
+    )
+    if statuses:
+        return statuses[0] if len(statuses) == 1 else ",".join(statuses)
+    adapter_status = deeph_adapter_status(rows)
+    return EQUIVALENCE_STATUS_PROVEN if adapter_status == EQUIVALENCE_PROVEN_RAW_GLOBAL else EQUIVALENCE_STATUS_UNPROVEN
 
 
 def split_audit_status(rows: list[dict[str, Any]]) -> str:
@@ -355,6 +384,57 @@ def timing_seconds(record: dict[str, Any]) -> dict[str, float | None]:
     }
 
 
+def telemetry_fields(record: dict[str, Any]) -> dict[str, Any]:
+    telemetry = record.get("telemetry") if isinstance(record.get("telemetry"), dict) else {}
+    if not telemetry and record.get("telemetry_path"):
+        telemetry = read_json(Path(str(record.get("telemetry_path"))))
+    if not isinstance(telemetry, dict) or not telemetry:
+        return {
+            "telemetry_status": "unavailable",
+            "wall_clock_seconds_total": None,
+            "gpu_hours_total": None,
+            "gpu_hours_to_best_validation": None,
+            "wall_clock_seconds_to_best_validation": None,
+            "peak_gpu_memory_mb": None,
+            "samples_per_second": None,
+            "matrix_blocks_per_second": None,
+            "epochs_trained": None,
+            "best_validation_epoch": None,
+            "telemetry_warnings": ["telemetry unavailable"],
+        }
+    return {
+        "telemetry_status": telemetry.get("telemetry_status") or "partial",
+        "wall_clock_seconds_total": telemetry.get("wall_clock_seconds_total"),
+        "gpu_hours_total": telemetry.get("gpu_hours_total"),
+        "gpu_hours_to_best_validation": telemetry.get("gpu_hours_to_best_validation"),
+        "wall_clock_seconds_to_best_validation": telemetry.get("wall_clock_seconds_to_best_validation"),
+        "peak_gpu_memory_mb": telemetry.get("peak_gpu_memory_mb"),
+        "samples_per_second": telemetry.get("samples_per_second"),
+        "matrix_blocks_per_second": telemetry.get("matrix_blocks_per_second"),
+        "epochs_trained": telemetry.get("epochs_trained"),
+        "best_validation_epoch": telemetry.get("best_validation_epoch"),
+        "telemetry_warnings": telemetry.get("telemetry_warnings") or [],
+        "hardware": telemetry.get("hardware") or {},
+    }
+
+
+def early_stopping_fields(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = record.get("early_stopping") if isinstance(record.get("early_stopping"), dict) else {}
+    if not metadata:
+        return {}
+    return {
+        "validation_metric_name": metadata.get("validation_metric_name"),
+        "metric_mode": metadata.get("metric_mode"),
+        "early_stopping_patience": metadata.get("patience"),
+        "early_stopping_min_delta": metadata.get("min_delta"),
+        "early_stopping_max_epochs": metadata.get("max_epochs"),
+        "early_stopping_best_epoch": metadata.get("best_epoch"),
+        "early_stopping_best_validation_value": metadata.get("best_validation_value"),
+        "early_stopping_epochs_trained": metadata.get("epochs_trained"),
+        "early_stopping_stop_reason": metadata.get("stop_reason"),
+    }
+
+
 def row_from_training_record(record: dict[str, Any]) -> dict[str, Any]:
     model = normalize_model(record.get("model"))
     if model not in MODELS:
@@ -381,12 +461,43 @@ def row_from_training_record(record: dict[str, Any]) -> dict[str, Any]:
         or record.get("adapter_equivalence_status")
         or ""
     )
-    if model == "deeph" and adapter_equivalence_status != EQUIVALENCE_PROVEN_RAW_GLOBAL:
-        metric_warnings.append(deeph_adapter_equivalence_warning(adapter_equivalence_status))
+    equivalence_status = str(
+        method_summary.get("equivalence_status")
+        or record.get("equivalence_status")
+        or (EQUIVALENCE_STATUS_PROVEN if adapter_equivalence_status == EQUIVALENCE_PROVEN_RAW_GLOBAL else "")
+    )
+    equivalence_scope = str(method_summary.get("equivalence_scope") or record.get("equivalence_scope") or "")
+    equivalence_gate = method_summary.get("equivalence_gate") if isinstance(method_summary.get("equivalence_gate"), dict) else {}
+    diagnostic_reason = str(
+        method_summary.get("diagnostic_only_reason")
+        or record.get("diagnostic_only_reason")
+        or equivalence_gate.get("diagnostic_only_reason")
+        or ""
+    )
+    if model == "deeph" and not deeph_adapter_equivalence_proven(
+        {
+            "model": model,
+            "adapter_equivalence_status": adapter_equivalence_status,
+            "equivalence_status": equivalence_status,
+        }
+    ):
+        metric_warnings.append(
+            deeph_adapter_equivalence_warning(
+                adapter_equivalence_status,
+                equivalence_status=equivalence_status,
+                reason=diagnostic_reason,
+            )
+        )
     severe = severe_warning_items(record.get("severe_warnings"), record.get("warnings"), metric_warnings)
     method_status = method_summary.get("method_status") or ("missing_metrics" if record.get("status") == "completed" else record.get("status"))
     diagnostic_only = bool(method_summary.get("diagnostic_only")) or metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY
-    if model == "deeph" and adapter_equivalence_status != EQUIVALENCE_PROVEN_RAW_GLOBAL:
+    if model == "deeph" and not deeph_adapter_equivalence_proven(
+        {
+            "model": model,
+            "adapter_equivalence_status": adapter_equivalence_status,
+            "equivalence_status": equivalence_status,
+        }
+    ):
         diagnostic_only = True
     comparability_status = "diagnostic_only" if diagnostic_only else "valid"
     if method_status not in {"ok", "dry_run", "failed", "missing_metrics", None}:
@@ -408,6 +519,10 @@ def row_from_training_record(record: dict[str, Any]) -> dict[str, Any]:
         or (record.get("overrides") or {}).get("seed_everything")
         or "unknown",
         "run_status": str(record.get("status") or "unknown"),
+        "protocol_stage": str(record.get("protocol_stage") or "exploratory"),
+        "metric_split": str(record.get("metric_split") or ("test" if record.get("metrics_run") else "")),
+        "test_metrics_locked": bool(record.get("test_metrics_locked")),
+        "test_metrics_status": str(record.get("test_metrics_status") or ""),
         "method_status": method_status,
         "prediction_dir": str(Path(str(record.get("run_root") or "")) / "graph2mat" / "prediction_structures")
         if model == "graph2mat"
@@ -423,9 +538,14 @@ def row_from_training_record(record: dict[str, Any]) -> dict[str, Any]:
         "severe_warnings": severe,
         "diagnostic_only": diagnostic_only,
         "adapter_equivalence_status": adapter_equivalence_status,
+        "equivalence_status": equivalence_status,
+        "equivalence_scope": equivalence_scope,
+        "diagnostic_only_reason": diagnostic_reason,
         "raw_global_equivalence_proven": bool(method_summary.get("raw_global_equivalence_proven")),
         **deeph_manifest,
         **timing_seconds(record),
+        **telemetry_fields(record),
+        **early_stopping_fields(record),
     }
     for key, value in method_summary.items():
         if key.endswith("_mean"):
@@ -468,9 +588,28 @@ def rows_from_common_metrics(
         if model not in MODELS:
             continue
         adapter_equivalence_status = str(item.get("adapter_equivalence_status") or "")
+        equivalence_status = str(
+            item.get("equivalence_status")
+            or (EQUIVALENCE_STATUS_PROVEN if adapter_equivalence_status == EQUIVALENCE_PROVEN_RAW_GLOBAL else "")
+        )
+        equivalence_scope = str(item.get("equivalence_scope") or "")
+        equivalence_gate = item.get("equivalence_gate") if isinstance(item.get("equivalence_gate"), dict) else {}
+        diagnostic_reason = str(item.get("diagnostic_only_reason") or equivalence_gate.get("diagnostic_only_reason") or "")
         item_severe = list(severe)
-        if model == "deeph" and adapter_equivalence_status != EQUIVALENCE_PROVEN_RAW_GLOBAL:
-            item_severe.append(deeph_adapter_equivalence_warning(adapter_equivalence_status))
+        if model == "deeph" and not deeph_adapter_equivalence_proven(
+            {
+                "model": model,
+                "adapter_equivalence_status": adapter_equivalence_status,
+                "equivalence_status": equivalence_status,
+            }
+        ):
+            item_severe.append(
+                deeph_adapter_equivalence_warning(
+                    adapter_equivalence_status,
+                    equivalence_status=equivalence_status,
+                    reason=diagnostic_reason,
+                )
+            )
         row = {
             "benchmark_id": "",
             **metadata,
@@ -495,6 +634,9 @@ def rows_from_common_metrics(
             or manifest_status == "diagnostic_only"
             or metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY,
             "adapter_equivalence_status": adapter_equivalence_status,
+            "equivalence_status": equivalence_status,
+            "equivalence_scope": equivalence_scope,
+            "diagnostic_only_reason": diagnostic_reason,
             "raw_global_equivalence_proven": bool(item.get("raw_global_equivalence_proven")),
             "split_audit_status": str(item.get("split_audit_status") or ("missing" if model == "deeph" else "not_applicable")),
             "split_audit_path": str(item.get("split_audit_path") or ""),
@@ -507,7 +649,7 @@ def rows_from_common_metrics(
         for key, value in item.items():
             if key.endswith("_mean"):
                 row[key] = value
-        if model == "deeph" and adapter_equivalence_status != EQUIVALENCE_PROVEN_RAW_GLOBAL:
+        if model == "deeph" and not deeph_adapter_equivalence_proven(row):
             row["diagnostic_only"] = True
             row["comparability_status"] = "diagnostic_only"
             row["scientific_status"] = "diagnostic_only"
@@ -753,9 +895,9 @@ def pairwise_comparisons(best_rows: list[dict[str, Any]], *, baseline_model: str
             gates_failed.extend(baseline.get("gates_failed") or ["invalid_prediction_format"])
         if not challenger.get("robust_eligible"):
             gates_failed.extend(challenger.get("gates_failed") or ["invalid_prediction_format"])
-        if challenger_model == "deeph" and challenger.get("adapter_equivalence_status") != EQUIVALENCE_PROVEN_RAW_GLOBAL:
+        if challenger_model == "deeph" and not deeph_adapter_equivalence_proven(challenger):
             gates_failed.append("deeph_adapter_equivalence_not_proven")
-        if baseline_model == "deeph" and baseline.get("adapter_equivalence_status") != EQUIVALENCE_PROVEN_RAW_GLOBAL:
+        if baseline_model == "deeph" and not deeph_adapter_equivalence_proven(baseline):
             gates_failed.append("deeph_adapter_equivalence_not_proven")
         lower = metric_lower_is_better(metric)
         baseline_value = number(baseline.get("mean"))
@@ -911,6 +1053,7 @@ def build_recommendation(
         "metric_policy": metric_policy_role(primary_metric) if primary_metric else "missing",
         "comparability_status": "valid" if not hard_failures else ("diagnostic_only" if status == "diagnostic_only" else status),
         "adapter_equivalence_status": deeph_adapter_status(rows),
+        "equivalence_status": deeph_equivalence_status(rows),
         "split_audit_status": split_audit_status(rows),
         "status_values": sorted(RECOMMENDATION_STATUS_VALUES),
         "warnings": severe,
@@ -939,6 +1082,11 @@ def pareto_frontier(rows: list[dict[str, Any]], primary_metric: str | None) -> l
                 "train_time_seconds": row.get("training_time_seconds"),
                 "predict_time_seconds": row.get("prediction_time_seconds"),
                 "preprocess_time_seconds": row.get("preprocess_time_seconds"),
+                "gpu_hours_total": row.get("gpu_hours_total"),
+                "gpu_hours_to_best_validation": row.get("gpu_hours_to_best_validation"),
+                "peak_gpu_memory_mb": row.get("peak_gpu_memory_mb"),
+                "samples_per_second": row.get("samples_per_second"),
+                "matrix_blocks_per_second": row.get("matrix_blocks_per_second"),
                 "timing_reliability_status": "available" if math.isfinite(time_value) else "timing_unavailable",
             }
         )

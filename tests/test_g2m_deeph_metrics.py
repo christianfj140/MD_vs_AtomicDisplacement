@@ -1,4 +1,5 @@
 import csv
+import importlib
 import json
 import sys
 import tempfile
@@ -75,6 +76,7 @@ def write_method_metrics(
             {
                 "sample": sample_id,
                 "dos_mae_500_fermi_window": mae * 7,
+                "dos_wasserstein_eV": mae * 8,
                 "deeph_diagnostic_only": diagnostic,
             }
         )
@@ -158,6 +160,37 @@ def write_valid_dataset_manifests(root: Path, sample_ids: list[str]) -> tuple[Pa
 
 
 class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
+    def test_deeph_low_energy_metric_policy_matches_common_kpoint_policy(self) -> None:
+        try:
+            import numpy as np
+            deeph_metrics = importlib.import_module("evaluate_deeph_kpoint_metrics")
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"DeepH metric dependency unavailable: {exc.name}")
+
+        first = deeph_metrics.low_energy_metrics_from_eigenvalues(
+            np.asarray([0.0, 1.0, 3.0], dtype=float),
+            np.asarray([0.1, 0.8, 4.0], dtype=float),
+            n_states=2,
+            alignment="none",
+        )
+        second = deeph_metrics.low_energy_metrics_from_eigenvalues(
+            np.asarray([0.0, 2.0, 5.0], dtype=float),
+            np.asarray([0.0, 2.3, 6.0], dtype=float),
+            n_states=2,
+            alignment="none",
+        )
+
+        self.assertEqual(first["low_energy_n_states"], 2)
+        self.assertAlmostEqual(first["low_energy_rmse_eV"], ((0.1**2 + 0.2**2) / 2.0) ** 0.5)
+        weighted = deeph_metrics.weighted_metric_rmse(
+            [
+                {"k_weight": 0.25, "low_energy_rmse_eV": first["low_energy_rmse_eV"]},
+                {"k_weight": 0.75, "low_energy_rmse_eV": second["low_energy_rmse_eV"]},
+            ],
+            "low_energy_rmse_eV",
+        )
+        self.assertTrue(np.isfinite(weighted))
+
     def test_ml_prediction_cannot_be_selected_as_reference(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "ML_prediction.HSX"):
             validate_no_forbidden_references(
@@ -308,7 +341,7 @@ class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
         )
 
         self.assertTrue(payload["available"])
-        matrix_plot = next(plot for plot in payload["plots"] if plot["id"] == "matrix")
+        matrix_plot = next(plot for plot in payload["plots"] if plot["id"] == "h_mae")
         self.assertTrue(matrix_plot["missing_metrics"])
 
     def test_plot_payload_diagnostic_only_disables_winner(self) -> None:
@@ -417,8 +450,49 @@ class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
         self.assertTrue(payload["available"])
         self.assertEqual(payload["metric_scaling_rows"], metric_scaling_rows)
         plot_ids = {plot["id"] for plot in payload["plots"]}
-        self.assertIn("metric_scaling_matrix", plot_ids)
-        self.assertIn("metric_scaling_spectral", plot_ids)
+        self.assertIn("metric_scaling_h_mae", plot_ids)
+        self.assertIn("metric_scaling_spectral_low_energy", plot_ids)
+        self.assertTrue(
+            all(len(plot.get("metrics") or []) == 1 for plot in payload["plots"] if plot["kind"] == "metric_scaling")
+        )
+
+    def test_plot_payload_splits_metric_groups_by_scale(self) -> None:
+        payload = build_common_plot_payload(
+            {
+                "status": "valid_reused_joint_dataset",
+                "summary_rows": [
+                    {
+                        "method": "graph2mat",
+                        "h_mae_eV_mean": 0.1,
+                        "h_rmse_eV_mean": 0.2,
+                        "h_mse_eV2_mean": 0.04,
+                        "global_rmse_eV_mean": 0.3,
+                        "low_energy_rmse_eV_mean": 0.4,
+                        "fermi_window_rmse_eV_mean": 0.5,
+                        "frontier_window_rmse_eV_mean": 0.6,
+                        "dos_mae_500_fermi_window_mean": 0.7,
+                        "dos_wasserstein_eV_mean": 0.8,
+                    }
+                ],
+                "warnings": [],
+                "recommendation": {"winner": None, "robust_recommendation": False},
+            }
+        )
+
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        for plot_id in (
+            "h_mae",
+            "h_rmse",
+            "h_mse",
+            "spectral_global",
+            "spectral_low_energy",
+            "spectral_fermi",
+            "spectral_frontier",
+            "dos_mae",
+            "dos_wasserstein",
+        ):
+            self.assertIn(plot_id, plot_ids)
+        self.assertTrue(all(len(plot.get("metrics") or []) == 1 for plot in payload["plots"] if plot["kind"] == "grouped_bar"))
 
     def test_plot_payload_includes_artifact_missing_counts(self) -> None:
         payload = build_common_plot_payload(

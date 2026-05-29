@@ -686,7 +686,214 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertIn("deeph_discovery", deeph_manifest)
             self.assertEqual(results["ranking"]["recommendation"]["status"], "invalid_incomplete_grid")
             self.assertTrue((Path(tmp) / "results" / "training_sweep_dry" / "sweep" / "training_sweep_manifest.json").exists())
+            self.assertTrue((Path(tmp) / "results" / "training_sweep_dry" / "sweep" / "search_plan.json").exists())
+            self.assertTrue((Path(tmp) / "results" / "training_sweep_dry" / "sweep" / "budget_summary.json").exists())
             self.assertTrue((Path(tmp) / "results" / "training_sweep_dry" / "summary" / "ranking" / "ranking_summary.json").exists())
+
+    def test_equal_gpu_hours_budget_skips_new_trials_after_exhaustion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fake_graph2mat_job(payload, validation, record):
+                return {
+                    **record,
+                    "status": "completed",
+                    "run_root": str(Path(tmp) / "runs" / record["config_id"]),
+                    "telemetry": {"gpu_hours_total": 0.1},
+                }
+
+            runner._run_training_sweep_graph2mat_job = fake_graph2mat_job  # type: ignore[method-assign]
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "budget_gpu",
+                    "benchmark_mode": "final_publication",
+                    "training_sweep": {
+                        "enabled": True,
+                        "budget_policy": {"mode": "equal_gpu_hours_per_model", "gpu_hours_per_model": 0.15},
+                        "common": {"epochs": [1], "learning_rate": [0.001], "batch_size": [1], "seeds": [42]},
+                        "graph2mat": {"enabled": True, "num_interactions": [1, 2, 3]},
+                        "deeph": {"enabled": False},
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 0)
+            results = runner.results()["results"]
+            summary = results["training_sweep"]
+            completed = [row for row in summary["runs"] if row["status"] == "completed"]
+            skipped = [row for row in summary["runs"] if row["status"] == "skipped_budget_exhausted"]
+            self.assertEqual(len(completed), 2)
+            self.assertEqual(len(skipped), 1)
+            self.assertAlmostEqual(summary["budget"]["consumed_gpu_hours_by_model"]["graph2mat"], 0.2)
+            self.assertEqual(summary["budget"]["skipped_trials_by_model"]["graph2mat"], 1)
+            self.assertTrue((Path(tmp) / "results" / "budget_gpu" / "sweep" / "budget_summary.json").exists())
+
+    def test_equal_gpu_hours_missing_telemetry_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fake_graph2mat_job(payload, validation, record):
+                return {
+                    **record,
+                    "status": "completed",
+                    "run_root": str(Path(tmp) / "runs" / record["config_id"]),
+                }
+
+            runner._run_training_sweep_graph2mat_job = fake_graph2mat_job  # type: ignore[method-assign]
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "budget_missing_telemetry",
+                    "benchmark_mode": "final_publication",
+                    "training_sweep": {
+                        "enabled": True,
+                        "budget_policy": {"mode": "equal_gpu_hours_per_model", "gpu_hours_per_model": 1.0},
+                        "common": {"epochs": [1]},
+                        "graph2mat": {"enabled": True, "num_interactions": [1]},
+                        "deeph": {"enabled": False},
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 1)
+            results = runner.results()["results"]
+            self.assertIn("Missing gpu_hours_total", results["training_sweep"]["failed_runs"][0]["error"])
+            self.assertEqual(results["training_sweep"]["budget"]["budget_accounting_status"], "failed")
+
+    def test_final_benchmark_training_sweep_locks_test_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            calls = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,)):
+                calls.append(command)
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "paper_search_dry",
+                    "dry_run": True,
+                    "benchmark_mode": "final_publication",
+                    "training_sweep": {
+                        "enabled": True,
+                        "common": {"epochs": [1], "learning_rate": [0.001], "batch_size": [1], "seeds": [42]},
+                        "graph2mat": {"enabled": True, "max_ell": [2], "hidden_irreps_channels": [4]},
+                        "deeph": {"enabled": False},
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 0)
+            self.assertEqual(calls, [])
+            results = runner.results()["results"]
+            self.assertIsNone(results["ranking"])
+            self.assertTrue(results["test_blindness"]["final_test_locked"])
+            self.assertEqual(results["test_blindness"]["protocol_stage"], "search")
+            run = results["training_sweep"]["runs"][0]
+            self.assertEqual(run["protocol_stage"], "search")
+            self.assertTrue(run["test_metrics_locked"])
+            self.assertEqual(run["test_metrics_status"], "locked_until_final")
+            self.assertNotIn("predict_run", run)
+            self.assertNotIn("metrics_run", run)
+            self.assertTrue(
+                (Path(tmp) / "results" / "paper_search_dry" / "summary" / "test_blindness_manifest.json").exists()
+            )
+
+    def test_final_benchmark_search_writes_topk_and_robust_rerun_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fake_graph2mat_job(payload, validation, record):
+                value = 0.1 if int(record["index"]) == 2 else 0.2
+                return {
+                    **record,
+                    "status": "completed",
+                    "run_root": str(Path(tmp) / "runs" / record["config_id"]),
+                    "metric_split": "validation",
+                    "early_stopping": {
+                        "validation_metric_name": "val_loss",
+                        "best_validation_value": value,
+                    },
+                    "telemetry": {"gpu_hours_total": 0.01},
+                }
+
+            def fake_deeph_job(payload, validation, record):
+                value = 0.15 if int(record["index"]) == 4 else 0.3
+                return {
+                    **record,
+                    "status": "completed",
+                    "run_root": str(Path(tmp) / "runs" / record["config_id"]),
+                    "metric_split": "validation",
+                    "early_stopping": {
+                        "validation_metric_name": "val_loss",
+                        "best_validation_value": value,
+                    },
+                    "telemetry": {"gpu_hours_total": 0.02},
+                }
+
+            runner._run_training_sweep_graph2mat_job = fake_graph2mat_job  # type: ignore[method-assign]
+            runner._run_training_sweep_deeph_job = fake_deeph_job  # type: ignore[method-assign]
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "paper_search_topk",
+                    "benchmark_mode": "final_publication",
+                    "final_seeds": [0, 1, 2],
+                    "top_k_selection": {"k_per_model": 1, "split": "validation", "metric": "val_loss"},
+                    "training_sweep": {
+                        "enabled": True,
+                        "common": {"epochs": [1], "learning_rate": [0.001], "batch_size": [1], "seeds": [42]},
+                        "graph2mat": {"enabled": True, "max_ell": [2], "hidden_irreps_channels": [4, 8]},
+                        "deeph": {"enabled": True, "atom_fea_len": [64, 128], "edge_fea_len": [64]},
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 0)
+            results = runner.results()["results"]
+            selection = results["selection"]
+            self.assertEqual(selection["status"], "planned")
+            selected = selection["selected_configs"]["selected_configs"]
+            selected_by_model = {row["model"]: row for row in selected}
+            self.assertEqual(selected_by_model["graph2mat"]["validation_metric_value"], 0.1)
+            self.assertEqual(selected_by_model["graph2mat"]["index"], 2)
+            self.assertEqual(selected_by_model["deeph"]["validation_metric_value"], 0.15)
+            self.assertEqual(selected_by_model["deeph"]["index"], 4)
+            plan = selection["robust_rerun_plan"]
+            self.assertEqual(plan["planned_run_count"], 6)
+            self.assertTrue((Path(tmp) / "results" / "paper_search_topk" / "summary" / "selection" / "selected_configs.json").exists())
+            self.assertTrue((Path(tmp) / "results" / "paper_search_topk" / "summary" / "selection" / "robust_rerun_plan.json").exists())
 
     def test_available_datasets_payload_lists_ready_joint_datasets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -748,6 +955,12 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertNotIn("val_runs", config["training"]["data"])
             self.assertEqual(context.runs_json_counts["train"], 1)
             self.assertEqual(context.runs_json_counts["val"], 1)
+            manifest = json.loads(context.graph2mat_manifest_path.read_text(encoding="utf-8"))
+            accounting = manifest["extra"]["optimizer_update_accounting"]
+            self.assertEqual(accounting["train_samples"], 1)
+            self.assertEqual(accounting["batch_size"], 64)
+            self.assertEqual(accounting["steps_per_epoch"], 1)
+            self.assertEqual(accounting["total_optimizer_updates"], accounting["max_epochs"])
 
     def test_graph2mat_cuequivariance_requirement_fails_early_when_unavailable(self):
         runner = Graph2MatDeepHBenchmarkRunner()
@@ -850,6 +1063,23 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
 
             self.assertTrue(destination.exists())
             self.assertEqual(destination.resolve(), source.resolve())
+
+    def test_link_or_copy_file_leaves_equivalent_existing_basis_link_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared_basis = Path(tmp) / "MD_steps" / "basis" / "C.ion.xml"
+            material_basis = Path(tmp) / "material_basis" / "C.ion.xml"
+            destination = Path(tmp) / "MD_steps" / "0" / "C.ion.xml"
+            shared_basis.parent.mkdir(parents=True)
+            material_basis.parent.mkdir(parents=True)
+            destination.parent.mkdir(parents=True)
+            shared_basis.write_text("<basis />\n", encoding="utf-8")
+            material_basis.write_text("<basis />\n", encoding="utf-8")
+            os.symlink(os.path.relpath(shared_basis, destination.parent), destination)
+
+            _link_or_copy_file(material_basis, destination)
+
+            self.assertTrue(destination.exists())
+            self.assertEqual(destination.resolve(), shared_basis.resolve())
 
     def test_resume_training_sweep_loads_only_completed_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1109,7 +1339,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertTrue(payload["available"])
             self.assertGreaterEqual(payload["archived_runs"], 1)
             self.assertTrue(payload["metric_scaling_rows"])
-            metric_plot = next(plot for plot in payload["plots"] if plot["id"] == "metric_scaling_matrix")
+            metric_plot = next(plot for plot in payload["plots"] if plot["id"] == "metric_scaling_h_mae")
             self.assertEqual(metric_plot["kind"], "metric_scaling")
             self.assertTrue(any(row["dataset_size"] == 3 for row in payload["metric_scaling_rows"]))
 
@@ -1144,7 +1374,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertEqual(payload["metric_scaling_rows"], [live_row])
             self.assertEqual(payload["live_metric_rows"], 1)
             self.assertEqual(payload["archived_runs"], 0)
-            metric_plot = next(plot for plot in payload["plots"] if plot["id"] == "metric_scaling_matrix")
+            metric_plot = next(plot for plot in payload["plots"] if plot["id"] == "metric_scaling_h_mae")
             self.assertEqual(metric_plot["kind"], "metric_scaling")
             self.assertEqual(metric_plot["rows"][0]["metric_value"], 0.123)
 

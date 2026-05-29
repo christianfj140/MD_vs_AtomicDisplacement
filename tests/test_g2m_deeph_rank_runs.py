@@ -20,7 +20,10 @@ from g2m_deeph_rank_runs import (  # noqa: E402
     rank_metric_groups,
     row_from_training_record,
 )
-from deeph_prediction_adapter import EQUIVALENCE_PROVEN_RAW_GLOBAL  # noqa: E402
+from deeph_prediction_adapter import (  # noqa: E402
+    EQUIVALENCE_PROVEN_RAW_GLOBAL,
+    EQUIVALENCE_STATUS_UNPROVEN,
+)
 
 
 def valid_metric_row(model: str, *, value: float = 0.1, seed: int = 1, **overrides) -> dict:
@@ -362,6 +365,32 @@ class Graph2MatDeepHRankingTests(unittest.TestCase):
         ]
 
         rec = build_recommendation(rows=rows, best_rows=best_rows, pairs=[{"metric": "low_energy_rmse_eV", "status": "comparable"}], primary_metric="low_energy_rmse_eV")
+
+        self.assertIsNone(rec["winner"])
+        self.assertEqual(rec["status"], "diagnostic_only")
+        self.assertIn("deeph_adapter_equivalence_not_proven", rec["gates_failed"])
+
+    def test_unproven_equivalence_status_blocks_even_with_proven_adapter_label(self) -> None:
+        best_rows = [
+            best_row("graph2mat", mean=0.2),
+            best_row("deeph", mean=0.1),
+        ]
+        rows = [
+            valid_metric_row("graph2mat", value=0.2),
+            valid_metric_row(
+                "deeph",
+                value=0.1,
+                adapter_equivalence_status=EQUIVALENCE_PROVEN_RAW_GLOBAL,
+                equivalence_status=EQUIVALENCE_STATUS_UNPROVEN,
+            ),
+        ]
+
+        rec = build_recommendation(
+            rows=rows,
+            best_rows=best_rows,
+            pairs=[{"metric": "low_energy_rmse_eV", "status": "comparable"}],
+            primary_metric="low_energy_rmse_eV",
+        )
 
         self.assertIsNone(rec["winner"])
         self.assertEqual(rec["status"], "diagnostic_only")

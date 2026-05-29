@@ -55,6 +55,33 @@ from g2m_deeph_metrics import (  # noqa: E402
 )
 from g2m_deeph_rank_runs import rank_graph2mat_deeph_runs  # noqa: E402
 from g2m_deeph_live_metrics import dedupe_metric_rows, live_metric_scaling_rows  # noqa: E402
+from g2m_deeph_telemetry import (  # noqa: E402
+    GpuTelemetryMonitor,
+    compute_gpu_hours,
+    optimizer_update_accounting,
+    summarize_run_telemetry,
+    write_telemetry,
+)
+from g2m_deeph_early_stopping import (  # noqa: E402
+    DeepHEarlyStoppingObserver,
+    graph2mat_early_stopping_callbacks,
+    parse_early_stopping_policy,
+    tensorboard_policy_metadata,
+)
+from g2m_deeph_budget import BudgetTracker, write_budget_summary  # noqa: E402
+from g2m_deeph_test_blindness import (  # noqa: E402
+    SEARCH_STAGE,
+    build_search_stage_manifest,
+    is_final_benchmark_mode,
+    protocol_stage_from_payload,
+    search_stage_record_fields,
+)
+from g2m_deeph_topk import (  # noqa: E402
+    generate_robust_rerun_plan,
+    select_top_configs,
+    selection_policy_from_payload,
+    write_selection_artifacts,
+)
 from g2m_deeph_training_sweep import expand_training_sweep  # noqa: E402
 from dataset_recipe_helpers import (  # noqa: E402
     dataset_sweep_recipes_from_payload,
@@ -84,6 +111,10 @@ DATASET_SWEEP_RUN_MODE = "generate_datasets_only"
 FULL_STRICT_PIPELINE_RUN_MODE = "full_strict_pipeline"
 METRIC_FAIL_POLICY_FAIL_CLOSED = "fail_closed"
 METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY = "diagnostic_only"
+TEST_METRICS_LOCKED_MESSAGE = (
+    "Final/publicable benchmark mode keeps test predictions and test metrics locked "
+    "during search. Run the final_test stage only after validation-based top-k selection."
+)
 DEEPH_TRAIN_OVERRIDE_KEYS = {
     "epochs",
     "batch_size",
@@ -253,6 +284,15 @@ def _optional_positive_int(value: Any, *, field_name: str) -> int | None:
     if parsed <= 0:
         raise RuntimeError(f"{field_name} must be a positive integer.")
     return parsed
+
+
+def _optional_int_value(value: Any) -> int | None:
+    if value in (None, "", "null"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_duration(seconds: float | int | None) -> str:
@@ -436,6 +476,20 @@ def _graph2mat_checkpoint_callbacks(every_n_epochs: int) -> list[dict[str, Any]]
     ]
 
 
+def _apply_common_early_stopping_to_graph2mat_config(config: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any] | None:
+    policy = parse_early_stopping_policy(payload)
+    if policy is None:
+        return None
+    training = config.setdefault("training", {})
+    trainer = training.setdefault("trainer", {})
+    trainer["max_epochs"] = policy.max_epochs
+    callbacks = list(trainer.get("callbacks") or [])
+    callbacks.extend(graph2mat_early_stopping_callbacks(policy))
+    trainer["callbacks"] = callbacks
+    config["common_early_stopping"] = policy.to_dict()
+    return policy.to_dict()
+
+
 def _apply_performance_to_graph2mat_config(config: dict[str, Any], performance: dict[str, Any]) -> None:
     if not performance:
         return
@@ -605,6 +659,11 @@ def _link_or_copy_file(src: Path, dst: Path) -> None:
     if dst.exists() or dst.is_symlink():
         try:
             if src.resolve(strict=True) == dst.resolve(strict=True):
+                return
+        except OSError:
+            pass
+        try:
+            if src.is_file() and dst.exists() and dst.is_file() and _file_sha256(src) == _file_sha256(dst):
                 return
         except OSError:
             pass
@@ -1386,6 +1445,7 @@ class Graph2MatDeepHBenchmarkRunner:
         overrides = payload.get("graph2mat_overrides") or {}
         if isinstance(overrides, dict):
             self._apply_graph2mat_overrides(config, overrides)
+        early_stopping_policy = _apply_common_early_stopping_to_graph2mat_config(config, payload)
 
         _write_yaml(config_path, config)
         context = Graph2MatBenchmarkContext(
@@ -1413,6 +1473,7 @@ class Graph2MatDeepHBenchmarkRunner:
             payload,
             self._graph2mat_python(payload),
         )
+        optimizer_accounting = self._graph2mat_optimizer_accounting(context, config)
         self._write_graph2mat_manifest(
             context,
             extra={
@@ -1421,6 +1482,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 "runs_json": str(runs_json_path),
                 "runs_json_counts": runs_json_counts,
                 "graph2mat_acceleration": acceleration,
+                "early_stopping_policy": early_stopping_policy,
+                "optimizer_update_accounting": optimizer_accounting,
             },
         )
         return context
@@ -1490,8 +1553,10 @@ class Graph2MatDeepHBenchmarkRunner:
         label: str,
         allowed_returncodes: tuple[int, ...] = (0,),
         progress_provider: Any | None = None,
+        line_observer: Any | None = None,
     ) -> dict[str, Any]:
         started_at = time.time()
+        controlled_stop_reason: str | None = None
         with self._lock:
             self._logs.append(f"[G2M-DEEPH][RUN] {label}: {' '.join(command)}\n")
         process = subprocess.Popen(
@@ -1504,6 +1569,8 @@ class Graph2MatDeepHBenchmarkRunner:
             text=True,
             bufsize=1,
         )
+        telemetry_monitor = GpuTelemetryMonitor()
+        telemetry_monitor.start(process.pid)
         with self._lock:
             self._processes.append(process)
         try:
@@ -1527,6 +1594,15 @@ class Graph2MatDeepHBenchmarkRunner:
                             line, pending = pending.split("\n", 1)
                             with self._lock:
                                 self._logs.append(line + "\n")
+                            if line_observer is not None and process.poll() is None:
+                                reason = line_observer(line)
+                                if reason and controlled_stop_reason is None:
+                                    controlled_stop_reason = str(reason)
+                                    with self._lock:
+                                        self._logs.append(
+                                            f"[G2M-DEEPH][EARLY-STOP] {label}: {controlled_stop_reason}\n"
+                                        )
+                                    process.terminate()
 
                 if self._state.stop_requested and process.poll() is None:
                     process.terminate()
@@ -1564,18 +1640,23 @@ class Graph2MatDeepHBenchmarkRunner:
                             line, pending = pending.split("\n", 1)
                             with self._lock:
                                 self._logs.append(line + "\n")
+                            if line_observer is not None and controlled_stop_reason is None:
+                                reason = line_observer(line)
+                                if reason:
+                                    controlled_stop_reason = str(reason)
                     break
             if pending:
                 with self._lock:
                     self._logs.append(pending)
             returncode = process.wait()
         finally:
+            command_telemetry = telemetry_monitor.stop()
             if process.stdout is not None:
                 process.stdout.close()
             with self._lock:
                 self._processes = [item for item in self._processes if item is not process]
         finished_at = time.time()
-        if returncode not in allowed_returncodes:
+        if returncode not in allowed_returncodes and controlled_stop_reason is None:
             raise RuntimeError(f"{label} failed with exit code {returncode}")
         return {
             "label": label,
@@ -1585,6 +1666,14 @@ class Graph2MatDeepHBenchmarkRunner:
             "finished_at": finished_at,
             "elapsed_seconds": finished_at - started_at,
             "returncode": returncode,
+            "controlled_stop_reason": controlled_stop_reason,
+            "telemetry": {
+                **command_telemetry,
+                "gpu_hours": compute_gpu_hours(
+                    command_telemetry.get("gpu_active_seconds"),
+                    command_telemetry.get("observed_gpu_count"),
+                ),
+            },
         }
 
     def _md_generation_python(self, payload: dict[str, Any]) -> str:
@@ -2120,7 +2209,12 @@ class Graph2MatDeepHBenchmarkRunner:
         )
         orbital_json = str(options.get("orbital") or deeph_orbital_json_from_raw_mirror(raw_mirror))
         dataset_name = str(options.get("dataset_name") or DEEPh_DEFAULT_DATASET_NAME)
+        early_stopping_policy = parse_early_stopping_policy(payload)
         epochs = int(options.get("epochs", payload.get("deeph_epochs", 100)) or 100)
+        if early_stopping_policy is not None:
+            epochs = early_stopping_policy.max_epochs
+            options = dict(options)
+            options["epochs"] = early_stopping_policy.max_epochs
         batch_size = int(options.get("batch_size", 3) or 3)
         learning_rate = float(options.get("learning_rate", 0.001) or 0.001)
         disable_cuda = _parse_bool(options.get("disable_cuda"), True)
@@ -2155,6 +2249,10 @@ class Graph2MatDeepHBenchmarkRunner:
             multiprocessing=multiprocessing,
             radius=radius,
             orbital=orbital_json,
+            early_stopping_loss=-1.0 if early_stopping_policy is not None else None,
+            early_stopping_loss_epoch=[-1.0, early_stopping_policy.max_epochs + 1]
+            if early_stopping_policy is not None
+            else None,
             overrides={key: options[key] for key in DEEPH_TRAIN_OVERRIDE_KEYS if key in options},
         )
         inference_configs: list[Path] = []
@@ -2469,13 +2567,64 @@ class Graph2MatDeepHBenchmarkRunner:
                 if artifact.name == "ML_prediction.HSX":
                     continue
                 _link_or_copy_file(artifact, output_dir / "siesta_hamiltonians" / sample_id / artifact.name)
-        split_root = dataset_root / "splits"
+            split_root = dataset_root / "splits"
         if split_root.exists():
             target = output_dir / "splits"
             if target.exists():
                 shutil.rmtree(target)
             shutil.copytree(split_root, target, symlinks=True)
         return output_dir
+
+    def _write_run_cost_telemetry(
+        self,
+        *,
+        model: str,
+        run_root: Path,
+        frozen_split_manifest_path: Path,
+        train_run: dict[str, Any] | None = None,
+        predict_run: dict[str, Any] | None = None,
+        preprocess_run: dict[str, Any] | None = None,
+        inference_runs: list[dict[str, Any]] | None = None,
+        metrics_run: dict[str, Any] | None = None,
+        training_dir: Path | None = None,
+        deeph_save_dir: Path | None = None,
+        payload: dict[str, Any] | None = None,
+        optimizer_accounting: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        telemetry = summarize_run_telemetry(
+            model=model,
+            run_root=run_root,
+            training_dir=training_dir,
+            deeph_save_dir=deeph_save_dir,
+            frozen_split_manifest_path=frozen_split_manifest_path,
+            train_run=train_run,
+            predict_run=predict_run,
+            preprocess_run=preprocess_run,
+            inference_runs=inference_runs or [],
+            metrics_run=metrics_run,
+            performance=_performance_settings_from_payload(payload or {}),
+            optimizer_accounting=optimizer_accounting,
+        )
+        telemetry_path = run_root / "telemetry" / f"{model}.json"
+        write_telemetry(telemetry_path, telemetry)
+        telemetry["telemetry_path"] = str(telemetry_path)
+        return telemetry
+
+    def _graph2mat_optimizer_accounting(
+        self,
+        context: Graph2MatBenchmarkContext,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        training = config.get("training") if isinstance(config.get("training"), dict) else {}
+        data = training.get("data") if isinstance(training.get("data"), dict) else {}
+        trainer = training.get("trainer") if isinstance(training.get("trainer"), dict) else {}
+        return optimizer_update_accounting(
+            train_samples=context.runs_json_counts.get("train"),
+            batch_size=_optional_int_value(data.get("batch_size")),
+            max_epochs=_optional_int_value(trainer.get("max_epochs")),
+            gradient_accumulation=_optional_int_value(trainer.get("accumulate_grad_batches")) or 1,
+            drop_last=_parse_bool(data.get("drop_last"), False),
+        )
 
     def _run_training_sweep_graph2mat_job(
         self,
@@ -2486,14 +2635,25 @@ class Graph2MatDeepHBenchmarkRunner:
         child = self._child_training_payload(payload, record)
         self._clean_resume_training_run_root(child, record)
         context = self._prepare_graph2mat_context(child, {**validation, "dataset_root": record["dataset_root"]})
+        prepared_manifest = _load_json(context.graph2mat_manifest_path)
+        prepared_extra = prepared_manifest.get("extra") if isinstance(prepared_manifest.get("extra"), dict) else {}
+        optimizer_accounting = (
+            prepared_extra.get("optimizer_update_accounting")
+            if isinstance(prepared_extra.get("optimizer_update_accounting"), dict)
+            else {}
+        )
         result: dict[str, Any] = {
             **record,
             "run_root": str(context.run_root),
             "graph2mat_manifest_path": str(context.graph2mat_manifest_path),
+            "optimizer_update_accounting": optimizer_accounting,
         }
         metric_fail_policy = _metric_fail_policy(payload)
+        final_mode = is_final_benchmark_mode(payload)
         result["metric_fail_policy"] = metric_fail_policy
         result["fail_open_metric_outputs"] = metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY
+        if final_mode:
+            result.update(search_stage_record_fields())
         warning = _metric_fail_policy_warning(metric_fail_policy)
         if warning:
             result["severe_warnings"] = [warning]
@@ -2507,12 +2667,63 @@ class Graph2MatDeepHBenchmarkRunner:
             label=f"Graph2Mat sweep train {record['config_id']}",
             progress_provider=lambda: _lightning_training_progress(context.training_dir),
         )
+        early_stopping_policy = parse_early_stopping_policy(child)
+        early_stopping_metadata = (
+            tensorboard_policy_metadata(context.training_dir, early_stopping_policy)
+            if early_stopping_policy is not None
+            else None
+        )
         checkpoint_manifest = _load_json(context.training_dir / "checkpoint_manifest.json")
         self._write_graph2mat_manifest(
             context,
             checkpoint_manifest=checkpoint_manifest,
-            extra={"training_completed": True, "training_run": train_run, "sweep_record": record},
+            extra={
+                "training_completed": True,
+                "training_run": train_run,
+                "sweep_record": record,
+                "early_stopping": early_stopping_metadata,
+                "optimizer_update_accounting": optimizer_accounting,
+                **(search_stage_record_fields() if final_mode else {}),
+            },
         )
+        if final_mode:
+            telemetry = self._write_run_cost_telemetry(
+                model="graph2mat",
+                run_root=context.run_root,
+                frozen_split_manifest_path=context.frozen_split_manifest_path,
+                train_run=train_run,
+                training_dir=context.training_dir,
+                payload=child,
+                optimizer_accounting=optimizer_accounting,
+            )
+            self._write_graph2mat_manifest(
+                context,
+                checkpoint_manifest=checkpoint_manifest,
+                extra={
+                    "training_completed": True,
+                    "training_run": train_run,
+                    "sweep_record": record,
+                    "telemetry": telemetry,
+                    "early_stopping": early_stopping_metadata,
+                    "optimizer_update_accounting": optimizer_accounting,
+                    **search_stage_record_fields(),
+                },
+            )
+            self._logs.append(
+                f"[G2M-DEEPH] Graph2Mat sweep {record['config_id']}: {TEST_METRICS_LOCKED_MESSAGE}\n"
+            )
+            result.update(
+                {
+                    "status": "completed",
+                    "train_run": train_run,
+                    "telemetry": telemetry,
+                    "telemetry_path": telemetry["telemetry_path"],
+                    "early_stopping": early_stopping_metadata,
+                    "optimizer_update_accounting": optimizer_accounting,
+                    **search_stage_record_fields(),
+                }
+            )
+            return result
         predict_run = self._run_command(
             [self._graph2mat_python(child), str(DEFAULT_MD_PREDICTION_SCRIPT)],
             cwd=REPO_ROOT,
@@ -2548,7 +2759,42 @@ class Graph2MatDeepHBenchmarkRunner:
             label=f"Graph2Mat sweep metrics {record['config_id']}",
             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
         )
-        result.update({"status": "completed", "train_run": train_run, "predict_run": predict_run, "metrics_run": metrics_run})
+        telemetry = self._write_run_cost_telemetry(
+            model="graph2mat",
+            run_root=context.run_root,
+            frozen_split_manifest_path=context.frozen_split_manifest_path,
+            train_run=train_run,
+            predict_run=predict_run,
+            metrics_run=metrics_run,
+            training_dir=context.training_dir,
+            payload=child,
+            optimizer_accounting=optimizer_accounting,
+        )
+        self._write_graph2mat_manifest(
+            context,
+            checkpoint_manifest=checkpoint_manifest,
+            prediction_outputs=prediction_outputs,
+                            extra={
+                                "prediction_completed": True,
+                                "prediction_run": predict_run,
+                                "sweep_record": record,
+                                "telemetry": telemetry,
+                                "early_stopping": early_stopping_metadata,
+                                "optimizer_update_accounting": optimizer_accounting,
+                            },
+                        )
+        result.update(
+            {
+                "status": "completed",
+                "train_run": train_run,
+                "predict_run": predict_run,
+                "metrics_run": metrics_run,
+                "telemetry": telemetry,
+                "telemetry_path": telemetry["telemetry_path"],
+                "early_stopping": early_stopping_metadata,
+                "optimizer_update_accounting": optimizer_accounting,
+            }
+        )
         return result
 
     def _run_training_sweep_deeph_job(
@@ -2567,8 +2813,11 @@ class Graph2MatDeepHBenchmarkRunner:
             "deeph_manifest_path": str(deeph_context.manifest_path),
         }
         metric_fail_policy = _metric_fail_policy(payload)
+        final_mode = is_final_benchmark_mode(payload)
         result["metric_fail_policy"] = metric_fail_policy
         result["fail_open_metric_outputs"] = metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY
+        if final_mode:
+            result.update(search_stage_record_fields())
         warning = _metric_fail_policy_warning(metric_fail_policy)
         if warning:
             result["severe_warnings"] = [warning]
@@ -2588,19 +2837,65 @@ class Graph2MatDeepHBenchmarkRunner:
             split_audit=split_audit,
             extra={"sweep_record": record},
         )
+        early_stopping_policy = parse_early_stopping_policy(child)
+        deeph_early_stopping = DeepHEarlyStoppingObserver(early_stopping_policy) if early_stopping_policy else None
         train_run = self._run_command(
             [self._deeph_command(child, "deeph-train"), "--config", str(deeph_context.train_config)],
             cwd=deeph_context.root,
             env=self._deeph_command_env(child),
             label=f"DeepH sweep train {record['config_id']}",
+            line_observer=deeph_early_stopping,
         )
+        early_stopping_metadata = deeph_early_stopping.metadata() if deeph_early_stopping is not None else None
         training_outputs = self._validate_deeph_training_outputs(deeph_context)
         self._write_deeph_manifest(
             deeph_context,
             train_run=train_run,
             training_outputs=training_outputs,
-            extra={"sweep_record": record},
+            extra={
+                "sweep_record": record,
+                "early_stopping": early_stopping_metadata,
+                **(search_stage_record_fields() if final_mode else {}),
+            },
         )
+        if final_mode:
+            telemetry = self._write_run_cost_telemetry(
+                model="deeph",
+                run_root=graph_context.run_root,
+                frozen_split_manifest_path=graph_context.frozen_split_manifest_path,
+                preprocess_run=preprocess_run,
+                train_run=train_run,
+                deeph_save_dir=deeph_context.save_dir,
+                payload=child,
+            )
+            self._write_deeph_manifest(
+                deeph_context,
+                preprocess_run=preprocess_run,
+                train_run=train_run,
+                training_outputs=training_outputs,
+                split_audit=split_audit,
+                extra={
+                    "sweep_record": record,
+                    "telemetry": telemetry,
+                    "early_stopping": early_stopping_metadata,
+                    **search_stage_record_fields(),
+                },
+            )
+            self._logs.append(
+                f"[G2M-DEEPH] DeepH sweep {record['config_id']}: {TEST_METRICS_LOCKED_MESSAGE}\n"
+            )
+            result.update(
+                {
+                    "status": "completed",
+                    "preprocess_run": preprocess_run,
+                    "train_run": train_run,
+                    "telemetry": telemetry,
+                    "telemetry_path": telemetry["telemetry_path"],
+                    "early_stopping": early_stopping_metadata,
+                    **search_stage_record_fields(),
+                }
+            )
+            return result
         staged_inputs = self._stage_deeph_inference_inputs(deeph_context)
         inference_runs: list[dict[str, Any]] = []
         for inference_config in deeph_context.inference_configs:
@@ -2647,6 +2942,32 @@ class Graph2MatDeepHBenchmarkRunner:
             label=f"DeepH sweep metrics {record['config_id']}",
             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
         )
+        telemetry = self._write_run_cost_telemetry(
+            model="deeph",
+            run_root=graph_context.run_root,
+            frozen_split_manifest_path=graph_context.frozen_split_manifest_path,
+            preprocess_run=preprocess_run,
+            train_run=train_run,
+            inference_runs=inference_runs,
+            metrics_run=metrics_run,
+            deeph_save_dir=deeph_context.save_dir,
+            payload=child,
+        )
+        self._write_deeph_manifest(
+            deeph_context,
+            preprocess_run=preprocess_run,
+            train_run=train_run,
+            inference_runs=inference_runs,
+            training_outputs=training_outputs,
+            prediction_outputs=prediction_outputs,
+            split_audit=split_audit,
+            extra={
+                "inference_inputs": staged_inputs,
+                "sweep_record": record,
+                "telemetry": telemetry,
+                "early_stopping": early_stopping_metadata,
+            },
+        )
         result.update(
             {
                 "status": "completed",
@@ -2654,6 +2975,9 @@ class Graph2MatDeepHBenchmarkRunner:
                 "train_run": train_run,
                 "inference_runs": inference_runs,
                 "metrics_run": metrics_run,
+                "telemetry": telemetry,
+                "telemetry_path": telemetry["telemetry_path"],
+                "early_stopping": early_stopping_metadata,
             }
         )
         return result
@@ -2669,6 +2993,23 @@ class Graph2MatDeepHBenchmarkRunner:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
+
+    def _write_training_search_plan(self, run_root: Path, plan: dict[str, Any]) -> None:
+        search_plan = plan.get("search_plan") if isinstance(plan.get("search_plan"), dict) else None
+        if search_plan is None:
+            search_policy = plan.get("search_policy") if isinstance(plan.get("search_policy"), dict) else {}
+            search_plan = {
+                "schema": "graph2mat_deeph_training_search_plan_v1",
+                "strategy": str(search_policy.get("strategy") or "grid"),
+                "planned_run_count": len(plan.get("planned_runs") or []),
+                "planned_runs": list(plan.get("planned_runs") or []),
+            }
+        _write_json(run_root / "sweep" / "search_plan.json", search_plan)
+
+    def _write_budget_summary(self, run_root: Path, tracker: BudgetTracker) -> dict[str, Any]:
+        summary = tracker.summary()
+        write_budget_summary(run_root / "sweep" / "budget_summary.json", summary)
+        return summary
 
     def _resume_run_root(self, payload: dict[str, Any], *, default_run_root: Path | None = None) -> Path | None:
         raw = (
@@ -2850,20 +3191,34 @@ class Graph2MatDeepHBenchmarkRunner:
         planned = list(plan.get("planned_runs") or [])
         error_policy = str(plan.get("error_policy") or "continue_on_error")
         metric_fail_policy = _metric_fail_policy(payload)
+        final_mode = is_final_benchmark_mode(payload)
+        protocol_stage = protocol_stage_from_payload(payload, default=SEARCH_STAGE if final_mode else "exploratory")
         run_root = Path(str(self._state.run_root or self._benchmark_run_root(payload, str(self._state.run_id))))
         resume_root, completed_by_key = self._load_resume_training_sweep(payload, run_root=run_root)
+        budget_tracker = BudgetTracker(plan.get("budget_policy"))
+        budget_tracker.add_completed_many(list(completed_by_key.values()), source="resume_manifest")
         summary: dict[str, Any] = {
             "schema": "graph2mat_deeph_training_sweep_v1",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "status": "running",
+            "protocol_stage": protocol_stage,
+            "final_benchmark_mode": final_mode,
+            "final_test_locked": final_mode,
             "error_policy": error_policy,
             "metric_fail_policy": metric_fail_policy,
             "fail_open_metric_outputs": metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY,
             "resumed_from_run_root": str(resume_root) if resume_root else "",
             "planned_runs": planned,
+            "search_policy": plan.get("search_policy"),
+            "budget_policy": plan.get("budget_policy"),
+            "search_plan_path": str(run_root / "sweep" / "search_plan.json"),
+            "budget_summary_path": str(run_root / "sweep" / "budget_summary.json"),
             "runs": list(completed_by_key.values()),
             "failed_runs": [],
+            "skipped_runs": [],
         }
+        self._write_training_search_plan(run_root, plan)
+        summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
         self._set_stage("training_sweep")
         with self._lock:
             self._state.training_sweep_status = {
@@ -2887,6 +3242,8 @@ class Graph2MatDeepHBenchmarkRunner:
             f"Graph2Mat parallel jobs={graph2mat_parallelism}; "
             f"DeepH parallel jobs={deeph_parallelism}.\n"
         )
+        if final_mode:
+            self._logs.append(f"[G2M-DEEPH] {TEST_METRICS_LOCKED_MESSAGE}\n")
         deeph_options = self._deeph_options(payload)
         deeph_inner_workers = int(deeph_options.get("multiprocessing", 0) or 0)
         if deeph_parallelism > 1 and deeph_inner_workers > 1:
@@ -2896,17 +3253,33 @@ class Graph2MatDeepHBenchmarkRunner:
             )
 
         def record_success(result: dict[str, Any]) -> None:
+            if result.get("status") == "completed":
+                budget_tracker.add_completed(result)
+            else:
+                budget_tracker.release(result)
             summary["runs"].append(result)
+            summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
             with self._lock:
                 self._state.training_sweep_status["completed"] += 1
 
         def record_failure(record: dict[str, Any], exc: Exception) -> None:
+            budget_tracker.release(record)
             failed = {**record, "status": "failed", "error": str(exc)}
             summary["runs"].append(failed)
             summary["failed_runs"].append(failed)
             with self._lock:
                 self._state.training_sweep_status["failed"] += 1
             self._logs.append(f"[G2M-DEEPH][WARN] Training sweep run failed: {record.get('config_id')}: {exc}\n")
+
+        def record_budget_skip(record: dict[str, Any]) -> None:
+            skipped = budget_tracker.skip_for_budget(record)
+            summary["runs"].append(skipped)
+            summary["skipped_runs"].append(skipped)
+            summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
+            self._logs.append(
+                f"[G2M-DEEPH][BUDGET] Skipping {record.get('model')} {record.get('config_id')}: "
+                f"{skipped['budget_skip_reason']}\n"
+            )
 
         index = 0
         while index < len(planned):
@@ -2922,6 +3295,11 @@ class Graph2MatDeepHBenchmarkRunner:
                 )
                 index += 1
                 continue
+            if not budget_tracker.can_schedule(record):
+                record_budget_skip(record)
+                index += 1
+                self._write_training_sweep_summary(run_root, summary)
+                continue
             if record.get("model") == "graph2mat" and graph2mat_parallelism > 1:
                 batch: list[dict[str, Any]] = []
                 while index < len(planned) and len(batch) < graph2mat_parallelism:
@@ -2929,6 +3307,11 @@ class Graph2MatDeepHBenchmarkRunner:
                     candidate_key = "|".join(_training_record_key(candidate))
                     if candidate.get("model") != "graph2mat" or candidate_key in completed_by_key:
                         break
+                    if not budget_tracker.can_schedule(candidate):
+                        record_budget_skip(candidate)
+                        index += 1
+                        continue
+                    budget_tracker.reserve(candidate)
                     batch.append(candidate)
                     index += 1
                 if not batch:
@@ -2982,6 +3365,11 @@ class Graph2MatDeepHBenchmarkRunner:
                     candidate_key = "|".join(_training_record_key(candidate))
                     if candidate.get("model") != "deeph" or candidate_key in completed_by_key:
                         break
+                    if not budget_tracker.can_schedule(candidate):
+                        record_budget_skip(candidate)
+                        index += 1
+                        continue
+                    budget_tracker.reserve(candidate)
                     batch.append(candidate)
                     index += 1
                 if not batch:
@@ -3045,6 +3433,7 @@ class Graph2MatDeepHBenchmarkRunner:
                     }
                 )
             try:
+                budget_tracker.reserve(record)
                 if record["model"] == "graph2mat":
                     result = self._run_training_sweep_graph2mat_job(payload, validation, record)
                 elif record["model"] == "deeph":
@@ -3073,7 +3462,82 @@ class Graph2MatDeepHBenchmarkRunner:
             self._finish(returncode=130, error="Stop requested.")
             return
         summary["status"] = "completed" if not summary["failed_runs"] else "completed_with_failures"
+        summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
         self._write_training_sweep_summary(run_root, summary)
+        if final_mode:
+            test_blindness = build_search_stage_manifest(run_root=run_root, summary=summary, payload=payload)
+            dry_run = _parse_bool(payload.get("dry_run"), False)
+            selection: dict[str, Any] = {
+                "status": "skipped_dry_run" if dry_run else "not_started",
+                "reason": "dry_run does not execute training jobs, so top-k selection is pending."
+                if dry_run
+                else "",
+            }
+            if not dry_run:
+                policy = selection_policy_from_payload(payload)
+                if not policy.get("final_seeds"):
+                    selection = {
+                        "status": "pending_missing_final_seeds",
+                        "reason": "No final_seeds were provided; top-k robust rerun planning is pending.",
+                        "policy": policy,
+                    }
+                else:
+                    selected_configs = select_top_configs(
+                        list(summary.get("runs") or []),
+                        metric=str(policy["metric"]),
+                        mode=str(policy["mode"]),
+                        k_per_model=int(policy["k_per_model"]),
+                        grouping=str(policy["grouping"]),
+                        allow_diagnostic=False,
+                    )
+                    robust_plan = generate_robust_rerun_plan(
+                        selected_configs,
+                        final_seeds=list(policy.get("final_seeds") or []),
+                    )
+                    paths = write_selection_artifacts(run_root / "summary" / "selection", selected_configs, robust_plan)
+                    selection = {
+                        "status": "planned",
+                        "selected_configs": selected_configs,
+                        "robust_rerun_plan": robust_plan,
+                        "paths": paths,
+                    }
+                    test_blindness["selected_final_runs"] = robust_plan.get("planned_runs") or []
+                    test_blindness["final_test_status"] = "pending_final_test"
+                    test_blindness["selected_configs_path"] = paths["selected_configs_json"]
+                    test_blindness["robust_rerun_plan_path"] = paths["robust_rerun_plan_json"]
+                    _write_json(run_root / "summary" / "test_blindness_manifest.json", test_blindness)
+                summary["selection"] = selection
+                self._write_training_sweep_summary(run_root, summary)
+            message = (
+                "Final/publicable search completed test-blind. Test prediction, test metrics, "
+                "ranking and winner claims are locked until validation-based top-k selection "
+                "and the explicit final_test stage."
+            )
+            with self._lock:
+                self._state.training_sweep_status.update(
+                    {
+                        "active_model": None,
+                        "active_dataset": None,
+                        "active_config_id": None,
+                        "active_runs": [],
+                        "status": summary["status"],
+                        "protocol_stage": SEARCH_STAGE,
+                        "final_test_locked": True,
+                    }
+                )
+                self._last_results = {
+                    "dry_run": _parse_bool(payload.get("dry_run"), False),
+                    "contract_name": CONTRACT_NAME,
+                    "dataset_validation": validation,
+                    "dataset_sweep": payload.get("_dataset_sweep_manifest"),
+                    "training_sweep": summary,
+                    "test_blindness": test_blindness,
+                    "selection": selection,
+                    "ranking": None,
+                    "message": message,
+                }
+            self._finish(returncode=0 if not summary["failed_runs"] else 1)
+            return
         self._set_stage("ranking")
         ranking = self._run_ranking(
             run_root,
@@ -4103,7 +4567,18 @@ class Graph2MatDeepHBenchmarkRunner:
         deeph_context: DeepHBenchmarkContext | None = None
         common_metrics_manifest: dict[str, Any] | None = None
         ranking_manifest: dict[str, Any] | None = None
+        graph2mat_training_run: dict[str, Any] | None = None
+        graph2mat_prediction_run: dict[str, Any] | None = None
+        deeph_preprocess_run: dict[str, Any] | None = None
+        deeph_training_run: dict[str, Any] | None = None
+        deeph_inference_runs: list[dict[str, Any]] = []
+        graph2mat_eval_run: dict[str, Any] | None = None
+        deeph_eval_run: dict[str, Any] | None = None
+        graph2mat_early_stopping: dict[str, Any] | None = None
+        deeph_early_stopping: dict[str, Any] | None = None
+        test_blindness_manifest: dict[str, Any] | None = None
         try:
+            final_mode = is_final_benchmark_mode(payload)
             sweep_info = self.dataset_sweep_info_from_payload(payload)
             if sweep_info is not None and str(payload.get("run_mode") or "").strip() == FULL_STRICT_PIPELINE_RUN_MODE:
                 self._run_full_strict_pipeline(payload, sweep_info)
@@ -4156,7 +4631,7 @@ class Graph2MatDeepHBenchmarkRunner:
                         self._logs.append("[G2M-DEEPH] graph2mat_train: dry-run, no subprocess launched.\n")
                     else:
                         command = [self._graph2mat_python(payload), str(DEFAULT_MD_TRAINING_SCRIPT)]
-                        training_run = self._run_command(
+                        graph2mat_training_run = self._run_command(
                             command,
                             cwd=REPO_ROOT,
                             env=self._graph2mat_command_env(context, payload),
@@ -4165,19 +4640,31 @@ class Graph2MatDeepHBenchmarkRunner:
                         )
                         checkpoint_manifest_path = context.training_dir / "checkpoint_manifest.json"
                         checkpoint_manifest = _load_json(checkpoint_manifest_path)
+                        early_stopping_policy = parse_early_stopping_policy(payload)
+                        graph2mat_early_stopping = (
+                            tensorboard_policy_metadata(context.training_dir, early_stopping_policy)
+                            if early_stopping_policy is not None
+                            else None
+                        )
                         self._write_graph2mat_manifest(
                             context,
                             checkpoint_manifest=checkpoint_manifest,
-                            extra={"training_completed": True, "training_run": training_run},
+                            extra={
+                                "training_completed": True,
+                                "training_run": graph2mat_training_run,
+                                "early_stopping": graph2mat_early_stopping,
+                            },
                         )
                 elif phase == "graph2mat_predict":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before graph2mat_predict.")
-                    if context.dry_run:
+                    if final_mode:
+                        self._logs.append(f"[G2M-DEEPH] graph2mat_predict: {TEST_METRICS_LOCKED_MESSAGE}\n")
+                    elif context.dry_run:
                         self._logs.append("[G2M-DEEPH] graph2mat_predict: dry-run, no subprocess launched.\n")
                     else:
                         command = [self._graph2mat_python(payload), str(DEFAULT_MD_PREDICTION_SCRIPT)]
-                        prediction_run = self._run_command(
+                        graph2mat_prediction_run = self._run_command(
                             command,
                             cwd=REPO_ROOT,
                             env=self._graph2mat_command_env(context, payload),
@@ -4189,7 +4676,11 @@ class Graph2MatDeepHBenchmarkRunner:
                             context,
                             checkpoint_manifest=checkpoint_manifest,
                             prediction_outputs=prediction_outputs,
-                            extra={"prediction_completed": True, "prediction_run": prediction_run},
+                            extra={
+                                "prediction_completed": True,
+                                "prediction_run": graph2mat_prediction_run,
+                                "early_stopping": graph2mat_early_stopping,
+                            },
                         )
                 elif phase == "deeph_preprocess":
                     if context is None:
@@ -4208,7 +4699,7 @@ class Graph2MatDeepHBenchmarkRunner:
                             "--config",
                             str(deeph_context.preprocess_config),
                         ]
-                        preprocess_run = self._run_command(
+                        deeph_preprocess_run = self._run_command(
                             command,
                             cwd=deeph_context.root,
                             env=self._deeph_command_env(payload),
@@ -4217,7 +4708,7 @@ class Graph2MatDeepHBenchmarkRunner:
                         split_audit = self._audit_deeph_split(deeph_context, context)
                         self._write_deeph_manifest(
                             deeph_context,
-                            preprocess_run=preprocess_run,
+                            preprocess_run=deeph_preprocess_run,
                             split_audit=split_audit,
                         )
                 elif phase == "deeph_train":
@@ -4231,33 +4722,40 @@ class Graph2MatDeepHBenchmarkRunner:
                             "--config",
                             str(deeph_context.train_config),
                         ]
-                        train_run = self._run_command(
+                        early_stopping_policy = parse_early_stopping_policy(payload)
+                        deeph_early_observer = DeepHEarlyStoppingObserver(early_stopping_policy) if early_stopping_policy else None
+                        deeph_training_run = self._run_command(
                             command,
                             cwd=deeph_context.root,
                             env=self._deeph_command_env(payload),
                             label="DeepH train",
+                            line_observer=deeph_early_observer,
                         )
+                        deeph_early_stopping = deeph_early_observer.metadata() if deeph_early_observer is not None else None
                         training_outputs = self._validate_deeph_training_outputs(deeph_context)
                         self._write_deeph_manifest(
                             deeph_context,
-                            train_run=train_run,
+                            train_run=deeph_training_run,
                             training_outputs=training_outputs,
+                            extra={"early_stopping": deeph_early_stopping},
                         )
                 elif phase == "deeph_predict":
                     if deeph_context is None:
                         raise RuntimeError("DeepH context was not prepared before deeph_predict.")
-                    if deeph_context.dry_run:
+                    if final_mode:
+                        self._logs.append(f"[G2M-DEEPH] deeph_predict: {TEST_METRICS_LOCKED_MESSAGE}\n")
+                    elif deeph_context.dry_run:
                         self._logs.append("[G2M-DEEPH] deeph_predict: dry-run, no subprocess launched.\n")
                     else:
                         staged_inputs = self._stage_deeph_inference_inputs(deeph_context)
-                        inference_runs: list[dict[str, Any]] = []
+                        deeph_inference_runs = []
                         for inference_config in deeph_context.inference_configs:
                             command = [
                                 self._deeph_command(payload, "deeph-inference"),
                                 "--config",
                                 str(inference_config),
                             ]
-                            inference_runs.append(
+                            deeph_inference_runs.append(
                                 self._run_command(
                                     command,
                                     cwd=deeph_context.root,
@@ -4273,10 +4771,10 @@ class Graph2MatDeepHBenchmarkRunner:
                         )
                         self._write_deeph_manifest(
                             deeph_context,
-                            inference_runs=inference_runs,
+                            inference_runs=deeph_inference_runs,
                             training_outputs=training_outputs,
                             prediction_outputs=prediction_outputs,
-                            extra={"inference_inputs": staged_inputs},
+                            extra={"inference_inputs": staged_inputs, "early_stopping": deeph_early_stopping},
                         )
                 elif phase == "common_metrics":
                     if context is None:
@@ -4284,7 +4782,9 @@ class Graph2MatDeepHBenchmarkRunner:
                     if deeph_context is None:
                         raise RuntimeError("DeepH context was not prepared before common_metrics.")
                     metric_fail_policy = _metric_fail_policy(payload)
-                    if context.dry_run or deeph_context.dry_run:
+                    if final_mode:
+                        self._logs.append(f"[G2M-DEEPH] common_metrics: {TEST_METRICS_LOCKED_MESSAGE}\n")
+                    elif context.dry_run or deeph_context.dry_run:
                         self._logs.append("[G2M-DEEPH] common_metrics: dry-run, no evaluator subprocess launched.\n")
                     else:
                         common_root = context.run_root / "common_metrics"
@@ -4342,6 +4842,60 @@ class Graph2MatDeepHBenchmarkRunner:
                             "graph2mat_eval": graph2mat_eval_run,
                             "deeph_eval": deeph_eval_run,
                         }
+                        graph2mat_telemetry = self._write_run_cost_telemetry(
+                            model="graph2mat",
+                            run_root=context.run_root,
+                            frozen_split_manifest_path=context.frozen_split_manifest_path,
+                            train_run=graph2mat_training_run,
+                            predict_run=graph2mat_prediction_run,
+                            metrics_run=graph2mat_eval_run,
+                            training_dir=context.training_dir,
+                            payload=payload,
+                        )
+                        deeph_telemetry = self._write_run_cost_telemetry(
+                            model="deeph",
+                            run_root=context.run_root,
+                            frozen_split_manifest_path=context.frozen_split_manifest_path,
+                            preprocess_run=deeph_preprocess_run,
+                            train_run=deeph_training_run,
+                            inference_runs=deeph_inference_runs,
+                            metrics_run=deeph_eval_run,
+                            deeph_save_dir=deeph_context.save_dir,
+                            payload=payload,
+                        )
+                        common_metrics_manifest["telemetry"] = {
+                            "graph2mat": graph2mat_telemetry,
+                            "deeph": deeph_telemetry,
+                        }
+                        checkpoint_manifest = _load_json(context.training_dir / "checkpoint_manifest.json")
+                        prediction_outputs = self._validate_graph2mat_prediction_outputs(context)
+                        self._write_graph2mat_manifest(
+                            context,
+                            checkpoint_manifest=checkpoint_manifest,
+                            prediction_outputs=prediction_outputs,
+                            extra={
+                                "prediction_completed": True,
+                                "prediction_run": graph2mat_prediction_run,
+                                "telemetry": graph2mat_telemetry,
+                                "early_stopping": graph2mat_early_stopping,
+                            },
+                        )
+                        training_outputs = (
+                            self._validate_deeph_training_outputs(deeph_context)
+                            if (deeph_context.save_dir / "best_state_dict.pkl").exists()
+                            else None
+                        )
+                        prediction_outputs_deeph = self._validate_deeph_prediction_outputs(deeph_context)
+                        self._write_deeph_manifest(
+                            deeph_context,
+                            preprocess_run=deeph_preprocess_run,
+                            train_run=deeph_training_run,
+                            inference_runs=deeph_inference_runs,
+                            training_outputs=training_outputs,
+                            prediction_outputs=prediction_outputs_deeph,
+                            split_audit=_load_json(deeph_context.split_audit_path) if deeph_context.split_audit_path.exists() else None,
+                            extra={"telemetry": deeph_telemetry, "early_stopping": deeph_early_stopping},
+                        )
                         _force_diagnostic_metric_manifest(
                             common_metrics_manifest,
                             metric_fail_policy=metric_fail_policy,
@@ -4356,7 +4910,21 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif phase == "ranking":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before ranking.")
-                    if common_metrics_manifest is None:
+                    if final_mode:
+                        test_blindness_manifest = build_search_stage_manifest(
+                            run_root=context.run_root,
+                            summary={
+                                "status": "completed",
+                                "runs": [],
+                                "failed_runs": [],
+                            },
+                            payload=payload,
+                        )
+                        self._logs.append(
+                            "[G2M-DEEPH] ranking: skipped in final/publicable search; "
+                            "top-k selection must use validation metrics only.\n"
+                        )
+                    elif common_metrics_manifest is None:
                         self._logs.append("[G2M-DEEPH] ranking: no common metrics summary in dry-run.\n")
                     else:
                         ranking_manifest = self._run_ranking(
@@ -4398,9 +4966,13 @@ class Graph2MatDeepHBenchmarkRunner:
                     "deeph": deeph_context.to_dict() if deeph_context is not None else None,
                     "common_metrics": common_metrics_manifest,
                     "ranking": ranking_manifest,
+                    "test_blindness": test_blindness_manifest,
                     "phase_timings": list(self._phase_timings),
                     "message": (
-                        "Graph2Mat and DeepH command chain completed; common metrics were "
+                        "Final/publicable search completed test-blind; test metrics are locked "
+                        "until validation-based top-k selection and final_test."
+                        if final_mode
+                        else "Graph2Mat and DeepH command chain completed; common metrics were "
                         "computed when prediction outputs were available."
                     ),
                 }

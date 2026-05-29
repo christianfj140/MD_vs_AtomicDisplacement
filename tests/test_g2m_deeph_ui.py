@@ -181,10 +181,18 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         for text in (
             "Artifact completeness",
             "Final recommendation",
-            "Matrix MAE/RMSE/MSE/R2 comparison",
+            "Hamiltonian MAE",
+            "Hamiltonian RMSE",
+            "Hamiltonian MSE",
+            "Sparse support R2",
             "Relative Frobenius comparison",
-            "Spectral metrics comparison",
-            "DOS metrics",
+            "Predicted Hamiltonian hermiticity",
+            "Global spectral RMSE",
+            "Low-energy spectral RMSE",
+            "Fermi-window spectral RMSE",
+            "Frontier-window spectral RMSE",
+            "DOS Fermi-window MAE",
+            "DOS Wasserstein distance",
             "Phase timing",
             "No robust winner",
             "Ranking recommendation",
@@ -205,9 +213,13 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("renderG2MDeepHGroupedBarPlot", self.app_js)
         self.assertIn("renderG2MDeepHTimingScalingPlot", self.app_js)
         self.assertIn("renderG2MDeepHMetricScalingPlot", self.app_js)
+        self.assertIn("normalizeG2MDeepHMetricPlots", self.app_js)
+        self.assertIn("g2mDeephReadableMetricGroups", self.app_js)
         self.assertIn("grouped_bar", self.app_js)
         self.assertIn("timing_scaling", self.app_js)
         self.assertIn("metric_scaling", self.app_js)
+        self.assertIn("spectral_fermi", self.app_js)
+        self.assertIn("DOS Wasserstein distance", self.app_js)
         self.assertIn("Metrics vs dataset size", self.app_js)
         self.assertIn("Timing vs dataset size", self.app_js)
         self.assertIn("g2m-deeph-plot-", self.app_js)

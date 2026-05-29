@@ -1622,6 +1622,63 @@ function updateG2MDeepHStatus(status = {}) {
   updateG2MDeepHGlobalStatus(status);
 }
 
+function g2mDeephReadableMetricGroups() {
+  return [
+    { id: "h_mae", title: "Hamiltonian MAE", y_title: "MAE eV", metrics: [{ key: "h_mae_eV_mean", label: "H MAE" }] },
+    { id: "h_rmse", title: "Hamiltonian RMSE", y_title: "RMSE eV", metrics: [{ key: "h_rmse_eV_mean", label: "H RMSE" }] },
+    { id: "h_mse", title: "Hamiltonian MSE", y_title: "MSE eV^2", metrics: [{ key: "h_mse_eV2_mean", label: "H MSE" }] },
+    { id: "r2", title: "Sparse support R2", y_title: "R2", metrics: [{ key: "r2_mean", label: "R2" }] },
+    {
+      id: "frobenius",
+      title: "Relative Frobenius comparison",
+      y_title: "Relative Frobenius",
+      metrics: [{ key: "relative_frobenius_mean", label: "Relative Frobenius" }],
+    },
+    {
+      id: "hermiticity",
+      title: "Predicted Hamiltonian hermiticity",
+      y_title: "Hermiticity residual",
+      metrics: [{ key: "hermiticity_pred_mean", label: "Hermiticity residual" }],
+    },
+    {
+      id: "spectral_global",
+      title: "Global spectral RMSE",
+      y_title: "RMSE eV",
+      metrics: [{ key: "global_rmse_eV_mean", label: "Global RMSE" }],
+    },
+    {
+      id: "spectral_low_energy",
+      title: "Low-energy spectral RMSE",
+      y_title: "RMSE eV",
+      metrics: [{ key: "low_energy_rmse_eV_mean", label: "Low-energy RMSE" }],
+    },
+    {
+      id: "spectral_fermi",
+      title: "Fermi-window spectral RMSE",
+      y_title: "RMSE eV",
+      metrics: [{ key: "fermi_window_rmse_eV_mean", label: "Fermi RMSE" }],
+    },
+    {
+      id: "spectral_frontier",
+      title: "Frontier-window spectral RMSE",
+      y_title: "RMSE eV",
+      metrics: [{ key: "frontier_window_rmse_eV_mean", label: "Frontier RMSE" }],
+    },
+    {
+      id: "dos_mae",
+      title: "DOS Fermi-window MAE",
+      y_title: "DOS MAE",
+      metrics: [{ key: "dos_mae_500_fermi_window_mean", label: "DOS MAE" }],
+    },
+    {
+      id: "dos_wasserstein",
+      title: "DOS Wasserstein distance",
+      y_title: "Wasserstein eV",
+      metrics: [{ key: "dos_wasserstein_eV_mean", label: "DOS Wasserstein" }],
+    },
+  ];
+}
+
 function renderG2MDeepHMetricSummary(payload) {
   const container = document.getElementById("g2m-deeph-metric-summary");
   if (!container) return;
@@ -1747,38 +1804,7 @@ function renderG2MDeepHMetricSummary(payload) {
     ],
   );
 
-  const metricGroups = plotPayload?.metric_groups || [
-    {
-      id: "matrix",
-      title: "Matrix MAE/RMSE/MSE/R2 comparison",
-      metrics: [
-        { key: "h_mae_eV_mean", label: "H MAE" },
-        { key: "h_rmse_eV_mean", label: "H RMSE" },
-        { key: "h_mse_eV2_mean", label: "H MSE" },
-        { key: "r2_mean", label: "R2" },
-      ],
-    },
-    {
-      id: "frobenius",
-      title: "Relative Frobenius comparison",
-      metrics: [{ key: "relative_frobenius_mean", label: "Relative Frobenius" }],
-    },
-    {
-      id: "spectral",
-      title: "Spectral metrics comparison",
-      metrics: [
-        { key: "global_rmse_eV_mean", label: "Global RMSE" },
-        { key: "low_energy_rmse_eV_mean", label: "Low-energy RMSE" },
-        { key: "fermi_window_rmse_eV_mean", label: "Fermi RMSE" },
-        { key: "frontier_window_rmse_eV_mean", label: "Frontier RMSE" },
-      ],
-    },
-    {
-      id: "dos",
-      title: "DOS metrics",
-      metrics: [{ key: "dos_mae_500_fermi_window_mean", label: "DOS MAE" }],
-    },
-  ];
+  const metricGroups = plotPayload?.metric_groups || g2mDeephReadableMetricGroups();
   const summaryRows = common.summary_rows || [];
   for (const group of metricGroups) {
     const columns = [
@@ -2100,6 +2126,39 @@ function renderG2MDeepHPlotsPayload(payload) {
   schedulePlotResize();
 }
 
+function normalizeG2MDeepHMetricPlots(payload = {}) {
+  const rows = payload.metric_scaling_rows || [];
+  if (!rows.length) {
+    return {
+      ...payload,
+      metric_groups: g2mDeephReadableMetricGroups(),
+    };
+  }
+  const readableGroups = g2mDeephReadableMetricGroups();
+  const readableMetricPlots = [];
+  for (const group of readableGroups) {
+    const metricKeys = new Set((group.metrics || []).map((metric) => metric.key));
+    const groupRows = rows.filter((row) => metricKeys.has(row.metric_key));
+    if (!groupRows.length) continue;
+    readableMetricPlots.push({
+      id: `metric_scaling_${group.id}`,
+      kind: "metric_scaling",
+      title: `${group.title} vs dataset size`,
+      x_title: "Dataset size (snapshots)",
+      y_title: group.y_title || "Metric value",
+      metrics: group.metrics || [],
+      rows: groupRows,
+    });
+  }
+  const nonMetricPlots = (payload.plots || []).filter((plot) => plot.kind !== "metric_scaling");
+  return {
+    ...payload,
+    available: Boolean(payload.available || readableMetricPlots.length || nonMetricPlots.length),
+    metric_groups: readableGroups,
+    plots: [...readableMetricPlots, ...nonMetricPlots],
+  };
+}
+
 function metricScalingRowKey(row = {}) {
   return [
     row.run_id || "",
@@ -2154,7 +2213,9 @@ async function maybeLoadG2MDeepHLiveMetrics(payload) {
 
 async function loadG2MDeepHPlots() {
   if (!window.Plotly) await ensurePlotlyLoaded();
-  const payload = await maybeLoadG2MDeepHLiveMetrics(await request("/api/g2m-deeph/plots"));
+  const payload = normalizeG2MDeepHMetricPlots(
+    await maybeLoadG2MDeepHLiveMetrics(await request("/api/g2m-deeph/plots")),
+  );
   state.g2mDeephPlotPayload = payload;
   renderG2MDeepHMetricSummary({
     available: payload.available,

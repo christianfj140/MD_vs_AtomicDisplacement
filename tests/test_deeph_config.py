@@ -170,6 +170,32 @@ class DeepHConfigTests(unittest.TestCase):
         self.assertEqual(config["network"]["num_l"], "5")
         self.assertEqual(config["network"]["if_lcmp"], "False")
 
+    def test_train_ini_renders_common_early_stopping_guardrails(self) -> None:
+        path = self.root / "config" / "train_early_stopping.ini"
+        render_train_config(
+            path,
+            processed_dir=self.root / "processed",
+            graph_dir=self.root / "graph",
+            save_dir=self.root / "train",
+            dataset_name="graphene_unit",
+            split_ratios={"train_ratio": "0.5", "val_ratio": "0.25", "test_ratio": "0.25"},
+            seed=17,
+            epochs=25,
+            batch_size=4,
+            learning_rate=0.002,
+            disable_cuda=True,
+            device="cpu",
+            early_stopping_loss=-1.0,
+            early_stopping_loss_epoch=[-1.0, 26],
+        )
+
+        config = configparser.ConfigParser()
+        config.read(path)
+
+        self.assertEqual(config["train"]["epochs"], "25")
+        self.assertEqual(config["train"]["early_stopping_loss"], "-1.0")
+        self.assertEqual(json.loads(config["train"]["early_stopping_loss_epoch"]), [-1.0, 26])
+
     def test_train_ini_renders_basis_derived_orbital_mask(self) -> None:
         path = self.root / "config" / "train_orbital.ini"
         orbital = [{"6 6": [0, 0]}, {"6 6": [0, 1]}, {"6 6": [1, 0]}, {"6 6": [1, 1]}]
