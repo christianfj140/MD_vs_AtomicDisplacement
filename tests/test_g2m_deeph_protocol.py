@@ -188,6 +188,61 @@ class Graph2MatDeepHProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "gpu_hours_per_model"):
             validate_protocol(protocol)
 
+    def test_deeph_search_space_rejects_plain_mse_loss(self) -> None:
+        protocol = valid_protocol()
+        protocol["models"]["deeph"]["search_space"]["criterion"] = {"value": "MSELoss"}
+
+        with self.assertRaisesRegex(RuntimeError, "models.deeph.search_space.criterion"):
+            validate_protocol(protocol)
+
+    def test_deeph_search_space_rejects_wrong_optimizer_spelling(self) -> None:
+        protocol = valid_protocol()
+        protocol["models"]["deeph"]["search_space"]["optimizer"] = {"value": "AdamW"}
+
+        with self.assertRaisesRegex(RuntimeError, "models.deeph.search_space.optimizer"):
+            validate_protocol(protocol)
+
+    def test_deeph_manual_plan_rejects_plain_mse_loss(self) -> None:
+        protocol = valid_protocol()
+        protocol["search_policy"] = {"strategy": "manual", "random_seed": 1}
+        protocol["manual_search_plan"] = {
+            "planned_runs": [
+                {
+                    "model": "deeph",
+                    "config_id": "DH-bad",
+                    "overrides": {
+                        "batch_size": 4,
+                        "learning_rate": 0.0001,
+                        "criterion": "MSELoss",
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "overrides.criterion"):
+            validate_protocol(protocol)
+
+    def test_deeph_manual_plan_rejects_wrong_optimizer_spelling(self) -> None:
+        protocol = valid_protocol()
+        protocol["search_policy"] = {"strategy": "manual", "random_seed": 1}
+        protocol["manual_search_plan"] = {
+            "planned_runs": [
+                {
+                    "model": "deeph",
+                    "config_id": "DH-bad",
+                    "overrides": {
+                        "batch_size": 4,
+                        "learning_rate": 0.0001,
+                        "criterion": "MaskMSELoss",
+                        "optimizer": "AdamW",
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "overrides.optimizer"):
+            validate_protocol(protocol)
+
         protocol = valid_protocol()
         protocol["budget_policy"] = {"mode": "same_number_of_epochs", "n_trials_per_model": 10}
         with self.assertRaisesRegex(RuntimeError, "budget_policy.mode"):
@@ -203,6 +258,42 @@ class Graph2MatDeepHProtocolTests(unittest.TestCase):
         protocol = valid_protocol()
         protocol["early_stopping"]["metric"] = "training_loss"
         with self.assertRaisesRegex(RuntimeError, "early_stopping.metric must match selection.metric"):
+            validate_protocol(protocol)
+
+    def test_validation_spectral_composite_allows_val_loss_early_stopping(self) -> None:
+        protocol = valid_protocol()
+        protocol["selection"]["metric"] = "val_spectral_composite"
+        protocol["top_k_selection"]["metric"] = "val_spectral_composite"
+        protocol["early_stopping"]["metric"] = "val_loss"
+        protocol["search_policy"] = {"strategy": "manual", "random_seed": 20260529, "max_runs": 2}
+        protocol["manual_search_plan"] = {
+            "planned_runs": [
+                {
+                    "model": "graph2mat",
+                    "config_id": "G2M-A01",
+                    "overrides": {"batch_size": 32, "optim_lr": 0.003},
+                },
+                {
+                    "model": "deeph",
+                    "config_id": "DH-A01",
+                    "overrides": {"batch_size": 4, "learning_rate": 3e-5},
+                },
+            ]
+        }
+        protocol["final_evaluation"]["primary_metric"] = "test_spectral_composite_score"
+
+        validated = validate_protocol(protocol)
+
+        self.assertEqual(validated["selection"]["metric"], "val_spectral_composite")
+        self.assertEqual(validated["early_stopping"]["metric"], "val_loss")
+        self.assertEqual(validated["search_policy"]["strategy"], "manual")
+        self.assertEqual(validated["final_evaluation"]["primary_metric"], "test_spectral_composite_score")
+
+    def test_manual_search_strategy_requires_preregistered_plan(self) -> None:
+        protocol = valid_protocol()
+        protocol["search_policy"] = {"strategy": "manual", "random_seed": 20260529}
+
+        with self.assertRaisesRegex(RuntimeError, "manual_search_plan"):
             validate_protocol(protocol)
 
     def test_invalid_final_test_policy_fails(self) -> None:

@@ -114,6 +114,54 @@ class Graph2MatDeepHTrainingSweepTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "above max_runs"):
             expand_training_sweep({**payload, "max_runs": 1}, datasets=DATASETS)
 
+    def test_manual_search_plan_preserves_preregistered_runs(self) -> None:
+        sweep = expand_training_sweep(
+            {
+                "enabled": True,
+                "max_runs": 2,
+                "search_policy": {"strategy": "manual", "random_seed": 20260529},
+                "manual_runs": [
+                    {
+                        "model": "graph2mat",
+                        "config_id": "G2M-A01",
+                        "dataset_id": "joint_a",
+                        "common": {"seed": 1001},
+                        "overrides": {
+                            "batch_size": 32,
+                            "optim_lr": 0.003,
+                            "hidden_irreps": "24x0e + 24x1o + 24x2e + 24x3o",
+                            "max_epochs": 600,
+                        },
+                    },
+                    {
+                        "model": "deeph",
+                        "config_id": "DH-A01",
+                        "dataset_id": "joint_a",
+                        "common": {"seed": 1001},
+                        "overrides": {
+                            "batch_size": 4,
+                            "learning_rate": 3e-5,
+                            "atom_fea_len": 64,
+                            "epochs": 600,
+                        },
+                    },
+                ],
+            },
+            datasets=DATASETS,
+        )
+
+        self.assertEqual(sweep["search_policy"]["strategy"], "manual")
+        self.assertEqual(sweep["search_plan"]["strategy"], "manual")
+        self.assertEqual([row["config_id"] for row in sweep["planned_runs"]], ["G2M-A01", "DH-A01"])
+        graph2mat = sweep["planned_runs"][0]
+        deeph = sweep["planned_runs"][1]
+        self.assertEqual(graph2mat["overrides"]["seed_everything"], 1001)
+        self.assertEqual(graph2mat["overrides"]["batch_size"], 32)
+        self.assertEqual(graph2mat["manual_plan_index"], 1)
+        self.assertEqual(deeph["overrides"]["seed"], 1001)
+        self.assertEqual(deeph["overrides"]["learning_rate"], 3e-5)
+        self.assertEqual(deeph["manual_plan_index"], 2)
+
     def test_unknown_and_forbidden_fields_fail(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Unsupported training_sweep.deeph"):
             expand_training_sweep(

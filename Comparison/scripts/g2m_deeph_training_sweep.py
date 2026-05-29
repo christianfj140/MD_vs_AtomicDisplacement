@@ -53,7 +53,7 @@ FORBIDDEN_DEEPH_KEYS = {
     "spin",
 }
 SEARCH_PLAN_SCHEMA = "graph2mat_deeph_training_search_plan_v1"
-ALLOWED_SEARCH_STRATEGIES = {"grid", "random", "latin_hypercube"}
+ALLOWED_SEARCH_STRATEGIES = {"grid", "manual", "random", "latin_hypercube"}
 
 
 @dataclass(frozen=True)
@@ -420,7 +420,7 @@ def training_sweep_from_protocol(protocol: dict[str, Any]) -> dict[str, Any]:
 
     models = protocol.get("models") if isinstance(protocol.get("models"), dict) else {}
     search_policy = dict(protocol.get("search_policy") or {})
-    return {
+    payload = {
         "enabled": True,
         "protocol_id": str(protocol.get("protocol_id") or ""),
         "protocol_hash": str(protocol.get("protocol_hash") or ""),
@@ -436,6 +436,134 @@ def training_sweep_from_protocol(protocol: dict[str, Any]) -> dict[str, Any]:
             **dict((models.get("deeph") or {}).get("search_space") or {}),
         },
         "max_runs": int(search_policy.get("max_runs") or 100000),
+    }
+    manual = protocol.get("manual_search_plan") if isinstance(protocol.get("manual_search_plan"), dict) else {}
+    if manual.get("planned_runs") is not None:
+        payload["manual_runs"] = list(manual.get("planned_runs") or [])
+    return payload
+
+
+def _manual_dataset_ids(row: dict[str, Any], datasets: list[SweepDataset]) -> list[str]:
+    raw = row.get("dataset_ids")
+    if raw is None:
+        raw = row.get("dataset_id")
+    if raw in (None, "", "all"):
+        if len(datasets) != 1:
+            raise RuntimeError("manual_search_plan rows must set dataset_id when multiple datasets are declared.")
+        return [datasets[0].dataset_id]
+    ids = [str(item).strip() for item in _as_list(raw, field="manual_runs.dataset_id")]
+    known = {dataset.dataset_id for dataset in datasets}
+    missing = sorted(set(ids) - known)
+    if missing:
+        raise RuntimeError(f"manual_search_plan row references unknown dataset_id: {', '.join(missing)}")
+    return ids
+
+
+def _manual_training_sweep(
+    value: dict[str, Any],
+    *,
+    datasets: list[SweepDataset],
+    policy: dict[str, Any],
+    protocol_id: str,
+    protocol_hash: str,
+) -> dict[str, Any]:
+    rows = value.get("manual_runs")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("training_sweep.manual_runs must be a non-empty list for manual search.")
+    by_dataset = {dataset.dataset_id: dataset for dataset in datasets}
+    planned: list[dict[str, Any]] = []
+    seen_configs: set[str] = set()
+    duplicate_configs: list[dict[str, Any]] = []
+    for row_index, raw_row in enumerate(rows, start=1):
+        if not isinstance(raw_row, dict):
+            raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}] must be an object.")
+        model_name = str(raw_row.get("model") or "").strip().lower()
+        if model_name not in {"graph2mat", "deeph"}:
+            raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}].model must be graph2mat or deeph.")
+        common_combo = dict(raw_row.get("common") or {})
+        model_combo = dict(raw_row.get("overrides") or {})
+        if not model_combo:
+            raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}].overrides must not be empty.")
+        config_label = str(raw_row.get("config_id") or raw_row.get("id") or f"{model_name}_manual_{row_index:03d}").strip()
+        if not config_label:
+            raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}].config_id must not be empty.")
+        for dataset_id in _manual_dataset_ids(raw_row, datasets):
+            dataset = by_dataset[dataset_id]
+            identity = {
+                "model": model_name,
+                "dataset_id": dataset.dataset_id,
+                "common": common_combo,
+                "overrides": (
+                    _graph2mat_overrides(common_combo, model_combo)
+                    if model_name == "graph2mat"
+                    else _deeph_overrides(common_combo, model_combo)
+                ),
+                "manual_config_id": config_label,
+            }
+            config_hash = stable_hash(identity)
+            duplicate_of = ""
+            duplicate = config_hash in seen_configs
+            if duplicate:
+                duplicate_of = next(
+                    (
+                        item["config_id"]
+                        for item in planned
+                        if item.get("config_hash") == config_hash
+                    ),
+                    "",
+                )
+                duplicate_configs.append(
+                    {
+                        "model": model_name,
+                        "dataset_id": dataset.dataset_id,
+                        "trial_index": row_index,
+                        "config_hash": config_hash,
+                        "config_id": config_label,
+                        "duplicate_of_config_id": duplicate_of,
+                    }
+                )
+            seen_configs.add(config_hash)
+            planned_row = _planned_record(
+                index=len(planned) + 1,
+                model_name=model_name,
+                dataset=dataset,
+                common_combo=common_combo,
+                model_combo=model_combo,
+                config_id=config_label,
+                config_hash=config_hash,
+                search_strategy="manual",
+                search_seed=policy.get("random_seed"),
+                search_trial_index=row_index,
+                protocol_id=protocol_id,
+                protocol_hash=protocol_hash,
+                duplicate_config=duplicate,
+                duplicate_of_config_id=duplicate_of,
+            )
+            planned_row["manual_plan_id"] = str(raw_row.get("id") or config_label)
+            planned_row["manual_plan_index"] = row_index
+            planned.append(planned_row)
+    max_runs = int(value.get("max_runs") or 100000)
+    if max_runs <= 0:
+        raise RuntimeError("training_sweep.max_runs must be positive.")
+    if len(planned) > max_runs:
+        raise RuntimeError(f"training_sweep planned {len(planned)} runs, above max_runs={max_runs}.")
+    return {
+        "enabled": True,
+        "max_runs": max_runs,
+        "error_policy": str(value.get("error_policy") or "continue_on_error"),
+        "search_policy": policy,
+        "budget_policy": value.get("budget_policy") if isinstance(value.get("budget_policy"), dict) else {},
+        "search_plan": _search_plan(
+            strategy="manual",
+            random_seed=policy.get("random_seed"),
+            n_trials_per_model=None,
+            protocol_id=protocol_id,
+            protocol_hash=protocol_hash,
+            planned=planned,
+            duplicate_configs=duplicate_configs,
+            sampled_dimensions={},
+        ),
+        "planned_runs": planned,
     }
 
 
@@ -477,6 +605,7 @@ def expand_training_sweep(value: Any, *, datasets: list[dict[str, Any]]) -> dict
             "common",
             "graph2mat",
             "deeph",
+            "manual_runs",
         }
     )
     if unknown_top:
@@ -501,6 +630,14 @@ def expand_training_sweep(value: Any, *, datasets: list[dict[str, Any]]) -> dict
     n_trials_per_model = policy.get("n_trials_per_model")
     protocol_id = str(value.get("protocol_id") or "")
     protocol_hash = str(value.get("protocol_hash") or "")
+    if strategy == "manual":
+        return _manual_training_sweep(
+            value,
+            datasets=parsed_datasets,
+            policy=policy,
+            protocol_id=protocol_id,
+            protocol_hash=protocol_hash,
+        )
 
     common_combos = _common_grid(common) if strategy == "grid" else []
     graph2mat_combos = (

@@ -1,20 +1,15 @@
 {
-  "protocol_id": "graphene_w90_g2m_deeph_final_v1",
-  "version": "1.0",
+  "protocol_id": "graphene_w90_g2m_deeph_weekend_iid1000_paper_ready_v1",
+  "version": "1.1",
   "datasets": [
     {
-      "dataset_id": "graphene_w90_phase1_iid300",
-      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300",
-      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/benchmark_dataset_manifest.json",
-      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/frozen_split_manifest.json",
-      "compatibility_hash": "recorded_in_benchmark_dataset_manifest"
-    },
-    {
-      "dataset_id": "graphene_w90_phase1_iid600",
-      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600",
-      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/benchmark_dataset_manifest.json",
-      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/frozen_split_manifest.json",
-      "compatibility_hash": "recorded_in_benchmark_dataset_manifest"
+      "dataset_id": "graphene_w90_phase1_iid1000",
+      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid1000",
+      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid1000/benchmark_dataset_manifest.json",
+      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid1000/frozen_split_manifest.json",
+      "artifact_validation": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid1000/artifact_validation.json",
+      "compatibility_hash": "recorded_in_benchmark_dataset_manifest",
+      "role": "search_and_validation"
     }
   ],
   "reference_artifacts": {
@@ -60,12 +55,12 @@
           "value": 600
         },
         "hidden_irreps": {
-      "choices": [
-        "24x0e + 24x1o + 24x2e + 24x3o",
-        "32x0e + 32x1o + 32x2e + 32x3o",
-        "48x0e + 48x1o + 48x2e + 48x3o",
-        "64x0e + 64x1o + 64x2e + 64x3o"
-      ]
+          "choices": [
+            "24x0e + 24x1o + 24x2e + 24x3o",
+            "32x0e + 32x1o + 32x2e + 32x3o",
+            "48x0e + 48x1o + 48x2e + 48x3o",
+            "64x0e + 64x1o + 64x2e + 64x3o"
+          ]
         },
         "num_interactions": {
           "value": 3
@@ -101,6 +96,9 @@
             "default",
             "edge_node_mix"
           ]
+        },
+        "seed_everything": {
+          "value": 0
         }
       }
     },
@@ -109,11 +107,12 @@
       "search_space": {
         "learning_rate": {
           "distribution": "loguniform",
-          "min": 0.00003,
+          "min": 3e-05,
           "max": 0.001
         },
         "batch_size": {
           "choices": [
+            2,
             4,
             8
           ]
@@ -127,6 +126,7 @@
         "weight_decay": {
           "choices": [
             0.0,
+            1e-05,
             0.0001
           ]
         },
@@ -136,11 +136,16 @@
         "atom_fea_len": {
           "choices": [
             64,
-            128
+            128,
+            256
           ]
         },
         "edge_fea_len": {
-          "value": 128
+          "choices": [
+            32,
+            64,
+            128
+          ]
         },
         "gauss_stop": {
           "value": 6
@@ -164,6 +169,9 @@
         },
         "retain_edge_fea": {
           "value": true
+        },
+        "seed": {
+          "value": 0
         }
       }
     }
@@ -177,7 +185,7 @@
   "early_stopping": {
     "metric": "val_loss",
     "mode": "min",
-    "patience": 30,
+    "patience": 70,
     "min_delta": 0.0,
     "max_epochs": 600
   },
@@ -198,7 +206,7 @@
     4
   ],
   "top_k_selection": {
-    "k_per_model": 2,
+    "k_per_model": 5,
     "split": "validation",
     "metric": "val_loss",
     "uses_test_metrics": false
@@ -236,5 +244,26 @@
     "adapter_equivalence_policy": "fail_closed_unless_proven",
     "robust_winner_requires_proven_equivalence": true,
     "diagnostic_if_unproven": true
+  },
+  "performance": {
+    "compute_accelerator": "gpu",
+    "torch_mixed_precision": "bf16-mixed",
+    "torch_float32_matmul_precision": "high",
+    "max_parallel_graph2mat_training_jobs": 3,
+    "max_parallel_deeph_training_jobs": 2,
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "torch_num_threads": 4,
+    "omp_num_threads": 4,
+    "mkl_num_threads": 4,
+    "openblas_num_threads": 4,
+    "numexpr_num_threads": 4
+  },
+  "notes": {
+    "purpose": "Weekend paper-ready search canary/full sweep on iid1000 with small/medium Graph2Mat batches. Final ID/OOD locked evaluation remains a later stage after validation-only selection.",
+    "created_after_stopping_run": "g2m_deeph_perf1024_cueq_clean_20260528_140516",
+    "test_blind_policy": "selection and early stopping use validation val_loss only; final claims use final_evaluation.primary_metric only after final stage."
   }
 }

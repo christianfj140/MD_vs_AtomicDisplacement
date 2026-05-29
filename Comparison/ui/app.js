@@ -468,6 +468,105 @@ const PLOT_HELP_BY_ID = {
   },
 };
 
+const G2M_DEEPH_PLOT_HELP_BY_ID = {
+  "g2m-deeph-plot-metric_scaling_h_mae": {
+    title: "Hamiltonian MAE",
+    metric: "Mean absolute error of H(k)",
+    formula: "\\operatorname{MAE}_H=\\operatorname{mean}_{s,k,ij}|H^{pred}_{ij}(k)-H^{ref}_{ij}(k)|",
+    description: "Error absoluto medio del Hamiltoniano periodico ensamblado en k-points.",
+    purpose: "DeepH reporta MAE de bloques del Hamiltoniano en escala meV. Este plot da una lectura parecida de error matricial para Graph2Mat y DeepH, pero debe tratarse como diagnostico hasta que la equivalencia raw/global de DeepH este probada.",
+    direction: "Menor es mejor. No declara ganador espectral por si solo: en DeepH el objetivo final es que el Hamiltoniano reproduzca bandas, DOS y propiedades derivadas.",
+  },
+  "g2m-deeph-plot-metric_scaling_h_rmse": {
+    title: "Hamiltonian RMSE",
+    metric: "Root mean squared error of H(k)",
+    formula: "\\operatorname{RMSE}_H=\\sqrt{\\operatorname{mean}_{s,k,ij}|H^{pred}_{ij}(k)-H^{ref}_{ij}(k)|^2}",
+    description: "Error cuadratico medio del Hamiltoniano; penaliza mas los elementos o bloques con errores grandes.",
+    purpose: "Sirve para detectar outliers de matriz que una MAE puede suavizar. Es util frente a DeepH porque errores grandes en pocos acoplamientos pueden degradar bandas aunque la media parezca aceptable.",
+    direction: "Menor es mejor. Comparalo junto a MAE, Frobenius y metricas espectrales.",
+  },
+  "g2m-deeph-plot-metric_scaling_h_mse": {
+    title: "Hamiltonian MSE",
+    metric: "Mean squared error of H(k)",
+    formula: "\\operatorname{MSE}_H=\\operatorname{mean}_{s,k,ij}|H^{pred}_{ij}(k)-H^{ref}_{ij}(k)|^2",
+    description: "Version cuadratica del error de matriz, en eV^2.",
+    purpose: "Ayuda a ver si una configuracion falla por pocos errores grandes. Para comparacion con DeepH es una metrica de soporte, no el endpoint fisico principal.",
+    direction: "Menor es mejor; valores altos suelen indicar inestabilidad en bloques concretos.",
+  },
+  "g2m-deeph-plot-metric_scaling_frobenius": {
+    title: "Relative Frobenius",
+    metric: "Relative matrix norm error",
+    formula: "\\frac{\\|H^{pred}-H^{ref}\\|_F}{\\|H^{ref}\\|_F}",
+    description: "Norma global del error de Hamiltoniano normalizada por la norma de referencia.",
+    purpose: "Resume si el modelo reproduce la escala total del Hamiltoniano. Es un puente util entre MAE de bloques estilo DeepH y errores espectrales derivados.",
+    direction: "Menor es mejor. Si baja pero el espectro no mejora, hay desacoplo matriz-espectro.",
+  },
+  "g2m-deeph-plot-metric_scaling_hermiticity": {
+    title: "Hermiticity residual",
+    metric: "Predicted Hamiltonian Hermiticity",
+    formula: "\\frac{\\|H^{pred}(k)-H^{pred}(k)^\\dagger\\|_F}{\\|H^{pred}(k)\\|_F}",
+    description: "Mide si el Hamiltoniano predicho respeta la simetria Hermitiana esperada.",
+    purpose: "DeepH y Graph2Mat solo son comparables fisicamente si el H predicho define un problema de autovalores estable. Un residuo alto puede invalidar bandas o DOS aunque el MAE sea bajo.",
+    direction: "Menor es mejor; cero es el comportamiento ideal.",
+  },
+  "g2m-deeph-plot-metric_scaling_spectral_global": {
+    title: "Global spectral RMSE",
+    metric: "Global eigenvalue RMSE",
+    formula: "\\sqrt{\\operatorname{mean}_{s,k,n}(\\varepsilon^{pred}_{n,k}-\\varepsilon^{ref}_{n,k})^2}",
+    description: "RMSE de autovalores sobre el espectro comparable completo.",
+    purpose: "DeepH se evalua no solo por matriz, sino por bandas y propiedades electronicas derivadas. Esta metrica pregunta directamente si los autovalores salen bien.",
+    direction: "Menor es mejor. Es mas cercano a una comparacion DeepH-style de bandas que H-MAE aislado.",
+  },
+  "g2m-deeph-plot-metric_scaling_spectral_low_energy": {
+    title: "Low-energy spectral RMSE",
+    metric: "Low-energy eigenvalue RMSE",
+    formula: "\\sqrt{\\operatorname{mean}_{s,k,n\\in W_{low}}(\\varepsilon^{pred}_{n,k}-\\varepsilon^{ref}_{n,k})^2}",
+    description: "Error de autovalores en la region de baja energia usada como endpoint principal del protocolo.",
+    purpose: "Es clave para comparar con DeepH porque las bandas cercanas a las energias relevantes son las que suelen gobernar estructura electronica y propiedades derivadas.",
+    direction: "Menor es mejor. Una mejora en H-MAE no basta si esta metrica no mejora.",
+  },
+  "g2m-deeph-plot-metric_scaling_spectral_fermi": {
+    title: "Fermi-window spectral RMSE",
+    metric: "Eigenvalue RMSE near Fermi",
+    formula: "\\sqrt{\\operatorname{mean}_{|\\varepsilon^{ref}-E_F|\\le w}(\\varepsilon^{pred}-\\varepsilon^{ref})^2}",
+    description: "Error espectral dentro de una ventana alrededor del nivel de Fermi.",
+    purpose: "DeepH muestra bandas y DOS cerca de Fermi; esta ventana es especialmente sensible para metales, gaps pequenos y propiedades de transporte.",
+    direction: "Menor es mejor. Si falta la ventana de Fermi, usa frontier/gap como diagnostico complementario, no sustituto silencioso.",
+  },
+  "g2m-deeph-plot-metric_scaling_spectral_frontier": {
+    title: "Frontier-window RMSE",
+    metric: "HOMO/LUMO or band-edge RMSE",
+    formula: "\\sqrt{\\operatorname{mean}(e_{HOMO}^2,e_{LUMO}^2)}",
+    description: "Error en estados frontier o borde de banda cuando la ventana de Fermi no captura suficientes niveles.",
+    purpose: "Mantiene una comparacion local de borde ocupado/no ocupado, util para juzgar si Graph2Mat conserva los rasgos de banda que DeepH suele mostrar visualmente.",
+    direction: "Menor es mejor; leelo junto al error de gap.",
+  },
+  "g2m-deeph-plot-metric_scaling_dos_mae": {
+    title: "DOS Fermi-window MAE",
+    metric: "Mean absolute DOS error near Fermi",
+    formula: "\\frac{1}{N_E}\\sum_E|D^{pred}(E)-D^{ref}(E)|",
+    description: "Error absoluto medio entre densidad de estados predicha y de referencia en la ventana energetica evaluada.",
+    purpose: "El paper de DeepH reporta DOS de estructuras no vistas y MAE de DOS en puntos alrededor de Fermi para graphene. Esta es una de las comparaciones mas utiles cuando las unidades y ventanas coinciden.",
+    direction: "Menor es mejor. Revisa unidades de DOS y ventana energetica antes de comparar con numeros del paper.",
+  },
+  "g2m-deeph-plot-metric_scaling_dos_wasserstein": {
+    title: "DOS Wasserstein distance",
+    metric: "Energy displacement between DOS distributions",
+    formula: "W_1=\\int |\\operatorname{CDF}_{pred}(E)-\\operatorname{CDF}_{ref}(E)|\\,dE",
+    description: "Distancia entre distribuciones DOS; mide cuanto habria que desplazar masa espectral en energia.",
+    purpose: "Complementa la DOS MAE: dos curvas pueden tener MAE parecida pero picos desplazados. DeepH busca reproducir propiedades derivadas del Hamiltoniano, y esta metrica ve desplazamientos de DOS.",
+    direction: "Menor es mejor; cero significa DOS indistinguible bajo esta metrica.",
+  },
+  "g2m-deeph-plot-timing_scaling": {
+    title: "Phase time vs dataset size",
+    metric: "Wall-clock seconds by phase",
+    formula: "t_{phase}=t_{end}-t_{start},\\quad \\mathrm{s/snapshot}=t_{phase}/N",
+    description: "Tiempo registrado para entrenamiento, prediccion, preprocesado DeepH y calculo de metricas.",
+    purpose: "DeepH se propone como metodo de alta eficiencia para evitar SCF costoso. Este plot separa precision de coste y ayuda a decidir si una configuracion es Pareto-competitiva.",
+    direction: "Menor es mejor solo si la precision espectral/DOS es comparable. Los fallos y OOM deben contar en el coste.",
+  },
+};
+
 const CROSS_PLOT_HELP_BY_ID = {
   "plot-cross-heatmap": {
     title: "Cross-evaluation heatmap",
@@ -495,6 +594,7 @@ const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
   g2mDeephOffset: 0,
+  g2mDeephRunId: null,
   g2mDeephWasRunning: false,
   g2mDeephValidation: null,
   g2mDeephResults: null,
@@ -1912,6 +2012,7 @@ function formatG2MDeepHValidationError(validation, datasetMode) {
 
 async function runG2MDeepHBenchmark() {
   state.g2mDeephOffset = 0;
+  state.g2mDeephRunId = null;
   state.g2mDeephResults = null;
   clearNode(document.getElementById("g2m-deeph-log"));
   renderG2MDeepHMetricSummary(null);
@@ -2085,16 +2186,22 @@ function renderG2MDeepHMetricScalingPlot(card, plot) {
     };
   });
   const annotations = traces.length ? [] : [emptyPlotAnnotation("No archived metric-vs-size rows with finite values.")];
-  renderPlot(
-    card,
-    traces,
-    plotLayout(plot.title || "Metrics vs dataset size", plot.y_title || "Metric value", {
+  let layout = plotLayout(plot.title || "Metrics vs dataset size", plot.y_title || "Metric value", {
       annotations,
       xaxis: { title: plot.x_title || "Dataset size (snapshots)", gridcolor: "#edf1f4", zeroline: false },
       yaxis: { title: plot.y_title || "Metric value", gridcolor: "#edf1f4", zeroline: false },
       legend: { orientation: "h", y: -0.24 },
-    }),
+    });
+  const references = DEEPH_PAPER_REFERENCE_LINES[card.id] || DEEPH_PAPER_REFERENCE_LINES[plot.id];
+  layout = withHorizontalReferenceLines(
+    layout,
+    traces,
+    references,
+    references
+      ? "DeepH paper reference lines are diagnostic guides; match basis, units, support and raw/global equivalence before claims."
+      : "",
   );
+  renderPlot(card, traces, layout);
 }
 
 function renderG2MDeepHPlotsPayload(payload) {
@@ -2182,27 +2289,56 @@ function dedupeMetricScalingRows(rows = []) {
   return result;
 }
 
+function timingScalingRowKey(row = {}) {
+  return [
+    row.run_id || "",
+    row.dataset_id || "",
+    row.model || "",
+    row.config_id || "",
+    row.phase || "",
+    row.epoch_label || "",
+    row.source || "",
+  ].join("|");
+}
+
+function dedupeTimingScalingRows(rows = []) {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const key = timingScalingRowKey(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(row);
+  }
+  return result;
+}
+
 function mergeG2MDeepHLivePlotPayload(payload, livePayload) {
   const liveRows = livePayload?.metric_scaling_rows || [];
-  if (!liveRows.length) return payload;
+  const liveTimingRows = livePayload?.timing_scaling_rows || [];
+  if (!liveRows.length && !liveTimingRows.length) return payload;
   const metricRows = dedupeMetricScalingRows([...(payload.metric_scaling_rows || []), ...liveRows]);
+  const timingRows = dedupeTimingScalingRows([...(payload.timing_scaling_rows || []), ...liveTimingRows]);
   const primaryPlots = (payload.plots || []).filter((plot) => plot.kind !== "metric_scaling");
   const liveMetricPlots = (livePayload.plots || []).filter((plot) => plot.kind === "metric_scaling");
+  const timingPlots = primaryPlots.map((plot) =>
+    plot.kind === "timing_scaling" ? { ...plot, rows: timingRows } : plot,
+  );
   return {
     ...payload,
     available: true,
     metric_scaling_rows: metricRows,
+    timing_scaling_rows: timingRows,
     live_metric_rows: liveRows.length,
+    live_timing_rows: liveTimingRows.length,
     live_metrics_source: livePayload.source || "sidecar",
-    plots: [...liveMetricPlots, ...primaryPlots],
+    plots: [...liveMetricPlots, ...timingPlots],
     message: payload.message || livePayload.message,
   };
 }
 
 async function maybeLoadG2MDeepHLiveMetrics(payload) {
-  const hasMetrics = (payload?.metric_scaling_rows || []).length > 0;
   const status = payload?.status || {};
-  if (hasMetrics || !status.running || !status.run_root) return payload;
   try {
     const livePayload = await request(G2M_DEEPH_LIVE_METRICS_URL);
     return mergeG2MDeepHLivePlotPayload(payload, livePayload);
@@ -2263,7 +2399,19 @@ function clearG2MDeepHLogView() {
 }
 
 async function pollG2MDeepHLogs() {
-  const payload = await request(`/api/g2m-deeph/logs?since=${state.g2mDeephOffset}&limit=${LOG_POLL_LIMIT}`);
+  const requestedSince = state.g2mDeephOffset;
+  const payload = await request(`/api/g2m-deeph/logs?since=${requestedSince}&limit=${LOG_POLL_LIMIT}`);
+  const currentRunId = payload.status?.run_id || null;
+  if (
+    (currentRunId && state.g2mDeephRunId && currentRunId !== state.g2mDeephRunId)
+    || (Number.isFinite(payload.offset) && payload.offset < requestedSince)
+  ) {
+    clearG2MDeepHLogView();
+    state.g2mDeephOffset = 0;
+    state.g2mDeephRunId = currentRunId;
+    return pollG2MDeepHLogs();
+  }
+  if (currentRunId) state.g2mDeephRunId = currentRunId;
   state.g2mDeephOffset = payload.offset;
   updateG2MDeepHStatus(payload.status || {});
   if (payload.lines.length) {
@@ -5245,6 +5393,37 @@ const PLOT_COLORS = [
 ];
 const DEEPH_REFERENCE_COLORS = ["#cc3311", "#882255", "#332288", "#117733", "#666666"];
 const DEEPH_PAPER_REFERENCE_LINES = {
+  "g2m-deeph-plot-metric_scaling_h_mae": [
+    {
+      value: 0.0019,
+      label: "DeepH graphene gen. 1.9 meV",
+      detail: "Graphene generalization MAE of local transformed H' blocks for 2,000 unseen 100-400 K configurations; diagnostic guide, not an identical H(k) MAE.",
+    },
+    {
+      value: 0.0021,
+      label: "DeepH graphene avg 2.1 meV",
+      detail: "Graphene H' MAE averaged over all 13x13 orbital combinations in the paper.",
+    },
+    {
+      value: 0.0085,
+      label: "DeepH graphene high 8.5 meV",
+      detail: "Upper end of reported graphene orbital-combination MAE range; shown as a visual diagnostic guide.",
+    },
+  ],
+  "g2m-deeph-plot-metric_scaling_r2": [
+    {
+      value: 0.9994,
+      label: "DeepH graphene R2 0.9994",
+      detail: "Reported coefficient of determination for graphene nearest-neighbor 1s Hamiltonian element.",
+    },
+  ],
+  "g2m-deeph-plot-metric_scaling_dos_mae": [
+    {
+      value: 0.0001,
+      label: "DeepH DOS MAE ~1e-4",
+      detail: "Graphene DOS MAE reported as about 0.1 x 10^-3 eV^-1 A^-2 over 500 points from -6 to +6 eV around Fermi; compare units and window carefully.",
+    },
+  ],
   "plot-kpoint-h": [
     {
       value: 0.0019,
@@ -5335,9 +5514,9 @@ function sciencePlotAxis(axis = {}, fallbackTitle = "") {
   const title = typeof rawTitle === "object"
     ? {
         ...rawTitle,
-        font: { size: 13, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
+        font: { size: 16, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
       }
-    : { text: rawTitle || "", font: { size: 13, color: SCIENCE_PLOT_AXIS_COLOR } };
+    : { text: rawTitle || "", font: { size: 16, color: SCIENCE_PLOT_AXIS_COLOR } };
   return {
     showline: true,
     linecolor: SCIENCE_PLOT_AXIS_COLOR,
@@ -5347,7 +5526,7 @@ function sciencePlotAxis(axis = {}, fallbackTitle = "") {
     ticklen: 4,
     tickwidth: 1,
     tickcolor: SCIENCE_PLOT_AXIS_COLOR,
-    tickfont: { size: 11, color: SCIENCE_PLOT_AXIS_COLOR },
+    tickfont: { size: 14, color: SCIENCE_PLOT_AXIS_COLOR },
     zeroline: false,
     showgrid: true,
     gridcolor: SCIENCE_PLOT_GRID_COLOR,
@@ -5361,7 +5540,7 @@ function sciencePlotAxis(axis = {}, fallbackTitle = "") {
 function sciencePlotLayout(layout = {}) {
   const rawTitle = typeof layout.title === "object" ? layout.title : { text: layout.title || "" };
   const annotations = (layout.annotations || []).map((annotation) => ({
-    font: { size: 12, color: "#374151", ...(annotation.font || {}) },
+    font: { size: 15, color: "#374151", ...(annotation.font || {}) },
     ...annotation,
   }));
   return {
@@ -5369,14 +5548,14 @@ function sciencePlotLayout(layout = {}) {
     autosize: true,
     paper_bgcolor: "#ffffff",
     plot_bgcolor: "#ffffff",
-    font: { family: SCIENCE_PLOT_FONT_FAMILY, color: SCIENCE_PLOT_AXIS_COLOR, size: 12 },
+    font: { family: SCIENCE_PLOT_FONT_FAMILY, color: SCIENCE_PLOT_AXIS_COLOR, size: 15 },
     ...layout,
     margin: { l: 64, r: 24, t: 50, b: 58, ...(layout.margin || {}) },
     title: {
       x: 0.02,
       xanchor: "left",
       ...rawTitle,
-      font: { size: 15, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
+      font: { size: 18, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
     },
     legend: {
       orientation: "h",
@@ -5386,13 +5565,13 @@ function sciencePlotLayout(layout = {}) {
       yanchor: "top",
       bgcolor: "rgba(255,255,255,0)",
       borderwidth: 0,
-      font: { size: 11, color: SCIENCE_PLOT_AXIS_COLOR },
+      font: { size: 14, color: SCIENCE_PLOT_AXIS_COLOR },
       ...(layout.legend || {}),
     },
     hoverlabel: {
       bgcolor: "#ffffff",
       bordercolor: "rgba(17, 24, 39, 0.22)",
-      font: { family: SCIENCE_PLOT_FONT_FAMILY, size: 12, color: SCIENCE_PLOT_AXIS_COLOR },
+      font: { family: SCIENCE_PLOT_FONT_FAMILY, size: 15, color: SCIENCE_PLOT_AXIS_COLOR },
       ...(layout.hoverlabel || {}),
     },
     annotations,
@@ -5693,7 +5872,7 @@ function lineTraces(runs, group, metrics) {
 
 function plotLayout(title, yTitle, extra = {}) {
   return sciencePlotLayout({
-    title: { text: title, x: 0.02, xanchor: "left", font: { size: 15 } },
+    title: { text: title, x: 0.02, xanchor: "left", font: { size: 18 } },
     margin: { l: 64, r: 24, t: 50, b: 58 },
     paper_bgcolor: "#ffffff",
     plot_bgcolor: "#ffffff",
@@ -5770,7 +5949,7 @@ function withHorizontalReferenceLines(layout, traces, references, note = "") {
       y: reference.value,
       yanchor: "bottom",
       showarrow: false,
-      font: { size: 11, color },
+      font: { size: 14, color },
       bgcolor: "rgba(255, 255, 255, 0.82)",
       bordercolor: "rgba(148, 163, 184, 0.55)",
       borderwidth: 1,
@@ -5807,7 +5986,7 @@ function emptyPlotAnnotation(message) {
     x: 0.5,
     y: 0.5,
     showarrow: false,
-    font: { size: 13, color: "#6b7280" },
+    font: { size: 16, color: "#6b7280" },
   };
 }
 
@@ -5821,7 +6000,7 @@ function topPlotAnnotation(message, y = 1.12, color = "#9f5b00") {
     xanchor: "left",
     yanchor: "bottom",
     showarrow: false,
-    font: { size: 12, color },
+    font: { size: 15, color },
   };
 }
 
@@ -5846,6 +6025,8 @@ function latexText(value) {
 }
 
 function plotInfoFor(plotId) {
+  const g2mDeepHInfo = G2M_DEEPH_PLOT_HELP_BY_ID[plotId];
+  if (g2mDeepHInfo) return g2mDeepHInfo;
   const crossInfo = CROSS_PLOT_HELP_BY_ID[plotId];
   if (crossInfo) {
     const metric = selectedCrossMetric();
@@ -6293,7 +6474,7 @@ function renderOrbitalPairHeatmap(id, runs) {
           method: "update",
           args: [
             { visible: choices.map((_item, itemIndex) => itemIndex === index) },
-            { title: { text: titleFor(choice), x: 0.02, xanchor: "left", font: { size: 15 } } },
+            { title: { text: titleFor(choice), x: 0.02, xanchor: "left", font: { size: 18 } } },
           ],
         })),
       },
@@ -6403,7 +6584,7 @@ function renderBoxPlot(id, runs) {
       xanchor: "left",
       yanchor: "bottom",
       showarrow: false,
-      font: { size: 11, color: "#56616f" },
+      font: { size: 14, color: "#56616f" },
     });
   }
   const pipelineAvailability = metricAvailabilityByPipeline(runs, "spectral", "fermi_window_rmse_eV")
@@ -6438,7 +6619,7 @@ function renderBoxPlot(id, runs) {
       xanchor: "left",
       yanchor: "bottom",
       showarrow: false,
-      font: { size: 11, color: "#9f5b00" },
+      font: { size: 14, color: "#9f5b00" },
     });
   }
   if (!traces.length) {
@@ -6615,7 +6796,7 @@ function renderHeatmap(id, runs) {
         z,
         text,
         texttemplate: "%{text}",
-        textfont: { size: 10 },
+        textfont: { size: 13 },
         customdata,
         x: metrics.map((item) => item.label),
         y: rows.map((run) => runDisplayLabel(run)),
@@ -6638,7 +6819,7 @@ function renderHeatmap(id, runs) {
       },
     ],
     {
-      title: { text: "Resumen compacto de metricas", x: 0.02, xanchor: "left", font: { size: 15 } },
+      title: { text: "Resumen compacto de metricas", x: 0.02, xanchor: "left", font: { size: 18 } },
       margin: { l: 120, r: 18, t: 74, b: 72 },
       paper_bgcolor: "#ffffff",
       plot_bgcolor: "#ffffff",
@@ -6727,7 +6908,7 @@ function renderSensitivitySweeps(id, runs) {
     }
   }
   let layout = {
-    title: { text: "Sensitivity sweeps", x: 0.02, xanchor: "left", font: { size: 15 } },
+    title: { text: "Sensitivity sweeps", x: 0.02, xanchor: "left", font: { size: 18 } },
     grid: { rows: 1, columns: 2, pattern: "independent" },
     xaxis: { title: "Support threshold", type: "log" },
     yaxis: { title: "RMSE union (eV)" },
@@ -7004,7 +7185,7 @@ function crossMissingGroupsAnnotation(groups, metric) {
     yanchor: "bottom",
     text: `${missingGroups} grupo(s) sin ${metric}; permanecen marcados como No metric en mapas.`,
     showarrow: false,
-    font: { size: 12, color: "#9f5b00" },
+    font: { size: 15, color: "#9f5b00" },
   };
 }
 
@@ -7073,7 +7254,7 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
         y: sizeLabels[rowIndex],
         text: label,
         showarrow: false,
-        font: { size: 11, color: "#6b7280" },
+        font: { size: 14, color: "#6b7280" },
       });
     });
   });
@@ -7289,7 +7470,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
       yanchor: "bottom",
       text: `Mapa exploratorio: ${scientificStatus}${blockers ? ` · ${blockers}` : ""}`,
       showarrow: false,
-      font: { size: 12, color: "#9f5b00" },
+      font: { size: 15, color: "#9f5b00" },
     });
   }
   yLabels.forEach((rowLabel, rowIndex) => {
@@ -7302,7 +7483,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
         y: rowLabel,
         text: label,
         showarrow: false,
-        font: { size: 11, color: isMissing ? "#6b7280" : "#17202a" },
+        font: { size: 14, color: isMissing ? "#6b7280" : "#17202a" },
       });
     });
   });

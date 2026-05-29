@@ -16,11 +16,13 @@ from graph2mat_sweep_config import GRAPH2MAT_READOUT_FAMILIES
 
 SCHEMA_NAME = "graph2mat_deeph_benchmark_protocol_v1"
 ALLOWED_MODELS = {"graph2mat", "deeph"}
-ALLOWED_SEARCH_STRATEGIES = {"grid", "random", "latin_hypercube"}
+ALLOWED_SEARCH_STRATEGIES = {"grid", "manual", "random", "latin_hypercube"}
 ALLOWED_BUDGET_MODES = {"equal_n_trials", "equal_gpu_hours_per_model"}
 ALLOWED_MODES = {"min", "max"}
 ALLOWED_FINAL_TEST_POLICIES = {"locked_until_final"}
 ALLOWED_DEEPH_EQUIVALENCE_POLICIES = {"fail_closed_unless_proven"}
+SUPPORTED_DEEPH_CRITERIA = {"MaskMSELoss"}
+SUPPORTED_DEEPH_OPTIMIZERS = {"sgd", "sgdm", "adam", "adamW", "adagrad", "RMSprop", "lbfgs"}
 DISALLOWED_FINAL_CLAIM_METRICS = {
     "loss",
     "metric_value",
@@ -52,7 +54,12 @@ ALLOWED_FINAL_CLAIM_METRICS = {
     "low_energy_rmse_eV_mean",
     "relative_frobenius",
     "relative_frobenius_mean",
+    "spectral_composite_score",
+    "spectral_composite_score_mean",
+    "test_spectral_composite_score",
+    "test_spectral_composite_score_mean",
 }
+VALIDATION_COMPOSITE_METRICS = {"val_spectral_composite"}
 
 REQUIRED_REFERENCE_ARTIFACTS = {
     "RUN.fdf",
@@ -262,6 +269,41 @@ def _validate_models(protocol: dict[str, Any]) -> None:
                         + ", ".join(sorted(GRAPH2MAT_READOUT_FAMILIES))
                         + "."
                     )
+        else:
+            if "optimizer" in search_space:
+                raw_optimizer_values = _values_from_space_spec(search_space.get("optimizer"))
+                optimizer_values = {
+                    str(item).strip()
+                    for item in raw_optimizer_values
+                    if str(item).strip()
+                }
+                unsupported = sorted(optimizer_values - SUPPORTED_DEEPH_OPTIMIZERS)
+                if unsupported:
+                    raise RuntimeError(
+                        "models.deeph.search_space.optimizer has unsupported values for the "
+                        "current DeepH-pack hamiltonian target: "
+                        + ", ".join(unsupported)
+                        + ". Use one of: "
+                        + ", ".join(sorted(SUPPORTED_DEEPH_OPTIMIZERS))
+                        + "."
+                    )
+            if "criterion" in search_space:
+                raw_criterion_values = _values_from_space_spec(search_space.get("criterion"))
+                criterion_values = {
+                    str(item).strip()
+                    for item in raw_criterion_values
+                    if str(item).strip()
+                }
+                unsupported = sorted(criterion_values - SUPPORTED_DEEPH_CRITERIA)
+                if unsupported:
+                    raise RuntimeError(
+                        "models.deeph.search_space.criterion has unsupported values for the "
+                        "current DeepH-pack hamiltonian target: "
+                        + ", ".join(unsupported)
+                        + ". Use one of: "
+                        + ", ".join(sorted(SUPPORTED_DEEPH_CRITERIA))
+                        + "."
+                    )
 
 
 def _validate_selection(protocol: dict[str, Any]) -> str:
@@ -284,7 +326,10 @@ def _validate_selection(protocol: dict[str, Any]) -> str:
 def _validate_early_stopping(protocol: dict[str, Any], *, selection_metric: str) -> None:
     section = _require_object(protocol.get("early_stopping"), field="early_stopping")
     metric = _require_nonempty_string(section.get("metric"), field="early_stopping.metric")
-    if metric != selection_metric:
+    if metric != selection_metric and not (
+        selection_metric in VALIDATION_COMPOSITE_METRICS
+        and metric in {"val_loss", "validation_loss"}
+    ):
         raise RuntimeError("early_stopping.metric must match selection.metric for the final protocol.")
     mode = _require_nonempty_string(section.get("mode"), field="early_stopping.mode")
     if mode not in ALLOWED_MODES:
@@ -301,7 +346,33 @@ def _validate_search_policy(protocol: dict[str, Any]) -> None:
         raise RuntimeError(
             "search_policy.strategy must be one of: " + ", ".join(sorted(ALLOWED_SEARCH_STRATEGIES)) + "."
         )
-    if strategy in {"random", "latin_hypercube"}:
+    if strategy == "manual":
+        manual = _require_object(protocol.get("manual_search_plan"), field="manual_search_plan")
+        rows = _require_list(manual.get("planned_runs"), field="manual_search_plan.planned_runs")
+        for index, row in enumerate(rows):
+            item = _require_object(row, field=f"manual_search_plan.planned_runs[{index}]")
+            model = _require_nonempty_string(item.get("model"), field=f"manual_search_plan.planned_runs[{index}].model")
+            if model not in ALLOWED_MODELS:
+                raise RuntimeError(f"manual_search_plan.planned_runs[{index}].model must be graph2mat or deeph.")
+            _require_nonempty_string(item.get("config_id") or item.get("id"), field=f"manual_search_plan.planned_runs[{index}].config_id")
+            overrides = _require_object(item.get("overrides"), field=f"manual_search_plan.planned_runs[{index}].overrides")
+            if model == "deeph" and "criterion" in overrides:
+                criterion = str(overrides.get("criterion") or "").strip()
+                if criterion not in SUPPORTED_DEEPH_CRITERIA:
+                    raise RuntimeError(
+                        f"manual_search_plan.planned_runs[{index}].overrides.criterion "
+                        "has unsupported values for the current DeepH-pack hamiltonian target: "
+                        f"{criterion!r}. Use one of: {', '.join(sorted(SUPPORTED_DEEPH_CRITERIA))}."
+                    )
+            if model == "deeph" and "optimizer" in overrides:
+                optimizer = str(overrides.get("optimizer") or "").strip()
+                if optimizer not in SUPPORTED_DEEPH_OPTIMIZERS:
+                    raise RuntimeError(
+                        f"manual_search_plan.planned_runs[{index}].overrides.optimizer "
+                        "has unsupported values for the current DeepH-pack hamiltonian target: "
+                        f"{optimizer!r}. Use one of: {', '.join(sorted(SUPPORTED_DEEPH_OPTIMIZERS))}."
+                    )
+    elif strategy in {"random", "latin_hypercube"}:
         _require_positive_int(section.get("n_trials_per_model"), field="search_policy.n_trials_per_model")
         if "random_seed" not in section:
             raise RuntimeError("search_policy.random_seed is required for randomized search strategies.")

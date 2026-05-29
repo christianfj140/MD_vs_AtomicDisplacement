@@ -26,9 +26,11 @@ from g2m_deeph_runner import (  # noqa: E402
     Graph2MatDeepHBenchmarkRunner,
     _deeph_training_parallelism,
     _deeph_metric_command_args,
+    _extract_validation_metrics,
     _force_diagnostic_metric_manifest,
     _link_or_copy_file,
     _metric_allowed_returncodes,
+    _metric_evaluation_split,
     _metric_fail_policy,
 )
 
@@ -184,6 +186,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         )
 
         self.assertNotIn("--no-fail-closed", command)
+        self.assertIn("test", command)
 
     def test_metric_fail_policy_diagnostic_mode_is_explicit(self):
         self.assertEqual(
@@ -201,6 +204,76 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         )
 
         self.assertIn("--no-fail-closed", command)
+
+    def test_deeph_metric_command_can_target_validation_split(self):
+        command = _deeph_metric_command_args(
+            python_executable="python3",
+            graph2mat_result_dir=Path("g2m"),
+            processed_dir=Path("processed"),
+            predictions_dir=Path("predictions"),
+            output_dir=Path("out"),
+            metric_fail_policy=METRIC_FAIL_POLICY_FAIL_CLOSED,
+            split="validation",
+        )
+
+        self.assertEqual(command[command.index("--split") + 1], "validation")
+
+    def test_search_composite_evaluation_uses_validation_split(self):
+        payload = {
+            "benchmark_mode": "final_publication",
+            "protocol_stage": "search",
+            "protocol": {
+                "selection": {"metric": "val_spectral_composite", "mode": "min"},
+                "top_k_selection": {"k_per_model": 1},
+            },
+        }
+
+        self.assertEqual(_metric_evaluation_split(payload), "validation")
+
+    def test_search_metric_evaluation_rejects_locked_test_split(self):
+        payload = {
+            "benchmark_mode": "final_publication",
+            "protocol_stage": "search",
+            "metric_evaluation_split": "test",
+            "protocol": {
+                "search_evaluation": {"run_validation_metrics": True},
+                "selection": {"metric": "val_spectral_composite", "mode": "min"},
+                "top_k_selection": {"k_per_model": 1},
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "locked test split"):
+            _metric_evaluation_split(payload)
+
+    def test_extract_validation_metrics_from_kpoint_csvs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics = Path(tmp)
+            (metrics / "kpoint_spectral_metrics.csv").write_text(
+                "sample,low_energy_rmse_eV,fermi_window_rmse_eV,frontier_window_rmse_eV,global_rmse_eV\n"
+                "a,0.2,0.3,0.4,0.5\n"
+                "b,0.4,0.5,0.6,0.7\n",
+                encoding="utf-8",
+            )
+            (metrics / "kpoint_dos_metrics.csv").write_text(
+                "sample,dos_wasserstein_eV,dos_mae_500_fermi_window\n"
+                "a,0.02,0.03\n"
+                "b,0.04,0.05\n",
+                encoding="utf-8",
+            )
+            (metrics / "kpoint_matrix_metrics.csv").write_text(
+                "sample,row_type,h_mae_eV\n"
+                "a,weighted_sample,0.1\n"
+                "b,weighted_sample,0.3\n",
+                encoding="utf-8",
+            )
+
+            extracted = _extract_validation_metrics(metrics)
+
+        self.assertAlmostEqual(extracted["low_energy_rmse_eV"], 0.3)
+        self.assertAlmostEqual(extracted["global_band_rmse"], 0.6)
+        self.assertAlmostEqual(extracted["dos_wasserstein"], 0.03)
+        self.assertAlmostEqual(extracted["dos_mae_near_fermi"], 0.04)
+        self.assertAlmostEqual(extracted["h_mae_eV"], 0.2)
 
     def test_diagnostic_metric_manifest_disables_robust_winners(self):
         manifest = {

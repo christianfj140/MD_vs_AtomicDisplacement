@@ -13,9 +13,11 @@ if str(SCRIPTS_DIR) not in sys.path:
 from g2m_deeph_topk import (  # noqa: E402
     ROBUST_RERUN_PLAN_SCHEMA,
     SELECTED_CONFIGS_SCHEMA,
+    VAL_SPECTRAL_COMPOSITE,
     generate_robust_rerun_plan,
     select_top_configs,
     validation_metric_value,
+    validation_spectral_composite_values,
     write_selection_artifacts,
 )
 
@@ -42,6 +44,30 @@ def _record(
         "common": {"epochs": 10, "learning_rate": 0.001, "batch_size": 2, "seed": 42},
         "overrides": {"hidden_irreps_channels": 16} if model == "graph2mat" else {"atom_fea_len": 64},
     }
+
+
+def _spectral_record(
+    model: str,
+    config_id: str,
+    *,
+    val_loss: float,
+    low_energy_rmse_eV: float,
+    fermi_window_rmse_eV: float,
+    frontier_window_rmse_eV: float,
+    global_band_rmse: float,
+    dos_wasserstein: float,
+    dos_mae_near_fermi: float,
+) -> dict:
+    record = _record(model, config_id, val_loss)
+    record["validation_metrics"] = {
+        "low_energy_rmse_eV": low_energy_rmse_eV,
+        "fermi_window_rmse_eV": fermi_window_rmse_eV,
+        "frontier_window_rmse_eV": frontier_window_rmse_eV,
+        "global_band_rmse": global_band_rmse,
+        "dos_wasserstein": dos_wasserstein,
+        "dos_mae_near_fermi": dos_mae_near_fermi,
+    }
+    return record
 
 
 class Graph2MatDeepHTopKTests(unittest.TestCase):
@@ -107,6 +133,70 @@ class Graph2MatDeepHTopKTests(unittest.TestCase):
         ]
 
         self.assertEqual(validation_metric_value(record, "val_loss"), 0.3)
+
+    def test_validation_spectral_composite_selects_spectral_not_val_loss(self) -> None:
+        selected = select_top_configs(
+            [
+                _spectral_record(
+                    "graph2mat",
+                    "g2m_low_loss_bad_spectrum",
+                    val_loss=0.001,
+                    low_energy_rmse_eV=2.0,
+                    fermi_window_rmse_eV=2.0,
+                    frontier_window_rmse_eV=2.0,
+                    global_band_rmse=2.0,
+                    dos_wasserstein=2.0,
+                    dos_mae_near_fermi=2.0,
+                ),
+                _spectral_record(
+                    "graph2mat",
+                    "g2m_high_loss_good_spectrum",
+                    val_loss=10.0,
+                    low_energy_rmse_eV=0.2,
+                    fermi_window_rmse_eV=0.2,
+                    frontier_window_rmse_eV=0.2,
+                    global_band_rmse=0.2,
+                    dos_wasserstein=0.2,
+                    dos_mae_near_fermi=0.2,
+                ),
+            ],
+            metric=VAL_SPECTRAL_COMPOSITE,
+            mode="min",
+            k_per_model=1,
+        )
+
+        row = selected["selected_configs"][0]
+        self.assertEqual(row["config_id"], "g2m_high_loss_good_spectrum")
+        self.assertEqual(row["selection_metric"], VAL_SPECTRAL_COMPOSITE)
+        self.assertIn("validation_composite", row)
+        self.assertLess(row["validation_metric_value"], 1.0)
+
+    def test_validation_spectral_composite_requires_all_components(self) -> None:
+        missing = _record("graph2mat", "g2m_missing_dos", 0.01)
+        missing["validation_metrics"] = {
+            "low_energy_rmse_eV": 0.1,
+            "fermi_window_rmse_eV": 0.1,
+            "frontier_window_rmse_eV": 0.1,
+            "global_band_rmse": 0.1,
+            "dos_wasserstein": 0.1,
+        }
+
+        self.assertEqual(validation_spectral_composite_values([missing]), {})
+        with self.assertRaisesRegex(RuntimeError, "No completed configs have validation metric"):
+            select_top_configs([missing], metric=VAL_SPECTRAL_COMPOSITE, mode="min", k_per_model=1)
+
+    def test_validation_spectral_composite_ignores_test_only_rows(self) -> None:
+        record = _record("graph2mat", "g2m_test_only", 0.5, split="test")
+        record["metrics"] = [
+            {"metric_split": "test", "metric": "low_energy_rmse_eV", "value": 0.01},
+            {"metric_split": "test", "metric": "fermi_window_rmse_eV", "value": 0.01},
+            {"metric_split": "test", "metric": "frontier_window_rmse_eV", "value": 0.01},
+            {"metric_split": "test", "metric": "global_band_rmse", "value": 0.01},
+            {"metric_split": "test", "metric": "dos_wasserstein", "value": 0.01},
+            {"metric_split": "test", "metric": "dos_mae_near_fermi", "value": 0.01},
+        ]
+
+        self.assertEqual(validation_spectral_composite_values([record]), {})
 
     def test_final_seed_expansion_preserves_hyperparameters_except_seed(self) -> None:
         selected = select_top_configs(

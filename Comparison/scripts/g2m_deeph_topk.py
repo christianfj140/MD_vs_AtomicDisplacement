@@ -18,6 +18,15 @@ SELECTED_CONFIGS_SCHEMA = "graph2mat_deeph_selected_configs_v1"
 ROBUST_RERUN_PLAN_SCHEMA = "graph2mat_deeph_robust_rerun_plan_v1"
 VALIDATION_SPLITS = {"validation", "val"}
 COMPLETED_STATUSES = {"completed"}
+VAL_SPECTRAL_COMPOSITE = "val_spectral_composite"
+SPECTRAL_COMPOSITE_COMPONENTS: tuple[tuple[str, float, tuple[str, ...]], ...] = (
+    ("low_energy_rmse_eV", 0.30, ("low_energy_rmse_eV", "low_energy_rmse_eV_mean")),
+    ("fermi_window_rmse_eV", 0.20, ("fermi_window_rmse_eV", "fermi_window_rmse_eV_mean")),
+    ("frontier_window_rmse_eV", 0.15, ("frontier_window_rmse_eV", "frontier_window_rmse_eV_mean")),
+    ("global_band_rmse", 0.15, ("global_band_rmse", "global_band_rmse_eV", "global_rmse_eV", "global_rmse_eV_mean")),
+    ("dos_wasserstein", 0.10, ("dos_wasserstein", "dos_wasserstein_eV", "dos_wasserstein_eV_mean")),
+    ("dos_mae_near_fermi", 0.10, ("dos_mae_near_fermi", "dos_mae_500_fermi_window", "dos_mae_500_fermi_window_mean")),
+)
 
 
 def finite_number(value: Any) -> float | None:
@@ -94,6 +103,71 @@ def validation_metric_value(record: dict[str, Any], metric: str) -> float | None
     return None
 
 
+def _validation_metric_value_any(record: dict[str, Any], aliases: tuple[str, ...]) -> float | None:
+    for alias in aliases:
+        value = validation_metric_value(record, alias)
+        if value is not None:
+            return value
+    return None
+
+
+def _median_scale(values: list[float]) -> float:
+    clean = sorted(value for value in values if math.isfinite(value) and value > 0)
+    if not clean:
+        return 1.0
+    middle = len(clean) // 2
+    if len(clean) % 2:
+        return clean[middle]
+    return (clean[middle - 1] + clean[middle]) / 2.0
+
+
+def validation_spectral_composite_values(records: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Compute validation-only spectral composite scores for complete records.
+
+    The score is fail-closed: a record must expose all required validation
+    spectral/DOS components. Test rows are ignored by validation_metric_value.
+    Components are normalized by the median finite positive component value
+    across eligible records, then combined by the preregistered weights.
+    """
+
+    component_values: dict[int, dict[str, float]] = {}
+    for record in records:
+        values: dict[str, float] = {}
+        for component, _weight, aliases in SPECTRAL_COMPOSITE_COMPONENTS:
+            value = _validation_metric_value_any(record, aliases)
+            if value is None:
+                break
+            values[component] = value
+        if len(values) == len(SPECTRAL_COMPOSITE_COMPONENTS):
+            component_values[id(record)] = values
+    scales = {
+        component: _median_scale([values[component] for values in component_values.values()])
+        for component, _weight, _aliases in SPECTRAL_COMPOSITE_COMPONENTS
+    }
+    scores: dict[int, dict[str, Any]] = {}
+    for record in records:
+        values = component_values.get(id(record))
+        if values is None:
+            continue
+        terms = {
+            component: {
+                "value": values[component],
+                "scale": scales[component],
+                "weight": weight,
+                "normalized": values[component] / scales[component],
+                "weighted": weight * (values[component] / scales[component]),
+            }
+            for component, weight, _aliases in SPECTRAL_COMPOSITE_COMPONENTS
+        }
+        scores[id(record)] = {
+            "score": sum(item["weighted"] for item in terms.values()),
+            "components": values,
+            "scales": scales,
+            "terms": terms,
+        }
+    return scores
+
+
 def _completed_records(records: list[dict[str, Any]], metric: str, *, allow_diagnostic: bool) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     for record in records:
@@ -114,6 +188,23 @@ def _completed_records(records: list[dict[str, Any]], metric: str, *, allow_diag
     return selected
 
 
+def _completed_records_for_status(records: list[dict[str, Any]], *, allow_diagnostic: bool) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("status") or "") not in COMPLETED_STATUSES:
+            continue
+        if not allow_diagnostic and (
+            record.get("diagnostic_only") is True
+            or str(record.get("scientific_status") or "").lower() == "diagnostic_only"
+            or str(record.get("comparability_status") or "").lower() == "diagnostic_only"
+        ):
+            continue
+        selected.append(record)
+    return selected
+
+
 def _group_key(record: dict[str, Any], grouping: str) -> tuple[str, ...]:
     model = str(record.get("model") or "")
     dataset_id = str(record.get("dataset_id") or "")
@@ -124,11 +215,20 @@ def _group_key(record: dict[str, Any], grouping: str) -> tuple[str, ...]:
     raise RuntimeError("top-k grouping must be model_dataset or model.")
 
 
-def _selection_row(record: dict[str, Any], *, metric: str, mode: str, rank: int, grouping: str) -> dict[str, Any]:
-    value = validation_metric_value(record, metric)
+def _selection_row(
+    record: dict[str, Any],
+    *,
+    metric: str,
+    mode: str,
+    rank: int,
+    grouping: str,
+    value_override: float | None = None,
+    composite_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    value = value_override if value_override is not None else validation_metric_value(record, metric)
     if value is None:
         raise RuntimeError(f"Selected record has no validation metric {metric}: {record.get('config_id')}")
-    return {
+    row = {
         "rank": rank,
         "index": record.get("index"),
         "grouping": grouping,
@@ -152,6 +252,9 @@ def _selection_row(record: dict[str, Any], *, metric: str, mode: str, rank: int,
         "protocol_stage": SEARCH_STAGE,
         "source_status": str(record.get("status") or ""),
     }
+    if composite_details:
+        row["validation_composite"] = json_safe(composite_details)
+    return row
 
 
 def select_top_configs(
@@ -172,7 +275,13 @@ def select_top_configs(
         raise RuntimeError("selection mode must be min or max.")
     if k_per_model <= 0:
         raise RuntimeError("top_k_selection.k_per_model must be positive.")
-    candidates = _completed_records(records, metric, allow_diagnostic=allow_diagnostic)
+    composite_scores: dict[int, dict[str, Any]] = {}
+    if metric == VAL_SPECTRAL_COMPOSITE:
+        status_candidates = _completed_records_for_status(records, allow_diagnostic=allow_diagnostic)
+        composite_scores = validation_spectral_composite_values(status_candidates)
+        candidates = [record for record in status_candidates if id(record) in composite_scores]
+    else:
+        candidates = _completed_records(records, metric, allow_diagnostic=allow_diagnostic)
     if not candidates:
         raise RuntimeError(f"No completed configs have validation metric {metric!r} for top-k selection.")
 
@@ -188,9 +297,9 @@ def select_top_configs(
             )
         group_records.sort(
             key=lambda row: (
-                -(validation_metric_value(row, metric) or 0.0)
+                -(composite_scores[id(row)]["score"] if metric == VAL_SPECTRAL_COMPOSITE else validation_metric_value(row, metric) or 0.0)
                 if normalized_mode == "max"
-                else (validation_metric_value(row, metric) or 0.0),
+                else (composite_scores[id(row)]["score"] if metric == VAL_SPECTRAL_COMPOSITE else validation_metric_value(row, metric) or 0.0),
                 str(row.get("config_id") or ""),
                 str(row.get("run_root") or ""),
             )
@@ -203,6 +312,8 @@ def select_top_configs(
                     mode=normalized_mode,
                     rank=rank,
                     grouping=grouping,
+                    value_override=composite_scores[id(record)]["score"] if metric == VAL_SPECTRAL_COMPOSITE else None,
+                    composite_details=composite_scores.get(id(record)) if metric == VAL_SPECTRAL_COMPOSITE else None,
                 )
             )
     return {

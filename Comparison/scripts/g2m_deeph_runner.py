@@ -204,6 +204,7 @@ class Graph2MatBenchmarkContext:
     output_file: str
     test_sample_ids: list[str]
     split_hash: str | None
+    prediction_split: str = "test"
     dry_run: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -225,6 +226,7 @@ class Graph2MatBenchmarkContext:
             "predict_glob": self.predict_glob,
             "output_file": self.output_file,
             "test_sample_ids": list(self.test_sample_ids),
+            "prediction_split": self.prediction_split,
             "split_hash": self.split_hash,
             "dry_run": self.dry_run,
         }
@@ -248,6 +250,7 @@ class DeepHBenchmarkContext:
     split_audit_csv_path: Path
     split_hash: str | None
     raw_mirror: dict[str, Any]
+    inference_split: str = "test"
     dry_run: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -268,6 +271,7 @@ class DeepHBenchmarkContext:
             "split_audit_csv_path": str(self.split_audit_csv_path),
             "split_hash": self.split_hash,
             "raw_mirror": self.raw_mirror,
+            "inference_split": self.inference_split,
             "dry_run": self.dry_run,
         }
 
@@ -909,6 +913,128 @@ def _metric_fail_policy_warning(policy: str) -> dict[str, str] | None:
     }
 
 
+def _search_validation_metrics_requested(payload: dict[str, Any]) -> bool:
+    if protocol_stage_from_payload(payload) != SEARCH_STAGE:
+        return False
+    raw = payload.get("search_validation_metrics")
+    if raw is not None:
+        return _parse_bool(raw, False)
+    protocol = payload.get("protocol") if isinstance(payload.get("protocol"), dict) else {}
+    search_eval = protocol.get("search_evaluation") if isinstance(protocol.get("search_evaluation"), dict) else {}
+    if "run_validation_metrics" in search_eval:
+        return _parse_bool(search_eval.get("run_validation_metrics"), False)
+    policy = selection_policy_from_payload(payload)
+    return str(policy.get("metric") or "").strip() == "val_spectral_composite"
+
+
+def _metric_evaluation_split(payload: dict[str, Any]) -> str:
+    if _search_validation_metrics_requested(payload):
+        split = "validation"
+    else:
+        split = "test"
+    raw = payload.get("metric_evaluation_split") or payload.get("prediction_split")
+    if raw not in (None, ""):
+        split = str(raw).strip()
+    if split not in {"train", "validation", "test"}:
+        raise RuntimeError("metric_evaluation_split must be train, validation, or test.")
+    if protocol_stage_from_payload(payload) == SEARCH_STAGE and _search_validation_metrics_requested(payload) and split == "test":
+        raise RuntimeError("Search-stage metric evaluation cannot use the locked test split.")
+    return split
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _csv_metric_mean(path: Path, metric: str, *, row_type: str | None = None) -> float | None:
+    if not path.exists():
+        return None
+    values: list[float] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row_type is not None and str(row.get("row_type") or "") != row_type:
+                continue
+            number = _finite_float(row.get(metric))
+            if number is not None:
+                values.append(number)
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _summary_metric_mean(manifest: dict[str, Any], group: str, metric: str) -> float | None:
+    summary = manifest.get("summary") if isinstance(manifest.get("summary"), dict) else {}
+    group_summary = summary.get(group) if isinstance(summary.get(group), dict) else {}
+    item = group_summary.get(metric) if isinstance(group_summary.get(metric), dict) else {}
+    return _finite_float(item.get("mean"))
+
+
+def _first_not_none(*values: float | None) -> float | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_validation_metrics(metrics_dir: Path) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    manifest_path = metrics_dir / "manifest.json"
+    manifest = _load_json(manifest_path) if manifest_path.exists() else {}
+
+    def set_if_available(key: str, value: float | None) -> None:
+        if value is not None:
+            metrics[key] = value
+
+    for metric in ("low_energy_rmse_eV", "fermi_window_rmse_eV", "frontier_window_rmse_eV"):
+        set_if_available(
+            metric,
+            _first_not_none(
+                _summary_metric_mean(manifest, "kpoint_spectral", metric),
+                _summary_metric_mean(manifest, "spectral", metric),
+                _csv_metric_mean(metrics_dir / "kpoint_spectral_metrics.csv", metric),
+                _csv_metric_mean(metrics_dir / "spectral_metrics.csv", metric),
+            ),
+        )
+    global_rmse = _first_not_none(
+        _summary_metric_mean(manifest, "kpoint_spectral", "global_rmse_eV"),
+        _summary_metric_mean(manifest, "spectral", "global_rmse_eV"),
+        _csv_metric_mean(metrics_dir / "kpoint_spectral_metrics.csv", "global_rmse_eV"),
+        _csv_metric_mean(metrics_dir / "spectral_metrics.csv", "global_rmse_eV"),
+    )
+    set_if_available("global_band_rmse", global_rmse)
+    set_if_available("global_rmse_eV", global_rmse)
+    dos_wasserstein = _first_not_none(
+        _summary_metric_mean(manifest, "kpoint_dos", "dos_wasserstein_eV"),
+        _summary_metric_mean(manifest, "dos", "dos_wasserstein_eV"),
+        _csv_metric_mean(metrics_dir / "kpoint_dos_metrics.csv", "dos_wasserstein_eV"),
+        _csv_metric_mean(metrics_dir / "dos_metrics.csv", "dos_wasserstein_eV"),
+    )
+    set_if_available("dos_wasserstein", dos_wasserstein)
+    set_if_available("dos_wasserstein_eV", dos_wasserstein)
+    dos_fermi_mae = _first_not_none(
+        _summary_metric_mean(manifest, "kpoint_dos", "dos_mae_500_fermi_window"),
+        _summary_metric_mean(manifest, "dos", "dos_mae_500_fermi_window"),
+        _csv_metric_mean(metrics_dir / "kpoint_dos_metrics.csv", "dos_mae_500_fermi_window"),
+        _csv_metric_mean(metrics_dir / "dos_metrics.csv", "dos_mae_500_fermi_window"),
+    )
+    set_if_available("dos_mae_near_fermi", dos_fermi_mae)
+    set_if_available("dos_mae_500_fermi_window", dos_fermi_mae)
+    h_mae = _first_not_none(
+        _summary_metric_mean(manifest, "kpoint_matrix", "h_mae_eV"),
+        _csv_metric_mean(metrics_dir / "kpoint_matrix_metrics.csv", "h_mae_eV", row_type="weighted_sample"),
+        _summary_metric_mean(manifest, "sparse", "h_matrix_mae_eV"),
+        _summary_metric_mean(manifest, "sparse", "mae_ref_eV"),
+        _csv_metric_mean(metrics_dir / "sparse_metrics.csv", "h_matrix_mae_eV"),
+        _csv_metric_mean(metrics_dir / "sparse_metrics.csv", "mae_ref_eV"),
+    )
+    set_if_available("h_mae_eV", h_mae)
+    return metrics
+
+
 def _force_diagnostic_metric_manifest(
     manifest: dict[str, Any],
     *,
@@ -950,6 +1076,7 @@ def _deeph_metric_command_args(
     predictions_dir: Path,
     output_dir: Path,
     metric_fail_policy: str,
+    split: str = "test",
 ) -> list[str]:
     command = [
         python_executable,
@@ -965,7 +1092,7 @@ def _deeph_metric_command_args(
         "--prediction-filename",
         "hamiltonians_pred.h5",
         "--split",
-        "test",
+        split,
     ]
     if metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY:
         command.append("--no-fail-closed")
@@ -1248,20 +1375,21 @@ class Graph2MatDeepHBenchmarkRunner:
         destination_root: Path,
         *,
         dataset_root: Path,
+        split: str = "test",
     ) -> list[str]:
-        test_rows = [row for row in frozen_split.get("rows", []) if row.get("split") == "test"]
-        if not test_rows:
-            raise RuntimeError("Frozen split manifest has no test rows for prediction.")
+        selected_rows = [row for row in frozen_split.get("rows", []) if row.get("split") == split]
+        if not selected_rows:
+            raise RuntimeError(f"Frozen split manifest has no {split} rows for prediction.")
         if destination_root.exists():
             shutil.rmtree(destination_root)
         sample_ids: list[str] = []
-        for row in test_rows:
+        for row in selected_rows:
             sample_id = str(row.get("sample_id") or row.get("deeph_sample_id") or "").strip()
             sample_dir = Path(str(row.get("sample_dir") or ""))
             if not sample_id:
-                raise RuntimeError(f"Frozen split test row is missing sample_id: {row}")
+                raise RuntimeError(f"Frozen split {split} row is missing sample_id: {row}")
             if not sample_dir.exists():
-                raise RuntimeError(f"Frozen split test sample_dir does not exist: {sample_dir}")
+                raise RuntimeError(f"Frozen split {split} sample_dir does not exist: {sample_dir}")
             target = destination_root / sample_id
             target.mkdir(parents=True, exist_ok=True)
             for artifact in sorted(path for path in sample_dir.iterdir() if path.is_file()):
@@ -1389,7 +1517,8 @@ class Graph2MatDeepHBenchmarkRunner:
         run_root = self._benchmark_run_root(payload, run_id)
         graph2mat_root = run_root / "graph2mat"
         training_dir = graph2mat_root / "training"
-        prediction_structs_dir = graph2mat_root / "prediction_structures" / "test"
+        prediction_split = _metric_evaluation_split(payload)
+        prediction_structs_dir = graph2mat_root / "prediction_structures" / prediction_split
         config_path = graph2mat_root / "pipeline_config.yaml"
         graph2mat_config_path = training_dir / "config.yaml"
         graph2mat_manifest_path = graph2mat_root / "graph2mat_manifest.json"
@@ -1410,6 +1539,7 @@ class Graph2MatDeepHBenchmarkRunner:
             frozen_split,
             prediction_structs_dir,
             dataset_root=dataset_root,
+            split=prediction_split,
         )
         runs_json_path, runs_json_counts = self._write_graph2mat_runs_json(
             dataset_root=dataset_root,
@@ -1477,6 +1607,7 @@ class Graph2MatDeepHBenchmarkRunner:
             output_file="ML_prediction.HSX",
             test_sample_ids=test_sample_ids,
             split_hash=frozen_split.get("split_hash"),
+            prediction_split=prediction_split,
             dry_run=_parse_bool(payload.get("dry_run"), False),
         )
         acceleration = self._enforce_graph2mat_acceleration_policy(
@@ -2342,8 +2473,9 @@ class Graph2MatDeepHBenchmarkRunner:
         inference_work_dirs: list[Path] = []
         deeph_discovery = self._deeph_discovery(payload)
         python_interpreter = self._deeph_python(payload)
+        inference_split = _metric_evaluation_split(payload)
         for row in raw_mirror["rows"]:
-            if row.get("split") != "test":
+            if row.get("split") != inference_split:
                 continue
             raw_sample = Path(str(row["raw_dir"]))
             work_dir = paths.inference_dir / raw_sample.name
@@ -2381,6 +2513,7 @@ class Graph2MatDeepHBenchmarkRunner:
             split_audit_csv_path=paths.root / "deeph_split_audit.csv",
             split_hash=graph2mat_context.split_hash,
             raw_mirror=raw_mirror,
+            inference_split=inference_split,
             dry_run=_parse_bool(payload.get("dry_run"), False),
         )
         self._write_deeph_manifest(context, extra={"prepared": True})
@@ -2390,7 +2523,7 @@ class Graph2MatDeepHBenchmarkRunner:
         rows: list[dict[str, Any]] = []
         missing: list[str] = []
         for row in context.raw_mirror.get("rows", []):
-            if row.get("split") != "test":
+            if row.get("split") != context.inference_split:
                 continue
             raw_sample = Path(str(row["raw_dir"]))
             processed_sample = context.processed_dir / raw_sample.name
@@ -2414,7 +2547,7 @@ class Graph2MatDeepHBenchmarkRunner:
             )
         if missing:
             raise RuntimeError(
-                "Missing DeepH processed test samples before inference: "
+                f"Missing DeepH processed {context.inference_split} samples before inference: "
                 + ", ".join(missing[:10])
             )
         return {"count": len(rows), "rows": rows}
@@ -2635,11 +2768,13 @@ class Graph2MatDeepHBenchmarkRunner:
         frozen_split_manifest: dict[str, Any],
         output_dir: Path,
         dataset_root: Path,
+        split: str = "test",
     ) -> Path:
         if output_dir.exists():
             shutil.rmtree(output_dir)
+        split_root = dataset_root / "splits"
         for row in frozen_split_manifest.get("rows") or []:
-            if row.get("split") != "test":
+            if row.get("split") != split:
                 continue
             sample_id = str(row.get("sample_id") or row.get("graph2mat_sample_id") or row.get("deeph_sample_id") or "").strip()
             sample_dir = Path(str(row.get("sample_dir") or ""))
@@ -2650,7 +2785,6 @@ class Graph2MatDeepHBenchmarkRunner:
                 if artifact.name == "ML_prediction.HSX":
                     continue
                 _link_or_copy_file(artifact, output_dir / "siesta_hamiltonians" / sample_id / artifact.name)
-            split_root = dataset_root / "splits"
         if split_root.exists():
             target = output_dir / "splits"
             if target.exists():
@@ -2769,7 +2903,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 **(search_stage_record_fields() if final_mode else {}),
             },
         )
-        if final_mode:
+        run_validation_metrics = final_mode and _search_validation_metrics_requested(child)
+        if final_mode and not run_validation_metrics:
             telemetry = self._write_run_cost_telemetry(
                 model="graph2mat",
                 run_root=context.run_root,
@@ -2807,6 +2942,11 @@ class Graph2MatDeepHBenchmarkRunner:
                 }
             )
             return result
+        if run_validation_metrics:
+            self._logs.append(
+                f"[G2M-DEEPH] Graph2Mat sweep {record['config_id']}: "
+                "evaluating validation-only spectral/DOS metrics; test split remains locked.\n"
+            )
         predict_run = self._run_command(
             [self._graph2mat_python(child), str(DEFAULT_MD_PREDICTION_SCRIPT)],
             cwd=REPO_ROOT,
@@ -2826,6 +2966,7 @@ class Graph2MatDeepHBenchmarkRunner:
             prediction_structs_dir=context.prediction_structs_dir,
             output_dir=metrics_root / "eval_input",
             dataset_root=context.dataset_root,
+            split=context.prediction_split,
         )
         metrics_run = self._run_command(
             [
@@ -2853,6 +2994,7 @@ class Graph2MatDeepHBenchmarkRunner:
             payload=child,
             optimizer_accounting=optimizer_accounting,
         )
+        validation_metrics = _extract_validation_metrics(staged.result_dir / "metrics") if run_validation_metrics else {}
         self._write_graph2mat_manifest(
             context,
             checkpoint_manifest=checkpoint_manifest,
@@ -2864,6 +3006,8 @@ class Graph2MatDeepHBenchmarkRunner:
                                 "telemetry": telemetry,
                                 "early_stopping": early_stopping_metadata,
                                 "optimizer_update_accounting": optimizer_accounting,
+                                "validation_metrics": validation_metrics,
+                                **(search_stage_record_fields() if final_mode else {}),
                             },
                         )
         result.update(
@@ -2876,6 +3020,10 @@ class Graph2MatDeepHBenchmarkRunner:
                 "telemetry_path": telemetry["telemetry_path"],
                 "early_stopping": early_stopping_metadata,
                 "optimizer_update_accounting": optimizer_accounting,
+                "metric_split": context.prediction_split,
+                "validation_metrics": validation_metrics,
+                "validation_metrics_path": str(staged.result_dir / "metrics" / "manifest.json"),
+                **(search_stage_record_fields() if final_mode else {}),
             }
         )
         return result
@@ -2941,7 +3089,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 **(search_stage_record_fields() if final_mode else {}),
             },
         )
-        if final_mode:
+        run_validation_metrics = final_mode and _search_validation_metrics_requested(child)
+        if final_mode and not run_validation_metrics:
             telemetry = self._write_run_cost_telemetry(
                 model="deeph",
                 run_root=graph_context.run_root,
@@ -2979,6 +3128,11 @@ class Graph2MatDeepHBenchmarkRunner:
                 }
             )
             return result
+        if run_validation_metrics:
+            self._logs.append(
+                f"[G2M-DEEPH] DeepH sweep {record['config_id']}: "
+                "evaluating validation-only spectral/DOS metrics; test split remains locked.\n"
+            )
         staged_inputs = self._stage_deeph_inference_inputs(deeph_context)
         inference_runs: list[dict[str, Any]] = []
         for inference_config in deeph_context.inference_configs:
@@ -3003,12 +3157,14 @@ class Graph2MatDeepHBenchmarkRunner:
             frozen_split_manifest=_load_json(graph_context.frozen_split_manifest_path),
             output_dir=metrics_root / "reference_input",
             dataset_root=graph_context.dataset_root,
+            split=deeph_context.inference_split,
         )
         staged_deeph = stage_deeph_metric_inputs(
             raw_mirror=deeph_context.raw_mirror,
             processed_dir=deeph_context.processed_dir,
             inference_dir=deeph_context.inference_dir,
             output_dir=metrics_root / "deeph_inputs",
+            split=deeph_context.inference_split,
         )
         deeph_metric_command = _deeph_metric_command_args(
             python_executable=self._graph2mat_python(child),
@@ -3017,6 +3173,7 @@ class Graph2MatDeepHBenchmarkRunner:
             predictions_dir=staged_deeph.predictions_dir,
             output_dir=metrics_root / "eval",
             metric_fail_policy=metric_fail_policy,
+            split=deeph_context.inference_split,
         )
         metrics_run = self._run_command(
             deeph_metric_command,
@@ -3036,6 +3193,7 @@ class Graph2MatDeepHBenchmarkRunner:
             deeph_save_dir=deeph_context.save_dir,
             payload=child,
         )
+        validation_metrics = _extract_validation_metrics(metrics_root / "eval" / "metrics") if run_validation_metrics else {}
         self._write_deeph_manifest(
             deeph_context,
             preprocess_run=preprocess_run,
@@ -3049,6 +3207,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 "sweep_record": record,
                 "telemetry": telemetry,
                 "early_stopping": early_stopping_metadata,
+                "validation_metrics": validation_metrics,
+                **(search_stage_record_fields() if final_mode else {}),
             },
         )
         result.update(
@@ -3061,6 +3221,10 @@ class Graph2MatDeepHBenchmarkRunner:
                 "telemetry": telemetry,
                 "telemetry_path": telemetry["telemetry_path"],
                 "early_stopping": early_stopping_metadata,
+                "metric_split": deeph_context.inference_split,
+                "validation_metrics": validation_metrics,
+                "validation_metrics_path": str(metrics_root / "eval" / "metrics" / "manifest.json"),
+                **(search_stage_record_fields() if final_mode else {}),
             }
         )
         return result
@@ -3753,7 +3917,16 @@ class Graph2MatDeepHBenchmarkRunner:
         payload = dict(payload or {})
         dataset_mode = str(payload.get("dataset_mode") or "reuse_validated").strip() or "reuse_validated"
         run_mode = str(payload.get("run_mode") or "").strip()
-        training_sweep_requested = _parse_bool((payload.get("training_sweep") or {}).get("enabled"), False) if isinstance(payload.get("training_sweep"), dict) else False
+        precomputed_training_sweep_plan = payload.get("_training_sweep_plan")
+        precomputed_training_sweep_requested = (
+            isinstance(precomputed_training_sweep_plan, dict)
+            and _parse_bool(precomputed_training_sweep_plan.get("enabled"), False)
+        )
+        training_sweep_requested = (
+            _parse_bool((payload.get("training_sweep") or {}).get("enabled"), False)
+            if isinstance(payload.get("training_sweep"), dict)
+            else False
+        ) or precomputed_training_sweep_requested
         dataset_sweep_info = self.dataset_sweep_info_from_payload(payload)
         full_strict_pipeline = run_mode == FULL_STRICT_PIPELINE_RUN_MODE or dataset_mode == FULL_STRICT_PIPELINE_RUN_MODE
         generate_datasets_only = (
@@ -3819,10 +3992,13 @@ class Graph2MatDeepHBenchmarkRunner:
         if training_sweep_requested and allow_repair:
             raise RuntimeError("training_sweep cannot run in repair mode.")
         if training_sweep_requested and not full_strict_pipeline:
-            payload["_training_sweep_plan"] = expand_training_sweep(
-                payload.get("training_sweep"),
-                datasets=self._training_sweep_datasets(validation),
-            )
+            if precomputed_training_sweep_requested:
+                payload["_training_sweep_plan"] = precomputed_training_sweep_plan
+            else:
+                payload["_training_sweep_plan"] = expand_training_sweep(
+                    payload.get("training_sweep"),
+                    datasets=self._training_sweep_datasets(validation),
+                )
 
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -4152,6 +4328,8 @@ class Graph2MatDeepHBenchmarkRunner:
             return
         if elapsed < 0:
             return
+        if elapsed == 0 and str(status).lower() != "running":
+            return
         try:
             size_value = int(dataset_size) if dataset_size is not None else None
         except (TypeError, ValueError):
@@ -4283,6 +4461,7 @@ class Graph2MatDeepHBenchmarkRunner:
         if not DEFAULT_OUTPUT_ROOT.exists():
             return {"timing_scaling_rows": [], "metric_scaling_rows": []}
         for run_root in sorted(path for path in DEFAULT_OUTPUT_ROOT.iterdir() if path.is_dir()):
+            metric_scaling_rows.extend(live_metric_scaling_rows(run_root))
             dataset_sweep = self._optional_json(str(run_root / "summary" / "dataset_sweep_summary.json"))
             size_map = self._dataset_sweep_size_map(dataset_sweep)
             for row in dataset_sweep.get("rows") or []:

@@ -290,12 +290,13 @@ def stage_graph2mat_metric_result(
     prediction_structs_dir: Path,
     output_dir: Path,
     dataset_root: Path | None = None,
+    split: str = "test",
 ) -> StagedGraph2MatMetrics:
     validate_no_forbidden_references(frozen_split_manifest)
     if output_dir.exists():
         shutil.rmtree(output_dir)
     sample_ids: list[str] = []
-    for row in split_rows(frozen_split_manifest, "test"):
+    for row in split_rows(frozen_split_manifest, split):
         sample_id = row_sample_id(row)
         sample_dir = Path(str(row.get("sample_dir") or ""))
         if not sample_dir.exists():
@@ -329,6 +330,7 @@ def stage_deeph_metric_inputs(
     processed_dir: Path,
     inference_dir: Path,
     output_dir: Path,
+    split: str = "test",
 ) -> StagedDeepHMetrics:
     if output_dir.exists():
         shutil.rmtree(output_dir)
@@ -336,7 +338,7 @@ def stage_deeph_metric_inputs(
     staged_predictions = output_dir / "predictions"
     sample_ids: list[str] = []
     for row in raw_mirror.get("rows") or []:
-        if row.get("split") != "test":
+        if row.get("split") != split:
             continue
         sample_id = str(row.get("sample_id") or "").strip()
         if not sample_id:
