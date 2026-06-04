@@ -198,6 +198,97 @@ class DeepHRawGlobalEquivalencePreflightNumericTests(unittest.TestCase):
         self.assertFalse(result.diagnostic_only)
         self.assertTrue(result.metric_fields()["deeph_raw_global_equivalence_proven"])
 
+    def test_siesta_orbital_mapping_signs_and_energy_shift_pass(self) -> None:
+        assert np is not None
+        shift_eV = 2.5
+        raw_h = np.asarray(
+            [
+                [1.2, 0.4, -0.3, 0.2],
+                [0.4, -0.7, 0.5, -0.6],
+                [-0.3, 0.5, 0.9, 0.1],
+                [0.2, -0.6, 0.1, -1.1],
+            ],
+            dtype=float,
+        )
+        raw_s = np.asarray(
+            [
+                [1.0, 0.03, -0.02, 0.04],
+                [0.03, 1.1, 0.05, -0.01],
+                [-0.02, 0.05, 0.9, 0.02],
+                [0.04, -0.01, 0.02, 1.2],
+            ],
+            dtype=float,
+        )
+
+        def raw_reference(_reference_path, _kpoint):
+            return {
+                "hamiltonian": raw_h,
+                "overlap": raw_s,
+                "spin": "",
+                "orthogonal": False,
+            }
+
+        preflight.raw_reference_matrices = raw_reference  # type: ignore[assignment]
+        orb_indx = self.sample / "graphene.ORB_INDX"
+        orb_indx.write_text(
+            "\n".join(
+                [
+                    "1 1 1 C 1 0 0 0 0 0 s 0.0 0 0 0 1",
+                    "2 1 1 C 1 0 1 -1 0 0 py 0.0 0 0 0 2",
+                    "3 1 1 C 1 0 1 0 0 0 pz 0.0 0 0 0 3",
+                    "4 1 1 C 1 0 1 1 0 0 px 0.0 0 0 0 4",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        write_json(
+            self.frozen,
+            {
+                "rows": [
+                    {
+                        "sample_id": "sample0",
+                        "split": "test",
+                        "sample_dir": str(self.sample),
+                        "artifact_paths": {
+                            "reference_hsx": str(self.reference),
+                            "run_fdf": str(self.run_fdf),
+                            "orb_indx": str(orb_indx),
+                        },
+                    }
+                ]
+            },
+        )
+        (self.processed / "orbital_types.dat").write_text("0 1\n", encoding="utf-8")
+        write_json(self.processed / "info.json", {"isspinful": False, "isorthogonal": False})
+
+        # SIESTA order is s,py,pz,px. DeepH processed blocks are s,px,py,pz.
+        # The processed Hamiltonian also uses an energy zero shifted by c*S.
+        permutation = [0, 2, 3, 1]
+        signs = np.asarray([1.0, -1.0, 1.0, -1.0])
+        converted_h = raw_h - shift_eV * raw_s
+        converted_s = raw_s
+        deeph_h = np.zeros_like(converted_h)
+        deeph_s = np.zeros_like(converted_s)
+        for siesta_i, deeph_i in enumerate(permutation):
+            for siesta_j, deeph_j in enumerate(permutation):
+                deeph_h[deeph_i, deeph_j] = signs[siesta_i] * converted_h[siesta_i, siesta_j] * signs[siesta_j]
+                deeph_s[deeph_i, deeph_j] = signs[siesta_i] * converted_s[siesta_i, siesta_j] * signs[siesta_j]
+        blocks = {"[0, 0, 0, 1, 1]": deeph_h}
+        write_h5(self.processed / "hamiltonians.h5", blocks)
+        write_h5(self.processed / "overlaps.h5", {"[0, 0, 0, 1, 1]": deeph_s})
+        write_h5(self.predictions / "hamiltonians_pred.h5", blocks)
+
+        manifest = self.run_preflight()
+        evidence = json.loads((self.predictions / "raw_global_equivalence_evidence.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["status"], "proven")
+        self.assertEqual(evidence["equivalence_status"], "proven")
+        self.assertEqual(evidence["basis_transform"]["status"], "applied")
+        self.assertEqual(evidence["basis_transform"]["permutation"], permutation)
+        self.assertEqual(evidence["basis_transform"]["signs"], signs.tolist())
+        self.assertAlmostEqual(evidence["energy_reference_alignment"]["shift_eV"], shift_eV, places=12)
+
     def test_shape_mismatch_fails(self) -> None:
         self.write_processed(shape_mismatch=True)
 

@@ -1,0 +1,244 @@
+{
+  "protocol_id": "g2m_deeph_iid300_deeph_paper_probe_v1",
+  "version": "1.0",
+  "datasets": [
+    {
+      "dataset_id": "graphene_w90_phase1_iid300",
+      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300",
+      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/benchmark_dataset_manifest.json",
+      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/frozen_split_manifest.json",
+      "artifact_validation": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300/artifact_validation.json",
+      "compatibility_hash": "recorded_in_benchmark_dataset_manifest",
+      "role": "deeph_paper_like_probe"
+    }
+  ],
+  "reference_artifacts": {
+    "contract": "joint_graph2mat_deeph_artifact_contract_v1",
+    "required": [
+      "RUN.fdf",
+      "SystemLabel.TSHS",
+      "SystemLabel.TSDE",
+      "SystemLabel.HSX",
+      "SystemLabel.STRUCT_OUT",
+      "SystemLabel.XV",
+      "SystemLabel.ORB_INDX",
+      "metadata.json"
+    ],
+    "forbidden": [
+      "ML_prediction.HSX"
+    ],
+    "forbid_as_reference": "ML_prediction.HSX"
+  },
+  "models": {
+    "graph2mat": {
+      "enabled": true,
+      "search_space": {
+        "optim_lr": {
+          "value": 0.0012
+        },
+        "batch_size": {
+          "value": 32
+        },
+        "max_epochs": {
+          "value": 1
+        },
+        "hidden_irreps": {
+          "value": "48x0e + 48x1o + 48x2e + 48x3o"
+        },
+        "num_interactions": {
+          "value": 3
+        },
+        "correlation": {
+          "value": 3
+        },
+        "max_ell": {
+          "value": 3
+        },
+        "loss": {
+          "value": "graph2mat.metrics.block_type_huber"
+        },
+        "loss_kwargs": {
+          "value": {
+            "beta": 0.003
+          }
+        },
+        "readout": {
+          "value": "edge_node_mix"
+        }
+      }
+    },
+    "deeph": {
+      "enabled": true,
+      "search_space": {
+        "learning_rate": {
+          "value": 0.001
+        },
+        "batch_size": {
+          "value": 12
+        },
+        "epochs": {
+          "value": 120
+        },
+        "optimizer": {
+          "value": "adam"
+        },
+        "weight_decay": {
+          "value": 0.0
+        },
+        "criterion": {
+          "value": "MaskMSELoss"
+        },
+        "atom_fea_len": {
+          "value": 128
+        },
+        "edge_fea_len": {
+          "value": 128
+        },
+        "gauss_stop": {
+          "value": 6
+        },
+        "num_l": {
+          "value": 5
+        },
+        "if_edge_update": {
+          "value": true
+        },
+        "if_lcmp": {
+          "value": true
+        },
+        "normalization": {
+          "value": "LayerNorm"
+        },
+        "atom_update_net": {
+          "value": "CGConv"
+        },
+        "retain_edge_fea": {
+          "value": true
+        }
+      }
+    }
+  },
+  "selection": {
+    "split": "validation",
+    "metric": "val_spectral_composite",
+    "mode": "min",
+    "source": "validation_only"
+  },
+  "early_stopping": {
+    "metric": "val_loss",
+    "mode": "min",
+    "patience": 40,
+    "min_delta": 0.0,
+    "max_epochs": 120
+  },
+  "search_policy": {
+    "strategy": "manual",
+    "max_runs": 1,
+    "random_seed": 20260601
+  },
+  "budget_policy": {
+    "mode": "equal_n_trials",
+    "n_trials_per_model": 1
+  },
+  "search_evaluation": {
+    "run_validation_metrics": false,
+    "split": "validation",
+    "metric_family": "telemetry_probe_only",
+    "test_metrics_locked": true
+  },
+  "final_seeds": [
+    3001,
+    3002,
+    3003
+  ],
+  "top_k_selection": {
+    "k_per_model": 1,
+    "split": "validation",
+    "metric": "val_spectral_composite",
+    "uses_test_metrics": false,
+    "grouping": "model_dataset"
+  },
+  "final_evaluation": {
+    "primary_metric": "low_energy_rmse_eV",
+    "mode": "min",
+    "secondary_metrics": [
+      "fermi_window_rmse_eV",
+      "frontier_window_rmse_eV",
+      "global_rmse_eV",
+      "dos_wasserstein_eV",
+      "dos_mae_500_fermi_window",
+      "h_mae_eV"
+    ],
+    "practical_match": {
+      "relative_gap_max": 1.1,
+      "absolute_gap_meV_max": 3.0,
+      "requires_cost_noninferior": true
+    }
+  },
+  "final_test_policy": {
+    "policy": "locked_until_final",
+    "test_split": "test",
+    "locked_during_search": true,
+    "evaluate_once_after_selection": true
+  },
+  "required_telemetry": [
+    "wall_clock_seconds",
+    "gpu_hours",
+    "peak_gpu_memory_mb",
+    "samples_per_second",
+    "matrix_blocks_per_second",
+    "best_validation_epoch"
+  ],
+  "deeph_comparability": {
+    "adapter_equivalence_policy": "fail_closed_unless_proven",
+    "robust_winner_requires_proven_equivalence": true,
+    "diagnostic_if_unproven": true
+  },
+  "performance": {
+    "compute_accelerator": "gpu",
+    "max_parallel_graph2mat_training_jobs": 1,
+    "max_parallel_deeph_training_jobs": 1,
+    "torch_num_threads": 4,
+    "omp_num_threads": 4,
+    "openblas_num_threads": 4,
+    "mkl_num_threads": 4,
+    "numexpr_num_threads": 4
+  },
+  "manual_search_plan": {
+    "description": "Single DeepH paper-like GPU probe on iid300. Hyperparameters follow the graphene paper direction where possible: lr=1e-3, batch=12, Adam, LCMP enabled. Criterion is MaskMSELoss because this DeepH-pack hamiltonian target rejects plain MSELoss.",
+    "planned_runs": [
+      {
+        "config_id": "DH-PAPER-IID300-LR1E3-B12",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "notes": "Exploratory probe only: verifies CUDA path and rough runtime; not a final scientific comparison.",
+        "common": {
+          "seed": 2201
+        },
+        "overrides": {
+          "epochs": 120,
+          "learning_rate": 0.001,
+          "batch_size": 12,
+          "optimizer": "adam",
+          "weight_decay": 0.0,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 128,
+          "edge_fea_len": 128,
+          "gauss_stop": 6,
+          "num_l": 5,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 2201
+        }
+      }
+    ]
+  },
+  "claim_policy": {
+    "scientific_status": "exploratory_probe_only",
+    "not_for_final_claims": true,
+    "reason": "Runs one DeepH configuration only and skips validation spectral/DOS metrics to focus on CUDA/runtime validation."
+  }
+}

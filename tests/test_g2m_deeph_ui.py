@@ -48,6 +48,11 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-log",
             "g2m-deeph-log-bottom",
             "g2m-deeph-log-clear",
+            "g2m-deeph-plot-run-status",
+            "g2m-deeph-plot-run-list",
+            "g2m-deeph-plot-runs-default",
+            "g2m-deeph-plot-runs-all",
+            "g2m-deeph-plot-runs-clear",
             "g2m-deeph-plots",
         ):
             self.assertIn(f'id="{control_id}"', self.index_html)
@@ -101,6 +106,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "/api/g2m-deeph/datasets",
             "/api/g2m-deeph/logs",
             "/api/g2m-deeph/results",
+            "/api/g2m-deeph/plot-runs",
             "/api/g2m-deeph/plots",
         ):
             self.assertIn(endpoint, self.app_js)
@@ -117,14 +123,11 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("performance,", self.app_js)
         self.assertIn("max_parallel_graph2mat_training_jobs", self.app_js)
         self.assertIn("max_parallel_deeph_training_jobs", self.app_js)
-        self.assertIn("G2M_DEEPH_LIVE_METRICS_URL", self.app_js)
-        self.assertIn("/api/g2m-deeph/live-plots", self.app_js)
-        self.assertIn("maybeLoadG2MDeepHLiveMetrics", self.app_js)
-        self.assertIn("mergeG2MDeepHLivePlotPayload", self.app_js)
-        self.assertIn("G2M_DEEPH_LIVE_PLOT_REFRESH_MS", self.app_js)
+        self.assertIn("loadG2MDeepHPlotRuns", self.app_js)
+        self.assertIn("g2m-deeph-plot-run-checkbox", self.app_js)
+        self.assertIn("Completed Graph2Mat/DeepH metrics", self.app_js)
         self.assertIn("maybeRefreshG2MDeepHLivePlots", self.app_js)
         self.assertIn("g2mDeephPlotsInFlight", self.app_js)
-        self.assertIn("Live Graph2Mat/DeepH metrics", self.app_js)
         self.assertIn("graph2mat_log_every_n_steps", self.app_js)
         self.assertIn("graph2mat_check_val_every_n_epoch", self.app_js)
         self.assertIn("graph2mat_checkpoint_every_n_epochs", self.app_js)
@@ -229,6 +232,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn('label: "Snapshots", format: g2mDeephIntegerValue', self.app_js)
         self.assertIn('"triangle-up"', self.app_js)
         self.assertIn('"circle"', self.app_js)
+        self.assertIn("g2mDeepHPlotsQuery", self.app_js)
+        self.assertIn("plot-run-option", self.styles_css)
 
     def test_plotly_science_style_theme_is_applied_without_matplotlib(self) -> None:
         self.assertIn("SCIENCE_PLOT_FONT_FAMILY", self.app_js)

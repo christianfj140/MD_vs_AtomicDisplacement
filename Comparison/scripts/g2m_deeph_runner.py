@@ -7,6 +7,7 @@ import json
 import os
 import csv
 import hashlib
+import re
 import select
 import shutil
 import subprocess
@@ -54,7 +55,7 @@ from g2m_deeph_metrics import (  # noqa: E402
     stage_graph2mat_metric_result,
 )
 from g2m_deeph_rank_runs import rank_graph2mat_deeph_runs  # noqa: E402
-from g2m_deeph_live_metrics import dedupe_metric_rows, live_metric_scaling_rows  # noqa: E402
+from g2m_deeph_live_metrics import completed_metric_record, dedupe_metric_rows, live_metric_scaling_rows  # noqa: E402
 from g2m_deeph_telemetry import (  # noqa: E402
     GpuTelemetryMonitor,
     ProcResourceMonitor,
@@ -72,6 +73,7 @@ from g2m_deeph_early_stopping import (  # noqa: E402
 )
 from g2m_deeph_budget import BudgetTracker, write_budget_summary  # noqa: E402
 from g2m_deeph_test_blindness import (  # noqa: E402
+    ROBUST_VALIDATION_STAGE,
     SEARCH_STAGE,
     build_search_stage_manifest,
     is_final_benchmark_mode,
@@ -98,6 +100,8 @@ from dataset_recipe_helpers import (  # noqa: E402
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
 LOG_HEARTBEAT_SECONDS = 30.0
+EXTERNAL_FINAL_LOG_ROOT = REPO_ROOT / "Comparison" / "results" / "paper_ready_final_70_logs"
+EXTERNAL_FINAL_RUN_GLOB = "paper_ready_final70_*"
 DEFAULT_DATASETS_ROOT = REPO_ROOT / "Comparison" / "datasets"
 DEFAULT_DATASET_ROOT = DEFAULT_DATASETS_ROOT / "graphene_w90_joint"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "Comparison" / "results" / "graphene_w90_g2m_deeph_benchmark"
@@ -575,6 +579,114 @@ def _deeph_training_parallelism(payload: dict[str, Any]) -> int:
     return max(1, workers)
 
 
+def _mixed_model_training_batches(payload: dict[str, Any]) -> bool:
+    return _model_batch_schedule(payload) == "mixed"
+
+
+def _model_batch_schedule(payload: dict[str, Any]) -> str:
+    settings = _performance_settings_from_payload(payload)
+    training_sweep = payload.get("training_sweep") if isinstance(payload.get("training_sweep"), dict) else {}
+    raw = (
+        settings.get("model_batch_schedule")
+        or training_sweep.get("model_batch_schedule")
+        or payload.get("model_batch_schedule")
+    )
+    if raw not in (None, "", "null"):
+        schedule = str(raw).strip().lower()
+        if schedule not in {"contiguous", "mixed", "alternating"}:
+            raise RuntimeError("model_batch_schedule must be contiguous, mixed, or alternating.")
+        return schedule
+    mixed_raw = (
+        settings.get("mixed_model_training_batches")
+        if settings.get("mixed_model_training_batches") is not None
+        else training_sweep.get("mixed_model_training_batches")
+    )
+    if _parse_bool(mixed_raw, False):
+        return "mixed"
+    alternating_raw = (
+        settings.get("alternating_model_training_batches")
+        if settings.get("alternating_model_training_batches") is not None
+        else training_sweep.get("alternating_model_training_batches")
+    )
+    if _parse_bool(alternating_raw, False):
+        return "alternating"
+    return "contiguous"
+
+
+def _alternating_model_start(payload: dict[str, Any]) -> str:
+    settings = _performance_settings_from_payload(payload)
+    training_sweep = payload.get("training_sweep") if isinstance(payload.get("training_sweep"), dict) else {}
+    raw = (
+        settings.get("model_batch_start")
+        or settings.get("alternating_model_start")
+        or training_sweep.get("model_batch_start")
+        or training_sweep.get("alternating_model_start")
+        or payload.get("model_batch_start")
+        or payload.get("alternating_model_start")
+        or "graph2mat"
+    )
+    start = str(raw).strip().lower()
+    if start not in {"graph2mat", "deeph"}:
+        raise RuntimeError("model_batch_start must be graph2mat or deeph.")
+    return start
+
+
+def _alternating_model_batch_order(
+    records: list[dict[str, Any]],
+    *,
+    graph2mat_parallelism: int,
+    deeph_parallelism: int,
+    start_model: str = "graph2mat",
+) -> list[dict[str, Any]]:
+    """Order runs as same-model batches, alternating between G2M and DeepH."""
+
+    queues = {
+        "graph2mat": [record for record in records if record.get("model") == "graph2mat"],
+        "deeph": [record for record in records if record.get("model") == "deeph"],
+    }
+    other = [record for record in records if record.get("model") not in queues]
+    limits = {
+        "graph2mat": max(1, int(graph2mat_parallelism)),
+        "deeph": max(1, int(deeph_parallelism)),
+    }
+    model = start_model if start_model in queues else "graph2mat"
+    ordered: list[dict[str, Any]] = []
+    while queues["graph2mat"] or queues["deeph"]:
+        if not queues[model]:
+            model = "deeph" if model == "graph2mat" else "graph2mat"
+            if not queues[model]:
+                break
+        count = min(limits[model], len(queues[model]))
+        ordered.extend(queues[model][:count])
+        del queues[model][:count]
+        model = "deeph" if model == "graph2mat" else "graph2mat"
+    ordered.extend(other)
+    return ordered
+
+
+def _deeph_device_settings(payload: dict[str, Any], options: dict[str, Any]) -> tuple[bool, str]:
+    settings = _performance_settings_from_payload(payload)
+    accelerator = str(settings.get("compute_accelerator") or "").strip().lower()
+    default_disable_cuda = accelerator not in {"gpu", "cuda"}
+    disable_cuda = _parse_bool(options.get("disable_cuda"), default_disable_cuda)
+    device = str(options.get("device") or ("cpu" if disable_cuda else "cuda:0"))
+    return disable_cuda, device
+
+
+def _budget_accounting_fail_closed(payload: dict[str, Any], *, final_mode: bool) -> bool:
+    """Return true when incomplete cost telemetry must fail the sweep run."""
+
+    if final_mode:
+        return True
+    if payload.get("budget_accounting_fail_closed") is not None:
+        return _parse_bool(payload.get("budget_accounting_fail_closed"), False)
+    training_sweep = payload.get("training_sweep") if isinstance(payload.get("training_sweep"), dict) else {}
+    budget_policy = training_sweep.get("budget_policy") if isinstance(training_sweep.get("budget_policy"), dict) else {}
+    if budget_policy.get("fail_closed_on_missing_telemetry") is not None:
+        return _parse_bool(budget_policy.get("fail_closed_on_missing_telemetry"), False)
+    return False
+
+
 def _training_record_epochs(record: dict[str, Any]) -> Any:
     overrides = record.get("overrides") if isinstance(record.get("overrides"), dict) else {}
     common = record.get("common") if isinstance(record.get("common"), dict) else {}
@@ -764,6 +876,25 @@ def _bounded_log_payload(
     }
 
 
+def _process_table_lines_for_text(*needles: str) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,ppid,stat,etime,cmd"],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return []
+    lines = []
+    for line in result.stdout.splitlines():
+        if all(needle in line for needle in needles):
+            lines.append(line)
+    return lines
+
+
 def _manifest_path_status(dataset_root: Path) -> dict[str, Any]:
     paths = {
         "artifact_validation": dataset_root / "artifact_validation.json",
@@ -914,7 +1045,8 @@ def _metric_fail_policy_warning(policy: str) -> dict[str, str] | None:
 
 
 def _search_validation_metrics_requested(payload: dict[str, Any]) -> bool:
-    if protocol_stage_from_payload(payload) != SEARCH_STAGE:
+    stage = protocol_stage_from_payload(payload)
+    if stage not in {SEARCH_STAGE, ROBUST_VALIDATION_STAGE}:
         return False
     raw = payload.get("search_validation_metrics")
     if raw is not None:
@@ -937,8 +1069,9 @@ def _metric_evaluation_split(payload: dict[str, Any]) -> str:
         split = str(raw).strip()
     if split not in {"train", "validation", "test"}:
         raise RuntimeError("metric_evaluation_split must be train, validation, or test.")
-    if protocol_stage_from_payload(payload) == SEARCH_STAGE and _search_validation_metrics_requested(payload) and split == "test":
-        raise RuntimeError("Search-stage metric evaluation cannot use the locked test split.")
+    stage = protocol_stage_from_payload(payload)
+    if stage in {SEARCH_STAGE, ROBUST_VALIDATION_STAGE} and _search_validation_metrics_requested(payload) and split == "test":
+        raise RuntimeError("Validation metric evaluation cannot use the locked test split.")
     return split
 
 
@@ -1106,6 +1239,11 @@ def _strict_dataset_validation_kwargs(
     snapshot_root: Path,
 ) -> dict[str, Any]:
     material_provenance = dataset_root / "material_provenance.json"
+    validation_profile = (
+        G2M_DEEPH_BENCHMARK_PROFILE
+        if _parse_bool(payload.get("strict_dataset_validation"), True)
+        else None
+    )
     return {
         "system_label": payload.get("system_label") or None,
         "require_tshs": _parse_bool(payload.get("require_tshs"), True),
@@ -1128,7 +1266,7 @@ def _strict_dataset_validation_kwargs(
         "siesta_input_paths": [Path(path) for path in payload.get("siesta_input_paths", [])]
         if isinstance(payload.get("siesta_input_paths"), list)
         else [dataset_root / "RUN.fdf", material_provenance],
-        "validation_profile": G2M_DEEPH_BENCHMARK_PROFILE,
+        "validation_profile": validation_profile,
     }
 
 
@@ -1146,6 +1284,95 @@ class Graph2MatDeepHBenchmarkRunner:
         self._phase_timings: list[dict[str, Any]] = []
         self._graph2mat_acceleration_cache: dict[str, dict[str, Any]] = {}
         self._graph2mat_acceleration_logged = False
+        self._external_final_log_offsets: dict[str, int] = {}
+        self._external_final_last_sync = 0.0
+        self._external_final_run_root: Path | None = None
+
+    def _external_final_process_lines(self) -> list[str]:
+        workflow_lines = _process_table_lines_for_text("paper_ready_final70")
+        script_lines = _process_table_lines_for_text("run_paper_ready_final_70.sh")
+        seen: set[str] = set()
+        lines: list[str] = []
+        for line in script_lines + workflow_lines:
+            if line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+        return lines
+
+    def _external_final_active(self) -> bool:
+        return bool(self._external_final_process_lines())
+
+    def _latest_external_final_run_root(self) -> Path | None:
+        candidates = sorted(
+            (REPO_ROOT / "Comparison" / "results").glob(f"g2m_deeph_*/runs/{EXTERNAL_FINAL_RUN_GLOB}"),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    def _sync_external_final_run_locked(self, *, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._external_final_last_sync < 5.0:
+            return
+        self._external_final_last_sync = now
+        process_lines = self._external_final_process_lines()
+        if not process_lines:
+            return
+        run_root = self._latest_external_final_run_root()
+        if run_root is not None:
+            self._external_final_run_root = run_root
+        if run_root is None:
+            self._logs.append(
+                "[G2M-DEEPH][external] Paper-ready final runner activo, esperando run root materializado.\n"
+            )
+            return
+        active_children = [
+            line for line in process_lines
+            if any(token in line for token in ("deeph-train", "deeph-preprocess", "run_md_training", "g2m_deeph_final_workflow"))
+        ]
+        self._logs.append(
+            "[G2M-DEEPH][external] Watching detached paper-ready final run: "
+            f"{run_root.name} | active_processes={len(active_children)} | "
+            f"root={run_root}\n"
+        )
+        for line in active_children[:20]:
+            self._logs.append(f"[G2M-DEEPH][external][ps] {line}\n")
+        recent_files = sorted(
+            [
+                path
+                for pattern in ("sweep/**/deeph/train/result.txt", "sweep/**/deeph/train/stderr.txt")
+                for path in run_root.glob(pattern)
+                if path.is_file()
+            ],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:12]
+        for path in sorted(recent_files):
+            key = str(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            start = self._external_final_log_offsets.get(key)
+            if start is None:
+                start = max(0, size - 4000)
+                if start > 0:
+                    self._logs.append(f"[G2M-DEEPH][external][tail] ... {path.relative_to(run_root)}\n")
+            if size <= start:
+                self._external_final_log_offsets[key] = size
+                continue
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(start)
+                    chunk = handle.read(min(size - start, 8000)).decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            self._external_final_log_offsets[key] = size
+            rel = path.relative_to(run_root)
+            for line in chunk.splitlines():
+                if line.strip():
+                    self._logs.append(f"[G2M-DEEPH][external][{rel}] {line}\n")
 
     def validate_dataset_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         dataset_root = _resolve_optional_repo_path(payload.get("dataset_root"), DEFAULT_DATASET_ROOT)
@@ -1175,6 +1402,11 @@ class Graph2MatDeepHBenchmarkRunner:
             snapshot_root=snapshot_root,
             max_snapshots=int(payload.get("max_invalid_snapshot_preview", 20) or 20),
         )
+        if not _parse_bool(payload.get("strict_dataset_validation"), True):
+            validation.setdefault("warnings", []).append(
+                "strict_dataset_validation=false: dataset provenance gates are exploratory-only; "
+                "do not use this run for robust scientific claims."
+            )
         if validation["benchmark_ready"] or snapshot_root != dataset_root or not dataset_root.exists():
             return validation
 
@@ -2431,8 +2663,7 @@ class Graph2MatDeepHBenchmarkRunner:
             options["epochs"] = early_stopping_policy.max_epochs
         batch_size = int(options.get("batch_size", 3) or 3)
         learning_rate = float(options.get("learning_rate", 0.001) or 0.001)
-        disable_cuda = _parse_bool(options.get("disable_cuda"), True)
-        device = str(options.get("device") or ("cpu" if disable_cuda else "cuda:0"))
+        disable_cuda, device = _deeph_device_settings(payload, options)
         multiprocessing = int(options.get("multiprocessing", 0) or 0)
         radius = float(options.get("radius", -1.0) or -1.0)
         num_threads = int(options.get("num_threads", -1) or -1)
@@ -3439,17 +3670,52 @@ class Graph2MatDeepHBenchmarkRunner:
         error_policy = str(plan.get("error_policy") or "continue_on_error")
         metric_fail_policy = _metric_fail_policy(payload)
         final_mode = is_final_benchmark_mode(payload)
+        budget_fail_closed = _budget_accounting_fail_closed(payload, final_mode=final_mode)
         protocol_stage = protocol_stage_from_payload(payload, default=SEARCH_STAGE if final_mode else "exploratory")
         run_root = Path(str(self._state.run_root or self._benchmark_run_root(payload, str(self._state.run_id))))
         resume_root, completed_by_key = self._load_resume_training_sweep(payload, run_root=run_root)
         budget_tracker = BudgetTracker(plan.get("budget_policy"))
-        budget_tracker.add_completed_many(list(completed_by_key.values()), source="resume_manifest")
+        budget_warnings: list[str] = []
+        graph2mat_parallelism = _graph2mat_training_parallelism(payload)
+        deeph_parallelism = _deeph_training_parallelism(payload)
+        model_batch_schedule = _model_batch_schedule(payload)
+        if model_batch_schedule == "alternating":
+            model_batch_start = _alternating_model_start(payload)
+            planned = _alternating_model_batch_order(
+                planned,
+                graph2mat_parallelism=graph2mat_parallelism,
+                deeph_parallelism=deeph_parallelism,
+                start_model=model_batch_start,
+            )
+            plan = {**plan, "planned_runs": planned, "planned_run_count": len(planned)}
+
+        def add_budget_completed(result: dict[str, Any], *, source: str = "completed") -> None:
+            try:
+                budget_tracker.add_completed(result, source=source)
+            except RuntimeError as exc:
+                if budget_fail_closed:
+                    raise
+                warning = str(exc)
+                budget_warnings.append(warning)
+                result["budget_accounting_status"] = "incomplete"
+                result["budget_accounting_warning"] = warning
+                warnings = result.setdefault("severe_warnings", [])
+                if isinstance(warnings, list) and warning not in warnings:
+                    warnings.append(warning)
+                self._logs.append(
+                    "[G2M-DEEPH][WARN] Budget accounting incomplete but non-final run "
+                    f"continues: {warning}\n"
+                )
+
+        for completed in completed_by_key.values():
+            add_budget_completed(completed, source="resume_manifest")
         summary: dict[str, Any] = {
             "schema": "graph2mat_deeph_training_sweep_v1",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "status": "running",
             "protocol_stage": protocol_stage,
             "final_benchmark_mode": final_mode,
+            "budget_accounting_fail_closed": budget_fail_closed,
             "final_test_locked": final_mode,
             "error_policy": error_policy,
             "metric_fail_policy": metric_fail_policy,
@@ -3463,6 +3729,7 @@ class Graph2MatDeepHBenchmarkRunner:
             "runs": list(completed_by_key.values()),
             "failed_runs": [],
             "skipped_runs": [],
+            "warnings": budget_warnings,
         }
         self._write_training_search_plan(run_root, plan)
         summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
@@ -3473,21 +3740,25 @@ class Graph2MatDeepHBenchmarkRunner:
                 "total": len(planned),
                 "completed": len(completed_by_key),
                 "failed": 0,
-                "graph2mat_parallelism": _graph2mat_training_parallelism(payload),
-                "deeph_parallelism": _deeph_training_parallelism(payload),
+                "graph2mat_parallelism": graph2mat_parallelism,
+                "deeph_parallelism": deeph_parallelism,
+                "model_batch_schedule": model_batch_schedule,
                 "active_model": None,
                 "active_dataset": None,
                 "active_config_id": None,
                 "active_runs": [],
+                "active_started_at": None,
             }
-        graph2mat_parallelism = _graph2mat_training_parallelism(payload)
-        deeph_parallelism = _deeph_training_parallelism(payload)
+        mixed_model_batches = model_batch_schedule == "mixed"
         summary["graph2mat_parallelism"] = graph2mat_parallelism
         summary["deeph_parallelism"] = deeph_parallelism
+        summary["model_batch_schedule"] = model_batch_schedule
+        summary["mixed_model_training_batches"] = mixed_model_batches
         self._logs.append(
             f"[G2M-DEEPH] Training sweep: {len(planned)} planned runs; "
             f"Graph2Mat parallel jobs={graph2mat_parallelism}; "
-            f"DeepH parallel jobs={deeph_parallelism}.\n"
+            f"DeepH parallel jobs={deeph_parallelism}; "
+            f"model batch schedule={model_batch_schedule}.\n"
         )
         if final_mode:
             self._logs.append(f"[G2M-DEEPH] {TEST_METRICS_LOCKED_MESSAGE}\n")
@@ -3501,13 +3772,15 @@ class Graph2MatDeepHBenchmarkRunner:
 
         def record_success(result: dict[str, Any]) -> None:
             if result.get("status") == "completed":
-                budget_tracker.add_completed(result)
+                add_budget_completed(result)
             else:
                 budget_tracker.release(result)
             summary["runs"].append(result)
+            summary["warnings"] = list(dict.fromkeys(budget_warnings))
             summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
             with self._lock:
                 self._state.training_sweep_status["completed"] += 1
+            self._write_training_sweep_summary(run_root, summary)
 
         def record_failure(record: dict[str, Any], exc: Exception) -> None:
             budget_tracker.release(record)
@@ -3527,6 +3800,7 @@ class Graph2MatDeepHBenchmarkRunner:
             with self._lock:
                 self._state.training_sweep_status["failed"] += 1
             self._logs.append(f"[G2M-DEEPH][WARN] Training sweep run failed: {record.get('config_id')}: {exc}\n")
+            self._write_training_sweep_summary(run_root, summary)
 
         def record_budget_skip(record: dict[str, Any]) -> None:
             skipped = budget_tracker.skip_for_budget(record)
@@ -3557,6 +3831,86 @@ class Graph2MatDeepHBenchmarkRunner:
                 index += 1
                 self._write_training_sweep_summary(run_root, summary)
                 continue
+            if mixed_model_batches and (graph2mat_parallelism > 1 or deeph_parallelism > 1):
+                batch: list[dict[str, Any]] = []
+                counts = {"graph2mat": 0, "deeph": 0}
+                limits = {"graph2mat": graph2mat_parallelism, "deeph": deeph_parallelism}
+                while index < len(planned):
+                    candidate = planned[index]
+                    candidate_key = "|".join(_training_record_key(candidate))
+                    model = str(candidate.get("model") or "")
+                    if model not in limits:
+                        break
+                    if candidate_key in completed_by_key:
+                        self._logs.append(
+                            f"[G2M-DEEPH] Skipping completed run from resume manifest: "
+                            f"{candidate.get('dataset_id')} {candidate.get('config_id')}\n"
+                        )
+                        index += 1
+                        continue
+                    if counts[model] >= limits[model]:
+                        break
+                    if not budget_tracker.can_schedule(candidate):
+                        record_budget_skip(candidate)
+                        index += 1
+                        continue
+                    budget_tracker.reserve(candidate)
+                    batch.append(candidate)
+                    counts[model] += 1
+                    index += 1
+                    if counts["graph2mat"] >= graph2mat_parallelism and counts["deeph"] >= deeph_parallelism:
+                        break
+                if not batch:
+                    continue
+                with self._lock:
+                    active_started_at = time.time()
+                    self._state.training_sweep_status.update(
+                        {
+                            "active_model": "mixed_parallel" if len(batch) > 1 else batch[0].get("model"),
+                            "active_dataset": ",".join(str(item.get("dataset_id")) for item in batch),
+                            "active_config_id": ",".join(str(item.get("config_id")) for item in batch),
+                            "active_started_at": active_started_at,
+                            "active_runs": [
+                                {
+                                    "model": item.get("model"),
+                                    "dataset_id": item.get("dataset_id"),
+                                    "config_id": item.get("config_id"),
+                                }
+                                for item in batch
+                            ],
+                        }
+                    )
+                self._logs.append(
+                    "[G2M-DEEPH][PERF] Running mixed Graph2Mat/DeepH sweep batch: "
+                    + ", ".join(f"{item.get('model')}:{item.get('config_id')}" for item in batch)
+                    + "\n"
+                )
+                first_error: Exception | None = None
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(batch),
+                    thread_name_prefix="g2m-deeph-mixed",
+                ) as executor:
+                    futures = {}
+                    for item in batch:
+                        if item.get("model") == "graph2mat":
+                            future = executor.submit(self._run_training_sweep_graph2mat_job, payload, validation, item)
+                        elif item.get("model") == "deeph":
+                            future = executor.submit(self._run_training_sweep_deeph_job, payload, validation, item)
+                        else:
+                            raise RuntimeError(f"Unsupported training sweep model: {item.get('model')}")
+                        futures[future] = item
+                    for future in concurrent.futures.as_completed(futures):
+                        item = futures[future]
+                        try:
+                            record_success(future.result())
+                        except Exception as exc:
+                            record_failure(item, exc)
+                            if first_error is None:
+                                first_error = exc
+                self._write_training_sweep_summary(run_root, summary)
+                if first_error is not None and error_policy == "fail_fast":
+                    raise first_error
+                continue
             if record.get("model") == "graph2mat" and graph2mat_parallelism > 1:
                 batch: list[dict[str, Any]] = []
                 while index < len(planned) and len(batch) < graph2mat_parallelism:
@@ -3574,11 +3928,13 @@ class Graph2MatDeepHBenchmarkRunner:
                 if not batch:
                     continue
                 with self._lock:
+                    active_started_at = time.time()
                     self._state.training_sweep_status.update(
                         {
                             "active_model": "graph2mat_parallel" if len(batch) > 1 else "graph2mat",
                             "active_dataset": ",".join(str(item.get("dataset_id")) for item in batch),
                             "active_config_id": ",".join(str(item.get("config_id")) for item in batch),
+                            "active_started_at": active_started_at,
                             "active_runs": [
                                 {
                                     "model": item.get("model"),
@@ -3632,11 +3988,13 @@ class Graph2MatDeepHBenchmarkRunner:
                 if not batch:
                     continue
                 with self._lock:
+                    active_started_at = time.time()
                     self._state.training_sweep_status.update(
                         {
                             "active_model": "deeph_parallel" if len(batch) > 1 else "deeph",
                             "active_dataset": ",".join(str(item.get("dataset_id")) for item in batch),
                             "active_config_id": ",".join(str(item.get("config_id")) for item in batch),
+                            "active_started_at": active_started_at,
                             "active_runs": [
                                 {
                                     "model": item.get("model"),
@@ -3675,11 +4033,13 @@ class Graph2MatDeepHBenchmarkRunner:
                 continue
             index += 1
             with self._lock:
+                active_started_at = time.time()
                 self._state.training_sweep_status.update(
                     {
                         "active_model": record.get("model"),
                         "active_dataset": record.get("dataset_id"),
                         "active_config_id": record.get("config_id"),
+                        "active_started_at": active_started_at,
                         "active_runs": [
                             {
                                 "model": record.get("model"),
@@ -3712,6 +4072,7 @@ class Graph2MatDeepHBenchmarkRunner:
                         "active_dataset": None,
                         "active_config_id": None,
                         "active_runs": [],
+                        "active_started_at": None,
                         "status": "stopped",
                     }
                 )
@@ -3777,6 +4138,7 @@ class Graph2MatDeepHBenchmarkRunner:
                         "active_dataset": None,
                         "active_config_id": None,
                         "active_runs": [],
+                        "active_started_at": None,
                         "status": summary["status"],
                         "protocol_stage": SEARCH_STAGE,
                         "final_test_locked": True,
@@ -3815,6 +4177,7 @@ class Graph2MatDeepHBenchmarkRunner:
                     "active_dataset": None,
                     "active_config_id": None,
                     "active_runs": [],
+                    "active_started_at": None,
                     "status": summary["status"],
                 }
             )
@@ -4083,11 +4446,73 @@ class Graph2MatDeepHBenchmarkRunner:
     def status(self) -> dict[str, Any]:
         with self._lock:
             running = self._thread is not None and self._thread.is_alive()
+            external_running = False
+            external_run_root = None
+            if not running and self._external_final_active():
+                self._sync_external_final_run_locked()
+                external_running = True
+                external_run_root = self._external_final_run_root
             self._state.running = running
             elapsed = None
             if self._state.started_at is not None:
-                end = time.time() if running else self._state.finished_at or time.time()
+                end = time.time() if running or external_running else self._state.finished_at or time.time()
                 elapsed = end - self._state.started_at
+            if external_running:
+                status_files = sorted(
+                    path
+                    for path in EXTERNAL_FINAL_LOG_ROOT.glob("paper_ready_final_70_*.status")
+                    if ".postprocess." not in path.name and ".winner_selection." not in path.name
+                )
+                started_at = self._state.started_at
+                status_values: dict[str, str] = {}
+                if status_files:
+                    try:
+                        status_file = status_files[-1]
+                        started_at = status_file.stat().st_mtime
+                        for line in status_file.read_text(encoding="utf-8").splitlines():
+                            if "=" in line:
+                                key, value = line.split("=", 1)
+                                status_values[key.strip()] = value.strip()
+                    except OSError:
+                        started_at = self._state.started_at
+                graph2mat_parallelism = int(status_values.get("graph2mat_parallelism") or 8)
+                deeph_parallelism = int(status_values.get("deeph_parallelism") or 6)
+                return {
+                    "running": True,
+                    "stage": "external_paper_ready_final",
+                    "returncode": None,
+                    "started_at": started_at,
+                    "finished_at": None,
+                    "elapsed_seconds": None if started_at is None else time.time() - float(started_at),
+                    "stop_requested": False,
+                    "error": None,
+                    "warnings": [
+                        "attached_to_detached_paper_ready_final_run: stop desde UI no matara este proceso externo"
+                    ],
+                    "run_id": external_run_root.name if external_run_root is not None else "paper_ready_final70_external",
+                    "dataset_root": self._state.dataset_root,
+                    "run_root": str(external_run_root) if external_run_root is not None else "",
+                    "graph2mat_config_path": self._state.graph2mat_config_path,
+                    "graph2mat_training_dir": self._state.graph2mat_training_dir,
+                    "deeph_manifest_path": self._state.deeph_manifest_path,
+                    "deeph_processed_dir": self._state.deeph_processed_dir,
+                    "deeph_save_dir": self._state.deeph_save_dir,
+                    "benchmark_manifest_path": self._state.benchmark_manifest_path,
+                    "frozen_split_manifest_path": self._state.frozen_split_manifest_path,
+                    "contract_name": CONTRACT_NAME,
+                    "phases": list(RUNNER_PHASES),
+                    "log_size": len(self._logs),
+                    "active_processes": len(self._external_final_process_lines()),
+                    "dataset_validation": self._dataset_validation,
+                    "training_sweep": {
+                        "enabled": True,
+                        "status": "external_running",
+                        "graph2mat_parallelism": graph2mat_parallelism,
+                        "deeph_parallelism": deeph_parallelism,
+                        "model_batch_schedule": status_values.get("model_batch_schedule", "alternating"),
+                        "model_batch_start": status_values.get("model_batch_start", "deeph"),
+                    },
+                }
             return {
                 "running": running,
                 "stage": self._state.stage,
@@ -4118,6 +4543,8 @@ class Graph2MatDeepHBenchmarkRunner:
 
     def logs(self, since: int = 0, limit: int | None = DEFAULT_LOG_RESPONSE_LIMIT) -> dict[str, Any]:
         with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._sync_external_final_run_locked()
             payload = _bounded_log_payload(self._logs, since=since, limit=limit)
             payload["status"] = self.status()
             return payload
@@ -4132,9 +4559,13 @@ class Graph2MatDeepHBenchmarkRunner:
                 "status": self.status(),
             }
 
-    def plots(self) -> dict[str, Any]:
+    def plots(self, selected_run_ids: set[str] | None = None) -> dict[str, Any]:
         with self._lock:
-            return self._build_plot_payload_locked()
+            return self._build_plot_payload_locked(selected_run_ids=selected_run_ids)
+
+    def plot_runs(self) -> dict[str, Any]:
+        with self._lock:
+            return self._plot_runs_payload_locked()
 
     def _optional_json(self, path_value: Any) -> dict[str, Any]:
         if not path_value:
@@ -4321,6 +4752,8 @@ class Graph2MatDeepHBenchmarkRunner:
         epochs: Any = None,
         epoch_label: str = "",
         status: str = "available",
+        run_id: str = "",
+        run_root: str = "",
     ) -> None:
         try:
             elapsed = float(elapsed_seconds)
@@ -4351,6 +4784,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 "seconds_per_snapshot": elapsed / size_value if size_value else None,
                 "source": source,
                 "status": status,
+                "run_id": run_id,
+                "run_root": run_root,
             }
         )
 
@@ -4452,16 +4887,298 @@ class Graph2MatDeepHBenchmarkRunner:
                         "scientific_status": source_row.get("scientific_status") or "",
                         "diagnostic_only": bool(source_row.get("diagnostic_only")),
                         "source": "ranking_normalized_run_metrics",
+                        "run_root": str(run_root),
                     }
                 )
 
-    def _archive_plot_rows_locked(self) -> dict[str, list[dict[str, Any]]]:
+    def _append_training_telemetry_metric_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        run_root: Path,
+        record: dict[str, Any],
+        dataset_size: int | None,
+        source: str,
+    ) -> None:
+        try:
+            size_value = int(dataset_size) if dataset_size is not None else None
+        except (TypeError, ValueError):
+            size_value = None
+        if size_value is None or size_value <= 0:
+            return
+        telemetry = record.get("telemetry") if isinstance(record.get("telemetry"), dict) else {}
+        common = record.get("common") if isinstance(record.get("common"), dict) else {}
+        metric_values = {
+            "validation_metric_value": record.get("validation_metric_value"),
+            "gpu_hours_total": telemetry.get("gpu_hours_total"),
+            "peak_gpu_memory_mb": telemetry.get("peak_gpu_memory_mb"),
+            "peak_rss_mb": telemetry.get("peak_rss_mb"),
+            "cpu_time_seconds_total": telemetry.get("cpu_time_seconds_total"),
+            "samples_per_second": telemetry.get("samples_per_second"),
+        }
+        for metric_key, raw_value in metric_values.items():
+            try:
+                metric_value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(metric_value):
+                continue
+            rows.append(
+                {
+                    "run_id": run_root.name,
+                    "dataset_id": str(record.get("dataset_id") or ""),
+                    "dataset_root": str(record.get("dataset_root") or ""),
+                    "dataset_size": size_value,
+                    "method": str(record.get("model") or ""),
+                    "config_id": str(record.get("config_id") or ""),
+                    "selected_config_id": str(record.get("selected_config_id") or ""),
+                    "config_hash": str(record.get("config_hash") or ""),
+                    "seed": record.get("final_seed") or record.get("seed") or common.get("seed"),
+                    "epochs": _training_record_epochs(record),
+                    "epoch_label": _training_record_epoch_label(record),
+                    "metric_key": metric_key,
+                    "metric_value": metric_value,
+                    "metric_fail_policy": str(record.get("metric_fail_policy") or ""),
+                    "scientific_status": str(record.get("protocol_stage") or "training_stage"),
+                    "diagnostic_only": True,
+                    "source": source,
+                    "run_root": str(run_root),
+                }
+            )
+
+    def _discover_plot_run_roots_locked(self) -> list[Path]:
+        roots: dict[str, Path] = {}
+        patterns = (
+            "*/runs/*/sweep/training_sweep_manifest.json",
+            "*/runs/*/summary/ranking/normalized_run_metrics.json",
+            "*/runs/*/common_metrics/summary/common_summary.json",
+            "*/sweep/training_sweep_manifest.json",
+            "*/summary/ranking/normalized_run_metrics.json",
+            "*/common_metrics/summary/common_summary.json",
+            "metric_archives_by_run/*/core/sweep/training_sweep_manifest.json",
+            "metric_archives_by_run/*/core/summary/ranking/normalized_run_metrics.json",
+            "metric_archives_by_run/*/core/common_metrics/summary/common_summary.json",
+        )
+        search_roots = [
+            DEFAULT_OUTPUT_ROOT,
+            REPO_ROOT / "Comparison" / "results",
+        ]
+        if self._state.run_root:
+            run_root = Path(str(self._state.run_root))
+            roots[str(run_root.resolve())] = run_root
+        if self._external_final_active():
+            self._sync_external_final_run_locked()
+        if self._external_final_run_root is not None:
+            run_root = self._external_final_run_root
+            roots[str(run_root.resolve())] = run_root
+        for base in search_roots:
+            if not base.exists():
+                continue
+            for pattern in patterns:
+                for artifact in base.glob(pattern):
+                    if artifact.name == "training_sweep_manifest.json":
+                        run_root = artifact.parent.parent
+                    else:
+                        run_root = artifact.parents[2]
+                    roots[str(run_root.resolve())] = run_root
+        return sorted(roots.values(), key=lambda path: (path.stat().st_mtime if path.exists() else 0), reverse=True)
+
+    def _plot_run_entry_locked(self, run_root: Path) -> dict[str, Any]:
+        training_sweep = self._optional_json(str(run_root / "sweep" / "training_sweep_manifest.json"))
+        normalized = self._optional_json(str(run_root / "summary" / "ranking" / "normalized_run_metrics.json"))
+        common_summary = self._optional_json(str(run_root / "common_metrics" / "summary" / "common_summary.json"))
+        rows = training_sweep.get("runs") if isinstance(training_sweep.get("runs"), list) else []
+        planned = training_sweep.get("planned_runs") if isinstance(training_sweep.get("planned_runs"), list) else []
+        partial_records: list[dict[str, Any]] = []
+        row_keys = {
+            (
+                str(row.get("model") or ""),
+                str(row.get("dataset_id") or ""),
+                str(row.get("config_id") or ""),
+            )
+            for row in rows
+            if isinstance(row, dict)
+        }
+        partial_manifest_patterns = (
+            ("deeph", "sweep/deeph/*/*/deeph/deeph_manifest.json"),
+            ("graph2mat", "sweep/graph2mat/*/*/graph2mat/graph2mat_manifest.json"),
+        )
+        for default_model, pattern in partial_manifest_patterns:
+            for manifest_path in run_root.glob(pattern):
+                manifest = self._optional_json(str(manifest_path))
+                extra = manifest.get("extra") if isinstance(manifest.get("extra"), dict) else {}
+                record = extra.get("sweep_record") if isinstance(extra.get("sweep_record"), dict) else {}
+                if not record:
+                    continue
+                record = dict(record)
+                record.setdefault("model", default_model)
+                key = (
+                    str(record.get("model") or ""),
+                    str(record.get("dataset_id") or ""),
+                    str(record.get("config_id") or ""),
+                )
+                if key in row_keys:
+                    continue
+                training_run = (
+                    manifest.get("train_run")
+                    if isinstance(manifest.get("train_run"), dict)
+                    else extra.get("training_run")
+                    if isinstance(extra.get("training_run"), dict)
+                    else {}
+                )
+                if training_run.get("returncode") == 0:
+                    record["status"] = "completed"
+                    record["train_run"] = training_run
+                elif manifest_path.parent.joinpath("train", "result.txt").exists():
+                    record["status"] = "running"
+                partial_records.append(record)
+        dataset_ids = sorted(
+            {
+                str(row.get("dataset_id") or "")
+                for row in [*rows, *planned, *partial_records]
+                if isinstance(row, dict) and row.get("dataset_id")
+            }
+        )
+        models = sorted(
+            {
+                str(row.get("model") or "")
+                for row in [*rows, *planned, *partial_records]
+                if isinstance(row, dict) and row.get("model")
+            }
+        )
+        completed = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "completed") + sum(
+            1 for row in partial_records if isinstance(row, dict) and row.get("status") == "completed"
+        )
+        failed = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed") + sum(
+            1 for row in partial_records if isinstance(row, dict) and row.get("status") == "failed"
+        )
+        status = str(training_sweep.get("status") or common_summary.get("status") or normalized.get("status") or "")
+        live_deeph_result_files = list(run_root.glob("sweep/deeph/*/*/deeph/train/result.txt"))
+        if live_deeph_result_files and not status:
+            status = "running"
+        if live_deeph_result_files and "deeph" not in models:
+            models.append("deeph")
+        try:
+            modified_at = run_root.stat().st_mtime
+        except OSError:
+            modified_at = None
+        has_metric_rows = bool(normalized.get("rows") or common_summary.get("summary_rows")) or any(
+            completed_metric_record(row) for row in rows if isinstance(row, dict)
+        ) or any(
+            isinstance(row, dict)
+            and (
+                row.get("validation_metric_value") is not None
+                or isinstance(row.get("telemetry"), dict)
+            )
+            for row in rows
+        ) or bool(live_deeph_result_files)
+        return {
+            "id": hashlib.sha256(str(run_root.resolve()).encode("utf-8")).hexdigest()[:16],
+            "run_id": run_root.name,
+            "run_root": str(run_root),
+            "label": run_root.name,
+            "status": status,
+            "dataset_ids": dataset_ids,
+            "models": models,
+            "completed_runs": completed,
+            "failed_runs": failed,
+            "planned_runs": len(planned) or len(partial_records),
+            "has_training_sweep": bool(training_sweep),
+            "has_metric_rows": has_metric_rows,
+            "modified_at": modified_at,
+        }
+
+    def _append_live_deeph_training_loss_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        run_root: Path,
+    ) -> None:
+        number_pattern = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+        pattern = re.compile(
+            r"Epoch\s+#(?P<epoch>\d+).*?"
+            rf"Train loss:\s*(?P<train>{number_pattern}).*?"
+            rf"Val loss:\s*(?P<val>{number_pattern}).*?"
+            rf"Best val loss:\s*(?P<best>{number_pattern})"
+        )
+        for result_path in run_root.glob("sweep/deeph/*/*/deeph/train/result.txt"):
+            try:
+                text = result_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            matches = list(pattern.finditer(text))
+            if not matches:
+                continue
+            match = matches[-1]
+            manifest = self._optional_json(str(result_path.parents[1] / "deeph_manifest.json"))
+            extra = manifest.get("extra") if isinstance(manifest.get("extra"), dict) else {}
+            record = extra.get("sweep_record") if isinstance(extra.get("sweep_record"), dict) else {}
+            context = manifest.get("context") if isinstance(manifest.get("context"), dict) else {}
+            dataset_root = str(record.get("dataset_root") or context.get("dataset_root") or "")
+            dataset_size = self._dataset_size_from_root(dataset_root)
+            if dataset_size is None or dataset_size <= 0:
+                continue
+            metric_values = {
+                "deeph_live_train_loss": match.group("train"),
+                "deeph_live_val_loss": match.group("val"),
+                "deeph_live_best_val_loss": match.group("best"),
+            }
+            for key, raw_value in metric_values.items():
+                try:
+                    metric_value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(metric_value):
+                    continue
+                rows.append(
+                    {
+                        "run_id": run_root.name,
+                        "dataset_id": str(record.get("dataset_id") or ""),
+                        "dataset_root": dataset_root,
+                        "dataset_size": int(dataset_size),
+                        "method": "deeph",
+                        "config_id": str(record.get("config_id") or result_path.parents[2].name),
+                        "selected_config_id": str(record.get("selected_config_id") or ""),
+                        "config_hash": str(record.get("config_hash") or ""),
+                        "seed": record.get("final_seed") or record.get("seed") or (record.get("common") or {}).get("seed"),
+                        "epochs": int(match.group("epoch")),
+                        "epoch_label": f"epoch {match.group('epoch')}",
+                        "metric_key": key,
+                        "metric_value": metric_value,
+                        "scientific_status": "live_training_diagnostic",
+                        "diagnostic_only": True,
+                        "source": "deeph_live_result_txt",
+                        "run_root": str(run_root),
+                    }
+                )
+
+    def _plot_runs_payload_locked(self) -> dict[str, Any]:
+        runs = [self._plot_run_entry_locked(run_root) for run_root in self._discover_plot_run_roots_locked()]
+        return {
+            "schema": "graph2mat_deeph_plot_runs_v1",
+            "runs": runs,
+            "default_selected_run_ids": [],
+        }
+
+    def _archive_plot_rows_locked(self, selected_run_ids: set[str] | None = None) -> dict[str, list[dict[str, Any]]]:
         timing_scaling_rows: list[dict[str, Any]] = []
         metric_scaling_rows: list[dict[str, Any]] = []
-        if not DEFAULT_OUTPUT_ROOT.exists():
-            return {"timing_scaling_rows": [], "metric_scaling_rows": []}
-        for run_root in sorted(path for path in DEFAULT_OUTPUT_ROOT.iterdir() if path.is_dir()):
-            metric_scaling_rows.extend(live_metric_scaling_rows(run_root))
+        if selected_run_ids is not None and not selected_run_ids:
+            return {
+                "timing_scaling_rows": timing_scaling_rows,
+                "metric_scaling_rows": metric_scaling_rows,
+            }
+        for run_root in self._discover_plot_run_roots_locked():
+            entry = self._plot_run_entry_locked(run_root)
+            if selected_run_ids is not None and entry["id"] not in selected_run_ids:
+                continue
+            run_id = run_root.name
+            for metric_row in live_metric_scaling_rows(run_root):
+                enriched_metric_row = dict(metric_row)
+                enriched_metric_row.setdefault("run_id", run_id)
+                enriched_metric_row.setdefault("run_root", str(run_root))
+                metric_scaling_rows.append(enriched_metric_row)
+            self._append_live_deeph_training_loss_rows(metric_scaling_rows, run_root=run_root)
             dataset_sweep = self._optional_json(str(run_root / "summary" / "dataset_sweep_summary.json"))
             size_map = self._dataset_sweep_size_map(dataset_sweep)
             for row in dataset_sweep.get("rows") or []:
@@ -4479,6 +5196,8 @@ class Graph2MatDeepHBenchmarkRunner:
                     model="dataset",
                     config_id=str(row.get("recipe_id") or ""),
                     status=str(row.get("status") or ""),
+                    run_id=run_id,
+                    run_root=str(run_root),
                 )
 
             training_sweep = self._optional_json(str(run_root / "sweep" / "training_sweep_manifest.json"))
@@ -4528,7 +5247,16 @@ class Graph2MatDeepHBenchmarkRunner:
                         epochs=_training_record_epochs(record),
                         epoch_label=_training_record_epoch_label(record),
                         status=str(record.get("status") or ""),
+                        run_id=run_id,
+                        run_root=str(run_root),
                     )
+                self._append_training_telemetry_metric_rows(
+                    metric_scaling_rows,
+                    run_root=run_root,
+                    record=record,
+                    dataset_size=dataset_size,
+                    source="archived_training_sweep_telemetry",
+                )
 
             dataset_root = self._run_dataset_root_from_archive(run_root)
             dataset_size = self._dataset_size_from_root(dataset_root)
@@ -4546,6 +5274,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 source="archived_graph2mat_manifest",
                 model="graph2mat",
                 config_id="default_graph2mat",
+                run_id=run_id,
+                run_root=str(run_root),
             )
             self._append_timing_scaling_row(
                 timing_scaling_rows,
@@ -4558,6 +5288,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 source="archived_graph2mat_manifest",
                 model="graph2mat",
                 config_id="default_graph2mat",
+                run_id=run_id,
+                run_root=str(run_root),
             )
             self._append_timing_scaling_row(
                 timing_scaling_rows,
@@ -4570,6 +5302,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 source="archived_deeph_manifest",
                 model="deeph",
                 config_id="default_deeph",
+                run_id=run_id,
+                run_root=str(run_root),
             )
             self._append_timing_scaling_row(
                 timing_scaling_rows,
@@ -4582,6 +5316,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 source="archived_deeph_manifest",
                 model="deeph",
                 config_id="default_deeph",
+                run_id=run_id,
+                run_root=str(run_root),
             )
             inference_elapsed = sum(
                 float(run.get("elapsed_seconds") or 0)
@@ -4599,6 +5335,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 source="archived_deeph_manifest",
                 model="deeph",
                 config_id="default_deeph",
+                run_id=run_id,
+                run_root=str(run_root),
             )
 
             normalized = self._optional_json(str(run_root / "summary" / "ranking" / "normalized_run_metrics.json"))
@@ -4657,6 +5395,10 @@ class Graph2MatDeepHBenchmarkRunner:
                 status=str(row.get("status") or ""),
             )
         training_sweep = results.get("training_sweep") if isinstance(results.get("training_sweep"), dict) else {}
+        if not training_sweep.get("runs") and self._state.run_root:
+            training_sweep = self._optional_json(
+                str(Path(str(self._state.run_root)) / "sweep" / "training_sweep_manifest.json")
+            )
         for record in training_sweep.get("runs") or []:
             if not isinstance(record, dict):
                 continue
@@ -4764,20 +5506,82 @@ class Graph2MatDeepHBenchmarkRunner:
             )
         return rows
 
-    def _build_plot_payload_locked(self) -> dict[str, Any]:
+    def _live_training_sweep_timing_rows_locked(self) -> list[dict[str, Any]]:
+        """Expose currently running sweep jobs as timing rows for live plots."""
+
+        status = self._state.training_sweep_status if isinstance(self._state.training_sweep_status, dict) else {}
+        active_started_at = status.get("active_started_at")
+        active_runs = status.get("active_runs") if isinstance(status.get("active_runs"), list) else []
+        if not active_started_at or not active_runs:
+            return []
+        try:
+            elapsed = max(0.0, time.time() - float(active_started_at))
+        except (TypeError, ValueError):
+            return []
+
+        training_sweep = self._last_results.get("training_sweep") if isinstance(self._last_results, dict) else {}
+        if not isinstance(training_sweep, dict):
+            training_sweep = {}
+        if not training_sweep.get("planned_runs") and self._state.run_root:
+            training_sweep = self._optional_json(
+                str(Path(str(self._state.run_root)) / "sweep" / "training_sweep_manifest.json")
+            )
+        planned_by_key = {
+            "|".join(_training_record_key(record)): record
+            for record in training_sweep.get("planned_runs") or []
+            if isinstance(record, dict)
+        }
+
+        rows: list[dict[str, Any]] = []
+        for active in active_runs:
+            if not isinstance(active, dict):
+                continue
+            key = "|".join(
+                (
+                    str(active.get("model") or ""),
+                    str(active.get("dataset_id") or ""),
+                    str(active.get("config_id") or ""),
+                )
+            )
+            record = dict(planned_by_key.get(key) or active)
+            model = str(record.get("model") or active.get("model") or "")
+            dataset_id = str(record.get("dataset_id") or active.get("dataset_id") or "")
+            dataset_root = str(record.get("dataset_root") or self._state.dataset_root or "")
+            dataset_size = self._dataset_size_from_root(dataset_root)
+            if dataset_size is None:
+                continue
+            label_model = "DeepH" if model == "deeph" else "Graph2Mat" if model == "graph2mat" else model or "Sweep"
+            self._append_timing_scaling_row(
+                rows,
+                dataset_id=dataset_id,
+                dataset_root=dataset_root,
+                dataset_size=dataset_size,
+                phase=f"{model or 'sweep'}_active_job",
+                label=f"{label_model} active job",
+                elapsed_seconds=elapsed,
+                source="live_training_sweep_status",
+                model=model,
+                config_id=str(record.get("config_id") or active.get("config_id") or ""),
+                epochs=_training_record_epochs(record),
+                epoch_label=_training_record_epoch_label(record),
+                status="running",
+            )
+        return rows
+
+    def _build_plot_payload_locked(self, selected_run_ids: set[str] | None = None) -> dict[str, Any]:
         results = self._last_results or {}
         common_metrics = results.get("common_metrics") if isinstance(results, dict) else None
         artifact_summary = {}
         if self._dataset_validation:
             artifact_summary = dict(self._dataset_validation.get("artifact_summary") or {})
-        archive_rows = self._archive_plot_rows_locked()
-        current_timing_scaling = self._timing_scaling_rows_locked()
+        archive_rows = self._archive_plot_rows_locked(selected_run_ids=selected_run_ids)
+        current_timing_scaling = [] if selected_run_ids is not None else self._timing_scaling_rows_locked()
         timing_scaling_rows = [
             *current_timing_scaling,
             *(archive_rows.get("timing_scaling_rows") or []),
         ]
         current_metric_scaling: list[dict[str, Any]] = []
-        if self._state.run_root:
+        if selected_run_ids is None and self._state.run_root:
             current_metric_scaling = live_metric_scaling_rows(Path(str(self._state.run_root)))
         metric_scaling_rows = dedupe_metric_rows(
             [
@@ -4794,6 +5598,7 @@ class Graph2MatDeepHBenchmarkRunner:
             status_payload=self.status(),
         )
         payload["live_metric_rows"] = len(current_metric_scaling)
+        payload["selected_run_ids"] = sorted(selected_run_ids) if selected_run_ids is not None else None
         payload["archived_runs"] = len(
             {
                 str(row.get("run_id"))
@@ -4808,6 +5613,7 @@ class Graph2MatDeepHBenchmarkRunner:
                 if row.get("dataset_root") or row.get("run_id") or row.get("config_id")
             }
         )
+        payload["live_timing_rows"] = 0
         ranking = results.get("ranking") if isinstance(results, dict) else None
         if isinstance(ranking, dict):
             payload["ranking"] = ranking

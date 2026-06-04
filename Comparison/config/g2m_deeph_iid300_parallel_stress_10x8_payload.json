@@ -1,0 +1,513 @@
+{
+  "allow_diagnostic_metrics": true,
+  "benchmark_mode": "exploratory_iid300_parallel_stress_10x8",
+  "budget_accounting_fail_closed": false,
+  "dataset_mode": "reuse_validated",
+  "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid300",
+  "deeph": {
+    "multiprocessing": 0,
+    "repo_path": "/home/christian/repositorios/DeepH-pack"
+  },
+  "diagnostic_only_reason": "Short iid300 high-parallelism stress payload; not paper-ready evidence.",
+  "dry_run": false,
+  "early_stopping": {
+    "max_epochs": 8,
+    "metric": "val_loss",
+    "min_delta": 0.0,
+    "mode": "min",
+    "patience": 3
+  },
+  "executed_dataset_ids": [
+    "graphene_w90_phase1_iid300"
+  ],
+  "metric_evaluation_split": "validation",
+  "metric_fail_policy": "diagnostic_only",
+  "output_root": "Comparison/results/g2m_deeph_iid300_parallel_stress_10x8_v1/runs",
+  "performance": {
+    "compute_accelerator": "gpu",
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_require_cuequivariance": true,
+    "max_parallel_deeph_training_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 10,
+    "mkl_num_threads": 2,
+    "model_batch_schedule": "alternating",
+    "numexpr_num_threads": 2,
+    "omp_num_threads": 2,
+    "openblas_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "torch_num_threads": 2
+  },
+  "probe_policy": {
+    "parallelism": {
+      "deeph": 8,
+      "graph2mat": 10
+    },
+    "purpose": "Short stress-test of higher parallelism with alternating per-model batches: 10 Graph2Mat jobs, then 8 DeepH jobs.",
+    "schedule": "10 Graph2Mat jobs, then 8 DeepH jobs; repeat if more runs are added.",
+    "scientific_status": "diagnostic_only"
+  },
+  "protocol_dataset_ids": [
+    "graphene_w90_phase1_iid300"
+  ],
+  "protocol_stage": "search",
+  "run_id": "g2m_deeph_iid300_parallel_stress_10x8_20260601",
+  "search_validation_metrics": true,
+  "selected_dataset_id": "graphene_w90_phase1_iid300",
+  "selection_metric": "val_spectral_composite",
+  "selection_mode": "min",
+  "strict_dataset_validation": false,
+  "training_sweep": {
+    "budget_policy": {
+      "edge_policy": "allow_overshoot_by_one_scheduler_batch",
+      "fail_closed_on_missing_telemetry": false,
+      "gpu_hours_per_model": 2.0,
+      "mode": "equal_gpu_hours_per_model"
+    },
+    "enabled": true,
+    "error_policy": "continue_on_error",
+    "manual_runs": [
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-01",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: small default-readout baseline.",
+        "overrides": {
+          "batch_size": 32,
+          "correlation": 2,
+          "hidden_irreps": "24x0e + 24x1o + 24x2e + 24x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.0012,
+          "readout": "default"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-02",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: edge-node readout baseline.",
+        "overrides": {
+          "batch_size": 32,
+          "correlation": 3,
+          "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.0012,
+          "readout": "edge_node_mix"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-03",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: moderate batch MSE.",
+        "overrides": {
+          "batch_size": 48,
+          "correlation": 3,
+          "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+          "loss": "graph2mat.metrics.block_type_mse",
+          "loss_kwargs": {},
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.003,
+          "readout": "default"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-04",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: moderate capacity edge-node.",
+        "overrides": {
+          "batch_size": 48,
+          "correlation": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.003,
+          "readout": "edge_node_mix"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-05",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: larger batch/capacity.",
+        "overrides": {
+          "batch_size": 64,
+          "correlation": 2,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.0012,
+          "readout": "default"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-06",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: larger edge-node config.",
+        "overrides": {
+          "batch_size": 64,
+          "correlation": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.0018,
+          "readout": "edge_node_mix"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-07",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: high LR MSE.",
+        "overrides": {
+          "batch_size": 96,
+          "correlation": 2,
+          "hidden_irreps": "32x0e + 32x1o + 32x2e + 32x3o",
+          "loss": "graph2mat.metrics.block_type_mse",
+          "loss_kwargs": {},
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.005,
+          "readout": "default"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-08",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: high LR edge-node.",
+        "overrides": {
+          "batch_size": 96,
+          "correlation": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.003,
+          "readout": "edge_node_mix"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-09",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: compact high-throughput control.",
+        "overrides": {
+          "batch_size": 128,
+          "correlation": 2,
+          "hidden_irreps": "24x0e + 24x1o + 24x2e + 24x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.003,
+          "readout": "default"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "G2M-STRESS10-10",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "graph2mat",
+        "notes": "10x8 stress: largest edge-node config in this short probe.",
+        "overrides": {
+          "batch_size": 128,
+          "correlation": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "max_ell": 3,
+          "max_epochs": 8,
+          "num_interactions": 3,
+          "optim_lr": 0.0012,
+          "readout": "edge_node_mix"
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-01",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: paper-like central config.",
+        "overrides": {
+          "atom_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "batch_size": 4,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 128,
+          "epochs": 8,
+          "gauss_stop": 6,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.0001,
+          "normalization": "LayerNorm",
+          "num_l": 4,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-02",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: faster LR.",
+        "overrides": {
+          "atom_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "batch_size": 8,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 128,
+          "epochs": 8,
+          "gauss_stop": 6,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.0003,
+          "normalization": "LayerNorm",
+          "num_l": 4,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-03",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: wider atom features.",
+        "overrides": {
+          "atom_fea_len": 192,
+          "atom_update_net": "CGConv",
+          "batch_size": 4,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 128,
+          "epochs": 8,
+          "gauss_stop": 6,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.0003,
+          "normalization": "LayerNorm",
+          "num_l": 4,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0001
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-04",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: wide edge features.",
+        "overrides": {
+          "atom_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "batch_size": 8,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 192,
+          "epochs": 8,
+          "gauss_stop": 6,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.0006,
+          "normalization": "LayerNorm",
+          "num_l": 4,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0001
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-05",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: shallower stack.",
+        "overrides": {
+          "atom_fea_len": 64,
+          "atom_update_net": "CGConv",
+          "batch_size": 8,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 128,
+          "epochs": 8,
+          "gauss_stop": 5,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.0003,
+          "normalization": "LayerNorm",
+          "num_l": 3,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-06",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: deeper/wider stack.",
+        "overrides": {
+          "atom_fea_len": 192,
+          "atom_update_net": "CGConv",
+          "batch_size": 4,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 192,
+          "epochs": 8,
+          "gauss_stop": 7,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.0001,
+          "normalization": "LayerNorm",
+          "num_l": 5,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0001
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-07",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: compact low-LR control.",
+        "overrides": {
+          "atom_fea_len": 64,
+          "atom_update_net": "CGConv",
+          "batch_size": 4,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 128,
+          "epochs": 8,
+          "gauss_stop": 6,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.00003,
+          "normalization": "LayerNorm",
+          "num_l": 3,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0
+        }
+      },
+      {
+        "common": {
+          "seed": 2701
+        },
+        "config_id": "DH-STRESS10-08",
+        "dataset_id": "graphene_w90_phase1_iid300",
+        "model": "deeph",
+        "notes": "10x8 stress: high-LR/wide stress endpoint.",
+        "overrides": {
+          "atom_fea_len": 192,
+          "atom_update_net": "CGConv",
+          "batch_size": 8,
+          "criterion": "MaskMSELoss",
+          "edge_fea_len": 192,
+          "epochs": 8,
+          "gauss_stop": 6,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "learning_rate": 0.001,
+          "normalization": "LayerNorm",
+          "num_l": 4,
+          "optimizer": "adamW",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0001
+        }
+      }
+    ],
+    "max_runs": 18,
+    "search_policy": {
+      "random_seed": 20260601,
+      "strategy": "manual"
+    }
+  }
+}

@@ -220,6 +220,20 @@ def seed_value(row: dict[str, Any]) -> Any:
     return row.get("seed", common.get("seed", overrides.get("seed_everything", overrides.get("seed"))))
 
 
+def selected_config_id(row: dict[str, Any]) -> str:
+    """Return the validation-selected config identity for final seed grouping."""
+
+    for key in ("selected_config_id", "base_config_id", "parent_config_id"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    source = row.get("source_selected_config") if isinstance(row.get("source_selected_config"), dict) else {}
+    value = str(source.get("config_id") or "").strip()
+    if value:
+        return value
+    return str(row.get("config_id") or "").strip()
+
+
 def compute_field(row: dict[str, Any], key: str) -> float | None:
     value = finite_number(row.get(key))
     if value is not None:
@@ -278,13 +292,20 @@ def aggregate_final_seed_metrics(
     confidence_level: float = 0.95,
     bootstrap_iterations: int = 1000,
 ) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in rows:
         if final_test_row(row, metric):
-            groups.setdefault((str(row.get("model") or ""), str(row.get("dataset_id") or "")), []).append(row)
+            groups.setdefault(
+                (
+                    str(row.get("model") or ""),
+                    str(row.get("dataset_id") or ""),
+                    selected_config_id(row),
+                ),
+                [],
+            ).append(row)
     expected = set(expected_seeds or [])
     summaries: list[dict[str, Any]] = []
-    for (model, dataset_id), group_rows in sorted(groups.items()):
+    for (model, dataset_id, config_id), group_rows in sorted(groups.items()):
         values = [value for row in group_rows if (value := metric_value(row, metric)) is not None]
         seeds = sorted({seed_value(row) for row in group_rows if seed_value(row) not in (None, "")}, key=str)
         gpu_hours = [value for row in group_rows if (value := compute_field(row, "gpu_hours_total")) is not None]
@@ -319,6 +340,11 @@ def aggregate_final_seed_metrics(
             {
                 "model": model,
                 "dataset_id": dataset_id,
+                "selected_config_id": config_id,
+                "config_id": config_id,
+                "final_run_config_ids": sorted(
+                    {str(row.get("config_id") or "") for row in group_rows if str(row.get("config_id") or "").strip()}
+                ),
                 "metric": metric,
                 "mean": mean(values),
                 "std": stddev(values),
@@ -383,6 +409,8 @@ def pareto_frontier(summary_rows: list[dict[str, Any]], *, mode: str) -> list[di
         item = {
             "model": row.get("model"),
             "dataset_id": row.get("dataset_id"),
+            "selected_config_id": row.get("selected_config_id") or row.get("config_id"),
+            "config_id": row.get("config_id") or row.get("selected_config_id"),
             "metric": row.get("metric"),
             "metric_value": value,
             "gpu_hours": cost,
@@ -429,38 +457,113 @@ def decide_winners(
     if mode not in VALID_MODES:
         raise RuntimeError("mode must be min or max.")
     gates_failed: list[str] = []
-    by_model = {str(row.get("model")): row for row in summary_rows if row.get("model") in MODELS}
-    if set(by_model) != set(MODELS):
-        gates_failed.append("missing_model")
     expected_count = len(expected_seeds or [])
-    for model, row in sorted(by_model.items()):
+    for row in summary_rows:
+        model = str(row.get("model") or "unknown")
+        dataset_id = str(row.get("dataset_id") or "dataset")
+        config_id = str(row.get("selected_config_id") or row.get("config_id") or "config")
         completed = int(row.get("n_seeds_completed") or 0)
         required = max(min_final_seeds, expected_count)
         if completed < required:
-            gates_failed.append(f"incomplete_final_seeds:{model}")
+            gates_failed.append(f"incomplete_final_seeds:{model}/{dataset_id}/{config_id}")
         if row.get("robust_claim_allowed_by_comparability") is not True:
-            gates_failed.append(f"diagnostic_only:{model}")
-    metric_rows = [row for row in by_model.values() if finite_number(row.get("mean")) is not None]
-    if len(metric_rows) < 2:
-        gates_failed.append("missing_metric")
+            gates_failed.append(f"diagnostic_only:{model}/{dataset_id}/{config_id}")
 
+    def row_sort_key(row: dict[str, Any]) -> tuple[float, str]:
+        value = finite_number(row.get("mean"))
+        if value is None:
+            value = math.inf if mode == "min" else -math.inf
+        return (value if mode == "min" else -value, str(row.get("selected_config_id") or row.get("config_id") or ""))
+
+    def best_model_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        metric_rows = [row for row in rows if finite_number(row.get("mean")) is not None]
+        if not metric_rows:
+            return None
+        metric_rows.sort(key=row_sort_key)
+        return metric_rows[0]
+
+    dataset_decisions: list[dict[str, Any]] = []
+    dataset_ids = sorted({str(row.get("dataset_id") or "") for row in summary_rows if str(row.get("dataset_id") or "")})
+    if not dataset_ids:
+        gates_failed.append("missing_dataset")
+
+    for dataset_id in dataset_ids:
+        dataset_rows = [row for row in summary_rows if str(row.get("dataset_id") or "") == dataset_id]
+        best_by_model = {
+            model: best_model_row([row for row in dataset_rows if str(row.get("model") or "") == model])
+            for model in MODELS
+        }
+        dataset_gates: list[str] = []
+        if any(row is None for row in best_by_model.values()):
+            dataset_gates.append(f"missing_model:{dataset_id}")
+        metric_rows = [row for row in best_by_model.values() if row is not None]
+        if len(metric_rows) < 2:
+            dataset_gates.append(f"missing_metric:{dataset_id}")
+        precision_winner = None
+        effect_size = None
+        ci_rule_passed = False
+        best: dict[str, Any] | None = None
+        other: dict[str, Any] | None = None
+        if len(metric_rows) >= 2:
+            metric_rows.sort(key=row_sort_key)
+            best, other = metric_rows[0], metric_rows[1]
+            best_mean = finite_number(best.get("mean"))
+            other_mean = finite_number(other.get("mean"))
+            if best_mean is not None and other_mean is not None:
+                effect_size = (other_mean - best_mean) if mode == "min" else (best_mean - other_mean)
+                ci_rule_passed = _ci_separated(best, other, mode=mode)
+                if effect_size > tolerance and ci_rule_passed:
+                    precision_winner = str(best.get("model") or "")
+                elif effect_size <= tolerance:
+                    dataset_gates.append(f"precision_difference_within_tolerance:{dataset_id}")
+                elif not ci_rule_passed:
+                    dataset_gates.append(f"confidence_intervals_overlap_or_unavailable:{dataset_id}")
+        gates_failed.extend(dataset_gates)
+        dataset_decisions.append(
+            {
+                "dataset_id": dataset_id,
+                "precision_winner": precision_winner,
+                "winner_config_id": (best or {}).get("selected_config_id") or (best or {}).get("config_id"),
+                "runner_up_model": (other or {}).get("model"),
+                "runner_up_config_id": (other or {}).get("selected_config_id") or (other or {}).get("config_id"),
+                "effect_size_best_vs_second": effect_size,
+                "ci_rule_passed": ci_rule_passed,
+                "gates_failed": sorted(set(dataset_gates)),
+                "best_config_by_model": {
+                    model: {
+                        "selected_config_id": row.get("selected_config_id") or row.get("config_id"),
+                        "mean": row.get("mean"),
+                        "confidence_interval": row.get("confidence_interval"),
+                    }
+                    for model, row in best_by_model.items()
+                    if row is not None
+                },
+            }
+        )
+
+    robust_dataset_winners = [
+        str(item.get("precision_winner"))
+        for item in dataset_decisions
+        if item.get("precision_winner") and not item.get("gates_failed")
+    ]
     precision_winner = None
     effect_size = None
-    ci_rule_passed = False
-    if len(metric_rows) >= 2:
-        metric_rows.sort(key=lambda row: (finite_number(row.get("mean")) or math.inf) * (1 if mode == "min" else -1))
-        best, other = metric_rows[0], metric_rows[1]
-        best_mean = finite_number(best.get("mean"))
-        other_mean = finite_number(other.get("mean"))
-        if best_mean is not None and other_mean is not None:
-            effect_size = (other_mean - best_mean) if mode == "min" else (best_mean - other_mean)
-            ci_rule_passed = _ci_separated(best, other, mode=mode)
-            if effect_size > tolerance and ci_rule_passed and not gates_failed:
-                precision_winner = best.get("model")
-            elif effect_size <= tolerance:
-                gates_failed.append("precision_difference_within_tolerance")
-            elif not ci_rule_passed:
-                gates_failed.append("confidence_intervals_overlap_or_unavailable")
+    ci_rule_passed = all(bool(item.get("ci_rule_passed")) for item in dataset_decisions) if dataset_decisions else False
+    if dataset_decisions:
+        if len(robust_dataset_winners) != len(dataset_decisions):
+            gates_failed.append("missing_robust_dataset_winner")
+        elif len(set(robust_dataset_winners)) == 1:
+            precision_winner = robust_dataset_winners[0]
+            effect_sizes = [
+                finite_number(item.get("effect_size_best_vs_second"))
+                for item in dataset_decisions
+                if finite_number(item.get("effect_size_best_vs_second")) is not None
+            ]
+            effect_size = min(effect_sizes) if effect_sizes else None
+        else:
+            gates_failed.append("dataset_winners_disagree")
+    if gates_failed:
+        precision_winner = None
 
     compute_winner = None
     if compute_accuracy_threshold is not None:
@@ -498,6 +601,7 @@ def decide_winners(
         "diagnostic_only_reason": "; ".join(sorted(set(diagnostic_reasons))),
         "effect_size_best_vs_second": effect_size,
         "ci_rule_passed": ci_rule_passed,
+        "dataset_decisions": dataset_decisions,
         "tolerance": tolerance,
         "compute_accuracy_threshold": compute_accuracy_threshold,
         "pareto_frontier": pareto_rows,

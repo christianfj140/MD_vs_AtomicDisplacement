@@ -200,12 +200,12 @@ def learning_curve_rows(
         events = _validation_events_from(record, telemetry)
         metric_name = _metric_name(record, telemetry, metric)
         epochs_trained = _epochs_trained(record, telemetry, events)
-        total_wall = finite_number(telemetry.get("wall_clock_seconds_to_best_validation"))
+        total_wall = finite_number(telemetry.get("wall_clock_seconds_total"))
         if total_wall is None:
-            total_wall = finite_number(telemetry.get("wall_clock_seconds_total"))
-        total_gpu = finite_number(telemetry.get("gpu_hours_to_best_validation"))
+            total_wall = finite_number(telemetry.get("wall_clock_seconds_to_best_validation"))
+        total_gpu = finite_number(telemetry.get("gpu_hours_total"))
         if total_gpu is None:
-            total_gpu = finite_number(telemetry.get("gpu_hours_total"))
+            total_gpu = finite_number(telemetry.get("gpu_hours_to_best_validation"))
         training_samples = finite_number(telemetry.get("training_sample_count"))
         matrix_blocks = finite_number(telemetry.get("matrix_block_count"))
         for index, event in enumerate(events, start=1):

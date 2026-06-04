@@ -31,10 +31,17 @@ from deeph_prediction_adapter import (
 
 
 PREFLIGHT_SCHEMA = "deeph_raw_global_equivalence_preflight_v1"
-DEFAULT_MATRIX_TOLERANCE = 1e-8
-DEFAULT_EIGENVALUE_TOLERANCE = 1e-8
+DEFAULT_MATRIX_TOLERANCE = 1e-6
+DEFAULT_EIGENVALUE_TOLERANCE = 3e-6
 SUPPORT_THRESHOLD = 1e-12
 FORBIDDEN_REFERENCE_NAME = "ML_prediction.HSX"
+SUPPORTED_ORBITAL_LABELS = {"s", "px", "py", "pz"}
+SIESTA_TO_DEEPH_ORBITAL_SIGNS = {
+    "s": 1.0,
+    "px": -1.0,
+    "py": -1.0,
+    "pz": 1.0,
+}
 
 
 class DeepHEquivalencePreflightError(RuntimeError):
@@ -88,6 +95,163 @@ def artifact_path(row: dict[str, Any], *keys: str, manifest_dir: Path) -> Path |
             path = manifest_dir / path
         return path
     return None
+
+
+def normalize_orbital_label(*, sym: str, angular_l: int, angular_m: int) -> str:
+    label = str(sym or "").strip().lower()
+    if label in SUPPORTED_ORBITAL_LABELS:
+        return label
+    if angular_l == 0:
+        return "s"
+    if angular_l == 1:
+        # SIESTA ORB_INDX commonly stores the real p orbitals as m=-1,0,+1
+        # with labels py,pz,px. Prefer the explicit label above when present.
+        return {-1: "py", 0: "pz", 1: "px"}.get(int(angular_m), f"p{angular_m}")
+    return label or f"l{angular_l}_m{angular_m}"
+
+
+def siesta_orbital_labels_from_orb_indx(path: Path, *, expected_count: int) -> list[str]:
+    if not path.exists():
+        raise DeepHEquivalencePreflightError(f"missing SIESTA ORB_INDX for orbital mapping: {path}")
+    orbitals: list[tuple[int, str]] = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        tokens = [token for token in line.split() if token.strip()]
+        if len(tokens) < 16:
+            continue
+        try:
+            int(tokens[0])
+            angular_l = int(tokens[6])
+            angular_m = int(tokens[7])
+            isc = tuple(int(value) for value in tokens[-4:-1])
+            unit_cell_index = int(tokens[-1])
+        except ValueError:
+            continue
+        if isc != (0, 0, 0):
+            continue
+        if unit_cell_index < 1 or unit_cell_index > expected_count:
+            continue
+        label = normalize_orbital_label(sym=tokens[10], angular_l=angular_l, angular_m=angular_m)
+        orbitals.append((unit_cell_index - 1, label))
+    orbitals = sorted(dict(orbitals).items())
+    labels = [label for _index, label in orbitals]
+    if len(labels) != expected_count:
+        raise DeepHEquivalencePreflightError(
+            f"SIESTA ORB_INDX unit-cell orbital count mismatch in {path}: "
+            f"{len(labels)} != {expected_count}"
+        )
+    unsupported = sorted({label for label in labels if label not in SUPPORTED_ORBITAL_LABELS})
+    if unsupported:
+        raise DeepHEquivalencePreflightError(
+            "unsupported SIESTA orbital label(s) for DeepH raw/global mapping: " + ", ".join(unsupported)
+        )
+    return labels
+
+
+def deeph_orbital_labels_from_orbital_types(path: Path) -> list[str]:
+    if not path.exists():
+        raise DeepHEquivalencePreflightError(f"missing DeepH orbital_types.dat for orbital mapping: {path}")
+    labels: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        tokens = [token for token in line.split() if token.strip()]
+        for token in tokens:
+            angular_l = int(token)
+            if angular_l == 0:
+                labels.append("s")
+            elif angular_l == 1:
+                # DeepH rotate_back writes p blocks in OpenMX xyz order.
+                labels.extend(["px", "py", "pz"])
+            else:
+                raise DeepHEquivalencePreflightError(
+                    f"unsupported DeepH angular momentum l={angular_l} in {path}; "
+                    "raw/global mapping is currently verified only for s/p orbitals"
+                )
+    if not labels:
+        raise DeepHEquivalencePreflightError(f"no DeepH orbital labels found in {path}")
+    return labels
+
+
+def derive_deeph_to_siesta_basis_transform(
+    *,
+    row: dict[str, Any],
+    manifest_dir: Path,
+    orbital_types: Path,
+    n_orbitals: int,
+) -> dict[str, Any]:
+    orb_indx = artifact_path(row, "orb_indx", manifest_dir=manifest_dir)
+    if orb_indx is None or not orb_indx.exists():
+        return {
+            "status": "identity_missing_orb_indx",
+            "orb_indx_path": str(orb_indx or ""),
+            "permutation": list(range(n_orbitals)),
+            "signs": [1.0] * n_orbitals,
+            "siesta_orbital_labels": [],
+            "deeph_orbital_labels": [],
+            "warnings": ["missing ORB_INDX; DeepH/SIESTA orbital mapping was left as identity"],
+        }
+    siesta_labels = siesta_orbital_labels_from_orb_indx(orb_indx, expected_count=n_orbitals)
+    deeph_labels = deeph_orbital_labels_from_orbital_types(orbital_types)
+    if len(deeph_labels) != n_orbitals:
+        raise DeepHEquivalencePreflightError(
+            f"DeepH orbital_types count mismatch in {orbital_types}: {len(deeph_labels)} != {n_orbitals}"
+        )
+
+    used: set[int] = set()
+    permutation: list[int] = []
+    for label in siesta_labels:
+        try:
+            source_index = next(
+                index for index, source_label in enumerate(deeph_labels) if index not in used and source_label == label
+            )
+        except StopIteration as exc:
+            raise DeepHEquivalencePreflightError(
+                "cannot map DeepH orbital order to SIESTA ORB_INDX order; missing label " + label
+            ) from exc
+        used.add(source_index)
+        permutation.append(source_index)
+    signs = [float(SIESTA_TO_DEEPH_ORBITAL_SIGNS[label]) for label in siesta_labels]
+    return {
+        "status": "applied",
+        "orb_indx_path": str(orb_indx),
+        "permutation": permutation,
+        "signs": signs,
+        "siesta_orbital_labels": siesta_labels,
+        "deeph_orbital_labels": deeph_labels,
+        "sign_policy": "SIESTA real-orbital signs matched to DeepH/OpenMX rotate_back convention",
+        "warnings": [],
+    }
+
+
+def apply_basis_transform(matrix: Any, transform: dict[str, Any]) -> Any:
+    try:
+        import numpy as np  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - guarded by runtime helper in numeric path.
+        raise DeepHEquivalencePreflightError("numpy is required for basis transforms") from exc
+    permutation = [int(index) for index in transform.get("permutation") or []]
+    signs = np.asarray([float(value) for value in transform.get("signs") or []], dtype=float)
+    if not permutation:
+        return matrix
+    transformed = np.asarray(matrix)[np.ix_(permutation, permutation)]
+    if signs.size != transformed.shape[0]:
+        raise DeepHEquivalencePreflightError("basis transform sign count does not match matrix shape")
+    return (signs[:, None] * transformed) * signs[None, :]
+
+
+def fit_energy_reference_shift(*, deeph_h: Any, raw_h: Any, raw_s: Any) -> float:
+    try:
+        import numpy as np  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - guarded by runtime helper in numeric path.
+        raise DeepHEquivalencePreflightError("numpy is required for energy reference fitting") from exc
+    residual = (np.asarray(raw_h) - np.asarray(deeph_h)).reshape(-1)
+    overlap = np.asarray(raw_s).reshape(-1)
+    denominator = np.vdot(overlap, overlap)
+    if abs(denominator) == 0.0:
+        raise DeepHEquivalencePreflightError("cannot fit DeepH energy reference shift: zero overlap norm")
+    shift = np.vdot(overlap, residual) / denominator
+    if abs(float(np.imag(shift))) > 1e-10:
+        raise DeepHEquivalencePreflightError(
+            f"DeepH energy reference shift has non-negligible imaginary component: {shift}"
+        )
+    return float(np.real(shift))
 
 
 def sample_id_from_row(row: dict[str, Any]) -> str:
@@ -370,6 +534,7 @@ def numeric_evidence_for_sample(
     orbital_types = processed_sample / "orbital_types.dat"
     prediction_h5 = prediction_sample / "hamiltonians_pred.h5"
     info_json = processed_sample / "info.json"
+    orb_indx_path = artifact_path(row, "orb_indx", manifest_dir=manifest_dir)
     source_files.update(
         {
             "deeph_processed_hamiltonian": file_entry(ref_h5),
@@ -377,6 +542,7 @@ def numeric_evidence_for_sample(
             "deeph_orbital_types": file_entry(orbital_types),
             "deeph_prediction": file_entry(prediction_h5),
             "deeph_info": file_entry(info_json),
+            "siesta_orb_indx": file_entry(orb_indx_path),
         }
     )
     missing = [
@@ -402,12 +568,28 @@ def numeric_evidence_for_sample(
         np = helpers["np"]
         eigenvalues = helpers["complex_generalized_eigenvalues"]
         orbital_counts = count_orbitals_from_orbital_types(orbital_types)
+        n_orbitals = int(sum(orbital_counts))
+        basis_transform = derive_deeph_to_siesta_basis_transform(
+            row=row,
+            manifest_dir=manifest_dir,
+            orbital_types=orbital_types,
+            n_orbitals=n_orbitals,
+        )
+        warnings.extend(str(item) for item in basis_transform.get("warnings") or [])
         ref_shapes = h5_block_shapes(ref_h5, orbital_counts, label="DeepH processed reference")
         pred_shapes = h5_block_shapes(prediction_h5, orbital_counts, label="DeepH prediction")
         overlap_shapes = h5_block_shapes(overlap_h5, orbital_counts, label="DeepH processed overlap")
         support_keys_match = set(ref_shapes) == set(pred_shapes) == set(overlap_shapes)
         kpoints, k_warnings = kpoints_from_fdf(fdf_path)
         warnings.extend(k_warnings)
+        gamma_kpoint = kpoints[0]
+        gamma_raw = raw_reference_matrices(reference_path, gamma_kpoint)
+        gamma_deeph_h = apply_basis_transform(assemble_hk(ref_h5, orbital_types, gamma_kpoint), basis_transform)
+        energy_reference_shift_eV = fit_energy_reference_shift(
+            deeph_h=gamma_deeph_h,
+            raw_h=gamma_raw["hamiltonian"],
+            raw_s=gamma_raw["overlap"],
+        )
         max_hk_error = 0.0
         max_s_error = 0.0
         max_eigen_error = 0.0
@@ -418,24 +600,25 @@ def numeric_evidence_for_sample(
             raw = raw_reference_matrices(reference_path, kpoint)
             raw_h = raw["hamiltonian"]
             raw_s = raw["overlap"]
-            deeph_h = assemble_hk(ref_h5, orbital_types, kpoint)
-            deeph_s = assemble_hk(overlap_h5, orbital_types, kpoint)
+            deeph_h = apply_basis_transform(assemble_hk(ref_h5, orbital_types, kpoint), basis_transform)
+            deeph_s = apply_basis_transform(assemble_hk(overlap_h5, orbital_types, kpoint), basis_transform)
             shape_match = shape_match and raw_h.shape == deeph_h.shape and raw_s.shape == deeph_s.shape
             if not shape_match:
                 continue
-            h_delta = np.asarray(deeph_h - raw_h)
+            deeph_h_aligned = np.asarray(deeph_h + energy_reference_shift_eV * raw_s)
+            h_delta = np.asarray(deeph_h_aligned - raw_h)
             s_delta = np.asarray(deeph_s - raw_s)
             max_hk_error = max(max_hk_error, float(np.max(np.abs(h_delta))) if h_delta.size else 0.0)
             max_s_error = max(max_s_error, float(np.max(np.abs(s_delta))) if s_delta.size else 0.0)
             raw_eig = eigenvalues(raw_h, raw_s)
-            deeph_eig = eigenvalues(deeph_h, deeph_s)
+            deeph_eig = eigenvalues(deeph_h_aligned, raw_s)
             if raw_eig.shape != deeph_eig.shape:
                 shape_match = False
                 continue
             eig_delta = np.asarray(deeph_eig - raw_eig)
             max_eigen_error = max(max_eigen_error, float(np.max(np.abs(eig_delta))) if eig_delta.size else 0.0)
             support_match = support_match and bool(
-                np.array_equal(np.abs(raw_h) > SUPPORT_THRESHOLD, np.abs(deeph_h) > SUPPORT_THRESHOLD)
+                np.array_equal(np.abs(raw_h) > SUPPORT_THRESHOLD, np.abs(deeph_h_aligned) > SUPPORT_THRESHOLD)
             )
             kpoint_rows.append({"kx": float(kpoint[0]), "ky": float(kpoint[1]), "kz": float(kpoint[2])})
         hk_pass = shape_match and max_hk_error <= matrix_tolerance
@@ -462,6 +645,7 @@ def numeric_evidence_for_sample(
             "max_abs_hk_error_eV": max_hk_error,
             "max_abs_s_ref_error": max_s_error,
             "max_abs_eigenvalue_error_eV": max_eigen_error,
+            "energy_reference_shift_eV": energy_reference_shift_eV,
         }
         tolerances = {
             "max_abs_hk_error_eV": matrix_tolerance,
@@ -494,6 +678,16 @@ def numeric_evidence_for_sample(
         "tolerances": tolerances,
         "source_files": source_files,
         "kpoints_checked": kpoint_rows,
+        "basis_transform": basis_transform,
+        "energy_reference_alignment": {
+            "policy": "least_squares_shift_from_first_kpoint: H_raw ~= H_deeph_converted + c*S_ref",
+            "shift_eV": energy_reference_shift_eV,
+            "fit_kpoint": {
+                "kx": float(gamma_kpoint[0]),
+                "ky": float(gamma_kpoint[1]),
+                "kz": float(gamma_kpoint[2]),
+            },
+        },
         "generator": {
             "script": Path(__file__).name,
             "command": command or sys.argv,

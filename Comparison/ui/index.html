@@ -1091,6 +1091,21 @@
               </div>
               <button id="g2m-deeph-refresh-results" class="button secondary" type="button">Refresh results</button>
             </div>
+            <div class="g2m-deeph-run-selector" aria-label="Graph2Mat vs DeepH runs to plot">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Runs to plot</strong>
+                  <p class="field-help">Selecciona runs terminados o archivados. Los plots solo usan resultados ya escritos, no jobs activos.</p>
+                </div>
+                <div class="run-selector-actions">
+                  <button id="g2m-deeph-plot-runs-default" class="button ghost small" type="button">Recent metrics</button>
+                  <button id="g2m-deeph-plot-runs-all" class="button ghost small" type="button">All</button>
+                  <button id="g2m-deeph-plot-runs-clear" class="button ghost small" type="button">Clear</button>
+                </div>
+              </div>
+              <div id="g2m-deeph-plot-run-status" class="muted-text">Loading plot runs...</div>
+              <div id="g2m-deeph-plot-run-list" class="plot-run-list"></div>
+            </div>
             <div id="g2m-deeph-plots" class="plot-grid">
               <div class="plot-card full placeholder-card">No benchmark plots available yet.</div>
             </div>
@@ -1479,6 +1494,7 @@
             <code>GET /api/g2m-deeph/status</code>
             <code>GET /api/g2m-deeph/logs?since=0&amp;limit=2000</code>
             <code>GET /api/g2m-deeph/results</code>
+            <code>GET /api/g2m-deeph/plot-runs</code>
             <code>GET /api/g2m-deeph/plots</code>
           </div>
         </section>
@@ -1486,6 +1502,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260529-g2m-phasea-plots"></script>
+    <script src="/app.js?v=20260603-g2m-plot-selector-active-run"></script>
   </body>
 </html>

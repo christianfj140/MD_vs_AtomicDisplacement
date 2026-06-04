@@ -147,6 +147,109 @@ DOS_WASSERSTEIN_METRIC_GROUP = {
         },
     ],
 }
+VALIDATION_RERUN_METRIC_GROUP = {
+    "id": "validation_rerun",
+    "title": "Final-seed validation metric",
+    "y_title": "Validation metric",
+    "metrics": [
+        {
+            "key": "validation_metric_value",
+            "label": "Validation metric",
+            "unit": "",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+DEEPH_LIVE_LOSS_METRIC_GROUP = {
+    "id": "deeph_live_loss",
+    "title": "DeepH live training loss",
+    "y_title": "Loss",
+    "metrics": [
+        {
+            "key": "deeph_live_train_loss",
+            "label": "Train loss",
+            "unit": "",
+            "direction": "lower_is_better",
+        },
+        {
+            "key": "deeph_live_val_loss",
+            "label": "Val loss",
+            "unit": "",
+            "direction": "lower_is_better",
+        },
+        {
+            "key": "deeph_live_best_val_loss",
+            "label": "Best val loss",
+            "unit": "",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+GPU_HOURS_METRIC_GROUP = {
+    "id": "gpu_hours",
+    "title": "GPU-hours",
+    "y_title": "GPU-hours",
+    "metrics": [
+        {
+            "key": "gpu_hours_total",
+            "label": "GPU-hours",
+            "unit": "h",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+PEAK_GPU_MEMORY_METRIC_GROUP = {
+    "id": "peak_gpu_memory",
+    "title": "Peak GPU memory",
+    "y_title": "Peak VRAM MB",
+    "metrics": [
+        {
+            "key": "peak_gpu_memory_mb",
+            "label": "Peak VRAM",
+            "unit": "MB",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+PEAK_RSS_METRIC_GROUP = {
+    "id": "peak_rss",
+    "title": "Peak process RAM",
+    "y_title": "Peak RSS MB",
+    "metrics": [
+        {
+            "key": "peak_rss_mb",
+            "label": "Peak RSS",
+            "unit": "MB",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+CPU_TIME_METRIC_GROUP = {
+    "id": "cpu_time",
+    "title": "CPU time",
+    "y_title": "CPU seconds",
+    "metrics": [
+        {
+            "key": "cpu_time_seconds_total",
+            "label": "CPU time",
+            "unit": "s",
+            "direction": "lower_is_better",
+        },
+    ],
+}
+THROUGHPUT_METRIC_GROUP = {
+    "id": "throughput",
+    "title": "Training throughput",
+    "y_title": "Samples/s",
+    "metrics": [
+        {
+            "key": "samples_per_second",
+            "label": "Samples/s",
+            "unit": "samples/s",
+            "direction": "higher_is_better",
+        },
+    ],
+}
 COMMON_METRIC_GROUPS = [
     H_MAE_METRIC_GROUP,
     H_RMSE_METRIC_GROUP,
@@ -160,6 +263,13 @@ COMMON_METRIC_GROUPS = [
     SPECTRAL_FRONTIER_METRIC_GROUP,
     DOS_MAE_METRIC_GROUP,
     DOS_WASSERSTEIN_METRIC_GROUP,
+    VALIDATION_RERUN_METRIC_GROUP,
+    DEEPH_LIVE_LOSS_METRIC_GROUP,
+    GPU_HOURS_METRIC_GROUP,
+    PEAK_GPU_MEMORY_METRIC_GROUP,
+    PEAK_RSS_METRIC_GROUP,
+    CPU_TIME_METRIC_GROUP,
+    THROUGHPUT_METRIC_GROUP,
 ]
 
 

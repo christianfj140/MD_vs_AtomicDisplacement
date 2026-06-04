@@ -106,9 +106,9 @@ def request_json(
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             body = response.read().decode("utf-8")
-    except urllib.error.URLError as exc:
+    except (TimeoutError, urllib.error.URLError) as exc:
         raise RuntimeError(f"UI API request failed: {url}: {exc}") from exc
     parsed = json.loads(body)
     if not isinstance(parsed, dict):
@@ -164,6 +164,31 @@ def prepare_payload(entry: QueueEntry, *, queue_root: Path) -> Path:
     payload = read_json(entry.workflow_root / "search" / "run_search_payload.json")
     payload["dry_run"] = False
     payload["run_id"] = run_id
+    performance = dict(payload.get("performance") or {})
+    performance.update(
+        {
+            "max_parallel_graph2mat_training_jobs": 7,
+            "max_parallel_deeph_training_jobs": 5,
+            "model_batch_schedule": "alternating",
+            "model_batch_start": "deeph",
+            "torch_num_threads": 2,
+            "omp_num_threads": 2,
+            "mkl_num_threads": 2,
+            "openblas_num_threads": 2,
+            "numexpr_num_threads": 2,
+        }
+    )
+    payload["performance"] = performance
+    deeph = dict(payload.get("deeph") or {})
+    deeph.update(
+        {
+            "disable_cuda": False,
+            "device": "cuda:0",
+            "multiprocessing": 0,
+            "num_threads": 2,
+        }
+    )
+    payload["deeph"] = deeph
     payload_path = queue_root / "payloads" / f"{entry.key}_{run_id}.json"
     write_json(payload_path, payload)
     return payload_path
@@ -171,7 +196,12 @@ def prepare_payload(entry: QueueEntry, *, queue_root: Path) -> Path:
 
 def wait_until_idle(ui_url: str, *, poll_seconds: float) -> dict[str, Any]:
     while True:
-        status = request_json(f"{ui_url.rstrip('/')}/api/g2m-deeph/status", allow_error=True)
+        try:
+            status = request_json(f"{ui_url.rstrip('/')}/api/g2m-deeph/status", allow_error=True)
+        except RuntimeError as exc:
+            print("[QUEUE][WAIT][API-RETRY]", exc, flush=True)
+            time.sleep(poll_seconds)
+            continue
         sweep = status.get("training_sweep") if isinstance(status.get("training_sweep"), dict) else {}
         print(
             "[QUEUE][WAIT]",
@@ -190,7 +220,12 @@ def wait_until_idle(ui_url: str, *, poll_seconds: float) -> dict[str, Any]:
 
 def wait_for_run(ui_url: str, *, run_id: str, poll_seconds: float) -> dict[str, Any]:
     while True:
-        status = request_json(f"{ui_url.rstrip('/')}/api/g2m-deeph/status", allow_error=True)
+        try:
+            status = request_json(f"{ui_url.rstrip('/')}/api/g2m-deeph/status", allow_error=True)
+        except RuntimeError as exc:
+            print("[QUEUE][RUN][API-RETRY]", exc, flush=True)
+            time.sleep(poll_seconds)
+            continue
         sweep = status.get("training_sweep") if isinstance(status.get("training_sweep"), dict) else {}
         print(
             "[QUEUE][RUN]",

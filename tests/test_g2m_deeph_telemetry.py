@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +115,24 @@ class Graph2MatDeepHTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry["observed_gpu_count"], 1)
         self.assertGreater(telemetry["gpu_active_seconds"], 0)
 
+    def test_gpu_monitor_records_short_gpu_jobs(self) -> None:
+        def query():
+            return ([{"pid": 123, "used_memory_mb": 256, "gpu_uuid": "gpu0"}], None)
+
+        monitor = GpuTelemetryMonitor(
+            poll_interval_seconds=10.0,
+            query_processes=query,
+            pid_tree=lambda root: {root},
+        )
+        monitor.start(123)
+        time.sleep(0.02)
+        telemetry = monitor.stop()
+
+        self.assertEqual(telemetry["peak_gpu_memory_mb"], 256)
+        self.assertEqual(telemetry["observed_gpu_count"], 1)
+        self.assertGreater(telemetry["gpu_active_seconds"], 0)
+        self.assertGreater(compute_gpu_hours(telemetry["gpu_active_seconds"], telemetry["observed_gpu_count"]), 0)
+
     def test_proc_monitor_unavailable_path_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             monitor = ProcResourceMonitor(
@@ -151,6 +170,44 @@ class Graph2MatDeepHTelemetryTests(unittest.TestCase):
             self.assertEqual(telemetry["total_optimizer_updates"], 4)
             self.assertIn("gpu_hours_total unavailable", telemetry["telemetry_warnings"])
             self.assertIn("train: nvidia-smi unavailable", telemetry["telemetry_warnings"])
+
+    def test_validation_gpu_hours_to_best_uses_training_start_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            split = root / "frozen_split_manifest.json"
+            split.write_text(json.dumps({"split_counts": {"train": 8, "validation": 2}}), encoding="utf-8")
+            with mock.patch(
+                "g2m_deeph_telemetry.extract_graph2mat_validation_cost",
+                return_value={
+                    "best_validation_value": 0.1,
+                    "best_validation_epoch": 1,
+                    "best_validation_step": 1,
+                    "wall_clock_seconds_to_best_validation": 180.0,
+                    "selection_metric": "val_loss",
+                    "status": "available",
+                },
+            ) as validation_cost:
+                telemetry = summarize_run_telemetry(
+                    model="graph2mat",
+                    run_root=root,
+                    training_dir=root / "training",
+                    frozen_split_manifest_path=split,
+                    train_run={
+                        "started_at": 1000.0,
+                        "elapsed_seconds": 360.0,
+                        "telemetry": {
+                            "gpu_hours": 0.1,
+                            "gpu_active_seconds": 360.0,
+                            "observed_gpu_count": 1,
+                            "peak_gpu_memory_mb": 512,
+                        },
+                    },
+                    optimizer_accounting=optimizer_update_accounting(train_samples=8, batch_size=4, max_epochs=2),
+                )
+
+            self.assertEqual(validation_cost.call_args.kwargs["run_started_at"], 1000.0)
+            self.assertAlmostEqual(telemetry["gpu_hours_total"], 0.1)
+            self.assertAlmostEqual(telemetry["gpu_hours_to_best_validation"], 0.05)
 
     def test_artifact_serialization_and_ranking_old_artifact_compatibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

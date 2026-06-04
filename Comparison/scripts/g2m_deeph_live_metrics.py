@@ -142,9 +142,14 @@ def completed_metric_record(record: dict[str, Any]) -> bool:
         return False
     metrics_run = record.get("metrics_run") if isinstance(record.get("metrics_run"), dict) else {}
     try:
-        return int(metrics_run.get("returncode")) == 0
+        if int(metrics_run.get("returncode")) == 0:
+            return True
     except (TypeError, ValueError):
-        return False
+        pass
+    paths = _metric_paths(record)
+    return paths["manifest"].exists() and any(
+        paths[key].exists() for key in ("matrix", "spectral", "dos")
+    )
 
 
 def _metric_paths(record: dict[str, Any]) -> dict[str, Path]:
@@ -290,6 +295,7 @@ def dedupe_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             str(row.get("dataset_id") or ""),
             str(row.get("method") or ""),
             str(row.get("config_id") or ""),
+            str(row.get("seed") or ""),
             str(row.get("epoch_label") or ""),
             str(row.get("metric_key") or ""),
         )

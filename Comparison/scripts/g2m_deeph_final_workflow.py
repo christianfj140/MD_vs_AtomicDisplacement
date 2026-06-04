@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from g2m_deeph_final_stats import final_statistics_report, load_rows
+from g2m_deeph_final_stats import final_statistics_report, load_rows, metric_split, metric_value, protocol_stage
 from g2m_deeph_protocol import load_protocol
 from g2m_deeph_report import generate_report
 from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner
@@ -41,6 +41,7 @@ STAGES = {
     "select-top-k",
     "generate-final-seeds",
     "run-final",
+    "run-final-test",
     "evaluate-final-test",
     "generate-report",
 }
@@ -218,6 +219,8 @@ def build_runner_payload(
     }
     if isinstance(protocol.get("performance"), dict):
         payload["performance"] = dict(protocol["performance"])
+    if isinstance(protocol.get("deeph"), dict):
+        payload["deeph"] = dict(protocol["deeph"])
     return payload
 
 
@@ -231,6 +234,17 @@ def wait_for_runner(
         status = runner.status()
         if not status.get("running"):
             break
+        run_root = Path(str(status.get("run_root") or ""))
+        sweep_manifest_path = run_root / "sweep" / "training_sweep_manifest.json"
+        if sweep_manifest_path.exists():
+            sweep_manifest = read_json(sweep_manifest_path)
+            sweep_status = str(sweep_manifest.get("status") or "")
+            runs = sweep_manifest.get("runs") if isinstance(sweep_manifest.get("runs"), list) else []
+            planned = sweep_manifest.get("planned_runs") if isinstance(sweep_manifest.get("planned_runs"), list) else []
+            if sweep_status in {"completed", "completed_with_failures", "stopped"} and (
+                not planned or len(runs) >= len(planned)
+            ):
+                break
         time.sleep(max(0.2, poll_seconds))
     runner.write_incremental_manifest(output_manifest)
     payload = read_json(output_manifest)
@@ -400,6 +414,11 @@ def stage_run_search(args: argparse.Namespace) -> dict[str, Any]:
         dry_run=bool(args.dry_run),
         dataset_id=args.dataset_id,
     )
+    expected_run_root = workflow_root / "runs" / run_id
+    if expected_run_root.exists():
+        payload["reuse_run_root"] = True
+        payload["resume_training_sweep"] = True
+        payload["resume_from_run_root"] = str(expected_run_root)
     selected_plan = payload["_training_sweep_plan"]
     search_dir = workflow_root / "search"
     write_json(search_dir / "run_search_payload.json", payload)
@@ -551,6 +570,11 @@ def stage_run_final(args: argparse.Namespace) -> dict[str, Any]:
         dry_run=bool(args.dry_run),
         dataset_id=args.dataset_id,
     )
+    expected_run_root = workflow_root / "runs" / run_id
+    if expected_run_root.exists():
+        payload["reuse_run_root"] = True
+        payload["resume_training_sweep"] = True
+        payload["resume_from_run_root"] = str(expected_run_root)
     selected_plan = payload["_training_sweep_plan"]
     final_dir = workflow_root / "final"
     write_json(final_dir / "run_final_payload.json", payload)
@@ -616,6 +640,16 @@ def final_run_root(args: argparse.Namespace) -> Path:
     return Path(root)
 
 
+def final_test_run_root(args: argparse.Namespace) -> Path:
+    if args.final_run_root:
+        return args.final_run_root
+    manifest = read_json(args.workflow_root / "stages" / "run-final-test.json")
+    root = ((manifest.get("outputs") or {}).get("final_test_run_root") or "").strip()
+    if root:
+        return Path(root)
+    return final_run_root(args)
+
+
 def final_evaluation_metric(protocol: dict[str, Any]) -> str:
     section = protocol.get("final_evaluation")
     if not isinstance(section, dict):
@@ -636,6 +670,119 @@ def final_evaluation_mode(protocol: dict[str, Any]) -> str:
     return mode
 
 
+def stage_run_final_test(args: argparse.Namespace) -> dict[str, Any]:
+    workflow_root = args.workflow_root
+    protocol = load_workflow_protocol(args.protocol, workflow_root)
+    metric = final_evaluation_metric(protocol)
+    robust_plan_path = require_path(
+        args.robust_rerun_plan or workflow_root / "selection" / "robust_rerun_plan.json",
+        message="Missing robust rerun plan",
+    )
+    robust_plan = read_json(robust_plan_path)
+    source_root = final_run_root(args)
+    rows = load_rows(source_root)
+    output_root = workflow_root / "final_test"
+    output_sweep = output_root / "sweep"
+    if args.dry_run:
+        manifest = {
+            "schema": WORKFLOW_SCHEMA,
+            "stage": "run-final-test",
+            "status": "planned_dry_run",
+            "source_final_run_root": str(source_root),
+            "robust_rerun_plan": str(robust_plan_path),
+            "planned_run_count": len(robust_plan.get("planned_runs") or []),
+            "message": "No training or test inference launched.",
+        }
+        write_json(output_root / "run_final_test_manifest.json", manifest)
+        return stage_manifest(
+            workflow_root=workflow_root,
+            stage=args.stage,
+            status="planned_dry_run",
+            inputs={"final_run_root": str(source_root), "robust_rerun_plan": str(robust_plan_path)},
+            outputs={
+                "run_final_test_manifest": str(output_root / "run_final_test_manifest.json"),
+                "planned_run_count": len(robust_plan.get("planned_runs") or []),
+            },
+            message="Final-test materialization planned; no subprocesses launched.",
+        )
+
+    normalized_rows: list[dict[str, Any]] = []
+    blocked: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or metric_value(row, metric) is None:
+            continue
+        stage = protocol_stage(row)
+        split = metric_split(row)
+        if stage == SEARCH_STAGE and split == "test":
+            blocked.append(str(row.get("config_id") or row.get("run_id") or index))
+            continue
+        if stage == FINAL_TEST_STAGE or split == "test":
+            item = dict(row)
+            item["protocol_stage"] = FINAL_TEST_STAGE
+            item["metric_split"] = "test"
+            item["final_test_source_run_root"] = str(source_root)
+            normalized_rows.append(item)
+    if blocked:
+        raise RuntimeError(
+            "Refusing to promote test metrics produced before explicit final_test stage: "
+            + ", ".join(blocked[:10])
+        )
+    if not normalized_rows:
+        manifest = {
+            "schema": WORKFLOW_SCHEMA,
+            "stage": "run-final-test",
+            "status": "missing_final_test_metrics",
+            "source_final_run_root": str(source_root),
+            "robust_rerun_plan": str(robust_plan_path),
+            "planned_run_count": len(robust_plan.get("planned_runs") or []),
+            "message": (
+                "No final-test metric rows were found. run-final-test does not retrain or invent metrics; "
+                "produce locked-test inference/evaluation rows, then rerun this stage."
+            ),
+        }
+        write_json(output_root / "run_final_test_manifest.json", manifest)
+        raise RuntimeError("run-final-test found no final_test/test metric rows for the selected final runs.")
+
+    validate_final_evaluation_inputs(
+        selected_runs=list(robust_plan.get("planned_runs") or []),
+        metric_rows=normalized_rows,
+        stage=FINAL_TEST_STAGE,
+        metric=metric,
+    )
+    payload = {
+        "schema": "graph2mat_deeph_final_test_metrics_v1",
+        "protocol_stage": FINAL_TEST_STAGE,
+        "metric_split": "test",
+        "source_final_run_root": str(source_root),
+        "runs": normalized_rows,
+    }
+    write_json(output_sweep / "training_sweep_manifest.json", payload)
+    write_csv(output_sweep / "training_sweep_metrics.csv", normalized_rows)
+    manifest = {
+        "schema": WORKFLOW_SCHEMA,
+        "stage": "run-final-test",
+        "status": "completed",
+        "source_final_run_root": str(source_root),
+        "final_test_run_root": str(output_root),
+        "robust_rerun_plan": str(robust_plan_path),
+        "final_test_row_count": len(normalized_rows),
+    }
+    write_json(output_root / "run_final_test_manifest.json", manifest)
+    return stage_manifest(
+        workflow_root=workflow_root,
+        stage=args.stage,
+        status="completed",
+        inputs={"final_run_root": str(source_root), "robust_rerun_plan": str(robust_plan_path)},
+        outputs={
+            "run_final_test_manifest": str(output_root / "run_final_test_manifest.json"),
+            "final_test_run_root": str(output_root),
+            "training_sweep_manifest": str(output_sweep / "training_sweep_manifest.json"),
+            "final_test_row_count": len(normalized_rows),
+        },
+        message="Final-test rows materialized and marked as explicit final_test/test.",
+    )
+
+
 def stage_evaluate_final_test(args: argparse.Namespace) -> dict[str, Any]:
     workflow_root = args.workflow_root
     protocol = load_workflow_protocol(args.protocol, workflow_root)
@@ -644,7 +791,7 @@ def stage_evaluate_final_test(args: argparse.Namespace) -> dict[str, Any]:
         message="Missing robust rerun plan",
     )
     robust_plan = read_json(robust_plan_path)
-    root = final_run_root(args)
+    root = final_test_run_root(args)
     metric = final_evaluation_metric(protocol)
     mode = final_evaluation_mode(protocol)
     rows = load_rows(root)
@@ -675,7 +822,7 @@ def stage_evaluate_final_test(args: argparse.Namespace) -> dict[str, Any]:
 def stage_generate_report(args: argparse.Namespace) -> dict[str, Any]:
     workflow_root = args.workflow_root
     protocol = load_workflow_protocol(args.protocol, workflow_root)
-    root = args.report_run_root or args.final_run_root or final_run_root(args)
+    root = args.report_run_root or args.final_run_root or final_test_run_root(args)
     metric = final_evaluation_metric(protocol)
     mode = final_evaluation_mode(protocol)
     report = generate_report(
@@ -710,6 +857,7 @@ STAGE_HANDLERS = {
     "select-top-k": stage_select_top_k,
     "generate-final-seeds": stage_generate_final_seeds,
     "run-final": stage_run_final,
+    "run-final-test": stage_run_final_test,
     "evaluate-final-test": stage_evaluate_final_test,
     "generate-report": stage_generate_report,
 }

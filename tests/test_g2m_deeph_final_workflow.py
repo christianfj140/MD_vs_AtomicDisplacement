@@ -304,6 +304,72 @@ class Graph2MatDeepHFinalWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["dataset_root"], "/tmp/joint_b")
         self.assertEqual({row["dataset_id"] for row in planned_runs}, {"joint_b"})
 
+    def test_run_final_test_dry_run_does_not_launch_training(self) -> None:
+        self.test_top_k_and_final_seed_plan_are_stage_artifacts()
+        final_root = self.workflow / "fake_final_run"
+        write_json(final_root / "sweep" / "training_sweep_manifest.json", {"runs": []})
+
+        manifest = self.run_cli("--stage", "run-final-test", "--dry-run", "--final-run-root", str(final_root))
+
+        self.assertEqual(manifest["status"], "planned_dry_run")
+        final_test_manifest = json.loads((self.workflow / "final_test" / "run_final_test_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(final_test_manifest["status"], "planned_dry_run")
+        self.assertIn("No training", final_test_manifest["message"])
+
+    def test_run_final_test_materializes_test_rows_and_evaluate_uses_them(self) -> None:
+        self.test_top_k_and_final_seed_plan_are_stage_artifacts()
+        robust_plan = json.loads((self.workflow / "selection" / "robust_rerun_plan.json").read_text(encoding="utf-8"))
+        final_rows = []
+        for row in robust_plan["planned_runs"]:
+            final_rows.append(
+                {
+                    **row,
+                    "status": "completed",
+                    "metric_split": "test",
+                    "low_energy_rmse_eV_mean": 0.2 if row["model"] == "graph2mat" else 0.3,
+                    "telemetry": {"gpu_hours_total": 1.0, "peak_gpu_memory_mb": 1000.0},
+                    "adapter_equivalence_status": "proven_raw_global_hamiltonian_equivalent"
+                    if row["model"] == "deeph"
+                    else "",
+                    "equivalence_status": "proven" if row["model"] == "deeph" else "",
+                    "comparability_status": "valid",
+                }
+            )
+        final_root = self.workflow / "fake_final_run"
+        write_json(final_root / "sweep" / "training_sweep_manifest.json", {"runs": final_rows})
+
+        materialized = self.run_cli("--stage", "run-final-test", "--final-run-root", str(final_root))
+        evaluated = self.run_cli("--stage", "evaluate-final-test")
+
+        self.assertEqual(materialized["status"], "completed")
+        self.assertEqual(evaluated["status"], "completed")
+        normalized = json.loads((self.workflow / "final_test" / "sweep" / "training_sweep_manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(normalized["runs"])
+        self.assertEqual({row["protocol_stage"] for row in normalized["runs"]}, {"final_test"})
+        self.assertEqual({row["metric_split"] for row in normalized["runs"]}, {"test"})
+
+    def test_run_final_test_rejects_test_metrics_from_search_stage(self) -> None:
+        self.test_top_k_and_final_seed_plan_are_stage_artifacts()
+        robust_plan = json.loads((self.workflow / "selection" / "robust_rerun_plan.json").read_text(encoding="utf-8"))
+        final_root = self.workflow / "fake_final_run"
+        write_json(
+            final_root / "sweep" / "training_sweep_manifest.json",
+            {
+                "runs": [
+                    {
+                        **robust_plan["planned_runs"][0],
+                        "status": "completed",
+                        "protocol_stage": "search",
+                        "metric_split": "test",
+                        "low_energy_rmse_eV_mean": 0.2,
+                    }
+                ]
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Refusing to promote test metrics"):
+            self.run_cli("--stage", "run-final-test", "--final-run-root", str(final_root))
+
     def test_evaluate_final_test_requires_test_metrics(self) -> None:
         self.test_top_k_and_final_seed_plan_are_stage_artifacts()
         final_root = self.workflow / "fake_final_run"

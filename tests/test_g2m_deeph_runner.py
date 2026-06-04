@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from unittest import mock
@@ -24,6 +25,7 @@ from g2m_deeph_runner import (  # noqa: E402
     METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY,
     METRIC_FAIL_POLICY_FAIL_CLOSED,
     Graph2MatDeepHBenchmarkRunner,
+    _deeph_device_settings,
     _deeph_training_parallelism,
     _deeph_metric_command_args,
     _extract_validation_metrics,
@@ -234,6 +236,34 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         payload = {
             "benchmark_mode": "final_publication",
             "protocol_stage": "search",
+            "metric_evaluation_split": "test",
+            "protocol": {
+                "search_evaluation": {"run_validation_metrics": True},
+                "selection": {"metric": "val_spectral_composite", "mode": "min"},
+                "top_k_selection": {"k_per_model": 1},
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "locked test split"):
+            _metric_evaluation_split(payload)
+
+    def test_robust_validation_composite_evaluation_uses_validation_split(self):
+        payload = {
+            "benchmark_mode": "final_publication",
+            "protocol_stage": "robust_validation",
+            "protocol": {
+                "search_evaluation": {"run_validation_metrics": True},
+                "selection": {"metric": "val_spectral_composite", "mode": "min"},
+                "top_k_selection": {"k_per_model": 1},
+            },
+        }
+
+        self.assertEqual(_metric_evaluation_split(payload), "validation")
+
+    def test_robust_validation_metric_evaluation_rejects_locked_test_split(self):
+        payload = {
+            "benchmark_mode": "final_publication",
+            "protocol_stage": "robust_validation",
             "metric_evaluation_split": "test",
             "protocol": {
                 "search_evaluation": {"run_validation_metrics": True},
@@ -877,6 +907,48 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertIn("Missing gpu_hours_total", results["training_sweep"]["failed_runs"][0]["error"])
             self.assertEqual(results["training_sweep"]["budget"]["budget_accounting_status"], "failed")
 
+    def test_exploratory_equal_gpu_hours_missing_telemetry_records_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fake_graph2mat_job(payload, validation, record):
+                return {
+                    **record,
+                    "status": "completed",
+                    "run_root": str(Path(tmp) / "runs" / record["config_id"]),
+                }
+
+            runner._run_training_sweep_graph2mat_job = fake_graph2mat_job  # type: ignore[method-assign]
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "budget_missing_telemetry_exploratory",
+                    "benchmark_mode": "exploratory_weekend_fast",
+                    "training_sweep": {
+                        "enabled": True,
+                        "budget_policy": {"mode": "equal_gpu_hours_per_model", "gpu_hours_per_model": 1.0},
+                        "common": {"epochs": [1]},
+                        "graph2mat": {"enabled": True, "num_interactions": [1]},
+                        "deeph": {"enabled": False},
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 0)
+            results = runner.results()["results"]
+            summary = results["training_sweep"]
+            self.assertEqual(summary["failed_runs"], [])
+            self.assertIn("Missing gpu_hours_total", summary["warnings"][0])
+            self.assertEqual(summary["runs"][0]["budget_accounting_status"], "incomplete")
+            self.assertEqual(summary["budget"]["budget_accounting_status"], "failed")
+
     def test_final_benchmark_training_sweep_locks_test_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = Path(tmp) / "dataset"
@@ -1097,6 +1169,21 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             2,
         )
 
+    def test_deeph_uses_gpu_when_performance_requests_gpu(self):
+        disable_cuda, device = _deeph_device_settings(
+            {"performance": {"compute_accelerator": "gpu"}},
+            {},
+        )
+        self.assertFalse(disable_cuda)
+        self.assertEqual(device, "cuda:0")
+
+        disable_cuda, device = _deeph_device_settings(
+            {"performance": {"compute_accelerator": "gpu"}},
+            {"disable_cuda": True},
+        )
+        self.assertTrue(disable_cuda)
+        self.assertEqual(device, "cpu")
+
     def test_training_sweep_dry_run_batches_deeph_jobs_in_parallel(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = Path(tmp) / "dataset"
@@ -1141,6 +1228,123 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                 for key in ("raw_dir", "processed_dir", "graph_dir", "save_dir", "inference_dir", "manifest_path"):
                     self.assertIn(key, context)
             self.assertEqual(len(set(deeph_roots)), 2)
+
+    def test_training_sweep_dry_run_batches_mixed_models_in_parallel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "mixed_parallel_dry",
+                    "dry_run": True,
+                    "performance": {
+                        "max_parallel_graph2mat_training_jobs": 2,
+                        "max_parallel_deeph_training_jobs": 1,
+                        "mixed_model_training_batches": True,
+                    },
+                    "training_sweep": {
+                        "enabled": True,
+                        "search_policy": {"strategy": "manual"},
+                        "manual_runs": [
+                            {
+                                "model": "graph2mat",
+                                "config_id": "G2M-1",
+                                "overrides": {"max_ell": 2, "hidden_irreps_channels": 4, "max_epochs": 1},
+                            },
+                            {
+                                "model": "deeph",
+                                "config_id": "DH-1",
+                                "overrides": {"atom_fea_len": 64, "num_l": 5, "epochs": 1},
+                            },
+                            {
+                                "model": "graph2mat",
+                                "config_id": "G2M-2",
+                                "overrides": {"max_ell": 2, "hidden_irreps_channels": 8, "max_epochs": 1},
+                            },
+                        ],
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 0)
+            results = runner.results()["results"]
+            self.assertTrue(results["training_sweep"]["mixed_model_training_batches"])
+            self.assertEqual(len(results["training_sweep"]["runs"]), 3)
+            self.assertIn("Running mixed Graph2Mat/DeepH sweep batch", "".join(runner.logs(since=0)["lines"]))
+
+    def test_training_sweep_can_reorder_into_alternating_model_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            status = runner.start(
+                {
+                    "dataset_root": str(dataset),
+                    "output_root": str(Path(tmp) / "results"),
+                    "run_id": "alternating_model_batches_dry",
+                    "dry_run": True,
+                    "performance": {
+                        "max_parallel_graph2mat_training_jobs": 2,
+                        "max_parallel_deeph_training_jobs": 1,
+                        "model_batch_schedule": "alternating",
+                    },
+                    "training_sweep": {
+                        "enabled": True,
+                        "search_policy": {"strategy": "manual"},
+                        "manual_runs": [
+                            {
+                                "model": "graph2mat",
+                                "config_id": "G2M-1",
+                                "overrides": {"max_ell": 2, "hidden_irreps_channels": 4, "max_epochs": 1},
+                            },
+                            {
+                                "model": "deeph",
+                                "config_id": "DH-1",
+                                "overrides": {"atom_fea_len": 64, "num_l": 5, "epochs": 1},
+                            },
+                            {
+                                "model": "graph2mat",
+                                "config_id": "G2M-2",
+                                "overrides": {"max_ell": 2, "hidden_irreps_channels": 8, "max_epochs": 1},
+                            },
+                            {
+                                "model": "deeph",
+                                "config_id": "DH-2",
+                                "overrides": {"atom_fea_len": 128, "num_l": 5, "epochs": 1},
+                            },
+                            {
+                                "model": "graph2mat",
+                                "config_id": "G2M-3",
+                                "overrides": {"max_ell": 2, "hidden_irreps_channels": 16, "max_epochs": 1},
+                            },
+                        ],
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+
+            final = runner.status()
+            self.assertFalse(final["running"])
+            self.assertEqual(final["returncode"], 0)
+            summary = runner.results()["results"]["training_sweep"]
+            self.assertEqual(summary["model_batch_schedule"], "alternating")
+            self.assertEqual(
+                [row["config_id"] for row in summary["planned_runs"]],
+                ["G2M-1", "G2M-2", "DH-1", "G2M-3", "DH-2"],
+            )
+            logs = "".join(runner.logs(since=0)["lines"])
+            self.assertIn("Running Graph2Mat sweep batch: G2M-1, G2M-2", logs)
+            self.assertNotIn("Running mixed Graph2Mat/DeepH sweep batch", logs)
 
     def test_graph2mat_acceleration_probe_is_recorded_without_requiring_optional_package(self):
         runner = Graph2MatDeepHBenchmarkRunner()
@@ -1404,6 +1608,52 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertEqual(train_row["dataset_size"], 10)
         self.assertEqual(train_row["elapsed_seconds"], 20.0)
 
+    def test_plots_endpoint_excludes_running_training_sweep_timing_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            run_root = Path(tmp) / "results" / "live_run"
+            (run_root / "sweep").mkdir(parents=True)
+            planned = {
+                "planned_runs": [
+                    {
+                        "model": "deeph",
+                        "dataset_id": "dataset",
+                        "dataset_root": str(dataset),
+                        "config_id": "DH-live",
+                        "overrides": {"epochs": 12},
+                    }
+                ]
+            }
+            (run_root / "sweep" / "training_sweep_manifest.json").write_text(
+                json.dumps(planned),
+                encoding="utf-8",
+            )
+            runner = Graph2MatDeepHBenchmarkRunner()
+            with runner._lock:
+                runner._state.run_root = str(run_root)
+                runner._state.dataset_root = str(dataset)
+                runner._state.training_sweep_status = {
+                    "enabled": True,
+                    "active_model": "deeph",
+                    "active_dataset": "dataset",
+                    "active_config_id": "DH-live",
+                    "active_started_at": time.time() - 5.0,
+                    "active_runs": [
+                        {"model": "deeph", "dataset_id": "dataset", "config_id": "DH-live"}
+                    ],
+                }
+
+            payload = runner.plots()
+
+            running_rows = [
+                row
+                for row in payload["timing_scaling_rows"]
+                if row.get("source") == "live_training_sweep_status"
+            ]
+            self.assertEqual(running_rows, [])
+            self.assertEqual(payload["live_timing_rows"], 0)
+
     def test_plots_endpoint_includes_archived_metric_scaling_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
@@ -1445,6 +1695,53 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertEqual(metric_plot["kind"], "metric_scaling")
             self.assertTrue(any(row["dataset_size"] == 3 for row in payload["metric_scaling_rows"]))
 
+    def test_plots_endpoint_filters_selected_archived_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
+            dataset = Path(tmp) / "dataset"
+            _write_training_ready_dataset(dataset)
+            for run_name, metric_value in (("run_one", 0.12), ("run_two", 0.34)):
+                run_root = output_root / run_name
+                summary_dir = run_root / "common_metrics" / "summary"
+                summary_dir.mkdir(parents=True, exist_ok=True)
+                (summary_dir / "common_summary.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "diagnostic_only",
+                            "summary_rows": [
+                                {"method": "graph2mat", "h_mae_eV_mean": metric_value},
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                graph_dir = run_root / "graph2mat"
+                graph_dir.mkdir(parents=True, exist_ok=True)
+                (graph_dir / "graph2mat_manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "context": {"dataset_root": str(dataset)},
+                            "extra": {"training_run": {"elapsed_seconds": 3.0}},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            runner = Graph2MatDeepHBenchmarkRunner()
+            with mock.patch("g2m_deeph_runner.DEFAULT_OUTPUT_ROOT", output_root):
+                runs = runner.plot_runs()["runs"]
+                selected = next(run for run in runs if run["run_id"] == "run_two")
+                payload = runner.plots(selected_run_ids={selected["id"]})
+
+            self.assertTrue(payload["metric_scaling_rows"])
+            self.assertEqual({row["run_id"] for row in payload["metric_scaling_rows"]}, {"run_two"})
+            self.assertTrue(payload["timing_scaling_rows"])
+            self.assertEqual({row["run_id"] for row in payload["timing_scaling_rows"]}, {"run_two"})
+            with mock.patch("g2m_deeph_runner.DEFAULT_OUTPUT_ROOT", output_root):
+                empty_payload = runner.plots(selected_run_ids=set())
+            self.assertEqual(empty_payload["metric_scaling_rows"], [])
+            self.assertEqual(empty_payload["timing_scaling_rows"], [])
+
     def test_plots_endpoint_includes_live_metric_scaling_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
@@ -1475,7 +1772,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertTrue(payload["available"])
             self.assertEqual(payload["metric_scaling_rows"], [live_row])
             self.assertEqual(payload["live_metric_rows"], 1)
-            self.assertEqual(payload["archived_runs"], 0)
+            self.assertEqual(payload["archived_runs"], 1)
             metric_plot = next(plot for plot in payload["plots"] if plot["id"] == "metric_scaling_h_mae")
             self.assertEqual(metric_plot["kind"], "metric_scaling")
             self.assertEqual(metric_plot["rows"][0]["metric_value"], 0.123)
@@ -1487,10 +1784,11 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             "/api/g2m-deeph/run",
             "/api/g2m-deeph/stop",
             "/api/g2m-deeph/status",
-            "/api/g2m-deeph/logs",
-            "/api/g2m-deeph/results",
-            "/api/g2m-deeph/plots",
-        ):
+                "/api/g2m-deeph/logs",
+                "/api/g2m-deeph/results",
+                "/api/g2m-deeph/plot-runs",
+                "/api/g2m-deeph/plots",
+            ):
             self.assertIn(endpoint, source)
 
     def test_validate_dataset_http_endpoint_returns_summary(self):

@@ -1,0 +1,655 @@
+{
+  "protocol_id": "g2m_deeph_iid600_decision_bakeoff_parallel_v1",
+  "version": "1.0",
+  "datasets": [
+    {
+      "dataset_id": "graphene_w90_phase1_iid600",
+      "dataset_root": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600",
+      "benchmark_dataset_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/benchmark_dataset_manifest.json",
+      "frozen_split_manifest": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/frozen_split_manifest.json",
+      "artifact_validation": "Comparison/datasets/graphene_w90_joint/graphene_w90_phase1_iid600/artifact_validation.json",
+      "compatibility_hash": "recorded_in_benchmark_dataset_manifest",
+      "role": "decision_bakeoff_cost_accuracy"
+    }
+  ],
+  "reference_artifacts": {
+    "contract": "joint_graph2mat_deeph_artifact_contract_v1",
+    "required": [
+      "RUN.fdf",
+      "SystemLabel.TSHS",
+      "SystemLabel.TSDE",
+      "SystemLabel.HSX",
+      "SystemLabel.STRUCT_OUT",
+      "SystemLabel.XV",
+      "SystemLabel.ORB_INDX",
+      "metadata.json"
+    ],
+    "forbidden": [
+      "ML_prediction.HSX"
+    ],
+    "forbid_as_reference": "ML_prediction.HSX"
+  },
+  "models": {
+    "graph2mat": {
+      "enabled": true,
+      "search_space": {
+        "optim_lr": {
+          "choices": [
+            0.0009,
+            0.0012,
+            0.003
+          ]
+        },
+        "batch_size": {
+          "choices": [
+            32,
+            48,
+            64,
+            80
+          ]
+        },
+        "max_epochs": {
+          "value": 450
+        },
+        "hidden_irreps": {
+          "choices": [
+            "48x0e + 48x1o + 48x2e + 48x3o",
+            "64x0e + 64x1o + 64x2e + 64x3o"
+          ]
+        },
+        "num_interactions": {
+          "value": 3
+        },
+        "correlation": {
+          "choices": [
+            2,
+            3
+          ]
+        },
+        "max_ell": {
+          "value": 3
+        },
+        "loss": {
+          "choices": [
+            "graph2mat.metrics.block_type_mse",
+            "graph2mat.metrics.block_type_huber"
+          ]
+        },
+        "loss_kwargs": {
+          "choices": [
+            {},
+            {
+              "beta": 0.003
+            },
+            {
+              "beta": 0.01
+            }
+          ]
+        },
+        "readout": {
+          "choices": [
+            "default",
+            "edge_node_mix"
+          ]
+        }
+      }
+    },
+    "deeph": {
+      "enabled": true,
+      "search_space": {
+        "learning_rate": {
+          "choices": [
+            0.0001,
+            0.0003,
+            0.0006,
+            0.001
+          ]
+        },
+        "batch_size": {
+          "choices": [
+            4,
+            8,
+            12
+          ]
+        },
+        "epochs": {
+          "value": 360
+        },
+        "optimizer": {
+          "choices": [
+            "adam",
+            "adamW"
+          ]
+        },
+        "weight_decay": {
+          "choices": [
+            0.0,
+            0.0001
+          ]
+        },
+        "criterion": {
+          "value": "MaskMSELoss"
+        },
+        "atom_fea_len": {
+          "choices": [
+            128,
+            192
+          ]
+        },
+        "edge_fea_len": {
+          "choices": [
+            128,
+            192
+          ]
+        },
+        "gauss_stop": {
+          "value": 6
+        },
+        "num_l": {
+          "choices": [
+            4,
+            5
+          ]
+        },
+        "if_edge_update": {
+          "value": true
+        },
+        "if_lcmp": {
+          "value": true
+        },
+        "normalization": {
+          "value": "LayerNorm"
+        },
+        "atom_update_net": {
+          "value": "CGConv"
+        },
+        "retain_edge_fea": {
+          "value": true
+        }
+      }
+    }
+  },
+  "selection": {
+    "split": "validation",
+    "metric": "val_spectral_composite",
+    "mode": "min",
+    "source": "validation_only"
+  },
+  "early_stopping": {
+    "metric": "val_loss",
+    "mode": "min",
+    "patience": 70,
+    "min_delta": 0.0,
+    "max_epochs": 450
+  },
+  "search_policy": {
+    "strategy": "manual",
+    "max_runs": 16,
+    "random_seed": 20260601
+  },
+  "budget_policy": {
+    "mode": "equal_gpu_hours_per_model",
+    "gpu_hours_per_model": 16.0,
+    "edge_policy": "allow_overshoot_by_one_scheduler_batch"
+  },
+  "search_evaluation": {
+    "run_validation_metrics": true,
+    "split": "validation",
+    "metric_family": "spectral_and_DOS",
+    "test_metrics_locked": true
+  },
+  "final_seeds": [
+    9101,
+    9102,
+    9103
+  ],
+  "top_k_selection": {
+    "k_per_model": 2,
+    "split": "validation",
+    "metric": "val_spectral_composite",
+    "uses_test_metrics": false,
+    "grouping": "model_dataset"
+  },
+  "final_evaluation": {
+    "primary_metric": "low_energy_rmse_eV",
+    "mode": "min",
+    "secondary_metrics": [
+      "fermi_window_rmse_eV",
+      "frontier_window_rmse_eV",
+      "global_rmse_eV",
+      "dos_wasserstein_eV",
+      "dos_mae_500_fermi_window",
+      "h_mae_eV"
+    ],
+    "practical_match": {
+      "relative_gap_max": 1.1,
+      "absolute_gap_meV_max": 3.0,
+      "requires_cost_noninferior": true
+    }
+  },
+  "final_test_policy": {
+    "policy": "locked_until_final",
+    "test_split": "test",
+    "locked_during_search": true,
+    "evaluate_once_after_selection": true
+  },
+  "required_telemetry": [
+    "wall_clock_seconds",
+    "gpu_hours",
+    "peak_gpu_memory_mb",
+    "samples_per_second",
+    "matrix_blocks_per_second",
+    "best_validation_epoch"
+  ],
+  "deeph_comparability": {
+    "adapter_equivalence_policy": "fail_closed_unless_proven",
+    "robust_winner_requires_proven_equivalence": true,
+    "diagnostic_if_unproven": true
+  },
+  "performance": {
+    "compute_accelerator": "gpu",
+    "torch_mixed_precision": "bf16-mixed",
+    "torch_float32_matmul_precision": "high",
+    "max_parallel_graph2mat_training_jobs": 3,
+    "max_parallel_deeph_training_jobs": 2,
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "torch_num_threads": 2,
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2
+  },
+  "manual_search_plan": {
+    "description": "Exploratory iid600 decision bakeoff. It compares representative Graph2Mat and DeepH families on validation-only spectral/DOS metrics plus telemetry. It is not a robust final winner claim because DeepH raw/global equivalence may still be diagnostic-only.",
+    "planned_runs": [
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-01",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 32,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "optim_lr": 0.0012,
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "correlation": 3,
+          "readout": "edge_node_mix",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-02",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 48,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "optim_lr": 0.0012,
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "correlation": 3,
+          "readout": "edge_node_mix",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-03",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 64,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "optim_lr": 0.0012,
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "correlation": 3,
+          "readout": "edge_node_mix",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-04",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 48,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "optim_lr": 0.0009,
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.003
+          },
+          "correlation": 3,
+          "readout": "default",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-05",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 32,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "optim_lr": 0.003,
+          "loss": "graph2mat.metrics.block_type_mse",
+          "loss_kwargs": {},
+          "correlation": 2,
+          "readout": "edge_node_mix",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-06",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 80,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "optim_lr": 0.003,
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "correlation": 3,
+          "readout": "default",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-07",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 64,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "optim_lr": 0.0009,
+          "loss": "graph2mat.metrics.block_type_mse",
+          "loss_kwargs": {},
+          "correlation": 3,
+          "readout": "edge_node_mix",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-BAKE-I600-08",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6101
+        },
+        "overrides": {
+          "batch_size": 48,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "optim_lr": 0.003,
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "correlation": 2,
+          "readout": "edge_node_mix",
+          "max_ell": 3,
+          "num_interactions": 3,
+          "max_epochs": 450
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-01",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.001,
+          "batch_size": 12,
+          "optimizer": "adam",
+          "weight_decay": 0.0,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 128,
+          "edge_fea_len": 128,
+          "gauss_stop": 6,
+          "num_l": 5,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-02",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.001,
+          "batch_size": 8,
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 128,
+          "edge_fea_len": 128,
+          "gauss_stop": 6,
+          "num_l": 4,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-03",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.0003,
+          "batch_size": 8,
+          "optimizer": "adamW",
+          "weight_decay": 0.0,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 128,
+          "edge_fea_len": 128,
+          "gauss_stop": 6,
+          "num_l": 4,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-04",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.0003,
+          "batch_size": 4,
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 192,
+          "edge_fea_len": 128,
+          "gauss_stop": 6,
+          "num_l": 4,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-05",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.0001,
+          "batch_size": 8,
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 192,
+          "edge_fea_len": 128,
+          "gauss_stop": 6,
+          "num_l": 4,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-06",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.0001,
+          "batch_size": 4,
+          "optimizer": "adamW",
+          "weight_decay": 0.0,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 128,
+          "edge_fea_len": 192,
+          "gauss_stop": 6,
+          "num_l": 4,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-07",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.0003,
+          "batch_size": 12,
+          "optimizer": "adam",
+          "weight_decay": 0.0,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 128,
+          "edge_fea_len": 192,
+          "gauss_stop": 6,
+          "num_l": 5,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-BAKE-I600-08",
+        "dataset_id": "graphene_w90_phase1_iid600",
+        "common": {
+          "seed": 6201
+        },
+        "overrides": {
+          "epochs": 360,
+          "learning_rate": 0.0006,
+          "batch_size": 8,
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "criterion": "MaskMSELoss",
+          "atom_fea_len": 192,
+          "edge_fea_len": 192,
+          "gauss_stop": 6,
+          "num_l": 5,
+          "if_edge_update": true,
+          "if_lcmp": true,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "retain_edge_fea": true,
+          "seed": 6201
+        }
+      }
+    ]
+  },
+  "claim_policy": {
+    "scientific_status": "exploratory_decision_bakeoff",
+    "not_for_final_claims": true,
+    "reason": "Designed to choose which model family is worth deeper paper-ready reruns by validation spectral/DOS quality and telemetry. It is not a robust final winner claim."
+  }
+}

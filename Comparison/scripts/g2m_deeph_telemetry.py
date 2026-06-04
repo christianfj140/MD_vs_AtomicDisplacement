@@ -520,18 +520,21 @@ class GpuTelemetryMonitor:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _peak_gpu_memory_mb: float | None = None
     _gpu_active_seconds: float = 0.0
+    _started_at: float | None = None
     _observed_gpu_ids: set[str] = field(default_factory=set)
     _observed_pids: set[int] = field(default_factory=set)
     _warnings: list[str] = field(default_factory=list)
 
     def start(self, root_pid: int) -> None:
         self._root_pid = int(root_pid)
+        self._started_at = time.time()
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="g2m-deeph-gpu-telemetry", daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
         last_poll = time.time()
+        self._poll(0.0)
         while not self._stop.wait(self.poll_interval_seconds):
             now = time.time()
             self._poll(now - last_poll)
@@ -566,6 +569,12 @@ class GpuTelemetryMonitor:
         if self._thread is not None:
             self._thread.join(timeout=max(2.0, self.poll_interval_seconds * 2.0))
         with self._lock:
+            if (
+                self._gpu_active_seconds <= 0
+                and self._peak_gpu_memory_mb is not None
+                and self._started_at is not None
+            ):
+                self._gpu_active_seconds = max(0.0, time.time() - self._started_at)
             gpu_count = len(self._observed_gpu_ids) if self._observed_gpu_ids else None
             return {
                 "peak_gpu_memory_mb": self._peak_gpu_memory_mb,
@@ -658,9 +667,14 @@ def _tensorboard_validation_events(training_dir: Path, metric: str = "val_loss")
     return events
 
 
-def extract_graph2mat_validation_cost(training_dir: Path, *, metric: str = "val_loss") -> dict[str, Any]:
+def extract_graph2mat_validation_cost(
+    training_dir: Path,
+    *,
+    metric: str = "val_loss",
+    run_started_at: float | None = None,
+) -> dict[str, Any]:
     events = _tensorboard_validation_events(training_dir, metric=metric)
-    result = best_validation_cost_from_events(events, mode="min")
+    result = best_validation_cost_from_events(events, mode="min", run_started_at=run_started_at)
     result["selection_metric"] = metric
     if events:
         result["epochs_trained"] = max(
@@ -672,7 +686,7 @@ def extract_graph2mat_validation_cost(training_dir: Path, *, metric: str = "val_
     return result
 
 
-def extract_deeph_validation_cost(save_dir: Path) -> dict[str, Any]:
+def extract_deeph_validation_cost(save_dir: Path, *, run_started_at: float | None = None) -> dict[str, Any]:
     warnings: list[str] = []
     events: list[dict[str, Any]] = []
     for path in sorted(save_dir.glob("*.csv")):
@@ -694,7 +708,7 @@ def extract_deeph_validation_cost(save_dir: Path) -> dict[str, Any]:
             continue
     if not events:
         warnings.append("DeepH validation event log not found in save_dir; best validation cost unavailable.")
-    result = best_validation_cost_from_events(events, mode="min")
+    result = best_validation_cost_from_events(events, mode="min", run_started_at=run_started_at)
     result["selection_metric"] = "validation_loss"
     result["epochs_trained"] = max((int(item["epoch"]) for item in events), default=None) if events else None
     if warnings:
@@ -813,10 +827,11 @@ def summarize_run_telemetry(
         matrix_blocks=matrix_block_count,
         elapsed_seconds=phase_seconds["train"],
     )
+    train_started_at = finite_number((train_run or {}).get("started_at")) if isinstance(train_run, dict) else None
     validation_cost = (
-        extract_graph2mat_validation_cost(training_dir)
+        extract_graph2mat_validation_cost(training_dir, run_started_at=train_started_at)
         if model == "graph2mat" and training_dir is not None
-        else extract_deeph_validation_cost(deeph_save_dir)
+        else extract_deeph_validation_cost(deeph_save_dir, run_started_at=train_started_at)
         if model == "deeph" and deeph_save_dir is not None
         else {"status": "unavailable", "warning": "validation cost source unavailable"}
     )

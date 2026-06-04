@@ -44,8 +44,6 @@ const TEST_SET_DISPLAY_LABELS = {
 
 const PLOTLY_SCRIPT_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js";
 const MATHJAX_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
-const G2M_DEEPH_LIVE_METRICS_URL = "http://127.0.0.1:8781/api/g2m-deeph/live-plots";
-const G2M_DEEPH_LIVE_PLOT_REFRESH_MS = 15000;
 let plotlyLoadPromise = null;
 let mathJaxLoadPromise = null;
 
@@ -172,6 +170,7 @@ const UNKNOWN_MATERIAL_LABEL = "unknown material";
 const LOG_POLL_LIMIT = 2000;
 const POLL_INTERVAL_MS = 1200;
 const POLL_ERROR_TOAST_INTERVAL_MS = 30000;
+const G2M_DEEPH_LIVE_PLOT_REFRESH_MS = 30000;
 
 const METRIC_HELP = {
   low_energy_rmse_eV: {
@@ -557,6 +556,62 @@ const G2M_DEEPH_PLOT_HELP_BY_ID = {
     purpose: "Complementa la DOS MAE: dos curvas pueden tener MAE parecida pero picos desplazados. DeepH busca reproducir propiedades derivadas del Hamiltoniano, y esta metrica ve desplazamientos de DOS.",
     direction: "Menor es mejor; cero significa DOS indistinguible bajo esta metrica.",
   },
+  "g2m-deeph-plot-metric_scaling_validation_rerun": {
+    title: "Final-seed validation metric",
+    metric: "Validation metric recorded during final-seed reruns",
+    formula: "m_{val}=\\mathrm{metric}(\\mathcal{D}_{val};\\theta_{seed})",
+    description: "Valor de validacion guardado por cada semilla final. Sirve para ver estabilidad del rerun bloqueado sin abrir test.",
+    purpose: "Permite comparar si las configuraciones seleccionadas para Graph2Mat y DeepH mantienen comportamiento razonable al repetir semillas finales. No sustituye el test final.",
+    direction: "Normalmente menor es mejor. No declarar winner paper-ready con esta metrica: el winner sale de final_test + final_statistics + gate_check.",
+  },
+  "g2m-deeph-plot-metric_scaling_deeph_live_loss": {
+    title: "DeepH live training loss",
+    metric: "Train/validation loss streamed from result.txt",
+    formula: "\\mathcal{L}_{train},\\ \\mathcal{L}_{val},\\ \\min_t\\mathcal{L}_{val}(t)",
+    description: "Lectura diagnostica del entrenamiento DeepH en curso. Se actualiza desde los logs de entrenamiento, no desde el evaluator Hamiltoniano.",
+    purpose: "Sirve para verificar que DeepH esta entrenando y no se ha quedado parado. No es una metrica paper-ready ni sustituye MAE/Frobenius/espectro/DOS.",
+    direction: "Menor suele ser mejor, pero no declares ganador con esta curva. Las metricas cientificas aparecen cuando termina la config y se ejecuta el evaluator.",
+  },
+  "g2m-deeph-plot-metric_scaling_gpu_hours": {
+    title: "GPU-hours",
+    metric: "Total GPU active time",
+    formula: "GPUh=\\sum_g\\int u_g(t)\\,dt/3600",
+    description: "Coste de GPU observado durante el entrenamiento de cada run.",
+    purpose: "DeepH y Graph2Mat deben compararse tambien por coste. Este plot ayuda a ver si una ventaja de precision compensa el gasto de GPU.",
+    direction: "Menor es mejor solo si la precision final es comparable. Los fallos/OOM tambien deben contar en el coste.",
+  },
+  "g2m-deeph-plot-metric_scaling_peak_gpu_memory": {
+    title: "Peak GPU memory",
+    metric: "Maximum VRAM observed",
+    formula: "M_{peak}=\\max_t M_{GPU}(t)",
+    description: "Pico de memoria GPU registrado para cada configuracion/semilla.",
+    purpose: "Ayuda a saber que modelo cabe mejor en hardware real y que paralelismo es viable para DeepH y Graph2Mat.",
+    direction: "Menor es mejor para escalabilidad, pero debe leerse junto con precision y GPU-hours.",
+  },
+  "g2m-deeph-plot-metric_scaling_peak_rss": {
+    title: "Peak process RAM",
+    metric: "Maximum process resident memory",
+    formula: "RSS_{peak}=\\max_t RSS(t)",
+    description: "Pico de RAM de proceso observado durante el run.",
+    purpose: "DeepH puede gastar CPU/RAM en preprocesado y dataloading. Este plot separa cuellos de botella de CPU/RAM de coste GPU.",
+    direction: "Menor es mejor para robustez operativa; no es una metrica de precision.",
+  },
+  "g2m-deeph-plot-metric_scaling_cpu_time": {
+    title: "CPU time",
+    metric: "Total CPU seconds",
+    formula: "t_{CPU}=\\sum_c\\int active_c(t)\\,dt",
+    description: "Tiempo acumulado de CPU usado por el proceso.",
+    purpose: "Sirve para ver si un metodo aparentemente barato en GPU esta trasladando coste a CPU, preprocesado o dataloading.",
+    direction: "Menor es mejor a igualdad de precision y cobertura experimental.",
+  },
+  "g2m-deeph-plot-metric_scaling_throughput": {
+    title: "Training throughput",
+    metric: "Samples processed per second",
+    formula: "q=N_{train}/t_{train}",
+    description: "Tasa de entrenamiento estimada por run.",
+    purpose: "Permite detectar configuraciones lentas, saturacion de hardware y diferencias practicas entre DeepH y Graph2Mat.",
+    direction: "Mayor es mejor si no degrada las metricas espectrales/DOS finales.",
+  },
   "g2m-deeph-plot-timing_scaling": {
     title: "Phase time vs dataset size",
     metric: "Wall-clock seconds by phase",
@@ -599,8 +654,12 @@ const state = {
   g2mDeephValidation: null,
   g2mDeephResults: null,
   g2mDeephPlotPayload: null,
+  g2mDeephPlotRuns: [],
+  g2mDeephDefaultPlotRunIds: [],
+  g2mDeephSelectedPlotRunIds: [],
   g2mDeephPlotsInFlight: false,
   g2mDeephLastPlotRefreshAt: 0,
+  g2mDeephLastCompletedPlotSignature: null,
   g2mDeephDatasets: [],
   g2mDeephDatasetsLoaded: false,
   polling: null,
@@ -1776,6 +1835,52 @@ function g2mDeephReadableMetricGroups() {
       y_title: "Wasserstein eV",
       metrics: [{ key: "dos_wasserstein_eV_mean", label: "DOS Wasserstein" }],
     },
+    {
+      id: "validation_rerun",
+      title: "Final-seed validation metric",
+      y_title: "Validation metric",
+      metrics: [{ key: "validation_metric_value", label: "Validation metric" }],
+    },
+    {
+      id: "deeph_live_loss",
+      title: "DeepH live training loss",
+      y_title: "Loss",
+      metrics: [
+        { key: "deeph_live_train_loss", label: "Train loss" },
+        { key: "deeph_live_val_loss", label: "Val loss" },
+        { key: "deeph_live_best_val_loss", label: "Best val loss" },
+      ],
+    },
+    {
+      id: "gpu_hours",
+      title: "GPU-hours",
+      y_title: "GPU-hours",
+      metrics: [{ key: "gpu_hours_total", label: "GPU-hours" }],
+    },
+    {
+      id: "peak_gpu_memory",
+      title: "Peak GPU memory",
+      y_title: "Peak VRAM MB",
+      metrics: [{ key: "peak_gpu_memory_mb", label: "Peak VRAM" }],
+    },
+    {
+      id: "peak_rss",
+      title: "Peak process RAM",
+      y_title: "Peak RSS MB",
+      metrics: [{ key: "peak_rss_mb", label: "Peak RSS" }],
+    },
+    {
+      id: "cpu_time",
+      title: "CPU time",
+      y_title: "CPU seconds",
+      metrics: [{ key: "cpu_time_seconds_total", label: "CPU time" }],
+    },
+    {
+      id: "throughput",
+      title: "Training throughput",
+      y_title: "Samples/s",
+      metrics: [{ key: "samples_per_second", label: "Samples/s" }],
+    },
   ];
 }
 
@@ -1803,11 +1908,11 @@ function renderG2MDeepHMetricSummary(payload) {
   if (!common) {
     const statusBanner = document.createElement("div");
     statusBanner.className = "comparison-status-banner diagnostic";
-    const liveRows =
+    const completedRows =
       Number(plotPayload?.live_metric_rows || 0) ||
       (plotPayload?.metric_scaling_rows || []).filter((row) => row.source === "live_training_sweep_metrics").length;
-    statusBanner.textContent = liveRows
-      ? `Live Graph2Mat/DeepH metrics: ${liveRows} metric row(s), ${plotPayload?.timing_scaling_rows?.length || 0} timing row(s).`
+    statusBanner.textContent = completedRows
+      ? `Completed Graph2Mat/DeepH metrics: ${completedRows} metric row(s), ${plotPayload?.timing_scaling_rows?.length || 0} timing row(s).`
       : `Archived Graph2Mat/DeepH plots: ${plotPayload?.archived_runs || 0} metric run(s), ${plotPayload?.archived_timing_runs || 0} timing source(s).`;
     container.appendChild(statusBanner);
   }
@@ -2233,6 +2338,107 @@ function renderG2MDeepHPlotsPayload(payload) {
   schedulePlotResize();
 }
 
+function formatG2MDeepHPlotRunTime(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  return new Date(numeric * 1000).toLocaleString();
+}
+
+function setG2MDeepHSelectedPlotRuns(ids) {
+  const visibleIds = new Set((state.g2mDeephPlotRuns || []).map((run) => run.id));
+  state.g2mDeephSelectedPlotRunIds = Array.from(new Set(ids || [])).filter((id) => visibleIds.has(id));
+}
+
+function g2mDeepHPlotsQuery() {
+  if (state.g2mDeephSelectedPlotRunIds == null) return "";
+  const params = new URLSearchParams();
+  if (!state.g2mDeephSelectedPlotRunIds.length) {
+    params.set("run_ids", "");
+    return `?${params.toString()}`;
+  }
+  state.g2mDeephSelectedPlotRunIds.forEach((id) => params.append("run_id", id));
+  return `?${params.toString()}`;
+}
+
+function renderG2MDeepHPlotRunSelector() {
+  const status = document.getElementById("g2m-deeph-plot-run-status");
+  const list = document.getElementById("g2m-deeph-plot-run-list");
+  if (!status || !list) return;
+  const runs = state.g2mDeephPlotRuns || [];
+  const selected = new Set(state.g2mDeephSelectedPlotRunIds || []);
+  list.textContent = "";
+  if (!runs.length) {
+    status.textContent = "No previous Graph2Mat/DeepH runs found yet.";
+    return;
+  }
+  status.textContent = `${selected.size}/${runs.length} run(s) selected for plots. Running jobs are added only after their records finish.`;
+  for (const run of runs) {
+    const option = document.createElement("label");
+    option.className = "plot-run-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "g2m-deeph-plot-run-checkbox";
+    checkbox.value = run.id;
+    checkbox.checked = selected.has(run.id);
+    checkbox.addEventListener("change", () => {
+      const next = new Set(state.g2mDeephSelectedPlotRunIds || []);
+      if (checkbox.checked) next.add(run.id);
+      else next.delete(run.id);
+      setG2MDeepHSelectedPlotRuns(Array.from(next));
+      renderG2MDeepHPlotRunSelector();
+      loadG2MDeepHPlots().catch((error) => showToast(error.message));
+    });
+    const body = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = run.label || run.run_id || run.id;
+    const details = document.createElement("span");
+    const models = (run.models || []).map(methodDisplayLabel).join("+") || "no model";
+    const datasets = (run.dataset_ids || []).join(", ") || "no dataset";
+    const counts = `${run.completed_runs || 0}/${run.planned_runs || 0} done`;
+    const time = formatG2MDeepHPlotRunTime(run.modified_at);
+    details.textContent = [models, datasets, counts, run.status || "", time].filter(Boolean).join(" | ");
+    body.appendChild(title);
+    body.appendChild(details);
+    option.appendChild(checkbox);
+    option.appendChild(body);
+    list.appendChild(option);
+  }
+}
+
+async function loadG2MDeepHPlotRuns({ preserveSelection = true } = {}) {
+  let payload;
+  try {
+    payload = await request("/api/g2m-deeph/plot-runs");
+  } catch (error) {
+    state.g2mDeephPlotRuns = [];
+    state.g2mDeephDefaultPlotRunIds = [];
+    state.g2mDeephSelectedPlotRunIds = [];
+    const status = document.getElementById("g2m-deeph-plot-run-status");
+    const list = document.getElementById("g2m-deeph-plot-run-list");
+    if (status) status.textContent = "Run selector will be available after the UI backend is restarted.";
+    if (list) list.textContent = "";
+    return { runs: [], default_selected_run_ids: [], unavailable: true, error: error.message };
+  }
+  state.g2mDeephPlotRuns = payload.runs || [];
+  state.g2mDeephDefaultPlotRunIds = payload.default_selected_run_ids || [];
+  const visibleIds = new Set(state.g2mDeephPlotRuns.map((run) => run.id));
+  const metricRunIds = new Set(
+    state.g2mDeephPlotRuns
+      .filter((run) => run.has_metric_rows)
+      .map((run) => run.id),
+  );
+  const preservedSelection = (state.g2mDeephSelectedPlotRunIds || []).filter((id) => visibleIds.has(id));
+  const preservedHasMetrics = preservedSelection.some((id) => metricRunIds.has(id));
+  if (!preserveSelection || (preservedSelection.length && !preservedHasMetrics)) {
+    const defaults = state.g2mDeephDefaultPlotRunIds.filter((id) => visibleIds.has(id));
+    setG2MDeepHSelectedPlotRuns(defaults);
+  } else {
+    setG2MDeepHSelectedPlotRuns(state.g2mDeephSelectedPlotRunIds);
+  }
+  renderG2MDeepHPlotRunSelector();
+  return payload;
+}
+
 function normalizeG2MDeepHMetricPlots(payload = {}) {
   const rows = payload.metric_scaling_rows || [];
   if (!rows.length) {
@@ -2272,6 +2478,7 @@ function metricScalingRowKey(row = {}) {
     row.dataset_id || "",
     row.method || "",
     row.config_id || "",
+    row.seed || "",
     g2mDeephEpochLabel(row),
     row.metric_key || "",
   ].join("|");
@@ -2338,20 +2545,15 @@ function mergeG2MDeepHLivePlotPayload(payload, livePayload) {
 }
 
 async function maybeLoadG2MDeepHLiveMetrics(payload) {
-  const status = payload?.status || {};
-  try {
-    const livePayload = await request(G2M_DEEPH_LIVE_METRICS_URL);
-    return mergeG2MDeepHLivePlotPayload(payload, livePayload);
-  } catch {
-    return payload;
-  }
+  return payload;
 }
 
 async function loadG2MDeepHPlots() {
   if (!window.Plotly) await ensurePlotlyLoaded();
-  const payload = normalizeG2MDeepHMetricPlots(
-    await maybeLoadG2MDeepHLiveMetrics(await request("/api/g2m-deeph/plots")),
-  );
+  if (!state.g2mDeephPlotRuns?.length) {
+    await loadG2MDeepHPlotRuns({ preserveSelection: true });
+  }
+  const payload = normalizeG2MDeepHMetricPlots(await request(`/api/g2m-deeph/plots${g2mDeepHPlotsQuery()}`));
   state.g2mDeephPlotPayload = payload;
   renderG2MDeepHMetricSummary({
     available: payload.available,
@@ -2369,17 +2571,22 @@ async function loadG2MDeepHPlots() {
 }
 
 async function maybeRefreshG2MDeepHLivePlots(status = {}) {
-  if (!status.running || !status.run_root) return;
+  if (!status?.running || !state.g2mDeephSelectedPlotRunIds?.length || !state.plotsEnabled) return status;
   const now = Date.now();
-  if (state.g2mDeephPlotsInFlight) return;
-  if (now - state.g2mDeephLastPlotRefreshAt < G2M_DEEPH_LIVE_PLOT_REFRESH_MS) return;
+  if (state.g2mDeephPlotsInFlight || now - state.g2mDeephLastPlotRefreshAt < G2M_DEEPH_LIVE_PLOT_REFRESH_MS) {
+    return status;
+  }
   state.g2mDeephPlotsInFlight = true;
   state.g2mDeephLastPlotRefreshAt = now;
   try {
     await loadG2MDeepHPlots();
+  } catch (error) {
+    const statusEl = document.getElementById("g2m-deeph-plot-run-status");
+    if (statusEl) statusEl.textContent = `Plot refresh pending: ${error.message}`;
   } finally {
     state.g2mDeephPlotsInFlight = false;
   }
+  return status;
 }
 
 async function pollG2MDeepHStatus() {
@@ -2423,9 +2630,9 @@ async function pollG2MDeepHLogs() {
   state.g2mDeephWasRunning = Boolean(payload.status?.running);
   if (wasRunning && !payload.status?.running) {
     await loadG2MDeepHResults();
-    await loadG2MDeepHPlots();
+    await loadG2MDeepHPlotRuns();
   } else if (payload.status?.running) {
-    maybeRefreshG2MDeepHLivePlots(payload.status).catch(() => {});
+    await maybeRefreshG2MDeepHLivePlots(payload.status);
   }
 }
 
@@ -8162,7 +8369,7 @@ function setupTabs() {
         pollG2MDeepHStatus().catch((error) => showToast(error.message));
         loadG2MDeepHDatasets().catch((error) => showToast(error.message));
         loadG2MDeepHResults().catch((error) => showToast(error.message));
-        loadG2MDeepHPlots().catch((error) => showToast(error.message));
+        loadG2MDeepHPlotRuns({ preserveSelection: true }).catch((error) => showToast(error.message));
       }
     });
   });
@@ -8349,9 +8556,28 @@ function setupEvents() {
     stopG2MDeepHBenchmark().catch((error) => showToast(error.message));
   });
   document.getElementById("g2m-deeph-refresh-results")?.addEventListener("click", () => {
-    Promise.all([loadG2MDeepHResults(), loadG2MDeepHPlots()])
+    Promise.all([loadG2MDeepHResults(), loadG2MDeepHPlotRuns().then(() => loadG2MDeepHPlots())])
       .then(() => showToast("Graph2Mat vs DeepH refreshed"))
       .catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-plot-runs-default")?.addEventListener("click", () => {
+    const recentMetricRuns = (state.g2mDeephPlotRuns || [])
+      .filter((run) => run.has_metric_rows)
+      .slice(0, 4)
+      .map((run) => run.id);
+    setG2MDeepHSelectedPlotRuns(recentMetricRuns);
+    renderG2MDeepHPlotRunSelector();
+    loadG2MDeepHPlots().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-plot-runs-all")?.addEventListener("click", () => {
+    setG2MDeepHSelectedPlotRuns((state.g2mDeephPlotRuns || []).map((run) => run.id));
+    renderG2MDeepHPlotRunSelector();
+    loadG2MDeepHPlots().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-plot-runs-clear")?.addEventListener("click", () => {
+    setG2MDeepHSelectedPlotRuns([]);
+    renderG2MDeepHPlotRunSelector();
+    loadG2MDeepHPlots().catch((error) => showToast(error.message));
   });
   document.getElementById("g2m-deeph-log-bottom")?.addEventListener("click", scrollG2MDeepHLogToBottom);
   document.getElementById("g2m-deeph-log-clear")?.addEventListener("click", () => {

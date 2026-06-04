@@ -1348,6 +1348,77 @@ pre {
   display: none;
 }
 
+.g2m-deeph-run-selector {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.run-selector-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.run-selector-heading strong {
+  display: block;
+  color: var(--ink-strong);
+  font-size: 13px;
+}
+
+.run-selector-heading p {
+  margin: 3px 0 0;
+}
+
+.run-selector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.plot-run-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.plot-run-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.plot-run-option input {
+  margin-top: 3px;
+}
+
+.plot-run-option strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plot-run-option span {
+  display: block;
+  margin-top: 2px;
+}
+
 .muted-text {
   color: var(--muted);
   font-size: 13px;

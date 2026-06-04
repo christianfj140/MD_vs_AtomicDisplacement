@@ -126,6 +126,20 @@ class Graph2MatDeepHReportTests(unittest.TestCase):
         self.assertEqual(rows[1]["samples_seen_cumulative"], 10)
         self.assertEqual(rows[1]["matrix_blocks_seen_cumulative"], 100)
 
+    def test_learning_curve_gpu_hours_uses_total_not_zero_best_cost(self) -> None:
+        record = run_record(values=[0.2, 0.3, 0.4], gpu_hours=1.2)
+        record["telemetry"]["gpu_hours_to_best_validation"] = 0.0
+        record["learning_curve"] = [
+            {"split": "validation", "epoch": 1, "validation_metric": 0.2},
+            {"split": "validation", "epoch": 2, "validation_metric": 0.3},
+            {"split": "validation", "epoch": 3, "validation_metric": 0.4},
+        ]
+
+        rows = learning_curve_rows([record], metric="val_loss")
+
+        self.assertAlmostEqual(rows[0]["gpu_hours_cumulative"], 0.4)
+        self.assertAlmostEqual(rows[-1]["gpu_hours_cumulative"], 1.2)
+
     def test_computes_best_validation_point(self) -> None:
         records = [run_record(values=[0.5, 0.25, 0.35])]
         curves = learning_curve_rows(records, metric="val_loss")

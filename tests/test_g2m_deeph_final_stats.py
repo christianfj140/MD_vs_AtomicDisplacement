@@ -102,8 +102,8 @@ class Graph2MatDeepHFinalStatsTests(unittest.TestCase):
         )
 
         self.assertFalse(decision["robust_claim_allowed"])
-        self.assertIn("incomplete_final_seeds:graph2mat", decision["gates_failed"])
-        self.assertIn("incomplete_final_seeds:deeph", decision["gates_failed"])
+        self.assertIn("incomplete_final_seeds:graph2mat/dataset_a/graph2mat_cfg", decision["gates_failed"])
+        self.assertIn("incomplete_final_seeds:deeph/dataset_a/deeph_cfg", decision["gates_failed"])
 
     def test_bootstrap_ci_when_per_system_metrics_exist(self) -> None:
         ci = bootstrap_ci([0.1, 0.2, 0.3, 0.4], iterations=200, seed=7)
@@ -139,7 +139,7 @@ class Graph2MatDeepHFinalStatsTests(unittest.TestCase):
         decision = decide_winners(summaries, expected_seeds=[0, 1, 2], mode="min")
 
         self.assertFalse(decision["robust_claim_allowed"])
-        self.assertIn("diagnostic_only:deeph", decision["gates_failed"])
+        self.assertIn("diagnostic_only:deeph/dataset_a/deeph_cfg", decision["gates_failed"])
         self.assertIn("deeph adapter equivalence not proven", decision["diagnostic_only_reason"])
 
     def test_unproven_formal_equivalence_status_blocks_robust_claim(self) -> None:
@@ -156,8 +156,32 @@ class Graph2MatDeepHFinalStatsTests(unittest.TestCase):
         decision = decide_winners(summaries, expected_seeds=[0, 1, 2], mode="min")
 
         self.assertFalse(decision["robust_claim_allowed"])
-        self.assertIn("diagnostic_only:deeph", decision["gates_failed"])
+        self.assertIn("diagnostic_only:deeph/dataset_a/deeph_cfg", decision["gates_failed"])
         self.assertIn("equivalence=unproven", decision["diagnostic_only_reason"])
+
+    def test_top_k_configs_are_not_mixed_in_final_seed_summary(self) -> None:
+        rows = [
+            final_row("graph2mat", 0, 0.10, selected_config_id="g_a", config_id="g_a_seed0"),
+            final_row("graph2mat", 1, 0.10, selected_config_id="g_a", config_id="g_a_seed1"),
+            final_row("graph2mat", 2, 0.10, selected_config_id="g_a", config_id="g_a_seed2"),
+            final_row("graph2mat", 0, 0.40, selected_config_id="g_b", config_id="g_b_seed0"),
+            final_row("graph2mat", 1, 0.40, selected_config_id="g_b", config_id="g_b_seed1"),
+            final_row("graph2mat", 2, 0.40, selected_config_id="g_b", config_id="g_b_seed2"),
+            final_row("deeph", 0, 0.30, selected_config_id="d_a", config_id="d_a_seed0"),
+            final_row("deeph", 1, 0.30, selected_config_id="d_a", config_id="d_a_seed1"),
+            final_row("deeph", 2, 0.30, selected_config_id="d_a", config_id="d_a_seed2"),
+        ]
+
+        summaries = aggregate_final_seed_metrics(rows, metric="low_energy_rmse_eV", expected_seeds=[0, 1, 2])
+        by_config = {row["selected_config_id"]: row for row in summaries}
+        decision = decide_winners(summaries, expected_seeds=[0, 1, 2], mode="min")
+
+        self.assertEqual(set(by_config), {"g_a", "g_b", "d_a"})
+        self.assertAlmostEqual(by_config["g_a"]["mean"], 0.10)
+        self.assertAlmostEqual(by_config["g_b"]["mean"], 0.40)
+        self.assertTrue(decision["robust_claim_allowed"])
+        self.assertEqual(decision["precision_winner"], "graph2mat")
+        self.assertEqual(decision["dataset_decisions"][0]["winner_config_id"], "g_a")
 
     def test_winner_tolerance_and_ci_rules(self) -> None:
         summaries = aggregate_final_seed_metrics(

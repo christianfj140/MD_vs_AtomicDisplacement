@@ -14212,8 +14212,21 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, G2M_DEEPH_RUNNER.logs(since=since, limit=limit))
             elif path == "/api/g2m-deeph/results":
                 json_response(self, G2M_DEEPH_RUNNER.results())
+            elif path == "/api/g2m-deeph/plot-runs":
+                json_response(self, G2M_DEEPH_RUNNER.plot_runs())
             elif path == "/api/g2m-deeph/plots":
-                json_response(self, G2M_DEEPH_RUNNER.plots())
+                query = parse_qs(parsed_url.query, keep_blank_values=True)
+                selected_run_ids = None
+                if any(key in query for key in ("run_id", "run_ids", "selected_run_ids")):
+                    selected_run_ids = set()
+                    for key in ("run_id", "run_ids", "selected_run_ids"):
+                        for value in query.get(key, []):
+                            selected_run_ids.update(
+                                item.strip()
+                                for item in str(value).split(",")
+                                if item.strip()
+                            )
+                json_response(self, G2M_DEEPH_RUNNER.plots(selected_run_ids=selected_run_ids))
             elif path == "/":
                 self._serve_file(UI_DIR / "index.html")
             else:
