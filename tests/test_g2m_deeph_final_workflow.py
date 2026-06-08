@@ -304,6 +304,37 @@ class Graph2MatDeepHFinalWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["dataset_root"], "/tmp/joint_b")
         self.assertEqual({row["dataset_id"] for row in planned_runs}, {"joint_b"})
 
+    def test_run_final_budget_comes_from_robust_plan_not_search_budget(self) -> None:
+        protocol = protocol_payload()
+        protocol["budget_policy"] = {"mode": "equal_n_trials", "n_trials_per_model": 1}
+        write_json(self.protocol_path, protocol)
+        self.run_cli("--stage", "validate-protocol", "--protocol", str(self.protocol_path))
+        planned_runs = []
+        for model in ("deeph", "graph2mat"):
+            for seed in (0, 1, 2):
+                planned_runs.append(
+                    {
+                        "model": model,
+                        "dataset_id": "joint_a",
+                        "dataset_root": "/tmp/joint_a",
+                        "config_id": f"{model}_seed{seed}",
+                        "selected_config_id": model,
+                        "seed": seed,
+                    }
+                )
+        write_json(
+            self.workflow / "selection" / "robust_rerun_plan.json",
+            {"planned_runs": planned_runs, "planned_run_count": len(planned_runs)},
+        )
+
+        self.run_cli("--stage", "run-final", "--dry-run")
+
+        payload = json.loads((self.workflow / "final" / "run_final_payload.json").read_text(encoding="utf-8"))
+        budget_policy = payload["_training_sweep_plan"]["budget_policy"]
+        self.assertEqual(budget_policy["mode"], "equal_n_trials")
+        self.assertEqual(budget_policy["n_trials_per_model"], 3)
+        self.assertEqual(budget_policy["source"], "robust_rerun_plan")
+
     def test_run_final_test_dry_run_does_not_launch_training(self) -> None:
         self.test_top_k_and_final_seed_plan_are_stage_artifacts()
         final_root = self.workflow / "fake_final_run"

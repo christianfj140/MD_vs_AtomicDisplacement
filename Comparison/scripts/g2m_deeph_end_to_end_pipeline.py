@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Resumable end-to-end orchestration skeleton for Graph2Mat-vs-DeepH.
+"""Resumable end-to-end orchestration for Graph2Mat-vs-DeepH.
 
-This script intentionally contains only control-plane plumbing. It writes
-stage manifests/logs and delegates real work to existing repository scripts.
-It does not implement scientific metric logic, selection logic, equivalence
-logic, or release-manifest logic itself.
+The script is deliberately a control-plane wrapper: it writes stage
+manifests/logs, delegates scientific work to existing repository scripts, and
+fails closed when required evidence is missing. It can also summarize already
+materialized paper-ready artifacts without retraining or re-running inference.
 """
 
 from __future__ import annotations
@@ -24,6 +24,29 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_SCHEMA = "graph2mat_deeph_end_to_end_pipeline_v1"
 
+CLI_EXAMPLES = """examples:
+  Dry-run a full workflow:
+    python3 Comparison/scripts/g2m_deeph_end_to_end_pipeline.py \\
+      --workflow-root Comparison/results/my_workflow \\
+      --protocol Comparison/config/my_protocol.json \\
+      --dataset-root Comparison/datasets/my_dataset \\
+      --strict --dry-run
+
+  Resume from DeepH equivalence with explicit runnable inputs:
+    python3 Comparison/scripts/g2m_deeph_end_to_end_pipeline.py \\
+      --workflow-root Comparison/results/my_workflow \\
+      --from-stage equivalence --resume \\
+      --frozen-split-manifest Comparison/datasets/my_dataset/frozen_split_manifest.json \\
+      --graph2mat-result-dir Comparison/datasets/my_dataset/reference_input \\
+      --deeph-run-glob 'runs/*/sweep/deeph/*/*' \\
+      --equivalence-jobs 4 --strict
+
+  Produce a paper-ready strict summary from an existing final workflow root:
+    python3 Comparison/scripts/g2m_deeph_end_to_end_pipeline.py \\
+      --workflow-root Comparison/results/g2m_deeph_iid600_phaseB_intermediate_spectral_refine_v1 \\
+      --stages equivalence,summary
+"""
+
 STAGE_ORDER = (
     "generate-dataset",
     "verify-dataset",
@@ -33,6 +56,7 @@ STAGE_ORDER = (
     "select-top-k",
     "generate-final-seeds",
     "run-final",
+    "materialize-final-test",
     "run-final-test",
     "equivalence",
     "final-stats",
@@ -45,6 +69,7 @@ STAGE_ORDER = (
 STAGE_ALIASES = {
     "evaluate-final-test": "final-stats",
     "generate-report": "report",
+    "materialize-test": "materialize-final-test",
 }
 
 ALL_STAGE_NAMES = tuple(STAGE_ORDER) + tuple(STAGE_ALIASES)
@@ -69,6 +94,7 @@ HEAVY_STAGES = {
     "generate-dataset",
     "run-search",
     "run-final",
+    "materialize-final-test",
 }
 
 
@@ -383,6 +409,57 @@ def build_release_manifest_plan(stage: str, args: argparse.Namespace) -> Command
     )
 
 
+def build_materialize_final_test_plan(stage: str, args: argparse.Namespace) -> CommandPlan:
+    if not args.final_run_root:
+        raise RuntimeError("materialize-final-test requires --final-run-root.")
+    if not args.confirm_final_test_open:
+        raise RuntimeError("materialize-final-test requires --confirm-final-test-open.")
+    command = [
+        python_executable(args),
+        script_path("g2m_deeph_materialize_validation_metrics.py"),
+        "--run-root",
+        str(args.final_run_root),
+        "--model",
+        str(args.materialize_model),
+        "--jobs",
+        str(args.materialize_jobs),
+        "--split",
+        "test",
+        "--protocol-stage",
+        "final_test",
+        "--confirm-final-test-open",
+    ]
+    optional_arg(command, "--limit", args.materialize_limit)
+    optional_flag(command, "--overwrite", bool(args.materialize_overwrite))
+    optional_flag(command, "--watch", bool(args.materialize_watch))
+    optional_flag(command, "--skip-existing", bool(args.materialize_skip_existing))
+    optional_arg(command, "--max-cycles", args.materialize_max_cycles)
+    optional_arg(command, "--poll-seconds", args.poll_seconds)
+    return CommandPlan(
+        command=command,
+        inputs={
+            "final_run_root": str(args.final_run_root),
+            "split": "test",
+            "protocol_stage": "final_test",
+            "model": args.materialize_model,
+            "jobs": args.materialize_jobs,
+        },
+        outputs={"stage_manifest": str(stage_manifest_path(args.workflow_root, stage))},
+        message="Delegated to g2m_deeph_materialize_validation_metrics.py for locked final-test metrics.",
+        heavy=True,
+    )
+
+
+def _candidate_deeph_run_root(path: Path) -> Path | None:
+    if not path.is_dir():
+        return None
+    if (path / "deeph" / "inference").is_dir() or (path / "inference").is_dir():
+        return path
+    if path.name == "inference" and path.parent.name == "deeph":
+        return path.parent.parent
+    return None
+
+
 def discover_deeph_run_roots(args: argparse.Namespace) -> list[Path]:
     roots: list[Path] = []
     for raw in args.deeph_run_root or []:
@@ -397,13 +474,26 @@ def discover_deeph_run_roots(args: argparse.Namespace) -> list[Path]:
             if path.is_dir() and ((path / "deeph" / "inference").is_dir() or (path / "inference").is_dir())
         ]
         roots.extend(candidates)
+    if not roots:
+        for base in (
+            args.workflow_root / "final_test",
+            args.workflow_root / "runs",
+            args.workflow_root,
+        ):
+            if not base.is_dir():
+                continue
+            for path in base.rglob("*"):
+                candidate = _candidate_deeph_run_root(path)
+                if candidate is not None:
+                    roots.append(candidate)
     deduped: list[Path] = []
     seen: set[str] = set()
     for root in roots:
-        resolved_key = str(root)
+        candidate = _candidate_deeph_run_root(Path(root)) or Path(root)
+        resolved_key = str(candidate)
         if resolved_key not in seen:
             seen.add(resolved_key)
-            deduped.append(root)
+            deduped.append(candidate)
     return deduped
 
 
@@ -420,7 +510,9 @@ def deeph_inference_dir(run_root: Path) -> Path:
 
 def build_equivalence_plan(stage: str, args: argparse.Namespace) -> CommandPlan:
     output_dir = args.equivalence_output_dir or args.workflow_root / "equivalence_strict"
-    run_roots = discover_deeph_run_roots(args)
+    run_roots: list[Path] = [Path(raw) for raw in args.deeph_run_root or []]
+    for pattern in args.deeph_run_glob or []:
+        run_roots.extend(Path(path) for path in sorted(args.workflow_root.glob(str(pattern))))
     return CommandPlan(
         command=[
             "internal-parallel",
@@ -471,6 +563,8 @@ def build_stage_plan(stage: str, args: argparse.Namespace) -> CommandPlan:
         return build_gate_check_plan(stage, args)
     if stage == "release-manifest":
         return build_release_manifest_plan(stage, args)
+    if stage == "materialize-final-test":
+        return build_materialize_final_test_plan(stage, args)
     if stage == "summary":
         return build_summary_plan(stage, args)
     raise RuntimeError(f"Unsupported stage: {stage}")
@@ -608,6 +702,100 @@ def _run_one_equivalence_job(args: argparse.Namespace, run_root: Path, output_ba
     }
 
 
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_is_present(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _preflight_sample_counts(payload: dict[str, Any]) -> tuple[int, int, int]:
+    samples = payload.get("samples") if isinstance(payload.get("samples"), list) else []
+    seen = _int_value(payload.get("samples_seen"), len(samples))
+    proven = _int_value(
+        payload.get("samples_proven"),
+        sum(1 for item in samples if isinstance(item, dict) and item.get("status") == "proven"),
+    )
+    failed = _int_value(
+        payload.get("samples_failed"),
+        sum(1 for item in samples if isinstance(item, dict) and item.get("status") not in (None, "proven")),
+    )
+    return seen, proven, failed
+
+
+def summarize_existing_equivalence(output_base: Path) -> dict[str, Any]:
+    preflight_paths = sorted(output_base.glob("*/deeph_raw_global_equivalence_preflight.json"))
+    jobs: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    for index, preflight_path in enumerate(preflight_paths, start=1):
+        payload = read_json(preflight_path)
+        run_id = preflight_path.parent.name or f"deeph_run_{index:03d}"
+        status = str(payload.get("status") or "missing")
+        samples_seen, samples_proven, samples_failed = _preflight_sample_counts(payload)
+        job_blockers = [str(item) for item in payload.get("blockers") or [] if item]
+        if status != "proven":
+            job_blockers.append(f"preflight_status:{status}")
+        if samples_seen <= 0:
+            job_blockers.append("no_equivalence_samples_seen")
+        if samples_failed > 0:
+            job_blockers.append(f"samples_failed:{samples_failed}")
+        if samples_seen > 0 and samples_proven < samples_seen:
+            job_blockers.append(f"samples_not_proven:{samples_seen - samples_proven}")
+        job_status = "completed" if not job_blockers else "failed"
+        blockers.extend(f"{run_id}:{item}" for item in job_blockers)
+        jobs.append(
+            {
+                "run_id": run_id,
+                "status": job_status,
+                "preflight_status": status,
+                "preflight_output": str(preflight_path),
+                "samples_seen": samples_seen,
+                "samples_proven": samples_proven,
+                "samples_failed": samples_failed,
+                "output_dir": str(preflight_path.parent),
+                "blockers": job_blockers,
+            }
+        )
+    failed_jobs = [job for job in jobs if job.get("status") != "completed"]
+    if not jobs:
+        status = "missing"
+        blockers.append(f"missing_equivalence_preflight_outputs:{output_base}")
+    else:
+        status = "completed" if not failed_jobs else "failed"
+    return {
+        "schema": SCRIPT_SCHEMA,
+        "stage": "equivalence",
+        "status": status,
+        "source": "existing_preflight_outputs",
+        "generated_at": timestamp(),
+        "jobs": jobs,
+        "run_count": len(jobs),
+        "completed_count": len(jobs) - len(failed_jobs),
+        "failed_count": len(failed_jobs),
+        "samples_seen_total": sum(_int_value(job.get("samples_seen")) for job in jobs),
+        "samples_proven_total": sum(_int_value(job.get("samples_proven")) for job in jobs),
+        "samples_failed_total": sum(_int_value(job.get("samples_failed")) for job in jobs),
+        "blockers": blockers,
+        "output_dir": str(output_base),
+    }
+
+
+def write_existing_equivalence_summary(output_base: Path) -> dict[str, Any]:
+    summary = summarize_existing_equivalence(output_base)
+    write_json(output_base / "equivalence_strict_summary.json", summary)
+    return summary
+
+
 def run_equivalence_stage(args: argparse.Namespace) -> InternalStageResult:
     output_base = args.equivalence_output_dir or args.workflow_root / "equivalence_strict"
     output_base.mkdir(parents=True, exist_ok=True)
@@ -616,10 +804,51 @@ def run_equivalence_stage(args: argparse.Namespace) -> InternalStageResult:
         blockers.append("equivalence requires --frozen-split-manifest.")
     if not args.graph2mat_result_dir:
         blockers.append("equivalence requires --graph2mat-result-dir.")
+    if blockers:
+        existing_summary = summarize_existing_equivalence(output_base)
+        if existing_summary.get("run_count"):
+            write_json(output_base / "equivalence_strict_summary.json", existing_summary)
+            status = str(existing_summary.get("status") or "failed")
+            return InternalStageResult(
+                status=status,
+                returncode=0 if status == "completed" else 1,
+                stdout=json.dumps(json_safe(existing_summary), indent=2, sort_keys=True) + "\n",
+                stderr="\n".join(str(item) for item in existing_summary.get("blockers") or []) + "\n",
+                blockers=[str(item) for item in existing_summary.get("blockers") or []],
+                warnings=[
+                    "equivalence stage reused already materialized strict preflight evidence "
+                    "because runnable preflight inputs were incomplete."
+                ],
+                outputs={
+                    "equivalence_summary": str(output_base / "equivalence_strict_summary.json"),
+                    "equivalence_output_dir": str(output_base),
+                },
+                message="Synthesized DeepH equivalence summary from existing preflight evidence.",
+            )
     run_roots = discover_deeph_run_roots(args)
     if not run_roots:
         blockers.append("equivalence requires at least one --deeph-run-root, --deeph-run-glob match, or discoverable --final-run-root.")
     if blockers:
+        existing_summary = summarize_existing_equivalence(output_base)
+        if existing_summary.get("run_count"):
+            write_json(output_base / "equivalence_strict_summary.json", existing_summary)
+            status = str(existing_summary.get("status") or "failed")
+            return InternalStageResult(
+                status=status,
+                returncode=0 if status == "completed" else 1,
+                stdout=json.dumps(json_safe(existing_summary), indent=2, sort_keys=True) + "\n",
+                stderr="\n".join(str(item) for item in existing_summary.get("blockers") or []) + "\n",
+                blockers=[str(item) for item in existing_summary.get("blockers") or []],
+                warnings=[
+                    "equivalence stage reused already materialized strict preflight evidence "
+                    "because runnable preflight inputs were incomplete."
+                ],
+                outputs={
+                    "equivalence_summary": str(output_base / "equivalence_strict_summary.json"),
+                    "equivalence_output_dir": str(output_base),
+                },
+                message="Synthesized DeepH equivalence summary from existing preflight evidence.",
+            )
         summary = {
             "schema": SCRIPT_SCHEMA,
             "stage": "equivalence",
@@ -688,20 +917,151 @@ def _extend_blockers(blockers: list[str], prefix: str, value: Any) -> None:
         blockers.append(f"{prefix}:{value}")
 
 
+def _final_seed_rows(final_stats: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = final_stats.get("final_seed_summary")
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _telemetry_blockers(final_stats: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    required_fields = ("gpu_hours_mean", "peak_gpu_memory_mb_mean")
+    optional_fields = ("gpu_hours_std", "peak_gpu_memory_mb_std", "inference_seconds_mean")
+    for index, row in enumerate(_final_seed_rows(final_stats), start=1):
+        label = "/".join(
+            str(row.get(key) or "")
+            for key in ("model", "dataset_id", "selected_config_id")
+            if row.get(key)
+        ) or f"final_seed_summary_row_{index}"
+        for field_name in required_fields:
+            if not _float_is_present(row.get(field_name)):
+                blockers.append(f"missing_telemetry_field:{label}:{field_name}")
+        if not any(_float_is_present(row.get(field_name)) for field_name in optional_fields):
+            blockers.append(f"missing_telemetry_detail:{label}:std_or_inference_seconds")
+    if final_stats and not _final_seed_rows(final_stats):
+        blockers.append("missing_final_seed_summary")
+    return blockers
+
+
+def _winner_by_dataset(winner_decision: dict[str, Any]) -> list[dict[str, Any]]:
+    dataset_decisions = winner_decision.get("dataset_decisions")
+    if not isinstance(dataset_decisions, list):
+        return []
+    winners: list[dict[str, Any]] = []
+    for decision in dataset_decisions:
+        if not isinstance(decision, dict):
+            continue
+        winners.append(
+            {
+                "dataset_id": decision.get("dataset_id"),
+                "precision_winner": decision.get("precision_winner"),
+                "winner_config_id": decision.get("winner_config_id"),
+                "runner_up_model": decision.get("runner_up_model"),
+                "runner_up_config_id": decision.get("runner_up_config_id"),
+                "effect_size_best_vs_second": decision.get("effect_size_best_vs_second"),
+                "ci_rule_passed": decision.get("ci_rule_passed"),
+                "gates_failed": decision.get("gates_failed") or [],
+                "best_config_by_model": decision.get("best_config_by_model") or {},
+            }
+        )
+    return winners
+
+
+def _global_winner_from_dataset_winners(winners: list[dict[str, Any]]) -> dict[str, Any]:
+    labels = [
+        str(item.get("precision_winner"))
+        for item in winners
+        if item.get("precision_winner")
+    ]
+    if not labels:
+        return {"winner": None, "reason": "no_dataset_winners"}
+    unique = sorted(set(labels))
+    if len(unique) == 1 and len(labels) == len(winners):
+        return {"winner": unique[0], "reason": "all_dataset_winners_agree", "dataset_count": len(labels)}
+    return {
+        "winner": None,
+        "reason": "dataset_winners_disagree",
+        "dataset_winners": labels,
+        "unique_winners": unique,
+    }
+
+
+def _write_strict_summary_markdown(path: Path, payload: dict[str, Any]) -> None:
+    lines = [
+        "# Graph2Mat vs DeepH Strict Summary",
+        "",
+        f"- Workflow root: `{payload.get('workflow_root')}`",
+        f"- Robust claim allowed: `{payload.get('robust_claim_allowed')}`",
+        f"- Claim status: `{payload.get('claim_status')}`",
+        f"- Precision winner: `{payload.get('precision_winner')}`",
+        f"- Diagnostic precision winner: `{payload.get('diagnostic_precision_winner')}`",
+        f"- Global winner: `{(payload.get('global_winner') or {}).get('winner')}`",
+        "",
+        "## Winners By Dataset",
+    ]
+    winners = payload.get("winner_by_dataset") if isinstance(payload.get("winner_by_dataset"), list) else []
+    if winners:
+        for winner in winners:
+            lines.append(
+                "- "
+                f"`{winner.get('dataset_id')}`: {winner.get('precision_winner')} "
+                f"({winner.get('winner_config_id')}) vs "
+                f"{winner.get('runner_up_model')} ({winner.get('runner_up_config_id')})"
+            )
+    else:
+        lines.append("- No dataset-level winner decision available.")
+    blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
+    lines.extend(["", "## Blockers"])
+    if blockers:
+        lines.extend(f"- `{blocker}`" for blocker in blockers)
+    else:
+        lines.append("- None.")
+    next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+    lines.extend(["", "## Next Actions"])
+    if next_actions:
+        lines.extend(f"- {action}" for action in next_actions)
+    else:
+        lines.append("- No action required for the strict evidence currently checked.")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _next_actions_from_blockers(blockers: list[str]) -> list[str]:
+    actions: list[str] = []
+    joined = "\n".join(blockers)
+    if "missing_equivalence" in joined or "equivalence" in joined:
+        actions.append("Run or repair DeepH raw/global equivalence and refresh adapter manifests.")
+    if "telemetry" in joined:
+        actions.append("Regenerate final statistics from rows that include raw telemetry fields.")
+    if "release_manifest" in joined or "release" in joined:
+        actions.append("Regenerate `g2m_deeph_release_manifest.py --strict` and materialize missing artifacts.")
+    if "final_statistics" in joined:
+        actions.append("Run `final-stats` after final-test rows are complete.")
+    if "gate" in joined:
+        actions.append("Run `gate-check` and inspect its blockers.")
+    return sorted(set(actions))
+
+
 def run_summary_stage(args: argparse.Namespace) -> InternalStageResult:
     output = args.summary_output or args.workflow_root / "strict_summary.json"
     final_stats_path = args.workflow_root / "final_test" / "final_statistics.json"
     gate_path = args.workflow_root / "gate_status.json"
     release_path = args.workflow_root / "release_manifest.json"
     report_path = args.workflow_root / "report" / "final_report.json"
-    equivalence_path = (args.equivalence_output_dir or args.workflow_root / "equivalence_strict") / "equivalence_strict_summary.json"
+    equivalence_dir = args.equivalence_output_dir or args.workflow_root / "equivalence_strict"
+    equivalence_path = equivalence_dir / "equivalence_strict_summary.json"
 
     final_stats = read_json(final_stats_path)
     gate = read_json(gate_path)
     release = read_json(release_path)
     report = read_json(report_path)
     equivalence = read_json(equivalence_path)
+    if not equivalence:
+        existing_equivalence = summarize_existing_equivalence(equivalence_dir)
+        if existing_equivalence.get("run_count"):
+            write_json(equivalence_path, existing_equivalence)
+            equivalence = existing_equivalence
     winner_decision = final_stats.get("winner_decision") if isinstance(final_stats.get("winner_decision"), dict) else {}
+    winner_by_dataset = _winner_by_dataset(winner_decision)
+    global_winner = _global_winner_from_dataset_winners(winner_by_dataset)
 
     blockers: list[str] = []
     if not final_stats:
@@ -722,6 +1082,14 @@ def run_summary_stage(args: argparse.Namespace) -> InternalStageResult:
         blockers.append(f"release_manifest_status:{release.get('status') or 'unknown'}")
     if equivalence and equivalence.get("status") != "completed":
         blockers.append(f"equivalence_status:{equivalence.get('status') or 'unknown'}")
+    if final_stats:
+        blockers.extend(_telemetry_blockers(final_stats))
+    if release and release.get("missing_required"):
+        blockers.append(f"release_manifest_missing_required_count:{len(release.get('missing_required') or [])}")
+    if release and release.get("forbidden_reference_findings"):
+        blockers.append(
+            f"release_manifest_forbidden_reference_count:{len(release.get('forbidden_reference_findings') or [])}"
+        )
     _extend_blockers(blockers, "final_statistics", winner_decision.get("gates_failed"))
     _extend_blockers(blockers, "gate_check", gate.get("blockers") or [])
     _extend_blockers(blockers, "release_manifest_missing_required", release.get("missing_required") or [])
@@ -730,9 +1098,21 @@ def run_summary_stage(args: argparse.Namespace) -> InternalStageResult:
 
     stats_allowed = bool(final_stats) and winner_decision.get("robust_claim_allowed") is True
     gate_allowed = bool(gate) and gate.get("robust_claim_allowed") is True
-    release_complete = bool(release) and release.get("status") == "complete"
-    equivalence_complete = bool(equivalence) and equivalence.get("status") == "completed"
-    robust_claim_allowed = bool(stats_allowed and gate_allowed and release_complete and equivalence_complete and not blockers)
+    release_complete = bool(release) and release.get("status") == "complete" and not release.get("missing_required") and not release.get("forbidden_reference_findings")
+    equivalence_complete = bool(equivalence) and equivalence.get("status") == "completed" and not equivalence.get("blockers")
+    global_winner_agrees = global_winner.get("winner") is not None
+    if stats_allowed and winner_by_dataset and not global_winner_agrees:
+        blockers.append("global_winner_blocked:dataset_winners_disagree")
+    robust_claim_allowed = bool(
+        stats_allowed
+        and gate_allowed
+        and release_complete
+        and equivalence_complete
+        and global_winner_agrees
+        and not blockers
+    )
+    unique_blockers = sorted(set(str(item) for item in blockers if item))
+    md_output = output.with_suffix(".md")
     payload = {
         "schema": SCRIPT_SCHEMA,
         "stage": "summary",
@@ -745,9 +1125,16 @@ def run_summary_stage(args: argparse.Namespace) -> InternalStageResult:
         "strict_release_manifest_complete": release_complete,
         "equivalence_strict_complete": equivalence_complete,
         "claim_status": gate.get("claim_status") or ("robust_allowed" if robust_claim_allowed else "blocked"),
-        "precision_winner": winner_decision.get("precision_winner") if robust_claim_allowed else None,
+        "precision_winner": global_winner.get("winner") if robust_claim_allowed else None,
         "diagnostic_precision_winner": winner_decision.get("precision_winner"),
-        "blockers": sorted(set(str(item) for item in blockers if item)),
+        "winner_by_dataset": winner_by_dataset,
+        "global_winner": global_winner,
+        "diagnostic_winner": {
+            "winner": winner_decision.get("precision_winner"),
+            "reason": "diagnostic_only_when_robust_claim_blocked" if not robust_claim_allowed else "matches_robust_winner",
+        },
+        "blockers": unique_blockers,
+        "next_actions": _next_actions_from_blockers(unique_blockers),
         "inputs": {
             "final_statistics": str(final_stats_path),
             "gate_status": str(gate_path),
@@ -757,9 +1144,17 @@ def run_summary_stage(args: argparse.Namespace) -> InternalStageResult:
         },
         "release_status": release.get("status") if release else "missing",
         "equivalence_status": equivalence.get("status") if equivalence else "missing",
+        "equivalence_run_count": equivalence.get("run_count") if equivalence else 0,
+        "equivalence_samples_proven_total": equivalence.get("samples_proven_total") if equivalence else 0,
         "report_claim_status": report.get("claim_status") if report else "missing",
+        "outputs": {
+            "strict_summary": str(output),
+            "strict_summary_md": str(md_output),
+            "equivalence_strict_summary": str(equivalence_path),
+        },
     }
     write_json(output, payload)
+    _write_strict_summary_markdown(md_output, payload)
     stdout = json.dumps(json_safe(payload), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     return InternalStageResult(
         status="completed" if robust_claim_allowed else "blocked",
@@ -767,7 +1162,7 @@ def run_summary_stage(args: argparse.Namespace) -> InternalStageResult:
         stdout=stdout,
         stderr="\n".join(payload["blockers"]) + ("\n" if payload["blockers"] else ""),
         blockers=payload["blockers"],
-        outputs={"strict_summary": str(output)},
+        outputs={"strict_summary": str(output), "strict_summary_md": str(md_output)},
         message="Strict summary generated.",
     )
 
@@ -1031,7 +1426,11 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=CLI_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--workflow-root", type=Path, required=True)
     parser.add_argument("--stages", default="all", help="Comma-separated stages, or 'all'.")
     parser.add_argument("--from-stage", choices=ALL_STAGE_NAMES, default=None)
@@ -1056,6 +1455,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--final-run-root", type=Path, default=None)
     parser.add_argument("--report-run-root", type=Path, default=None)
     parser.add_argument("--compute-threshold", type=float, default=None)
+    parser.add_argument("--confirm-final-test-open", action="store_true")
+    parser.add_argument("--materialize-model", choices=("all", "graph2mat", "deeph"), default="all")
+    parser.add_argument("--materialize-jobs", type=int, default=2)
+    parser.add_argument("--materialize-limit", type=int, default=None)
+    parser.add_argument("--materialize-overwrite", action="store_true")
+    parser.add_argument("--materialize-watch", action="store_true")
+    parser.add_argument("--materialize-skip-existing", action="store_true")
+    parser.add_argument("--materialize-max-cycles", type=int, default=None)
     parser.add_argument("--frozen-split-manifest", type=Path, default=None)
     parser.add_argument("--graph2mat-result-dir", type=Path, default=None)
     parser.add_argument("--deeph-run-root", action="append", default=[])

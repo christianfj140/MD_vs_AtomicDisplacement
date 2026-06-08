@@ -10,7 +10,7 @@ SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from deeph_prediction_adapter import EQUIVALENCE_PROVEN_RAW_GLOBAL, EQUIVALENCE_STATUS_UNPROVEN  # noqa: E402
+from deeph_prediction_adapter import EQUIVALENCE_PROVEN_RAW_GLOBAL, EQUIVALENCE_STATUS_PROVEN, EQUIVALENCE_STATUS_UNPROVEN  # noqa: E402
 from g2m_deeph_final_stats import (  # noqa: E402
     aggregate_final_seed_metrics,
     bootstrap_ci,
@@ -158,6 +158,38 @@ class Graph2MatDeepHFinalStatsTests(unittest.TestCase):
         self.assertFalse(decision["robust_claim_allowed"])
         self.assertIn("diagnostic_only:deeph/dataset_a/deeph_cfg", decision["gates_failed"])
         self.assertIn("equivalence=unproven", decision["diagnostic_only_reason"])
+
+    def test_deeph_adapter_manifest_discovery_can_prove_equivalence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "deeph_run"
+            write_json(
+                run_root / "deeph" / "inference" / "adapter_manifest.json",
+                {
+                    "adapter_equivalence_statuses": [EQUIVALENCE_PROVEN_RAW_GLOBAL],
+                    "equivalence_statuses": [EQUIVALENCE_STATUS_PROVEN],
+                    "raw_global_equivalence_proven_count": 1,
+                    "equivalence_gate": {
+                        "robust_claim_allowed": True,
+                        "diagnostic_only": False,
+                    },
+                },
+            )
+            rows = [
+                final_row(
+                    "deeph",
+                    0,
+                    0.10,
+                    run_root=str(run_root),
+                    adapter_equivalence_status="",
+                    comparability_status="",
+                    diagnostic_only=False,
+                )
+            ]
+
+            summary = aggregate_final_seed_metrics(rows, metric="low_energy_rmse_eV")
+
+            self.assertTrue(summary[0]["robust_claim_allowed_by_comparability"])
+            self.assertEqual(summary[0]["diagnostic_only_reason"], "")
 
     def test_top_k_configs_are_not_mixed_in_final_seed_summary(self) -> None:
         rows = [

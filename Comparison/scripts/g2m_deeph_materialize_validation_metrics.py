@@ -188,6 +188,7 @@ def materialize_graph2mat(
     split: str,
     protocol_stage: str,
     primary_metric: str | None,
+    overwrite: bool,
 ) -> dict[str, Any]:
     child = runner._child_training_payload(payload, record)
     child["reuse_run_root"] = True
@@ -220,30 +221,41 @@ def materialize_graph2mat(
     )
     metrics_root = context.run_root / "metrics" / "graph2mat"
     eval_dir = split_output_name(split, "eval_input", "test_eval_input")
-    staged = stage_graph2mat_metric_result(
-        frozen_split_manifest=_load_json(context.frozen_split_manifest_path),
-        prediction_structs_dir=context.prediction_structs_dir,
-        output_dir=metrics_root / eval_dir,
-        dataset_root=context.dataset_root,
-        split=split,
-    )
     metric_fail_policy = _metric_fail_policy(child)
-    metrics_run = runner._run_command(
-        [
-            runner._graph2mat_python(child),
-            str(DEFAULT_HAMILTONIAN_METRICS_SCRIPT),
-            str(staged.result_dir),
-            "--workers",
-            "1",
-            "--enable-kpoint-metrics",
-            "--overwrite",
-        ],
-        cwd=REPO_ROOT,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        label=f"Graph2Mat validation metrics {record['config_id']}",
-        allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
-    )
-    metrics = _extract_validation_metrics(staged.result_dir / "metrics")
+    result_dir = metrics_root / eval_dir
+    metrics_manifest = result_dir / "metrics" / "manifest.json"
+    if metrics_manifest.exists() and not overwrite:
+        metrics_run = {
+            "label": f"Graph2Mat validation metrics {record['config_id']}",
+            "status": "skipped_existing_metrics",
+            "returncode": 0,
+            "message": "Existing Graph2Mat metric files were reused.",
+        }
+    else:
+        staged = stage_graph2mat_metric_result(
+            frozen_split_manifest=_load_json(context.frozen_split_manifest_path),
+            prediction_structs_dir=context.prediction_structs_dir,
+            output_dir=result_dir,
+            dataset_root=context.dataset_root,
+            split=split,
+        )
+        result_dir = staged.result_dir
+        metrics_run = runner._run_command(
+            [
+                runner._graph2mat_python(child),
+                str(DEFAULT_HAMILTONIAN_METRICS_SCRIPT),
+                str(result_dir),
+                "--workers",
+                "1",
+                "--enable-kpoint-metrics",
+                "--overwrite",
+            ],
+            cwd=REPO_ROOT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            label=f"Graph2Mat validation metrics {record['config_id']}",
+            allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
+        )
+    metrics = _extract_validation_metrics(result_dir / "metrics")
     runner._write_graph2mat_manifest(
         context,
         checkpoint_manifest=checkpoint_manifest,
@@ -256,7 +268,7 @@ def materialize_graph2mat(
             **metric_output_fields(
                 record=record,
                 metrics=metrics,
-                metrics_path=staged.result_dir / "metrics" / "manifest.json",
+                metrics_path=result_dir / "metrics" / "manifest.json",
                 split=split,
                 protocol_stage=protocol_stage,
                 primary_metric=primary_metric,
@@ -271,7 +283,7 @@ def materialize_graph2mat(
         **metric_output_fields(
             record=record,
             metrics=metrics,
-            metrics_path=staged.result_dir / "metrics" / "manifest.json",
+            metrics_path=result_dir / "metrics" / "manifest.json",
             split=split,
             protocol_stage=protocol_stage,
             primary_metric=primary_metric,
@@ -288,6 +300,7 @@ def materialize_deeph(
     split: str,
     protocol_stage: str,
     primary_metric: str | None,
+    overwrite: bool,
 ) -> dict[str, Any]:
     child = runner._child_training_payload(payload, record)
     child["reuse_run_root"] = True
@@ -355,22 +368,30 @@ def materialize_deeph(
         split=split,
     )
     metric_fail_policy = _metric_fail_policy(child)
-    metrics_run = runner._run_command(
-        _deeph_metric_command_args(
-            python_executable=runner._graph2mat_python(child),
-            graph2mat_result_dir=reference_dir,
-            processed_dir=staged_deeph.processed_dir,
-            predictions_dir=staged_deeph.predictions_dir,
-            output_dir=metrics_root / eval_name,
-            metric_fail_policy=metric_fail_policy,
-            split=split,
-        ),
-        cwd=REPO_ROOT,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        label=f"DeepH validation metrics {record['config_id']}",
-        allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
-    )
     metrics_path = metrics_root / eval_name / "metrics" / "manifest.json"
+    if metrics_path.exists() and not overwrite:
+        metrics_run = {
+            "label": f"DeepH validation metrics {record['config_id']}",
+            "status": "skipped_existing_metrics",
+            "returncode": 0,
+            "message": "Existing DeepH metric files were reused.",
+        }
+    else:
+        metrics_run = runner._run_command(
+            _deeph_metric_command_args(
+                python_executable=runner._graph2mat_python(child),
+                graph2mat_result_dir=reference_dir,
+                processed_dir=staged_deeph.processed_dir,
+                predictions_dir=staged_deeph.predictions_dir,
+                output_dir=metrics_root / eval_name,
+                metric_fail_policy=metric_fail_policy,
+                split=split,
+            ),
+            cwd=REPO_ROOT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            label=f"DeepH validation metrics {record['config_id']}",
+            allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
+        )
     metrics = _extract_validation_metrics(metrics_root / eval_name / "metrics")
     runner._write_deeph_manifest(
         deeph_context,
@@ -481,6 +502,7 @@ def materialize_available_records(
                 split=args.split,
                 protocol_stage=args.protocol_stage,
                 primary_metric=primary_metric,
+                overwrite=args.overwrite,
             )
         elif record.get("model") == "deeph":
             return materialize_deeph(
@@ -491,6 +513,7 @@ def materialize_available_records(
                 split=args.split,
                 protocol_stage=args.protocol_stage,
                 primary_metric=primary_metric,
+                overwrite=args.overwrite,
             )
         else:
             return None

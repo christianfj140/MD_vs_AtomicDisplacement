@@ -1069,6 +1069,8 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
     )
     if materialized:
         print(f"[OK] Basis Graph2Mat materializada en dataset combinado: {materialized} enlaces/copias.")
+    pipeline_paths["run_out_path"].write_text("".join(combined_run_out), encoding="utf-8")
+    pipeline_paths["run_fdf_path"].write_text(render_run_fdf(config, block={"n_snapshots": md_total_steps(config)}), encoding="utf-8")
     validate_joint_benchmark_artifacts(config, final_steps_dir)
     write_json(
         dataset_dir / "md_temperature_blocks_manifest.json",
@@ -1080,8 +1082,6 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
             "samples": samples,
         },
     )
-    pipeline_paths["run_out_path"].write_text("".join(combined_run_out), encoding="utf-8")
-    pipeline_paths["run_fdf_path"].write_text(render_run_fdf(config, block={"n_snapshots": md_total_steps(config)}), encoding="utf-8")
     print(f"[OK] Bloques MD combinados: {global_index} snapshots en {final_steps_dir}.")
 
 

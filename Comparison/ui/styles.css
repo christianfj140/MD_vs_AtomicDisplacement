@@ -1710,6 +1710,42 @@ pre {
   min-width: 680px;
 }
 
+.summary-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.summary-table th,
+.summary-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(17, 24, 39, 0.09);
+  text-align: left;
+  vertical-align: top;
+}
+
+.summary-table th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: #ffffff;
+}
+
+.summary-table td {
+  color: var(--text);
+}
+
+.g2m-deeph-dataset-minimum-panel .result-list {
+  overflow-x: auto;
+}
+
+.g2m-deeph-dataset-minimum-panel .comparison-status-banner {
+  margin: 12px 0;
+}
+
 .comparison-status-banner {
   padding: 12px 14px;
   border: 1px solid rgba(31, 139, 98, 0.32);

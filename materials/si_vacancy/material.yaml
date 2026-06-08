@@ -1,0 +1,6 @@
+material:
+  label: si_vacancy
+  fdf: materials/si_vacancy/RUN.smoke.fdf
+  pseudopotential_dir: materials/si_vacancy/pseudos
+  basis_dir: materials/si_vacancy/basis
+  structure_type: crystal

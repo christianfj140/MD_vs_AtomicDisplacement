@@ -242,6 +242,57 @@ class Graph2MatDeepHEndToEndPipelineSkeletonTests(unittest.TestCase):
         self.assertEqual(final_test_manifest["status"], "completed")
         self.assertEqual(final_test_manifest["source_final_run_root"], str(final_root))
 
+    def test_materialize_final_test_requires_explicit_confirmation(self) -> None:
+        final_root = self.workflow / "fake_final_run"
+
+        with self.assertRaisesRegex(RuntimeError, "confirm-final-test-open"):
+            self.module.run_pipeline(
+                self.parse(
+                    "--stages",
+                    "materialize-final-test",
+                    "--final-run-root",
+                    str(final_root),
+                    "--dry-run",
+                )
+            )
+
+        manifest = json.loads(
+            (self.workflow / "stages" / "materialize-final-test.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["status"], "blocked")
+        self.assertIn("confirm-final-test-open", " ".join(manifest["blockers"]))
+
+    def test_materialize_final_test_delegates_without_training_command(self) -> None:
+        final_root = self.workflow / "fake_final_run"
+
+        payload = self.module.run_pipeline(
+            self.parse(
+                "--stages",
+                "materialize-final-test",
+                "--final-run-root",
+                str(final_root),
+                "--confirm-final-test-open",
+                "--materialize-jobs",
+                "4",
+                "--dry-run",
+            )
+        )
+
+        self.assertEqual(payload["status"], "completed")
+        manifest = json.loads(
+            (self.workflow / "stages" / "materialize-final-test.json").read_text(encoding="utf-8")
+        )
+        command = " ".join(manifest["command"])
+        self.assertEqual(manifest["status"], "planned_dry_run")
+        self.assertTrue(manifest["heavy"])
+        self.assertIn("g2m_deeph_materialize_validation_metrics.py", command)
+        self.assertIn("--split test", command)
+        self.assertIn("--protocol-stage final_test", command)
+        self.assertIn("--confirm-final-test-open", command)
+        self.assertIn("--jobs 4", command)
+        self.assertNotIn("run_md_training.py", command)
+        self.assertNotIn("deeph-train", command)
+
     def _write_strict_summary_inputs(
         self,
         *,
@@ -249,13 +300,52 @@ class Graph2MatDeepHEndToEndPipelineSkeletonTests(unittest.TestCase):
         gate_allowed: bool = True,
         release_status: str = "complete",
         equivalence_status: str | None = "completed",
+        include_telemetry: bool = True,
+        dataset_winners: list[dict] | None = None,
     ) -> None:
+        if dataset_winners is None:
+            dataset_winners = [
+                {
+                    "dataset_id": "graphene_w90_phase1_iid600",
+                    "precision_winner": "deeph" if final_stats_allowed else None,
+                    "winner_config_id": "DH-T600-13",
+                    "runner_up_model": "graph2mat",
+                    "runner_up_config_id": "G2M-T600-26",
+                    "effect_size_best_vs_second": 0.1,
+                    "ci_rule_passed": True,
+                    "gates_failed": [],
+                }
+            ]
+        final_seed_summary = [
+            {
+                "model": "deeph",
+                "dataset_id": "graphene_w90_phase1_iid600",
+                "selected_config_id": "DH-T600-13",
+                "mean": 0.03,
+                "gpu_hours_mean": 1.2 if include_telemetry else None,
+                "gpu_hours_std": 0.1 if include_telemetry else None,
+                "peak_gpu_memory_mb_mean": 900.0 if include_telemetry else None,
+                "peak_gpu_memory_mb_std": 5.0 if include_telemetry else None,
+            },
+            {
+                "model": "graph2mat",
+                "dataset_id": "graphene_w90_phase1_iid600",
+                "selected_config_id": "G2M-T600-26",
+                "mean": 0.15,
+                "gpu_hours_mean": 0.2 if include_telemetry else None,
+                "gpu_hours_std": 0.02 if include_telemetry else None,
+                "peak_gpu_memory_mb_mean": 1100.0 if include_telemetry else None,
+                "peak_gpu_memory_mb_std": 8.0 if include_telemetry else None,
+            },
+        ]
         write_test_json(
             self.workflow / "final_test" / "final_statistics.json",
             {
+                "final_seed_summary": final_seed_summary,
                 "winner_decision": {
                     "robust_claim_allowed": final_stats_allowed,
                     "precision_winner": "deeph" if final_stats_allowed else None,
+                    "dataset_decisions": dataset_winners,
                     "gates_failed": [] if final_stats_allowed else ["missing_telemetry"],
                 }
             },
@@ -281,6 +371,22 @@ class Graph2MatDeepHEndToEndPipelineSkeletonTests(unittest.TestCase):
                 self.workflow / "equivalence_strict" / "equivalence_strict_summary.json",
                 {"status": equivalence_status, "blockers": [] if equivalence_status == "completed" else ["missing evidence"]},
             )
+        write_test_json(
+            self.workflow / "report" / "final_report.json",
+            {"claim_status": "robust_allowed" if gate_allowed else "blocked"},
+        )
+
+    def test_strict_summary_allows_robust_winner_when_evidence_complete(self) -> None:
+        self._write_strict_summary_inputs()
+
+        payload = self.module.run_pipeline(self.parse("--stages", "summary"))
+
+        self.assertEqual(payload["status"], "completed")
+        summary = json.loads((self.workflow / "strict_summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(summary["robust_claim_allowed"])
+        self.assertEqual(summary["precision_winner"], "deeph")
+        self.assertEqual(summary["global_winner"]["winner"], "deeph")
+        self.assertTrue((self.workflow / "strict_summary.md").exists())
 
     def test_strict_summary_blocks_missing_equivalence(self) -> None:
         self._write_strict_summary_inputs(equivalence_status=None)
@@ -293,7 +399,7 @@ class Graph2MatDeepHEndToEndPipelineSkeletonTests(unittest.TestCase):
         self.assertTrue(any("missing_equivalence_strict_summary" in item for item in summary["blockers"]))
 
     def test_strict_summary_blocks_missing_telemetry(self) -> None:
-        self._write_strict_summary_inputs(final_stats_allowed=False, gate_allowed=False)
+        self._write_strict_summary_inputs(include_telemetry=False)
 
         with self.assertRaisesRegex(RuntimeError, "telemetry"):
             self.module.run_pipeline(self.parse("--stages", "summary"))
@@ -301,6 +407,123 @@ class Graph2MatDeepHEndToEndPipelineSkeletonTests(unittest.TestCase):
         summary = json.loads((self.workflow / "strict_summary.json").read_text(encoding="utf-8"))
         self.assertFalse(summary["robust_claim_allowed"])
         self.assertTrue(any("missing_telemetry" in item or "telemetry_complete" in item for item in summary["blockers"]))
+
+    def test_strict_summary_synthesizes_existing_equivalence_preflights(self) -> None:
+        self._write_strict_summary_inputs(equivalence_status=None)
+        write_test_json(
+            self.workflow
+            / "equivalence_strict"
+            / "DH-T600-13_seed3001"
+            / "deeph_raw_global_equivalence_preflight.json",
+            {
+                "status": "proven",
+                "samples_seen": 10,
+                "samples_proven": 10,
+                "samples_failed": 0,
+                "samples": [{"status": "proven"} for _ in range(10)],
+            },
+        )
+
+        payload = self.module.run_pipeline(self.parse("--stages", "summary"))
+
+        self.assertEqual(payload["status"], "completed")
+        summary = json.loads((self.workflow / "strict_summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(summary["robust_claim_allowed"])
+        equivalence_summary = json.loads(
+            (self.workflow / "equivalence_strict" / "equivalence_strict_summary.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(equivalence_summary["status"], "completed")
+        self.assertEqual(equivalence_summary["samples_proven_total"], 10)
+
+    def test_equivalence_stage_uses_existing_preflights_without_runnable_inputs(self) -> None:
+        write_test_json(
+            self.workflow
+            / "equivalence_strict"
+            / "DH-T600-13_seed3001"
+            / "deeph_raw_global_equivalence_preflight.json",
+            {
+                "status": "proven",
+                "samples_seen": 5,
+                "samples_proven": 5,
+                "samples_failed": 0,
+            },
+        )
+
+        payload = self.module.run_pipeline(self.parse("--stages", "equivalence"))
+
+        self.assertEqual(payload["status"], "completed")
+        manifest = json.loads((self.workflow / "stages" / "equivalence.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "completed")
+        self.assertIn("Synthesized", manifest["message"])
+
+    def test_strict_summary_blocks_unproven_existing_equivalence(self) -> None:
+        self._write_strict_summary_inputs(equivalence_status=None)
+        write_test_json(
+            self.workflow
+            / "equivalence_strict"
+            / "DH-T600-13_seed3001"
+            / "deeph_raw_global_equivalence_preflight.json",
+            {
+                "status": "failed",
+                "samples_seen": 10,
+                "samples_proven": 9,
+                "samples_failed": 1,
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "equivalence"):
+            self.module.run_pipeline(self.parse("--stages", "summary"))
+
+        summary = json.loads((self.workflow / "strict_summary.json").read_text(encoding="utf-8"))
+        self.assertFalse(summary["robust_claim_allowed"])
+        self.assertTrue(any("equivalence" in item for item in summary["blockers"]))
+
+    def test_summary_blocks_global_winner_when_dataset_winners_disagree(self) -> None:
+        self._write_strict_summary_inputs(
+            dataset_winners=[
+                {
+                    "dataset_id": "graphene_w90_phase1_iid600",
+                    "precision_winner": "deeph",
+                    "winner_config_id": "DH-T600-13",
+                    "runner_up_model": "graph2mat",
+                    "runner_up_config_id": "G2M-T600-26",
+                    "gates_failed": [],
+                },
+                {
+                    "dataset_id": "graphene_w90_phase1_iid1000",
+                    "precision_winner": "graph2mat",
+                    "winner_config_id": "G2M-T1000-03",
+                    "runner_up_model": "deeph",
+                    "runner_up_config_id": "DH-T1000-03",
+                    "gates_failed": [],
+                },
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "global_winner"):
+            self.module.run_pipeline(self.parse("--stages", "summary"))
+
+        summary = json.loads((self.workflow / "strict_summary.json").read_text(encoding="utf-8"))
+        self.assertFalse(summary["robust_claim_allowed"])
+        self.assertEqual(summary["global_winner"]["reason"], "dataset_winners_disagree")
+
+    def test_discover_deeph_run_roots_from_workflow_final_test(self) -> None:
+        run_root = (
+            self.workflow
+            / "final_test"
+            / "sweep"
+            / "deeph"
+            / "graphene"
+            / "DH-T600-13_seed3001"
+        )
+        (run_root / "deeph" / "inference").mkdir(parents=True)
+        args = self.parse("--stages", "equivalence")
+
+        discovered = self.module.discover_deeph_run_roots(args)
+
+        self.assertIn(run_root, discovered)
 
     def test_strict_summary_blocks_missing_release_artifacts(self) -> None:
         self._write_strict_summary_inputs(release_status="invalid")

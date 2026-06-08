@@ -1,0 +1,20 @@
+{
+  "material_label": "si_vacancy",
+  "created_at": "2026-06-05T16:25:00",
+  "source": {
+    "siesta_fdf_url": "https://gitlab.com/siesta-project/siesta/-/raw/master/Util/Unfolding/Examples/Si/Defects/Vacancy/si7.fdf",
+    "pseudopotential_source": "copied from materials/si_amorphous/pseudos/Si.psf",
+    "basis_source": "copied from materials/si_amorphous/basis/Si.ion.xml"
+  },
+  "files": {
+    "official_fdf": "materials/si_vacancy/RUN.fdf",
+    "smoke_fdf": "materials/si_vacancy/RUN.smoke.fdf",
+    "pseudopotential": "materials/si_vacancy/pseudos/Si.psf",
+    "graph2mat_basis": "materials/si_vacancy/basis/Si.ion.xml"
+  },
+  "notes": [
+    "RUN.smoke.fdf is a lightweight smoke-test derivative of the official SIESTA Si vacancy example.",
+    "It removes band-unfolding blocks, uses Gamma-only sampling, and lowers the mesh cutoff for fast pipeline certification.",
+    "It is not a paper-grade electronic-structure setup."
+  ]
+}

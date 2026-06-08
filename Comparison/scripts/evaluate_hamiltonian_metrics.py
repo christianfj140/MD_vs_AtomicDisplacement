@@ -1159,11 +1159,12 @@ def evaluate_sample(
             sample_errors.append(stale_issue)
     structure_path = result_dir / "structures" / sample / "RUN.fdf"
     kgrid = parse_monkhorst_pack_kgrid(structure_path)
+    if enable_kpoint_metrics and kgrid is None:
+        kgrid = _monkhorst_pack_grid((1, 1, 1), (0.0, 0.0, 0.0), "implicit_gamma_only")
     if (
         enable_kpoint_metrics
         and kgrid is not None
         and kgrid.ok
-        and not kgrid.is_gamma_only
         and predicted_path is not None
         and reference_path is not None
         and not sample_errors

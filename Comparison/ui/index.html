@@ -1110,6 +1110,57 @@
               <div class="plot-card full placeholder-card">No benchmark plots available yet.</div>
             </div>
           </section>
+
+          <section class="panel g2m-deeph-dataset-minimum-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Dataset size minimum</p>
+                <h3>Minimum snapshots for target precision</h3>
+                <p class="field-help">
+                  Visualizacion read-only desde <code>dataset_size_minimum_existing_sweeps_*</code>. No modifica datos crudos ni lanza jobs.
+                </p>
+              </div>
+              <button id="g2m-deeph-dataset-minimum-refresh" class="button secondary" type="button">Refresh minimum</button>
+            </div>
+            <div class="grid four split-grid">
+              <label class="field">
+                <span>Metrica</span>
+                <select id="dataset-minimum-metric">
+                  <option value="h_mae_eV_mean" selected>H-MAE</option>
+                  <option value="h_rmse_eV">H-RMSE</option>
+                  <option value="low_energy_rmse_eV">Low-energy RMSE</option>
+                  <option value="fermi_window_rmse_eV">Fermi RMSE</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Threshold meV</span>
+                <input id="dataset-minimum-threshold" type="number" min="0" step="1" value="20" />
+              </label>
+              <label class="field">
+                <span>Eje x</span>
+                <select id="dataset-minimum-x-axis">
+                  <option value="n_train" selected>N_train</option>
+                  <option value="n_total">N_total</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Fit</span>
+                <select id="dataset-minimum-fit">
+                  <option value="power_law" selected>power law</option>
+                  <option value="inverse">1/x</option>
+                  <option value="inverse_square">1/x^2</option>
+                  <option value="quadratic">quadratic</option>
+                  <option value="linear">linear</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+            </div>
+            <div id="dataset-minimum-status" class="comparison-status-banner diagnostic">
+              Loading dataset-size-minimum outputs...
+            </div>
+            <div id="dataset-minimum-table" class="result-list"></div>
+            <div id="dataset-minimum-plot" class="plot-card full"></div>
+          </section>
         </section>
 
         <section id="view-performance" class="view">
@@ -1496,12 +1547,13 @@
             <code>GET /api/g2m-deeph/results</code>
             <code>GET /api/g2m-deeph/plot-runs</code>
             <code>GET /api/g2m-deeph/plots</code>
+            <code>GET /api/g2m-deeph/dataset-size-minimum</code>
           </div>
         </section>
       </main>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260603-g2m-plot-selector-active-run"></script>
+    <script src="/app.js?v=20260608-dataset-size-minimum-null-fix"></script>
   </body>
 </html>

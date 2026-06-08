@@ -1,0 +1,43 @@
+{
+  "material_label": "si_amorphous",
+  "created_for": "MD_vs_AtomicDisplacement material bundle onboarding",
+  "source": "SIESTA official GitLab repository",
+  "files": [
+    {
+      "path": "RUN.fdf",
+      "source_url": "https://gitlab.com/siesta-project/siesta/-/raw/master/Util/Unfolding/Examples/Si/Amorphous/Si216/a-Si-216.fdf",
+      "note": "Renamed locally to RUN.fdf for repository material-bundle conventions."
+    },
+    {
+      "path": "RUN.inline.fdf",
+      "source_url": null,
+      "note": "Generated locally from RUN.fdf by replacing %include a-Si-216.coord.fdf with the coordinate block, so dataset generation can copy a self-contained FDF."
+    },
+    {
+      "path": "RUN.smoke.fdf",
+      "source_url": null,
+      "note": "Generated locally from RUN.inline.fdf for pipeline smoke tests: removes active unfolding/refolding blocks, uses Gamma-only k-grid and a lighter MeshCutoff. Not intended for paper-grade production."
+    },
+    {
+      "path": "a-Si-216.coord.fdf",
+      "source_url": "https://gitlab.com/siesta-project/siesta/-/raw/master/Util/Unfolding/Examples/Si/Amorphous/Si216/a-Si-216.coord.fdf",
+      "note": "Required by RUN.fdf through %include."
+    },
+    {
+      "path": "pseudos/Si.psf",
+      "source_url": "https://gitlab.com/siesta-project/siesta/-/raw/master/Examples/LUA_Si111/Si.psf",
+      "note": "SIESTA example silicon pseudopotential used to satisfy the Si species."
+    },
+    {
+      "path": "basis/Si.ion.xml",
+      "source_url": null,
+      "note": "Generated locally with SIESTA from Comparison/workspaces/si_amorphous_basis_generation/RUN.fdf using the bundled Si.psf and PAO.BasisSize DZ."
+    }
+  ],
+  "local_validation": {
+    "material_bundle_validation": "passed",
+    "species": ["Si"],
+    "basis_dir": "materials/si_amorphous/basis",
+    "basis_note": "Si.ion.xml was generated locally with SIESTA for Graph2Mat basis mapping."
+  }
+}

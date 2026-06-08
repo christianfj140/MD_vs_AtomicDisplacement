@@ -657,6 +657,7 @@ const state = {
   g2mDeephPlotRuns: [],
   g2mDeephDefaultPlotRunIds: [],
   g2mDeephSelectedPlotRunIds: [],
+  datasetMinimumPayload: null,
   g2mDeephPlotsInFlight: false,
   g2mDeephLastPlotRefreshAt: 0,
   g2mDeephLastCompletedPlotSignature: null,
@@ -2162,12 +2163,13 @@ async function loadG2MDeepHResults() {
 function renderG2MDeepHGroupedBarPlot(card, plot) {
   const rows = plot.rows || [];
   const methods = rows.map((row) => methodDisplayLabel(row.method || "unknown"));
+  const metricKeys = (plot.metrics || []).map((metric) => metric.key);
   const traces = (plot.metrics || []).map((metric) => ({
     type: "bar",
     x: methods,
-    y: rows.map((row) => finiteNumber(row[metric.key])),
-    name: metric.unit ? `${metric.label} (${metric.unit})` : metric.label,
-    hovertemplate: "%{x}<br>%{fullData.name}: %{y:.5g}<extra></extra>",
+    y: rows.map((row) => metricDisplayValue(metric.key, row[metric.key])),
+    name: metricDisplayLabel(metric.key, metric.unit ? `${metric.label} (${metric.unit})` : metric.label),
+    hovertemplate: `%{x}<br>%{fullData.name}: %{y:.5g}<extra></extra>`,
   }));
   const finiteValues = traces.flatMap((trace) => (trace.y || []).filter((value) => value != null));
   const missing = plot.missing_metrics || [];
@@ -2180,11 +2182,11 @@ function renderG2MDeepHGroupedBarPlot(card, plot) {
   renderPlot(
     card,
     traces,
-    plotLayout(plot.title || "Graph2Mat vs DeepH", plot.y_title || "", {
+    plotLayout(plot.title || "Graph2Mat vs DeepH", metricDisplayAxisTitle(plot.y_title || "", metricKeys), {
       barmode: "group",
       annotations,
       xaxis: { title: "Method", gridcolor: "#edf1f4", zeroline: false },
-      yaxis: { title: plot.y_title || "", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: metricDisplayAxisTitle(plot.y_title || "", metricKeys), gridcolor: "#edf1f4", zeroline: false },
     }),
   );
 }
@@ -2201,6 +2203,24 @@ function g2mDeephEpochLabel(row = {}) {
   if (row.epoch_label) return String(row.epoch_label);
   if (row.epochs != null && row.epochs !== "") return `${row.epochs} epochs`;
   return "epochs unknown";
+}
+
+function valuesAreNonNegative(values) {
+  const finiteValues = values.filter((value) => typeof value === "number" && Number.isFinite(value));
+  return finiteValues.length > 0 && finiteValues.every((value) => value >= 0);
+}
+
+function paddedLinearRange(values, options = {}) {
+  const finiteValues = values.filter((value) => typeof value === "number" && Number.isFinite(value));
+  if (!finiteValues.length) return null;
+  const minValue = Math.min(...finiteValues);
+  const maxValue = Math.max(...finiteValues);
+  const span = maxValue - minValue;
+  const padding = span > 0 ? span * (options.padFraction ?? 0.06) : Math.max(Math.abs(maxValue) * 0.08, 1);
+  const minRange = options.forceZeroMin ? 0 : minValue - padding;
+  const maxRange = maxValue + padding;
+  if (!Number.isFinite(minRange) || !Number.isFinite(maxRange) || minRange === maxRange) return null;
+  return [minRange, maxRange];
 }
 
 function renderG2MDeepHTimingScalingPlot(card, plot) {
@@ -2225,40 +2245,65 @@ function renderG2MDeepHTimingScalingPlot(card, plot) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
-  const traces = Array.from(groups.entries()).map(([key, group]) => {
+  const traces = [];
+  const fitYMin = valuesAreNonNegative(rows.map((row) => row.elapsed_seconds)) ? 0 : null;
+  Array.from(groups.entries()).forEach(([key, group], index) => {
     const [phase, model, epochLabel] = key.split("|");
     const label = group[0]?.label || phase;
-    return {
+    const name = `${label}${model && model !== "all" ? ` · ${methodDisplayLabel(model)}` : ""} · ${epochLabel}`;
+    const color = plotColor(index);
+    const points = group.map((row) => ({
+      x: row.dataset_size,
+      y: row.elapsed_seconds,
+    }));
+    addFitTraces(traces, points, name, color, { legendgroup: key, fitYMin });
+    traces.push({
       type: "scatter",
       mode: "markers",
-      marker: { symbol: g2mDeephMarkerSymbol(model), size: g2mDeephIsDeepH(model) ? 10 : 8 },
+      marker: { symbol: g2mDeephMarkerSymbol(model), size: g2mDeephIsDeepH(model) ? 10 : 8, color },
       x: group.map((row) => row.dataset_size),
       y: group.map((row) => row.elapsed_seconds),
       text: group.map((row) => `${row.dataset_id || "-"} · ${row.config_id || "-"} · ${g2mDeephEpochLabel(row)}`),
-      name: `${label}${model && model !== "all" ? ` · ${methodDisplayLabel(model)}` : ""} · ${epochLabel}`,
+      name,
+      legendgroup: key,
       hovertemplate:
         "Dataset size: %{x}<br>Seconds: %{y:.3f}<br>%{text}<extra>%{fullData.name}</extra>",
-    };
+    });
   });
   const annotations = traces.length ? [] : [emptyPlotAnnotation("No timing-vs-size rows with finite values.")];
+  let layout = plotLayout(plot.title || "Phase time vs dataset size", plot.y_title || "Seconds", {
+    annotations,
+    xaxis: {
+      title: plot.x_title || "Dataset size (snapshots)",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.dataset_size)),
+    },
+    yaxis: {
+      title: plot.y_title || "Seconds",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      ...(fitYMin === 0 ? { range: paddedLinearRange(rows.map((row) => row.elapsed_seconds), { forceZeroMin: true }) } : {}),
+    },
+    legend: { orientation: "h", y: -0.24 },
+  });
+  layout = withFitSelector(layout, traces);
   renderPlot(
     card,
     traces,
-    plotLayout(plot.title || "Phase time vs dataset size", plot.y_title || "Seconds", {
-      annotations,
-      xaxis: { title: plot.x_title || "Dataset size (snapshots)", gridcolor: "#edf1f4", zeroline: false },
-      yaxis: { title: plot.y_title || "Seconds", gridcolor: "#edf1f4", zeroline: false },
-      legend: { orientation: "h", y: -0.24 },
-    }),
+    layout,
   );
 }
 
 function renderG2MDeepHMetricScalingPlot(card, plot) {
+  const metricKeys = (plot.metrics || []).map((metric) => metric.key);
+  const yTitle = metricDisplayAxisTitle(plot.y_title || "Metric value", metricKeys);
+  const yUnit = metricDisplayUnitForKeys(metricKeys);
   const rows = (plot.rows || [])
     .map((row) => ({
       ...row,
       dataset_size: finiteNumber(row.dataset_size),
-      metric_value: finiteNumber(row.metric_value),
+      metric_value: metricDisplayValue(row.metric_key, row.metric_value),
     }))
     .filter((row) => row.dataset_size != null && row.metric_value != null)
     .sort(
@@ -2276,28 +2321,52 @@ function renderG2MDeepHMetricScalingPlot(card, plot) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
-  const traces = Array.from(groups.entries()).map(([key, group]) => {
+  const traces = [];
+  const fitYMin = valuesAreNonNegative(rows.map((row) => row.metric_value)) ? 0 : null;
+  Array.from(groups.entries()).forEach(([key, group], index) => {
     const [metricKey, method, epochLabel] = key.split("|");
-    return {
+    const name = `${metricLabels[metricKey] || metricKey} · ${methodDisplayLabel(method)} · ${epochLabel}`;
+    const color = plotColor(index);
+    const points = group.map((row) => ({
+      x: row.dataset_size,
+      y: row.metric_value,
+    }));
+    addFitTraces(traces, points, name, color, { legendgroup: key, fitYMin });
+    traces.push({
       type: "scatter",
       mode: "markers",
-      marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8 },
+      marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8, color },
       x: group.map((row) => row.dataset_size),
       y: group.map((row) => row.metric_value),
       text: group.map((row) => `${row.run_id || "-"} · ${row.config_id || "-"} · ${g2mDeephEpochLabel(row)} · ${row.scientific_status || "-"}`),
-      name: `${metricLabels[metricKey] || metricKey} · ${methodDisplayLabel(method)} · ${epochLabel}`,
+      name,
+      legendgroup: key,
       hovertemplate:
-        "Dataset size: %{x}<br>Value: %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>",
-    };
+        `Dataset size: %{x}<br>Value${yUnit ? ` (${yUnit})` : ""}: %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
+    });
   });
   const annotations = traces.length ? [] : [emptyPlotAnnotation("No archived metric-vs-size rows with finite values.")];
-  let layout = plotLayout(plot.title || "Metrics vs dataset size", plot.y_title || "Metric value", {
+  let layout = plotLayout(plot.title || "Metrics vs dataset size", yTitle, {
       annotations,
-      xaxis: { title: plot.x_title || "Dataset size (snapshots)", gridcolor: "#edf1f4", zeroline: false },
-      yaxis: { title: plot.y_title || "Metric value", gridcolor: "#edf1f4", zeroline: false },
+      xaxis: {
+        title: plot.x_title || "Dataset size (snapshots)",
+        gridcolor: "#edf1f4",
+        zeroline: false,
+        range: paddedLinearRange(rows.map((row) => row.dataset_size)),
+      },
+      yaxis: {
+        title: yTitle,
+        gridcolor: "#edf1f4",
+        zeroline: false,
+        ...(fitYMin === 0 ? { range: paddedLinearRange(rows.map((row) => row.metric_value), { forceZeroMin: true }) } : {}),
+      },
       legend: { orientation: "h", y: -0.24 },
     });
-  const references = DEEPH_PAPER_REFERENCE_LINES[card.id] || DEEPH_PAPER_REFERENCE_LINES[plot.id];
+  const primaryMetricKey = metricKeys[0] || rows[0]?.metric_key || "";
+  const references = scaleReferencesForMetric(
+    DEEPH_PAPER_REFERENCE_LINES[card.id] || DEEPH_PAPER_REFERENCE_LINES[plot.id],
+    primaryMetricKey,
+  );
   layout = withHorizontalReferenceLines(
     layout,
     traces,
@@ -2306,6 +2375,7 @@ function renderG2MDeepHMetricScalingPlot(card, plot) {
       ? "DeepH paper reference lines are diagnostic guides; match basis, units, support and raw/global equivalence before claims."
       : "",
   );
+  layout = withFitSelector(layout, traces);
   renderPlot(card, traces, layout);
 }
 
@@ -2336,6 +2406,372 @@ function renderG2MDeepHPlotsPayload(payload) {
     }
   }
   schedulePlotResize();
+}
+
+const DATASET_MINIMUM_METRIC_LABELS = {
+  h_mae_eV_mean: "H-MAE",
+  h_rmse_eV: "H-RMSE",
+  low_energy_rmse_eV: "Low-energy RMSE",
+  fermi_window_rmse_eV: "Fermi RMSE",
+};
+
+const DATASET_MINIMUM_METHOD_COLORS = {
+  deeph: "#d62728",
+  graph2mat: "#1f77b4",
+};
+
+function datasetMinimumControlValue(id, fallback = "") {
+  const node = document.getElementById(id);
+  return node ? node.value : fallback;
+}
+
+function datasetMinimumSelectedMetric() {
+  return datasetMinimumControlValue("dataset-minimum-metric", "h_mae_eV_mean");
+}
+
+function datasetMinimumSelectedThreshold() {
+  return finiteNumber(datasetMinimumControlValue("dataset-minimum-threshold", "20"));
+}
+
+function datasetMinimumSelectedXAxis() {
+  return datasetMinimumControlValue("dataset-minimum-x-axis", "n_train");
+}
+
+function datasetMinimumSelectedFit() {
+  return datasetMinimumControlValue("dataset-minimum-fit", "power_law");
+}
+
+function datasetMinimumOutputLabel(output = {}) {
+  const threshold = finiteNumber(output.threshold_mev);
+  const metric = DATASET_MINIMUM_METRIC_LABELS[output.primary_metric] || output.primary_metric || "metric";
+  const axis = output.x_axis || "n_train";
+  return `${metric} · ${threshold == null ? "threshold ?" : `${formatCompactNumber(threshold)} meV`} · ${axis}`;
+}
+
+function formatCompactNumber(value) {
+  const number = finiteNumber(value);
+  if (number == null) return "-";
+  return Number.isInteger(number) ? String(number) : Number(number.toPrecision(5)).toString();
+}
+
+function datasetMinimumFindOutput(payload = {}) {
+  const metric = datasetMinimumSelectedMetric();
+  const threshold = datasetMinimumSelectedThreshold();
+  const outputs = (payload.outputs || []).filter((output) => output.status === "ok");
+  if (!outputs.length) return null;
+  const exact = outputs.find((output) => {
+    const outThreshold = finiteNumber(output.threshold_mev);
+    return output.primary_metric === metric && threshold != null && outThreshold != null && Math.abs(outThreshold - threshold) < 1e-9;
+  });
+  if (exact) return exact;
+  return null;
+}
+
+function datasetMinimumAxisField(axis) {
+  return axis === "n_total" ? "dataset_size_total" : "dataset_size_train";
+}
+
+function datasetMinimumAxisLabel(axis) {
+  return axis === "n_total" ? "N_total snapshots" : "N_train snapshots";
+}
+
+function datasetMinimumRowX(row = {}, axis = "n_train") {
+  return finiteNumber(row[datasetMinimumAxisField(axis)] ?? row.dataset_size_x);
+}
+
+function datasetMinimumDisplayN(output, method, nValue, axis) {
+  const value = finiteNumber(nValue);
+  if (value == null) return null;
+  if ((output.x_axis || "n_train") === axis) return value;
+  const sourceField = datasetMinimumAxisField(output.x_axis || "n_train");
+  const targetField = datasetMinimumAxisField(axis);
+  const row = (output.best_rows || []).find(
+    (item) =>
+      String(item.method || "") === String(method || "") &&
+      finiteNumber(item[sourceField]) != null &&
+      Math.abs(finiteNumber(item[sourceField]) - value) < 1e-9,
+  );
+  return row ? finiteNumber(row[targetField]) : value;
+}
+
+function datasetMinimumFormatN(value) {
+  const number = finiteNumber(value);
+  return number == null ? "-" : String(Math.round(number));
+}
+
+function datasetMinimumFormatMeV(value) {
+  const number = finiteNumber(value);
+  return number == null ? "-" : `${number.toFixed(3)} meV`;
+}
+
+function renderDatasetMinimumTable(output, axis) {
+  const container = document.getElementById("dataset-minimum-table");
+  if (!container) return;
+  container.textContent = "";
+  const thresholds = output?.thresholds || {};
+  const methods = Object.keys(thresholds).sort();
+  if (!methods.length) {
+    container.textContent = "No N_min threshold table available.";
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "summary-table";
+  const axisLabel = axis === "n_total" ? "N_total" : "N_train";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>Threshold</th>
+        <th>Method</th>
+        <th>Best observed</th>
+        <th>N_min_abs (${axisLabel})</th>
+        <th>N_min_rel95 (${axisLabel})</th>
+        <th>N_min_plateau (${axisLabel})</th>
+        <th>N_min_cost_eff (${axisLabel})</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const body = table.querySelector("tbody");
+  const threshold = finiteNumber(output.threshold_mev);
+  for (const method of methods) {
+    const row = thresholds[method] || {};
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${threshold == null ? "-" : `${formatCompactNumber(threshold)} meV`}</td>
+      <td>${escapeHtml(methodDisplayLabel(method))}</td>
+      <td>${datasetMinimumFormatMeV(row.best_observed_mev)}</td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_abs, axis))}</td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_rel95, axis))}</td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_plateau, axis))}</td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))}</td>
+    `;
+    body.appendChild(tr);
+  }
+  container.appendChild(table);
+}
+
+function datasetMinimumPowerLawFitLinePoints(points) {
+  const fitPoints = aggregateFitPoints(points).filter((point) => point.x > 0 && point.y != null);
+  if (fitPoints.length < 3) return [];
+  let best = null;
+  for (let index = 0; index < 160; index += 1) {
+    const alpha = 0.05 + ((4.0 - 0.05) * index) / 159;
+    const transformed = fitPoints.map((point) => ({ x: point.x ** (-alpha), y: point.y }));
+    const coefficients = polynomialCoefficients(transformed, 1);
+    if (!coefficients) continue;
+    const sse = transformed.reduce((sum, point) => {
+      const predicted = evaluatePolynomial(coefficients, point.x);
+      return sum + ((point.y - predicted) ** 2);
+    }, 0);
+    if (!best || sse < best.sse) best = { alpha, coefficients, sse };
+  }
+  if (!best) return [];
+  const xValues = fitPoints.map((point) => point.x);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return [];
+  const lineX = minX === maxX
+    ? [minX]
+    : Array.from({ length: 100 }, (_, index) => minX + ((maxX - minX) * index) / 99);
+  return lineX.map((x) => ({
+    x,
+    y: best.coefficients[0] + best.coefficients[1] * (x ** (-best.alpha)),
+  }));
+}
+
+function datasetMinimumFitLinePoints(points, fitKind) {
+  if (fitKind === "none") return [];
+  if (fitKind === "power_law") return datasetMinimumPowerLawFitLinePoints(points);
+  const reciprocalPower = fitKindReciprocalPower(fitKind);
+  if (reciprocalPower != null) return reciprocalFitLinePoints(points, reciprocalPower);
+  return fitLinePoints(points, fitKindDegree(fitKind));
+}
+
+function datasetMinimumFitLabel(fitKind) {
+  if (fitKind === "power_law") return "power law";
+  if (fitKind === "none") return "no fit";
+  return fitKindLabel(fitKind);
+}
+
+function renderDatasetMinimumPlot(output, axis) {
+  const card = document.getElementById("dataset-minimum-plot");
+  if (!card) return;
+  if (!window.Plotly) {
+    card.textContent = "Plotly no esta cargado.";
+    return;
+  }
+  const rows = (output?.best_rows || [])
+    .map((row) => ({
+      ...row,
+      x_value: datasetMinimumRowX(row, axis),
+      y_value: finiteNumber(row.primary_metric_mev_mean),
+      cost: finiteNumber(row.gpu_hours_total_mean),
+    }))
+    .filter((row) => row.x_value != null && row.y_value != null)
+    .sort((a, b) => a.x_value - b.x_value || String(a.method || "").localeCompare(String(b.method || "")));
+  if (!rows.length) {
+    renderPlot(card, [], plotLayout("Dataset size minimum", "H error (meV)", {
+      annotations: [emptyPlotAnnotation("No finite rows for selected dataset-size-minimum output.")],
+    }));
+    return;
+  }
+  const selectedFit = datasetMinimumSelectedFit();
+  const traces = [];
+  const methods = Array.from(new Set(rows.map((row) => String(row.method || "unknown")))).sort();
+  methods.forEach((method, index) => {
+    const group = rows.filter((row) => String(row.method || "unknown") === method);
+    const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
+    traces.push({
+      type: "scatter",
+      mode: "lines+markers",
+      x: group.map((row) => row.x_value),
+      y: group.map((row) => row.y_value),
+      marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8, color },
+      line: { color, width: 2 },
+      name: `${methodDisplayLabel(method)} best observed`,
+      text: group.map((row) => `${row.config_id || "-"} · ${row.epoch_label || "-"} · total ${row.dataset_size_total || "-"}`),
+      hovertemplate: `${axis === "n_total" ? "N_total" : "N_train"}: %{x}<br>Error: %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>`,
+    });
+    const fitPoints = group.map((row) => ({ x: row.x_value, y: row.y_value }));
+    const fitLine = datasetMinimumFitLinePoints(fitPoints, selectedFit);
+    if (fitLine.length > 1) {
+      traces.push({
+        type: "scatter",
+        mode: "lines",
+        x: fitLine.map((point) => point.x),
+        y: fitLine.map((point) => point.y),
+        name: `${methodDisplayLabel(method)} ${datasetMinimumFitLabel(selectedFit)} fit`,
+        line: { color, width: 2, dash: fitKindDash(selectedFit) },
+        opacity: 0.45,
+        hoverinfo: "skip",
+      });
+    }
+  });
+  const threshold = finiteNumber(output.threshold_mev);
+  const shapes = [];
+  const annotations = [];
+  if (threshold != null) {
+    shapes.push({
+      type: "line",
+      xref: "paper",
+      x0: 0,
+      x1: 1,
+      yref: "y",
+      y0: threshold,
+      y1: threshold,
+      line: { color: "#111827", width: 1.6, dash: "dot" },
+    });
+    annotations.push({
+      text: `threshold ${formatCompactNumber(threshold)} meV`,
+      xref: "paper",
+      x: 1,
+      xanchor: "right",
+      yref: "y",
+      y: threshold,
+      yanchor: "bottom",
+      showarrow: false,
+      font: { size: 13, color: "#111827" },
+      bgcolor: "rgba(255,255,255,0.82)",
+    });
+  }
+  const thresholds = output.thresholds || {};
+  methods.forEach((method, index) => {
+    const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
+    const nAbs = datasetMinimumDisplayN(output, method, thresholds[method]?.N_min_abs, axis);
+    const nRel = datasetMinimumDisplayN(output, method, thresholds[method]?.N_min_rel95, axis);
+    const nValue = finiteNumber(nAbs) ?? finiteNumber(nRel);
+    if (nValue == null) return;
+    const isAbs = finiteNumber(nAbs) != null;
+    shapes.push({
+      type: "line",
+      xref: "x",
+      x0: nValue,
+      x1: nValue,
+      yref: "paper",
+      y0: 0,
+      y1: 1,
+      line: { color, width: isAbs ? 1.8 : 1.2, dash: isAbs ? "dash" : "dot" },
+    });
+    annotations.push({
+      text: `${methodDisplayLabel(method)} ${isAbs ? "N_min_abs" : "N_min_rel95"}=${Math.round(nValue)}`,
+      xref: "x",
+      x: nValue,
+      yref: "paper",
+      y: 1.02 + index * 0.055,
+      showarrow: false,
+      font: { size: 12, color },
+      bgcolor: "rgba(255,255,255,0.82)",
+    });
+  });
+  const yValues = rows.map((row) => row.y_value).concat(threshold == null ? [] : [threshold]);
+  const title = `Dataset size minimum · ${DATASET_MINIMUM_METRIC_LABELS[output.primary_metric] || output.primary_metric || "metric"}`;
+  const layout = plotLayout(title, "Error (meV)", {
+    shapes,
+    annotations,
+    xaxis: {
+      title: datasetMinimumAxisLabel(axis),
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.x_value), { forceZeroMin: true }),
+    },
+    yaxis: {
+      title: "Error (meV)",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(yValues, { forceZeroMin: true }),
+    },
+    legend: { orientation: "h", y: -0.22 },
+    margin: { t: 84, r: 48, b: 70, l: 72 },
+  });
+  renderPlot(card, traces, layout, {
+    toImageButtonOptions: { filename: "dataset_size_minimum" },
+  });
+}
+
+function renderDatasetMinimumStatus(output, payload) {
+  const status = document.getElementById("dataset-minimum-status");
+  if (!status) return;
+  status.className = "comparison-status-banner diagnostic";
+  if (!payload?.available) {
+    status.classList.add("invalid");
+    status.textContent = payload?.message || "No dataset-size-minimum outputs found.";
+    return;
+  }
+  if (!output) {
+    const metric = datasetMinimumSelectedMetric();
+    const threshold = datasetMinimumSelectedThreshold();
+    status.classList.add("invalid");
+    status.textContent = `No hay output para ${DATASET_MINIMUM_METRIC_LABELS[metric] || metric} con threshold ${threshold ?? "-"} meV. Ejecuta el postproceso para esa combinacion.`;
+    return;
+  }
+  const warnings = (output.warnings || []).filter(Boolean);
+  const axis = datasetMinimumSelectedXAxis();
+  const axisNote = axis !== (output.x_axis || "n_train")
+    ? ` N_min fue calculado sobre ${output.x_axis || "n_train"} y se remapea visualmente a ${axis}.`
+    : "";
+  status.textContent = `${payload.diagnostic_warning || "Dataset-size-minimum output diagnostico."}${axisNote}${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}`;
+}
+
+function renderDatasetMinimum(payload = state.datasetMinimumPayload) {
+  state.datasetMinimumPayload = payload || null;
+  const output = datasetMinimumFindOutput(payload || {});
+  const axis = datasetMinimumSelectedXAxis();
+  renderDatasetMinimumStatus(output, payload);
+  renderDatasetMinimumTable(output, axis);
+  if (!output) {
+    const card = document.getElementById("dataset-minimum-plot");
+    if (card) card.textContent = "No plot available for selected metric/threshold.";
+    return;
+  }
+  renderDatasetMinimumPlot(output, axis);
+  schedulePlotResize("dataset-minimum-plot");
+}
+
+async function loadDatasetMinimum() {
+  if (!window.Plotly) await ensurePlotlyLoaded();
+  const payload = await request("/api/g2m-deeph/dataset-size-minimum");
+  renderDatasetMinimum(payload);
+  return payload;
 }
 
 function formatG2MDeepHPlotRunTime(value) {
@@ -2440,7 +2876,7 @@ async function loadG2MDeepHPlotRuns({ preserveSelection = true } = {}) {
 }
 
 function normalizeG2MDeepHMetricPlots(payload = {}) {
-  const rows = payload.metric_scaling_rows || [];
+  const rows = dedupeMetricScalingRows(payload.metric_scaling_rows || []);
   if (!rows.length) {
     return {
       ...payload,
@@ -2475,7 +2911,8 @@ function normalizeG2MDeepHMetricPlots(payload = {}) {
 function metricScalingRowKey(row = {}) {
   return [
     row.run_id || "",
-    row.dataset_id || "",
+    row.dataset_root || row.dataset_id || "",
+    row.dataset_size || "",
     row.method || "",
     row.config_id || "",
     row.seed || "",
@@ -2484,13 +2921,34 @@ function metricScalingRowKey(row = {}) {
   ].join("|");
 }
 
+function metricScalingEquivalentValueKey(row = {}) {
+  const value = finiteNumber(row.metric_value);
+  return value == null ? "" : value.toPrecision(14);
+}
+
+function metricScalingDuplicateValueKey(row = {}) {
+  return [
+    row.run_id || "",
+    row.dataset_root || row.dataset_id || "",
+    row.dataset_size || "",
+    row.method || "",
+    row.config_id || "",
+    g2mDeephEpochLabel(row),
+    row.metric_key || "",
+    metricScalingEquivalentValueKey(row),
+  ].join("|");
+}
+
 function dedupeMetricScalingRows(rows = []) {
   const seen = new Set();
+  const seenEquivalentValues = new Set();
   const result = [];
   for (const row of rows) {
     const key = metricScalingRowKey(row);
-    if (seen.has(key)) continue;
+    const valueKey = metricScalingDuplicateValueKey(row);
+    if (seen.has(key) || seenEquivalentValues.has(valueKey)) continue;
     seen.add(key);
+    if (valueKey) seenEquivalentValues.add(valueKey);
     result.push(row);
   }
   return result;
@@ -5580,8 +6038,100 @@ function metricValue(run, group, metric) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function metricDisplayUnitInfo(metricKeyOrTitle) {
+  const text = String(metricKeyOrTitle || "").trim();
+  const lower = text.toLowerCase();
+  if (!lower) return { scale: 1, unit: "", rawUnit: "", converted: false };
+  if (lower.includes("mev")) {
+    return lower.includes("mev2") || lower.includes("mev^2") || lower.includes("mev²")
+      ? { scale: 1, unit: "meV²", rawUnit: "meV²", converted: false }
+      : { scale: 1, unit: "meV", rawUnit: "meV", converted: false };
+  }
+  if (
+    /(^|_)ev2(_|$)/i.test(text) ||
+    /\bev\^?2\b/i.test(text) ||
+    /\bev²\b/i.test(text)
+  ) {
+    return { scale: 1_000_000, unit: "meV²", rawUnit: "eV²", converted: true };
+  }
+  if (/(^|_)ev(_|$)/i.test(text) || /\bev\b/i.test(text)) {
+    return { scale: 1000, unit: "meV", rawUnit: "eV", converted: true };
+  }
+  return { scale: 1, unit: "", rawUnit: "", converted: false };
+}
+
+function metricDisplayValue(metricKey, value) {
+  const number = finiteNumber(value);
+  if (number == null) return null;
+  return number * metricDisplayUnitInfo(metricKey).scale;
+}
+
+function metricDisplayUnitForKeys(metricKeys = []) {
+  const units = Array.from(
+    new Set(
+      metricKeys
+        .map((key) => metricDisplayUnitInfo(key).unit)
+        .filter(Boolean),
+    ),
+  );
+  return units.length === 1 ? units[0] : "";
+}
+
+function metricDisplayAxisTitle(title, metricKeys = []) {
+  const keys = Array.isArray(metricKeys) ? metricKeys : [metricKeys];
+  const unit = metricDisplayUnitForKeys(keys);
+  let text = String(title || "");
+  if (unit === "meV²") {
+    text = text
+      .replace(/_eV2(?=_|$)/g, "_meV2")
+      .replace(/\beV\^2\b/g, "meV²")
+      .replace(/\beV2\b/g, "meV²")
+      .replace(/\beV²\b/g, "meV²");
+  } else if (unit === "meV") {
+    text = text.replace(/_eV(?=_|$)/g, "_meV").replace(/\beV\b/g, "meV");
+  } else {
+    const titleUnit = metricDisplayUnitInfo(text);
+    if (titleUnit.unit === "meV²") {
+      text = text
+        .replace(/_eV2(?=_|$)/g, "_meV2")
+        .replace(/\beV\^2\b/g, "meV²")
+        .replace(/\beV2\b/g, "meV²")
+        .replace(/\beV²\b/g, "meV²");
+    } else if (titleUnit.unit === "meV") {
+      text = text.replace(/_eV(?=_|$)/g, "_meV").replace(/\beV\b/g, "meV");
+    }
+  }
+  if (!text && unit) return unit;
+  if (unit && !text.toLowerCase().includes(unit.toLowerCase().replace("²", ""))) return `${text} (${unit})`;
+  return text;
+}
+
+function metricDisplayLabel(metricKey, label = "") {
+  const unit = metricDisplayUnitInfo(metricKey).unit;
+  const text = String(label || metricKey || "Metric value");
+  if (!unit || text.toLowerCase().includes(unit.toLowerCase().replace("²", ""))) return text;
+  return `${text} (${unit})`;
+}
+
+function scaleReferencesForMetric(references, metricKey) {
+  const scale = metricDisplayUnitInfo(metricKey).scale;
+  if (!Array.isArray(references) || scale === 1) return references;
+  return references.map((reference) => {
+    const value = finiteNumber(reference?.value);
+    return value == null ? reference : { ...reference, value: value * scale };
+  });
+}
+
+function formatDisplayedMetric(value, metricKey, precision = 4) {
+  const number = metricDisplayValue(metricKey, value);
+  if (number == null) return "No metric";
+  const unit = metricDisplayUnitInfo(metricKey).unit;
+  return formatMetricDisplay(number, unit ? ` ${unit}` : "", precision);
 }
 
 const SCIENCE_PLOT_AXIS_COLOR = "#111827";
@@ -5884,7 +6434,38 @@ function evaluatePolynomial(coefficients, x) {
 function fitLinePoints(points, degree) {
   const fitPoints = aggregateFitPoints(points);
   if (fitPoints.length <= degree) return [];
-  const coefficients = polynomialCoefficients(fitPoints, degree);
+  const xValues = fitPoints.map((point) => point.x);
+  const minX = Math.min(...xValues);
+  const maxX = Math.max(...xValues);
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return [];
+  const scale = maxX - minX;
+  const center = (maxX + minX) / 2;
+  const normalizedFitPoints = fitPoints.map((point) => ({
+    x: scale > 0 ? (2 * (point.x - center)) / scale : 0,
+    y: point.y,
+  }));
+  const coefficients = polynomialCoefficients(normalizedFitPoints, degree);
+  if (!coefficients) return [];
+  const lineX = minX === maxX
+    ? [minX]
+    : Array.from({ length: 80 }, (_, index) => minX + ((maxX - minX) * index) / 79);
+  return lineX.map((x) => {
+    const normalizedX = scale > 0 ? (2 * (x - center)) / scale : 0;
+    return { x, y: evaluatePolynomial(coefficients, normalizedX) };
+  });
+}
+
+function reciprocalFitLinePoints(points, power) {
+  const fitPoints = aggregateFitPoints(points).filter((point) => point.x !== 0);
+  if (fitPoints.length < 2) return [];
+  const transformedPoints = fitPoints
+    .map((point) => ({
+      x: 1 / (point.x ** power),
+      y: point.y,
+    }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (transformedPoints.length < 2) return [];
+  const coefficients = polynomialCoefficients(transformedPoints, 1);
   if (!coefficients) return [];
   const xValues = fitPoints.map((point) => point.x);
   const minX = Math.min(...xValues);
@@ -5893,38 +6474,109 @@ function fitLinePoints(points, degree) {
   const lineX = minX === maxX
     ? [minX]
     : Array.from({ length: 80 }, (_, index) => minX + ((maxX - minX) * index) / 79);
-  return lineX.map((x) => ({ x, y: evaluatePolynomial(coefficients, x) }));
+  return lineX
+    .filter((x) => x !== 0)
+    .map((x) => ({
+      x,
+      y: evaluatePolynomial(coefficients, 1 / (x ** power)),
+    }));
+}
+
+function fitKindReciprocalPower(kind) {
+  if (kind === "inverse") return 1;
+  if (kind === "inverse_square") return 2;
+  return null;
+}
+
+function fitKindDegree(kind) {
+  if (kind === "quadratic") return 2;
+  if (kind === "linear") return 1;
+  const match = String(kind || "").match(/^degree_(\d+)$/);
+  if (match) return Number(match[1]);
+  return 1;
+}
+
+function fitKindForDegree(degree) {
+  if (degree === 1) return "linear";
+  if (degree === 2) return "quadratic";
+  return `degree_${degree}`;
+}
+
+function fitKindLabel(kind) {
+  if (kind === "inverse") return "1/x";
+  if (kind === "inverse_square") return "1/x^2";
+  const degree = fitKindDegree(kind);
+  if (degree === 1) return "linear";
+  if (degree === 2) return "quadratic";
+  return `degree ${degree}`;
+}
+
+function fitKindDash(kind) {
+  if (kind === "inverse") return "longdash";
+  if (kind === "inverse_square") return "dashdot";
+  const degree = fitKindDegree(kind);
+  if (degree === 1) return "solid";
+  if (degree === 2) return "dash";
+  return "dot";
+}
+
+function fitKindOrder(kind) {
+  if (kind === "linear") return 1;
+  if (kind === "quadratic") return 2;
+  if (kind === "inverse") return 3;
+  if (kind === "inverse_square") return 4;
+  return 10 + fitKindDegree(kind);
 }
 
 function fitTrace(points, name, color, kind, extra = {}) {
-  const degree = kind === "quadratic" ? 2 : 1;
-  const linePoints = fitLinePoints(points, degree);
+  const { fitYMin = null, ...traceExtra } = extra;
+  const degree = fitKindDegree(kind);
+  const reciprocalPower = fitKindReciprocalPower(kind);
+  const linePoints = reciprocalPower == null
+    ? fitLinePoints(points, degree)
+    : reciprocalFitLinePoints(points, reciprocalPower);
   if (linePoints.length < 2) return null;
+  const yValues = linePoints.map((point) => {
+    const value = point.y;
+    return Number.isFinite(fitYMin) && value < fitYMin ? null : value;
+  });
   return {
     type: "scatter",
     mode: "lines",
-    name: `${name} ${kind} fit`,
+    name: `${name} ${fitKindLabel(kind)} fit`,
     x: linePoints.map((point) => point.x),
-    y: linePoints.map((point) => point.y),
+    y: yValues,
     line: {
       color,
       width: 2,
-      dash: kind === "quadratic" ? "dash" : "solid",
+      dash: fitKindDash(kind),
     },
     opacity: 0.42,
     hoverinfo: "skip",
     visible: kind === "linear",
     showlegend: false,
-    meta: { role: "fit", fitKind: kind },
-    ...extra,
+    meta: {
+      role: "fit",
+      fitKind: kind,
+      fitDegree: degree,
+      fitLabel: `${fitKindLabel(kind)} fit`,
+      fitModel: reciprocalPower == null ? "polynomial" : `a+b/x^${reciprocalPower}`,
+    },
+    ...traceExtra,
   };
 }
 
+const MAX_POLYNOMIAL_FIT_DEGREE = 12;
+
 function addFitTraces(traces, points, name, color, extra = {}) {
-  const linear = fitTrace(points, name, color, "linear", extra);
-  const quadratic = fitTrace(points, name, color, "quadratic", extra);
-  if (linear) traces.push(linear);
-  if (quadratic) traces.push(quadratic);
+  for (const kind of ["linear", "quadratic", "inverse", "inverse_square"]) {
+    const trace = fitTrace(points, name, color, kind, extra);
+    if (trace) traces.push(trace);
+  }
+  for (let degree = 3; degree <= MAX_POLYNOMIAL_FIT_DEGREE; degree += 1) {
+    const trace = fitTrace(points, name, color, fitKindForDegree(degree), extra);
+    if (trace) traces.push(trace);
+  }
 }
 
 function fitVisibility(traces, fitKind) {
@@ -5936,24 +6588,52 @@ function fitVisibility(traces, fitKind) {
 }
 
 function withFitSelector(layout, traces) {
-  if (!traces.some((trace) => trace.meta?.role === "fit")) return layout;
+  const fitKinds = Array.from(
+    new Map(
+      traces
+        .filter((trace) => trace.meta?.role === "fit")
+        .map((trace) => [trace.meta.fitKind, trace.meta.fitLabel || `${trace.meta.fitKind} fit`]),
+    ).entries(),
+  ).sort((left, right) => fitKindOrder(left[0]) - fitKindOrder(right[0]));
+  if (!fitKinds.length) return layout;
+  const standardFitKinds = fitKinds.filter(([fitKind]) => fitKindOrder(fitKind) <= 4);
+  const polynomialFitKinds = fitKinds.filter(([fitKind]) => fitKindOrder(fitKind) > 4);
+  const updatemenus = [
+    {
+      type: "dropdown",
+      x: polynomialFitKinds.length ? 0.79 : 1,
+      y: 1.16,
+      xanchor: "right",
+      yanchor: "top",
+      buttons: [
+        ...standardFitKinds.map(([fitKind, label]) => ({
+          label: label.replace(/\bfit$/i, "fit"),
+          method: "update",
+          args: [{ visible: fitVisibility(traces, fitKind) }],
+        })),
+        { label: "No fit", method: "update", args: [{ visible: fitVisibility(traces, "none") }] },
+      ],
+    },
+  ];
+  if (polynomialFitKinds.length) {
+    updatemenus.push({
+      type: "dropdown",
+      x: 1,
+      y: 1.16,
+      xanchor: "right",
+      yanchor: "top",
+      active: -1,
+      buttons: polynomialFitKinds.map(([fitKind, label]) => ({
+        label: label.replace(/\bfit$/i, "fit"),
+        method: "update",
+        args: [{ visible: fitVisibility(traces, fitKind) }],
+      })),
+    });
+  }
   return {
     ...layout,
     margin: { ...layout.margin, t: Math.max(layout.margin?.t || 46, 78) },
-    updatemenus: [
-      {
-        type: "dropdown",
-        x: 1,
-        y: 1.16,
-        xanchor: "right",
-        yanchor: "top",
-        buttons: [
-          { label: "Linear fit", method: "update", args: [{ visible: fitVisibility(traces, "linear") }] },
-          { label: "Quadratic fit", method: "update", args: [{ visible: fitVisibility(traces, "quadratic") }] },
-          { label: "No fit", method: "update", args: [{ visible: fitVisibility(traces, "none") }] },
-        ],
-      },
-    ],
+    updatemenus,
   };
 }
 
@@ -6044,7 +6724,7 @@ function lineTraces(runs, group, metrics) {
       const points = items
         .map((run) => ({
           x: run.dataset_size,
-          y: metricValue(run, group, metric.key),
+          y: metricDisplayValue(metric.key, metricValue(run, group, metric.key)),
           text: [
             run.training_tag || run.run_id || "",
             materialContextText(run),
@@ -6059,7 +6739,8 @@ function lineTraces(runs, group, metrics) {
       const name = metrics.length > 1 ? `${label} · ${metric.label}` : label;
       const color = plotColor(traceIndex);
       const legendgroup = `${groupKey}-${metric.key}`;
-      addFitTraces(traces, points, name, color, { legendgroup });
+      const fitYMin = valuesAreNonNegative(points.map((point) => point.y)) ? 0 : null;
+      addFitTraces(traces, points, name, color, { legendgroup, fitYMin });
       traces.push({
         type: "scatter",
         mode: "markers",
@@ -6069,7 +6750,9 @@ function lineTraces(runs, group, metrics) {
         text: points.map((point) => point.text),
         marker: { size: 9, opacity: 0.86, color },
         legendgroup,
-        hovertemplate: "dataset %{x}<br>%{y:.4g}<br>run/tag %{text}<extra>%{fullData.name}</extra>",
+        hovertemplate:
+          `dataset %{x}<br>${metricDisplayLabel(metric.key, metric.label)}: %{y:.4g}` +
+          `<br>run/tag %{text}<extra>%{fullData.name}</extra>`,
       });
       traceIndex += 1;
     }
@@ -6420,7 +7103,8 @@ function formatMetricDisplay(value, suffix = "") {
 
 function renderLinePlot(id, runs, group, metrics, title, yTitle) {
   const traces = lineTraces(runs, group, metrics);
-  let layout = plotLayout(title, yTitle);
+  const metricKeys = (metrics || []).map((metric) => metric.key);
+  let layout = plotLayout(title, metricDisplayAxisTitle(yTitle, metricKeys));
   const annotations = [];
   if (metrics.length === 1) {
     const availabilityAnnotation = metricGapAnnotation(runs, group, metrics[0].key);
@@ -6436,7 +7120,7 @@ function renderLinePlot(id, runs, group, metrics, title, yTitle) {
   layout = withHorizontalReferenceLines(
     layout,
     traces,
-    DEEPH_PAPER_REFERENCE_LINES[id],
+    scaleReferencesForMetric(DEEPH_PAPER_REFERENCE_LINES[id], metricKeys[0]),
     DEEPH_PAPER_REFERENCE_LINES[id]
       ? "DeepH paper reference lines are diagnostic guides; match metric definitions before final claims."
       : "",
@@ -6549,7 +7233,9 @@ function orbitalPairMetricValue(row) {
 }
 
 function orbitalPairRmseValue(row) {
-  return finiteNumber(row.rmse_union_eV_mean) ?? finiteNumber(row.rmse_union_eV);
+  return finiteNumber(row.rmse_union_meV_mean) ??
+    finiteNumber(row.rmse_union_meV) ??
+    metricDisplayValue("rmse_union_eV", finiteNumber(row.rmse_union_eV_mean) ?? finiteNumber(row.rmse_union_eV));
 }
 
 function orbitalPairR2Value(row) {
@@ -6619,7 +7305,7 @@ function orbitalPairTrace(choice, visible) {
       `species_pair ${choice.speciesPair}<br>` +
       `${materialContextText(choice.run)}<br>` +
       `samples ${nSamples}, entries ${nEntries}<br>` +
-      `RMSE ${rmse == null ? "No metric" : `${rmse.toPrecision(4)} eV`}<br>` +
+      `RMSE ${rmse == null ? "No metric" : `${rmse.toPrecision(4)} meV`}<br>` +
       `R2 ${r2 == null ? "No metric" : r2.toPrecision(4)}`;
   }
   return {
@@ -6725,8 +7411,10 @@ function renderBoxPlot(id, runs) {
   const availability = [];
   const fallbackRuns = [];
   for (const run of runs) {
-    const spectral = sampleMetricValues(run, "spectral", "fermi_window_rmse_eV");
-    const frontier = sampleMetricValues(run, "spectral", "frontier_window_rmse_eV");
+    const spectral = sampleMetricValues(run, "spectral", "fermi_window_rmse_eV")
+      .map((value) => metricDisplayValue("fermi_window_rmse_eV", value));
+    const frontier = sampleMetricValues(run, "spectral", "frontier_window_rmse_eV")
+      .map((value) => metricDisplayValue("frontier_window_rmse_eV", value));
     const fermiAvailability = run.metric_availability?.spectral?.fermi_window_rmse_eV ||
       run.diagnostics?.metric_availability?.spectral?.fermi_window_rmse_eV ||
       {};
@@ -6752,7 +7440,7 @@ function renderBoxPlot(id, runs) {
         pointpos: 0,
         marker: { color: "#d7a021" },
         line: { color: "#9f5b00" },
-        hovertemplate: "%{y:.4g} eV<br>Frontier RMSE (HOMO/LUMO fallback)<extra>%{fullData.name}</extra>",
+        hovertemplate: "%{y:.4g} meV<br>Frontier RMSE (HOMO/LUMO fallback)<extra>%{fullData.name}</extra>",
       });
       continue;
     }
@@ -6764,10 +7452,10 @@ function renderBoxPlot(id, runs) {
       boxpoints: "all",
       jitter: 0.35,
       pointpos: 0,
-      hovertemplate: "%{y:.4g} eV<extra>%{fullData.name}</extra>",
+      hovertemplate: "%{y:.4g} meV<extra>%{fullData.name}</extra>",
     });
   }
-  const layout = plotLayout("Distribucion por muestra: Fermi-window RMSE", "RMSE eV", {
+  const layout = plotLayout("Distribucion por muestra: Fermi-window RMSE", "RMSE meV", {
     xaxis: { title: "", tickangle: -25 },
     showlegend: false,
     margin: { l: 56, r: 18, t: 136, b: 64 },
@@ -6874,14 +7562,14 @@ function renderScatterPlot(id, runs) {
         const yValue = row.global_rmse_eV;
         if (typeof xValue !== "number" || typeof yValue !== "number") continue;
         x.push(xValue);
-        y.push(yValue);
+        y.push(metricDisplayValue("global_rmse_eV", yValue));
         const fermiValue =
           typeof row.fermi_window_rmse_eV === "number" && Number.isFinite(row.fermi_window_rmse_eV)
-            ? `${row.fermi_window_rmse_eV.toPrecision(4)} eV`
+            ? `${metricDisplayValue("fermi_window_rmse_eV", row.fermi_window_rmse_eV).toPrecision(4)} meV`
             : "no disponible";
         const frontierValue =
           typeof row.frontier_window_rmse_eV === "number" && Number.isFinite(row.frontier_window_rmse_eV)
-            ? `${row.frontier_window_rmse_eV.toPrecision(4)} eV`
+            ? `${metricDisplayValue("frontier_window_rmse_eV", row.frontier_window_rmse_eV).toPrecision(4)} meV`
             : "no disponible";
         text.push(
           `dataset_${run.dataset_size} - sample ${row.sample}<br>` +
@@ -6895,7 +7583,8 @@ function renderScatterPlot(id, runs) {
     if (!x.length) continue;
     const color = plotColor(traceIndex);
     const points = x.map((value, index) => ({ x: value, y: y[index] }));
-    addFitTraces(traces, points, label, color, { legendgroup: pipeline });
+    const fitYMin = valuesAreNonNegative(points.map((point) => point.y)) ? 0 : null;
+    addFitTraces(traces, points, label, color, { legendgroup: pipeline, fitYMin });
     traces.push({
       type: "scatter",
       mode: "markers",
@@ -6905,11 +7594,11 @@ function renderScatterPlot(id, runs) {
       text,
       marker: { size: 9, opacity: 0.82, color },
       legendgroup: pipeline,
-      hovertemplate: "%{text}<br>Frobenius %{x:.4g}<br>Global spectral RMSE %{y:.4g} eV<extra>%{fullData.name}</extra>",
+      hovertemplate: "%{text}<br>Frobenius %{x:.4g}<br>Global spectral RMSE %{y:.4g} meV<extra>%{fullData.name}</extra>",
     });
     traceIndex += 1;
   }
-  let layout = plotLayout("Relacion matriz-espectro", "Global spectral RMSE eV", {
+  let layout = plotLayout("Relacion matriz-espectro", "Global spectral RMSE meV", {
     xaxis: { title: "Relative Frobenius error", gridcolor: "#edf1f4", zeroline: false },
     legend: { orientation: "h", y: -0.25 },
   });
@@ -6959,7 +7648,7 @@ function renderHeatmap(id, runs) {
   }
   const transformedColumns = metrics.map((metric) =>
     rows
-      .map((run) => metricValue(run, metric.group, metric.key))
+      .map((run) => metricDisplayValue(metric.key, metricValue(run, metric.group, metric.key)))
       .filter((value) => value != null)
       .map((value) => metric.transform === "log10_positive" ? Math.log10(Math.max(value, 1e-12)) : value),
   );
@@ -6971,7 +7660,8 @@ function renderHeatmap(id, runs) {
     metrics.map((metric, columnIndex) => {
       const value = metricValue(run, metric.group, metric.key);
       if (value == null) return null;
-      const transformed = metric.transform === "log10_positive" ? Math.log10(Math.max(value, 1e-12)) : value;
+      const displayValue = metricDisplayValue(metric.key, value);
+      const transformed = metric.transform === "log10_positive" ? Math.log10(Math.max(displayValue, 1e-12)) : displayValue;
       const range = ranges[columnIndex];
       if (range.min == null || range.max == null) return null;
       if (Math.abs(range.max - range.min) < 1e-15) return 0;
@@ -6982,14 +7672,18 @@ function renderHeatmap(id, runs) {
   const text = rows.map((run) =>
     metrics.map((metric) => {
       const value = metricValue(run, metric.group, metric.key);
-      return value == null ? "" : formatMetricDisplay(value, metric.suffix || "");
+      return value == null
+        ? ""
+        : formatMetricDisplay(metricDisplayValue(metric.key, value), metricDisplayUnitInfo(metric.key).unit ? ` ${metricDisplayUnitInfo(metric.key).unit}` : metric.suffix || "");
     }),
   );
   const customdata = rows.map((run) =>
     metrics.map((metric) => {
       const value = metricValue(run, metric.group, metric.key);
       return {
-        raw: formatMetricDisplay(value, metric.suffix || ""),
+        raw: value == null
+          ? "No metric"
+          : formatMetricDisplay(metricDisplayValue(metric.key, value), metricDisplayUnitInfo(metric.key).unit ? ` ${metricDisplayUnitInfo(metric.key).unit}` : metric.suffix || ""),
         note: metric.note || "color normalized within this metric",
         direction: metric.better === "higher" ? "higher is better" : "lower is better",
       };
@@ -7005,7 +7699,7 @@ function renderHeatmap(id, runs) {
         texttemplate: "%{text}",
         textfont: { size: 13 },
         customdata,
-        x: metrics.map((item) => item.label),
+        x: metrics.map((item) => metricDisplayLabel(item.key, item.label)),
         y: rows.map((run) => runDisplayLabel(run)),
         zmin: 0,
         zmax: 1,
@@ -7068,14 +7762,15 @@ function renderSensitivitySweeps(id, runs) {
     const ts = Array.from(sparseByThreshold.keys()).sort((a, b) => a - b);
     if (ts.length) {
       const sparsePoints = ts.map((t) => ({
-        x: t,
-        y: sparseByThreshold.get(t).reduce((s, v) => s + v, 0) / sparseByThreshold.get(t).length,
+        x: t * 1000,
+        y: metricDisplayValue("rmse_union_eV", sparseByThreshold.get(t).reduce((s, v) => s + v, 0) / sparseByThreshold.get(t).length),
       }));
       const sparseColor = plotColor(traces.length);
       addFitTraces(traces, sparsePoints, `${label} sparse-threshold RMSE`, sparseColor, {
         xaxis: "x1",
         yaxis: "y1",
         legendgroup: `${pipeline}-sparse-threshold`,
+        fitYMin: valuesAreNonNegative(sparsePoints.map((point) => point.y)) ? 0 : null,
       });
       traces.push({
         type: "scatter",
@@ -7092,14 +7787,15 @@ function renderSensitivitySweeps(id, runs) {
     const ss = Array.from(dosBySigma.keys()).sort((a, b) => a - b);
     if (ss.length) {
       const dosPoints = ss.map((s) => ({
-        x: s,
-        y: dosBySigma.get(s).reduce((sum, v) => sum + v, 0) / dosBySigma.get(s).length,
+        x: s * 1000,
+        y: metricDisplayValue("dos_wasserstein_eV", dosBySigma.get(s).reduce((sum, v) => sum + v, 0) / dosBySigma.get(s).length),
       }));
       const dosColor = plotColor(traces.length);
       addFitTraces(traces, dosPoints, `${label} DOS sigma W1`, dosColor, {
         xaxis: "x2",
         yaxis: "y2",
         legendgroup: `${pipeline}-dos-sigma`,
+        fitYMin: valuesAreNonNegative(dosPoints.map((point) => point.y)) ? 0 : null,
       });
       traces.push({
         type: "scatter",
@@ -7117,10 +7813,10 @@ function renderSensitivitySweeps(id, runs) {
   let layout = {
     title: { text: "Sensitivity sweeps", x: 0.02, xanchor: "left", font: { size: 18 } },
     grid: { rows: 1, columns: 2, pattern: "independent" },
-    xaxis: { title: "Support threshold", type: "log" },
-    yaxis: { title: "RMSE union (eV)" },
-    xaxis2: { title: "DOS sigma (eV)" },
-    yaxis2: { title: "DOS Wasserstein (eV)" },
+    xaxis: { title: "Support threshold (meV)", type: "log" },
+    yaxis: { title: "RMSE union (meV)" },
+    xaxis2: { title: "DOS sigma (meV)" },
+    yaxis2: { title: "DOS Wasserstein (meV)" },
     margin: { l: 56, r: 18, t: 46, b: 48 },
     legend: { orientation: "h", y: -0.25 },
     paper_bgcolor: "#ffffff",
@@ -7398,12 +8094,13 @@ function crossMissingGroupsAnnotation(groups, metric) {
 
 function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  const metricAxis = metricDisplayAxisTitle(metric, [metric]);
   if (!experiment || !(experiment.metrics || []).length) {
     renderEmptyPlot(
       id,
-      `Cross-evaluation heatmap (${metric})`,
+      `Cross-evaluation heatmap (${metricAxis})`,
       unavailableMessage || "No hay tabla cross_evaluation_metrics.csv completa.",
-      metric,
+      metricAxis,
     );
     return;
   }
@@ -7422,7 +8119,7 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
         crossSizeLabel(item) === label &&
         item.train_method === method
       );
-      return row?.metric_available ? row.mean : null;
+      return row?.metric_available ? metricDisplayValue(metric, row.mean) : null;
     }),
   );
   const text = sizeLabels.map((label) =>
@@ -7442,13 +8139,13 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
       return {
         label,
         method: crossMethodLabel(method),
-        valueText: row.metric_available ? row.mean.toPrecision(4) : "No metric",
+        valueText: row.metric_available ? formatDisplayedMetric(row.mean, metric) : "No metric",
         availability: metricAvailabilityLabel(row),
         material: row.material_label || UNKNOWN_MATERIAL_LABEL,
       };
     }),
   );
-  const layout = plotLayout(`Cross-evaluation heatmap (${metric})`, metric, {
+  const layout = plotLayout(`Cross-evaluation heatmap (${metricAxis})`, metricAxis, {
     xaxis: { title: "Training method", gridcolor: "#edf1f4", zeroline: false },
     yaxis: { title: "Frozen test set / pair size", automargin: true },
   });
@@ -7486,7 +8183,7 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
       hovertemplate:
         "%{customdata.label}<br>%{customdata.method}<br>" +
         "material: %{customdata.material}<br>" +
-        `${metric}: %{customdata.valueText}<br>` +
+        `${metricAxis}: %{customdata.valueText}<br>` +
         "finite rows: %{customdata.availability}<extra></extra>",
     }],
     layout,
@@ -7496,12 +8193,13 @@ function renderCrossHeatmap(id, experiment, unavailableMessage = "") {
 
 function renderCrossLearning(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  const metricAxis = metricDisplayAxisTitle(metric, [metric]);
   if (!experiment || !(experiment.metrics || []).length) {
     renderEmptyPlot(
       id,
-      `Learning curves (${metric})`,
+      `Learning curves (${metricAxis})`,
       unavailableMessage || "No hay cross_evaluation_metrics.csv para construir curvas de aprendizaje.",
-      metric,
+      metricAxis,
     );
     return;
   }
@@ -7520,26 +8218,29 @@ function renderCrossLearning(id, experiment, unavailableMessage = "") {
       const legendgroup = `${method}-${testSet}`;
       addFitTraces(
         traces,
-        points.map((row) => ({ x: row.dataset_size, y: row.mean })),
+        points.map((row) => ({ x: row.dataset_size, y: metricDisplayValue(metric, row.mean) })),
         name,
         color,
-        { legendgroup },
+        {
+          legendgroup,
+          fitYMin: valuesAreNonNegative(points.map((row) => metricDisplayValue(metric, row.mean))) ? 0 : null,
+        },
       );
       traces.push({
         type: "scatter",
         mode: "markers",
         name,
         x: points.map((row) => row.dataset_size),
-        y: points.map((row) => row.mean),
+        y: points.map((row) => metricDisplayValue(metric, row.mean)),
         text: points.map((row) => `${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
         marker: { size: 9, opacity: 0.86, color },
         legendgroup,
-        hovertemplate: "dataset %{x}<br>%{y:.4g}<br>%{text}<extra>%{fullData.name}</extra>",
+        hovertemplate: `dataset %{x}<br>${metricAxis}: %{y:.4g}<br>%{text}<extra>%{fullData.name}</extra>`,
       });
       traceIndex += 1;
     }
   }
-  let layout = plotLayout(`Learning curves (${metric})`, metric);
+  let layout = plotLayout(`Learning curves (${metricAxis})`, metricAxis);
   const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
   if (!traces.length) {
     layout.annotations = [(experiment?.metrics || []).length ? missingPlotMetricAnnotation(metric) : emptyPlotAnnotation("No hay curvas cruzadas disponibles.")];
@@ -7552,12 +8253,13 @@ function renderCrossLearning(id, experiment, unavailableMessage = "") {
 
 function renderCrossCompute(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  const metricAxis = metricDisplayAxisTitle(metric, [metric]);
   if (!experiment || !(experiment.metrics || []).length) {
     renderEmptyPlot(
       id,
-      `Metric vs total compute time (${metric})`,
+      `Metric vs total compute time (${metricAxis})`,
       unavailableMessage || "No hay cross_evaluation_metrics.csv para leer total_time_seconds.",
-      metric,
+      metricAxis,
     );
     return;
   }
@@ -7566,9 +8268,9 @@ function renderCrossCompute(id, experiment, unavailableMessage = "") {
   if (!means.length) {
     renderEmptyPlot(
       id,
-      `Metric vs total compute time (${metric})`,
+      `Metric vs total compute time (${metricAxis})`,
       "Falta total_time_seconds finito en cross_evaluation_metrics.csv; no se puede comparar metrica frente a coste total.",
-      metric,
+      metricAxis,
     );
     return;
   }
@@ -7583,25 +8285,28 @@ function renderCrossCompute(id, experiment, unavailableMessage = "") {
     const color = plotColor(traceIndex);
     addFitTraces(
       traces,
-      points.map((row) => ({ x: row.time, y: row.mean })),
+      points.map((row) => ({ x: row.time, y: metricDisplayValue(metric, row.mean) })),
       name,
       color,
-      { legendgroup: method },
+      {
+        legendgroup: method,
+        fitYMin: valuesAreNonNegative(points.map((row) => metricDisplayValue(metric, row.mean))) ? 0 : null,
+      },
     );
     traces.push({
       type: "scatter",
       mode: "markers",
       name,
       x: points.map((row) => row.time),
-      y: points.map((row) => row.mean),
+      y: points.map((row) => metricDisplayValue(metric, row.mean)),
       text: points.map((row) => `${testSetDisplayLabel(row.test_set)}, ${crossDatasetComboLabel(row)} · ${metricAvailabilityLabel(row)} finite`),
       marker: { size: 9, opacity: 0.86, color },
       legendgroup: method,
-      hovertemplate: "%{text}<br>%{x:.2f}s<br>%{y:.4g}<extra>%{fullData.name}</extra>",
+      hovertemplate: `%{text}<br>%{x:.2f}s<br>${metricAxis}: %{y:.4g}<extra>%{fullData.name}</extra>`,
     });
     traceIndex += 1;
   }
-  let layout = plotLayout(`Metric vs total compute time (${metric})`, metric, {
+  let layout = plotLayout(`Metric vs total compute time (${metricAxis})`, metricAxis, {
     xaxis: { title: "Total compute seconds", gridcolor: "#edf1f4", zeroline: false },
   });
   const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
@@ -7616,10 +8321,11 @@ function renderCrossCompute(id, experiment, unavailableMessage = "") {
 
 function renderWinnerMap(id, experiment, unavailableMessage = "") {
   const metric = selectedCrossMetric(experiment);
+  const metricAxis = metricDisplayAxisTitle(metric, [metric]);
   if (!experiment || !(experiment.metrics || []).length) {
     renderEmptyPlot(
       id,
-      `Winner map (${metric})`,
+      `Winner map (${metricAxis})`,
       unavailableMessage || "No hay celdas cross comparables porque falta cross_evaluation_metrics.csv.",
       "Winner",
     );
@@ -7654,7 +8360,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
     const candidates = means.filter((row) => row.test_set === testSet && crossDatasetComboLabel(row) === combo);
     const values = candidates.map((row) =>
       row.metric_available
-        ? `${methodLabel(row.train_method)}=${row.mean.toPrecision(4)} (${metricAvailabilityLabel(row)})`
+        ? `${methodLabel(row.train_method)}=${formatDisplayedMetric(row.mean, metric)} (${metricAvailabilityLabel(row)})`
         : `${methodLabel(row.train_method)}=No metric (${metricAvailabilityLabel(row)})`
     );
     return {
@@ -7696,7 +8402,7 @@ function renderWinnerMap(id, experiment, unavailableMessage = "") {
   });
   const missingAnnotation = crossMissingGroupsAnnotation(means, metric);
   if (missingAnnotation) annotations.push(missingAnnotation);
-  const layout = plotLayout(`Winner map (${metric})`, "Winner", {
+  const layout = plotLayout(`Winner map (${metricAxis})`, "Winner", {
     xaxis: { title: "Dataset combination", automargin: true },
     yaxis: { title: "Frozen test set", automargin: true },
     annotations,
@@ -8370,6 +9076,7 @@ function setupTabs() {
         loadG2MDeepHDatasets().catch((error) => showToast(error.message));
         loadG2MDeepHResults().catch((error) => showToast(error.message));
         loadG2MDeepHPlotRuns({ preserveSelection: true }).catch((error) => showToast(error.message));
+        loadDatasetMinimum().catch((error) => showToast(error.message));
       }
     });
   });
@@ -8556,9 +9263,24 @@ function setupEvents() {
     stopG2MDeepHBenchmark().catch((error) => showToast(error.message));
   });
   document.getElementById("g2m-deeph-refresh-results")?.addEventListener("click", () => {
-    Promise.all([loadG2MDeepHResults(), loadG2MDeepHPlotRuns().then(() => loadG2MDeepHPlots())])
+    Promise.all([loadG2MDeepHResults(), loadG2MDeepHPlotRuns().then(() => loadG2MDeepHPlots()), loadDatasetMinimum()])
       .then(() => showToast("Graph2Mat vs DeepH refreshed"))
       .catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-dataset-minimum-refresh")?.addEventListener("click", () => {
+    loadDatasetMinimum()
+      .then(() => showToast("Dataset-size minimum refreshed"))
+      .catch((error) => showToast(error.message));
+  });
+  [
+    "dataset-minimum-metric",
+    "dataset-minimum-threshold",
+    "dataset-minimum-x-axis",
+    "dataset-minimum-fit",
+  ].forEach((id) => {
+    const node = document.getElementById(id);
+    node?.addEventListener("change", () => renderDatasetMinimum());
+    node?.addEventListener("input", () => renderDatasetMinimum());
   });
   document.getElementById("g2m-deeph-plot-runs-default")?.addEventListener("click", () => {
     const recentMetricRuns = (state.g2mDeephPlotRuns || [])

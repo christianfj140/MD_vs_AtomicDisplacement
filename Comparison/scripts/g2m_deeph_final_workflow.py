@@ -221,6 +221,9 @@ def build_runner_payload(
         payload["performance"] = dict(protocol["performance"])
     if isinstance(protocol.get("deeph"), dict):
         payload["deeph"] = dict(protocol["deeph"])
+    for key in ("pipeline_config", "md_pipeline_config"):
+        if protocol.get(key) not in (None, ""):
+            payload[key] = protocol[key]
     return payload
 
 
@@ -545,20 +548,34 @@ def stage_run_final(args: argparse.Namespace) -> dict[str, Any]:
         message="Missing robust rerun plan",
     )
     robust_plan = read_json(robust_plan_path)
+    planned_runs = list(robust_plan.get("planned_runs") or [])
+    budget_runs = planned_runs
+    if args.dataset_id:
+        budget_runs = [row for row in planned_runs if row.get("dataset_id") == args.dataset_id]
+    per_model_counts: dict[str, int] = {}
+    for row in budget_runs:
+        model = str(row.get("model") or "").strip()
+        if model:
+            per_model_counts[model] = per_model_counts.get(model, 0) + 1
+    final_budget_policy = {
+        "mode": "equal_n_trials",
+        "n_trials_per_model": max(per_model_counts.values(), default=1),
+        "source": "robust_rerun_plan",
+    }
     plan = {
         "enabled": True,
-        "max_runs": int(robust_plan.get("planned_run_count") or len(robust_plan.get("planned_runs") or []) or 1),
+        "max_runs": int(robust_plan.get("planned_run_count") or len(planned_runs) or 1),
         "error_policy": "continue_on_error",
-        "budget_policy": dict(protocol.get("budget_policy") or {}),
+        "budget_policy": final_budget_policy,
         "search_policy": {"strategy": "selected_final_seeds"},
         "search_plan": {
             "schema": "graph2mat_deeph_final_seed_plan_v1",
             "protocol_id": protocol.get("protocol_id"),
             "protocol_hash": protocol.get("protocol_hash"),
             "planned_run_count": robust_plan.get("planned_run_count"),
-            "planned_runs": robust_plan.get("planned_runs") or [],
+            "planned_runs": planned_runs,
         },
-        "planned_runs": list(robust_plan.get("planned_runs") or []),
+        "planned_runs": planned_runs,
     }
     run_id = args.run_id or f"{protocol['protocol_id']}_robust_validation"
     payload = build_runner_payload(

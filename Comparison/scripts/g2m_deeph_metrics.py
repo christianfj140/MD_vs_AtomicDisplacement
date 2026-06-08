@@ -427,7 +427,12 @@ def stage_graph2mat_metric_result(
         split_root = dataset_root / "splits"
         if split_root.exists():
             _link_or_copy(split_root, output_dir / "splits")
-        for basis_dir in (dataset_root / "basis", dataset_root / "materials" / "basis"):
+        for basis_dir in (
+            dataset_root / "basis",
+            dataset_root / "material_basis",
+            dataset_root / "MD_steps" / "basis",
+            dataset_root / "materials" / "basis",
+        ):
             if basis_dir.exists():
                 _link_or_copy(basis_dir, output_dir / "basis")
                 break

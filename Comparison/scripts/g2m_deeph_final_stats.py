@@ -257,6 +257,107 @@ def per_system_values(row: dict[str, Any], metric: str) -> list[float]:
     return values
 
 
+def _bool_field(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y", "on"}
+
+
+def _candidate_adapter_manifest_paths(row: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+    for key in ("adapter_manifest_path", "deeph_adapter_manifest_path"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            candidates.append(Path(value))
+
+    run_root = str(row.get("run_root") or "").strip()
+    if run_root:
+        candidates.append(Path(run_root) / "deeph" / "inference" / "adapter_manifest.json")
+
+    deeph_manifest = str(row.get("deeph_manifest_path") or "").strip()
+    if deeph_manifest:
+        deeph_root = Path(deeph_manifest).parent
+        candidates.append(deeph_root / "inference" / "adapter_manifest.json")
+
+    metrics_path = str(row.get("metrics_path") or row.get("final_test_metrics_path") or "").strip()
+    if metrics_path:
+        path = Path(metrics_path)
+        for parent in path.parents:
+            if parent.name == "metrics":
+                candidates.append(parent.parent / "adapter_manifest.json")
+                break
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+    return unique
+
+
+def _first_string(values: Any) -> str:
+    if isinstance(values, list):
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return str(values or "").strip()
+
+
+def _deeph_equivalence_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Resolve DeepH equivalence from row fields, falling back to adapter manifests."""
+
+    status = str(row.get("adapter_equivalence_status") or row.get("deeph_adapter_equivalence_status") or "").strip()
+    equivalence_status = str(row.get("equivalence_status") or row.get("deeph_equivalence_status") or "").strip()
+    comparability_status = str(row.get("comparability_status") or row.get("deeph_comparability_status") or "").strip()
+    diagnostic_only = _bool_field(row.get("diagnostic_only") or row.get("deeph_diagnostic_only"))
+    source = "row" if status or equivalence_status else ""
+
+    needs_manifest = status != EQUIVALENCE_PROVEN_RAW_GLOBAL or equivalence_status != EQUIVALENCE_STATUS_PROVEN
+    if needs_manifest:
+        for path in _candidate_adapter_manifest_paths(row):
+            payload = read_json(path)
+            if not payload:
+                continue
+            gate = payload.get("equivalence_gate") if isinstance(payload.get("equivalence_gate"), dict) else {}
+            manifest_status = _first_string(payload.get("adapter_equivalence_statuses"))
+            manifest_equivalence_status = _first_string(payload.get("equivalence_statuses"))
+            proven_count = finite_number(payload.get("raw_global_equivalence_proven_count")) or 0.0
+            robust_allowed = gate.get("robust_claim_allowed") is True
+
+            if robust_allowed and proven_count > 0:
+                status = EQUIVALENCE_PROVEN_RAW_GLOBAL
+                equivalence_status = EQUIVALENCE_STATUS_PROVEN
+                comparability_status = comparability_status or "valid"
+                diagnostic_only = False
+                source = str(path)
+                break
+
+            status = status or manifest_status
+            equivalence_status = equivalence_status or manifest_equivalence_status
+            if gate:
+                diagnostic_only = gate.get("diagnostic_only") is True
+            source = str(path)
+            break
+
+    if not equivalence_status:
+        equivalence_status = (
+            EQUIVALENCE_STATUS_PROVEN if status == EQUIVALENCE_PROVEN_RAW_GLOBAL else EQUIVALENCE_STATUS_UNPROVEN
+        )
+    return {
+        "adapter_equivalence_status": status,
+        "equivalence_status": equivalence_status,
+        "comparability_status": comparability_status,
+        "diagnostic_only": diagnostic_only,
+        "source": source,
+    }
+
+
 def bootstrap_ci(values: list[float], *, iterations: int = 1000, confidence_level: float = 0.95, seed: int = 0) -> dict[str, Any]:
     if len(values) < 2:
         return {
@@ -319,21 +420,16 @@ def aggregate_final_seed_metrics(
         diagnostic_reasons: list[str] = []
         if model == "deeph":
             for row in group_rows:
-                status = str(row.get("adapter_equivalence_status") or "")
-                equivalence_status = str(row.get("equivalence_status") or "")
-                if not equivalence_status:
-                    equivalence_status = (
-                        EQUIVALENCE_STATUS_PROVEN
-                        if status == EQUIVALENCE_PROVEN_RAW_GLOBAL
-                        else EQUIVALENCE_STATUS_UNPROVEN
-                    )
+                equivalence = _deeph_equivalence_fields(row)
+                status = str(equivalence.get("adapter_equivalence_status") or "")
+                equivalence_status = str(equivalence.get("equivalence_status") or "")
                 if status != EQUIVALENCE_PROVEN_RAW_GLOBAL or equivalence_status != EQUIVALENCE_STATUS_PROVEN:
                     diagnostic_reasons.append(
                         "deeph adapter equivalence not proven: "
                         f"adapter={status or 'missing'} equivalence={equivalence_status or 'missing'}"
                     )
                     break
-                if bool(row.get("diagnostic_only")) or str(row.get("comparability_status") or "").lower() == "diagnostic_only":
+                if bool(equivalence.get("diagnostic_only")) or str(equivalence.get("comparability_status") or "").lower() == "diagnostic_only":
                     diagnostic_reasons.append("deeph metrics are diagnostic_only")
                     break
         summaries.append(

@@ -1,0 +1,6 @@
+material:
+  label: si_amorphous
+  fdf: materials/si_amorphous/RUN.inline.fdf
+  pseudopotential_dir: materials/si_amorphous/pseudos
+  basis_dir: materials/si_amorphous/basis
+  structure_type: crystal

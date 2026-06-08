@@ -5707,6 +5707,63 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def dataset_size_minimum_payload() -> dict[str, Any]:
+    """Return read-only dataset-size-minimum post-processing outputs."""
+    summary_paths = [
+        *RESULTS_ROOT.glob("dataset_size_minimum_existing_sweeps_*/dataset_size_minimum_summary.json"),
+        *RESULTS_ROOT.glob("dataset_size_minimum_existing_sweeps_*/*/dataset_size_minimum_summary.json"),
+    ]
+    outputs: list[dict[str, Any]] = []
+    for summary_path in sorted(set(summary_paths), key=lambda path: path.stat().st_mtime, reverse=True):
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            outputs.append(
+                {
+                    "status": "invalid_summary",
+                    "summary_path": str(summary_path),
+                    "error": str(exc),
+                }
+            )
+            continue
+        output_dir = summary_path.parent
+        best_rows = read_csv_rows(output_dir / "dataset_size_minimum_best_by_size.csv")
+        result_rows = read_csv_rows(output_dir / "dataset_size_minimum_results.csv")
+        outputs.append(
+            {
+                "status": summary.get("status") or "unknown",
+                "output_dir": str(output_dir),
+                "summary_path": str(summary_path),
+                "report_path": str(output_dir / "dataset_size_minimum_report.md"),
+                "primary_metric": summary.get("primary_metric"),
+                "threshold_mev": summary.get("threshold_mev"),
+                "x_axis": summary.get("x_axis"),
+                "thresholds": summary.get("thresholds") or {},
+                "fits": summary.get("fits") or {},
+                "dataset_sizes": summary.get("dataset_sizes") or [],
+                "methods": summary.get("methods") or sorted((summary.get("thresholds") or {}).keys()),
+                "warnings": summary.get("warnings") or [],
+                "best_rows": best_rows,
+                "result_rows_count": len(result_rows),
+                "modified_at": summary_path.stat().st_mtime,
+            }
+        )
+    return {
+        "available": any(item.get("status") == "ok" for item in outputs),
+        "schema": "dataset_size_minimum_ui_payload_v1",
+        "outputs": outputs,
+        "message": (
+            f"{len(outputs)} dataset-size-minimum output(s) found."
+            if outputs
+            else "No dataset_size_minimum_existing_sweeps_* summaries found under Comparison/results."
+        ),
+        "diagnostic_warning": (
+            "Dataset-size-minimum outputs are diagnostic post-processing unless they come from "
+            "a locked paper-ready protocol with repeated final seeds and full gates."
+        ),
+    }
+
+
 PLOT_MATERIAL_FIELDS = (
     "material_label",
     "material_source",
@@ -14227,6 +14284,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                                 if item.strip()
                             )
                 json_response(self, G2M_DEEPH_RUNNER.plots(selected_run_ids=selected_run_ids))
+            elif path == "/api/g2m-deeph/dataset-size-minimum":
+                json_response(self, dataset_size_minimum_payload())
             elif path == "/":
                 self._serve_file(UI_DIR / "index.html")
             else:

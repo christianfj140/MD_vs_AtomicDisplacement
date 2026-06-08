@@ -287,21 +287,37 @@ def live_metric_scaling_rows(run_root: Path | str) -> list[dict[str, Any]]:
 
 
 def dedupe_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str, str, str, str, str]] = set()
+    seen: set[tuple[str, ...]] = set()
+    seen_equivalent_values: set[tuple[str, ...]] = set()
     unique: list[dict[str, Any]] = []
     for row in rows:
+        dataset_identity = str(row.get("dataset_root") or row.get("dataset_id") or "")
+        dataset_size = str(row.get("dataset_size") or "")
+        metric_value = finite_number(row.get("metric_value"))
         key = (
             str(row.get("run_id") or ""),
-            str(row.get("dataset_id") or ""),
+            dataset_identity,
+            dataset_size,
             str(row.get("method") or ""),
             str(row.get("config_id") or ""),
             str(row.get("seed") or ""),
             str(row.get("epoch_label") or ""),
             str(row.get("metric_key") or ""),
         )
-        if key in seen:
+        value_key = (
+            str(row.get("run_id") or ""),
+            dataset_identity,
+            dataset_size,
+            str(row.get("method") or ""),
+            str(row.get("config_id") or ""),
+            str(row.get("epoch_label") or ""),
+            str(row.get("metric_key") or ""),
+            f"{metric_value:.14g}" if metric_value is not None else "",
+        )
+        if key in seen or value_key in seen_equivalent_values:
             continue
         seen.add(key)
+        seen_equivalent_values.add(value_key)
         unique.append(row)
     return unique
 

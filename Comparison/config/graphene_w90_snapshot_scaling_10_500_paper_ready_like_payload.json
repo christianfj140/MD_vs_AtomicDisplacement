@@ -1,0 +1,2944 @@
+{
+  "description": "Graphene W90 snapshot-scaling payload analogous to the paper-ready Graph2Mat-vs-DeepH protocol. It keeps the 10-500 snapshot dataset sizes from the original scaling payload, but uses paper-ready-like Graph2Mat batch sizes and DeepH settings instead of the diagnostic 1024 Graph2Mat batch size.",
+  "source_reference_payloads": [
+    "Comparison/config/g2m_deeph_iid600_phaseB_intermediate_spectral_refine_v1.json",
+    "Comparison/config/g2m_deeph_iid1000_phaseB_transfer_spectral_refine_v1.json",
+    "Comparison/config/graphene_w90_g2m_deeph_snapshot_scaling_10_500_weekend_payload.json"
+  ],
+  "pipeline_config": "Comparison/workspaces/20260521_124937/md/md_dataset1_azrt5n_graphene_w90_default_huber_b0p01_real_d26e8feb74/pipeline_config.yaml",
+  "material_preset": "graphene",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene"
+  },
+  "dataset_mode": "full_strict_pipeline",
+  "run_mode": "full_strict_pipeline",
+  "dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like",
+  "output_root": "${REPO_ROOT}/Comparison/results/graphene_w90_snapshot_scaling_10_500_paper_ready_like",
+  "system_label": "graphene",
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": "disabled",
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "split_mode": "blocked_with_gap",
+  "temporal_gap": 1,
+  "block_order": "train,validation,test",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 3,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "dataset_sweep": {
+    "enabled": true,
+    "max_datasets": 23,
+    "recipes": [
+      {
+        "recipe_id": "graphene_w90_scale_iid10",
+        "label": "Graphene W90 IID scale: 10 snapshots",
+        "size": 10,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid10_T150_2_1",
+            "label": "2 snapshots @ 150 K",
+            "n_snapshots": 2,
+            "temperature_K": 150,
+            "seed": 150010
+          },
+          {
+            "block_id": "graphene_w90_scale_iid10_T300_6_2",
+            "label": "6 snapshots @ 300 K",
+            "n_snapshots": 6,
+            "temperature_K": 300,
+            "seed": 300010
+          },
+          {
+            "block_id": "graphene_w90_scale_iid10_T450_2_3",
+            "label": "2 snapshots @ 450 K",
+            "n_snapshots": 2,
+            "temperature_K": 450,
+            "seed": 450010
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid20",
+        "label": "Graphene W90 IID scale: 20 snapshots",
+        "size": 20,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid20_T150_4_1",
+            "label": "4 snapshots @ 150 K",
+            "n_snapshots": 4,
+            "temperature_K": 150,
+            "seed": 150020
+          },
+          {
+            "block_id": "graphene_w90_scale_iid20_T300_12_2",
+            "label": "12 snapshots @ 300 K",
+            "n_snapshots": 12,
+            "temperature_K": 300,
+            "seed": 300020
+          },
+          {
+            "block_id": "graphene_w90_scale_iid20_T450_4_3",
+            "label": "4 snapshots @ 450 K",
+            "n_snapshots": 4,
+            "temperature_K": 450,
+            "seed": 450020
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid25",
+        "label": "Graphene W90 IID scale: 25 snapshots",
+        "size": 25,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid25_T150_5_1",
+            "label": "5 snapshots @ 150 K",
+            "n_snapshots": 5,
+            "temperature_K": 150,
+            "seed": 150025
+          },
+          {
+            "block_id": "graphene_w90_scale_iid25_T300_15_2",
+            "label": "15 snapshots @ 300 K",
+            "n_snapshots": 15,
+            "temperature_K": 300,
+            "seed": 300025
+          },
+          {
+            "block_id": "graphene_w90_scale_iid25_T450_5_3",
+            "label": "5 snapshots @ 450 K",
+            "n_snapshots": 5,
+            "temperature_K": 450,
+            "seed": 450025
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid30",
+        "label": "Graphene W90 IID scale: 30 snapshots",
+        "size": 30,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid30_T150_6_1",
+            "label": "6 snapshots @ 150 K",
+            "n_snapshots": 6,
+            "temperature_K": 150,
+            "seed": 150030
+          },
+          {
+            "block_id": "graphene_w90_scale_iid30_T300_18_2",
+            "label": "18 snapshots @ 300 K",
+            "n_snapshots": 18,
+            "temperature_K": 300,
+            "seed": 300030
+          },
+          {
+            "block_id": "graphene_w90_scale_iid30_T450_6_3",
+            "label": "6 snapshots @ 450 K",
+            "n_snapshots": 6,
+            "temperature_K": 450,
+            "seed": 450030
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid40",
+        "label": "Graphene W90 IID scale: 40 snapshots",
+        "size": 40,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid40_T150_8_1",
+            "label": "8 snapshots @ 150 K",
+            "n_snapshots": 8,
+            "temperature_K": 150,
+            "seed": 150040
+          },
+          {
+            "block_id": "graphene_w90_scale_iid40_T300_24_2",
+            "label": "24 snapshots @ 300 K",
+            "n_snapshots": 24,
+            "temperature_K": 300,
+            "seed": 300040
+          },
+          {
+            "block_id": "graphene_w90_scale_iid40_T450_8_3",
+            "label": "8 snapshots @ 450 K",
+            "n_snapshots": 8,
+            "temperature_K": 450,
+            "seed": 450040
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid50",
+        "label": "Graphene W90 IID scale: 50 snapshots",
+        "size": 50,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid50_T150_10_1",
+            "label": "10 snapshots @ 150 K",
+            "n_snapshots": 10,
+            "temperature_K": 150,
+            "seed": 150050
+          },
+          {
+            "block_id": "graphene_w90_scale_iid50_T300_30_2",
+            "label": "30 snapshots @ 300 K",
+            "n_snapshots": 30,
+            "temperature_K": 300,
+            "seed": 300050
+          },
+          {
+            "block_id": "graphene_w90_scale_iid50_T450_10_3",
+            "label": "10 snapshots @ 450 K",
+            "n_snapshots": 10,
+            "temperature_K": 450,
+            "seed": 450050
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid55",
+        "label": "Graphene W90 IID scale: 55 snapshots",
+        "size": 55,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid55_T150_11_1",
+            "label": "11 snapshots @ 150 K",
+            "n_snapshots": 11,
+            "temperature_K": 150,
+            "seed": 150055
+          },
+          {
+            "block_id": "graphene_w90_scale_iid55_T300_33_2",
+            "label": "33 snapshots @ 300 K",
+            "n_snapshots": 33,
+            "temperature_K": 300,
+            "seed": 300055
+          },
+          {
+            "block_id": "graphene_w90_scale_iid55_T450_11_3",
+            "label": "11 snapshots @ 450 K",
+            "n_snapshots": 11,
+            "temperature_K": 450,
+            "seed": 450055
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid60",
+        "label": "Graphene W90 IID scale: 60 snapshots",
+        "size": 60,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid60_T150_12_1",
+            "label": "12 snapshots @ 150 K",
+            "n_snapshots": 12,
+            "temperature_K": 150,
+            "seed": 150060
+          },
+          {
+            "block_id": "graphene_w90_scale_iid60_T300_36_2",
+            "label": "36 snapshots @ 300 K",
+            "n_snapshots": 36,
+            "temperature_K": 300,
+            "seed": 300060
+          },
+          {
+            "block_id": "graphene_w90_scale_iid60_T450_12_3",
+            "label": "12 snapshots @ 450 K",
+            "n_snapshots": 12,
+            "temperature_K": 450,
+            "seed": 450060
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid70",
+        "label": "Graphene W90 IID scale: 70 snapshots",
+        "size": 70,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid70_T150_14_1",
+            "label": "14 snapshots @ 150 K",
+            "n_snapshots": 14,
+            "temperature_K": 150,
+            "seed": 150070
+          },
+          {
+            "block_id": "graphene_w90_scale_iid70_T300_42_2",
+            "label": "42 snapshots @ 300 K",
+            "n_snapshots": 42,
+            "temperature_K": 300,
+            "seed": 300070
+          },
+          {
+            "block_id": "graphene_w90_scale_iid70_T450_14_3",
+            "label": "14 snapshots @ 450 K",
+            "n_snapshots": 14,
+            "temperature_K": 450,
+            "seed": 450070
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid75",
+        "label": "Graphene W90 IID scale: 75 snapshots",
+        "size": 75,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid75_T150_15_1",
+            "label": "15 snapshots @ 150 K",
+            "n_snapshots": 15,
+            "temperature_K": 150,
+            "seed": 150075
+          },
+          {
+            "block_id": "graphene_w90_scale_iid75_T300_45_2",
+            "label": "45 snapshots @ 300 K",
+            "n_snapshots": 45,
+            "temperature_K": 300,
+            "seed": 300075
+          },
+          {
+            "block_id": "graphene_w90_scale_iid75_T450_15_3",
+            "label": "15 snapshots @ 450 K",
+            "n_snapshots": 15,
+            "temperature_K": 450,
+            "seed": 450075
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid80",
+        "label": "Graphene W90 IID scale: 80 snapshots",
+        "size": 80,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid80_T150_16_1",
+            "label": "16 snapshots @ 150 K",
+            "n_snapshots": 16,
+            "temperature_K": 150,
+            "seed": 150080
+          },
+          {
+            "block_id": "graphene_w90_scale_iid80_T300_48_2",
+            "label": "48 snapshots @ 300 K",
+            "n_snapshots": 48,
+            "temperature_K": 300,
+            "seed": 300080
+          },
+          {
+            "block_id": "graphene_w90_scale_iid80_T450_16_3",
+            "label": "16 snapshots @ 450 K",
+            "n_snapshots": 16,
+            "temperature_K": 450,
+            "seed": 450080
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid90",
+        "label": "Graphene W90 IID scale: 90 snapshots",
+        "size": 90,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid90_T150_18_1",
+            "label": "18 snapshots @ 150 K",
+            "n_snapshots": 18,
+            "temperature_K": 150,
+            "seed": 150090
+          },
+          {
+            "block_id": "graphene_w90_scale_iid90_T300_54_2",
+            "label": "54 snapshots @ 300 K",
+            "n_snapshots": 54,
+            "temperature_K": 300,
+            "seed": 300090
+          },
+          {
+            "block_id": "graphene_w90_scale_iid90_T450_18_3",
+            "label": "18 snapshots @ 450 K",
+            "n_snapshots": 18,
+            "temperature_K": 450,
+            "seed": 450090
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid95",
+        "label": "Graphene W90 IID scale: 95 snapshots",
+        "size": 95,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid95_T150_19_1",
+            "label": "19 snapshots @ 150 K",
+            "n_snapshots": 19,
+            "temperature_K": 150,
+            "seed": 150095
+          },
+          {
+            "block_id": "graphene_w90_scale_iid95_T300_57_2",
+            "label": "57 snapshots @ 300 K",
+            "n_snapshots": 57,
+            "temperature_K": 300,
+            "seed": 300095
+          },
+          {
+            "block_id": "graphene_w90_scale_iid95_T450_19_3",
+            "label": "19 snapshots @ 450 K",
+            "n_snapshots": 19,
+            "temperature_K": 450,
+            "seed": 450095
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid100",
+        "label": "Graphene W90 IID scale: 100 snapshots",
+        "size": 100,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid100_T150_20_1",
+            "label": "20 snapshots @ 150 K",
+            "n_snapshots": 20,
+            "temperature_K": 150,
+            "seed": 150100
+          },
+          {
+            "block_id": "graphene_w90_scale_iid100_T300_60_2",
+            "label": "60 snapshots @ 300 K",
+            "n_snapshots": 60,
+            "temperature_K": 300,
+            "seed": 300100
+          },
+          {
+            "block_id": "graphene_w90_scale_iid100_T450_20_3",
+            "label": "20 snapshots @ 450 K",
+            "n_snapshots": 20,
+            "temperature_K": 450,
+            "seed": 450100
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid120",
+        "label": "Graphene W90 IID scale: 120 snapshots",
+        "size": 120,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid120_T150_24_1",
+            "label": "24 snapshots @ 150 K",
+            "n_snapshots": 24,
+            "temperature_K": 150,
+            "seed": 150120
+          },
+          {
+            "block_id": "graphene_w90_scale_iid120_T300_72_2",
+            "label": "72 snapshots @ 300 K",
+            "n_snapshots": 72,
+            "temperature_K": 300,
+            "seed": 300120
+          },
+          {
+            "block_id": "graphene_w90_scale_iid120_T450_24_3",
+            "label": "24 snapshots @ 450 K",
+            "n_snapshots": 24,
+            "temperature_K": 450,
+            "seed": 450120
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid150",
+        "label": "Graphene W90 IID scale: 150 snapshots",
+        "size": 150,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid150_T150_30_1",
+            "label": "30 snapshots @ 150 K",
+            "n_snapshots": 30,
+            "temperature_K": 150,
+            "seed": 150150
+          },
+          {
+            "block_id": "graphene_w90_scale_iid150_T300_90_2",
+            "label": "90 snapshots @ 300 K",
+            "n_snapshots": 90,
+            "temperature_K": 300,
+            "seed": 300150
+          },
+          {
+            "block_id": "graphene_w90_scale_iid150_T450_30_3",
+            "label": "30 snapshots @ 450 K",
+            "n_snapshots": 30,
+            "temperature_K": 450,
+            "seed": 450150
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid180",
+        "label": "Graphene W90 IID scale: 180 snapshots",
+        "size": 180,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid180_T150_36_1",
+            "label": "36 snapshots @ 150 K",
+            "n_snapshots": 36,
+            "temperature_K": 150,
+            "seed": 150180
+          },
+          {
+            "block_id": "graphene_w90_scale_iid180_T300_108_2",
+            "label": "108 snapshots @ 300 K",
+            "n_snapshots": 108,
+            "temperature_K": 300,
+            "seed": 300180
+          },
+          {
+            "block_id": "graphene_w90_scale_iid180_T450_36_3",
+            "label": "36 snapshots @ 450 K",
+            "n_snapshots": 36,
+            "temperature_K": 450,
+            "seed": 450180
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid200",
+        "label": "Graphene W90 IID scale: 200 snapshots",
+        "size": 200,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid200_T150_40_1",
+            "label": "40 snapshots @ 150 K",
+            "n_snapshots": 40,
+            "temperature_K": 150,
+            "seed": 150200
+          },
+          {
+            "block_id": "graphene_w90_scale_iid200_T300_120_2",
+            "label": "120 snapshots @ 300 K",
+            "n_snapshots": 120,
+            "temperature_K": 300,
+            "seed": 300200
+          },
+          {
+            "block_id": "graphene_w90_scale_iid200_T450_40_3",
+            "label": "40 snapshots @ 450 K",
+            "n_snapshots": 40,
+            "temperature_K": 450,
+            "seed": 450200
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid220",
+        "label": "Graphene W90 IID scale: 220 snapshots",
+        "size": 220,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid220_T150_44_1",
+            "label": "44 snapshots @ 150 K",
+            "n_snapshots": 44,
+            "temperature_K": 150,
+            "seed": 150220
+          },
+          {
+            "block_id": "graphene_w90_scale_iid220_T300_132_2",
+            "label": "132 snapshots @ 300 K",
+            "n_snapshots": 132,
+            "temperature_K": 300,
+            "seed": 300220
+          },
+          {
+            "block_id": "graphene_w90_scale_iid220_T450_44_3",
+            "label": "44 snapshots @ 450 K",
+            "n_snapshots": 44,
+            "temperature_K": 450,
+            "seed": 450220
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid250",
+        "label": "Graphene W90 IID scale: 250 snapshots",
+        "size": 250,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid250_T150_50_1",
+            "label": "50 snapshots @ 150 K",
+            "n_snapshots": 50,
+            "temperature_K": 150,
+            "seed": 150250
+          },
+          {
+            "block_id": "graphene_w90_scale_iid250_T300_150_2",
+            "label": "150 snapshots @ 300 K",
+            "n_snapshots": 150,
+            "temperature_K": 300,
+            "seed": 300250
+          },
+          {
+            "block_id": "graphene_w90_scale_iid250_T450_50_3",
+            "label": "50 snapshots @ 450 K",
+            "n_snapshots": 50,
+            "temperature_K": 450,
+            "seed": 450250
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid280",
+        "label": "Graphene W90 IID scale: 280 snapshots",
+        "size": 280,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid280_T150_56_1",
+            "label": "56 snapshots @ 150 K",
+            "n_snapshots": 56,
+            "temperature_K": 150,
+            "seed": 150280
+          },
+          {
+            "block_id": "graphene_w90_scale_iid280_T300_168_2",
+            "label": "168 snapshots @ 300 K",
+            "n_snapshots": 168,
+            "temperature_K": 300,
+            "seed": 300280
+          },
+          {
+            "block_id": "graphene_w90_scale_iid280_T450_56_3",
+            "label": "56 snapshots @ 450 K",
+            "n_snapshots": 56,
+            "temperature_K": 450,
+            "seed": 450280
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid300",
+        "label": "Graphene W90 IID scale: 300 snapshots",
+        "size": 300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid300_T150_60_1",
+            "label": "60 snapshots @ 150 K",
+            "n_snapshots": 60,
+            "temperature_K": 150,
+            "seed": 150300
+          },
+          {
+            "block_id": "graphene_w90_scale_iid300_T300_180_2",
+            "label": "180 snapshots @ 300 K",
+            "n_snapshots": 180,
+            "temperature_K": 300,
+            "seed": 300300
+          },
+          {
+            "block_id": "graphene_w90_scale_iid300_T450_60_3",
+            "label": "60 snapshots @ 450 K",
+            "n_snapshots": 60,
+            "temperature_K": 450,
+            "seed": 450300
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid500",
+        "label": "Graphene W90 IID scale: 500 snapshots",
+        "size": 500,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid500_T150_100_1",
+            "label": "100 snapshots @ 150 K",
+            "n_snapshots": 100,
+            "temperature_K": 150,
+            "seed": 150500
+          },
+          {
+            "block_id": "graphene_w90_scale_iid500_T300_300_2",
+            "label": "300 snapshots @ 300 K",
+            "n_snapshots": 300,
+            "temperature_K": 300,
+            "seed": 300500
+          },
+          {
+            "block_id": "graphene_w90_scale_iid500_T450_100_3",
+            "label": "100 snapshots @ 450 K",
+            "n_snapshots": 100,
+            "temperature_K": 450,
+            "seed": 450500
+          }
+        ]
+      }
+    ]
+  },
+  "graph2mat_overrides": {
+    "max_epochs": 750,
+    "optim_lr": 0.0018,
+    "batch_size": 40,
+    "loader_threads": 4,
+    "num_interactions": 3,
+    "correlation": 3,
+    "max_ell": 3,
+    "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+    "loss": "graph2mat.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.006
+    },
+    "readout": "edge_node_mix",
+    "seed_everything": 0
+  },
+  "deeph": {
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "num_threads": 2,
+    "multiprocessing": 0,
+    "epochs": 750,
+    "batch_size": 4,
+    "learning_rate": 0.0003,
+    "criterion": "MaskMSELoss",
+    "retain_edge_fea": true,
+    "weight_decay": 0.0,
+    "optimizer": "adamW",
+    "edge_fea_len": 192,
+    "normalization": "LayerNorm",
+    "atom_update_net": "CGConv",
+    "if_lcmp": true,
+    "gauss_stop": 6,
+    "atom_fea_len": 192,
+    "num_l": 4,
+    "if_edge_update": true
+  },
+  "training_sweep": {
+    "enabled": true,
+    "max_runs": 92,
+    "apply_to_datasets": [
+      "all"
+    ],
+    "error_policy": "continue_on_error",
+    "search_policy": {
+      "strategy": "manual",
+      "random_seed": 0
+    },
+    "manual_runs": [
+      {
+        "id": "G2M-T600-26-anchor-N10",
+        "config_id": "G2M-T600-26-anchor-N10",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid10",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N10",
+        "config_id": "G2M-T1000-03-anchor-N10",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid10",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N10",
+        "config_id": "DH-T600-13-anchor-N10",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid10",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N10",
+        "config_id": "DH-T1000-04-anchor-N10",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid10",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N20",
+        "config_id": "G2M-T600-26-anchor-N20",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid20",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N20",
+        "config_id": "G2M-T1000-03-anchor-N20",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid20",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N20",
+        "config_id": "DH-T600-13-anchor-N20",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid20",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N20",
+        "config_id": "DH-T1000-04-anchor-N20",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid20",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N25",
+        "config_id": "G2M-T600-26-anchor-N25",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid25",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N25",
+        "config_id": "G2M-T1000-03-anchor-N25",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid25",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N25",
+        "config_id": "DH-T600-13-anchor-N25",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid25",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N25",
+        "config_id": "DH-T1000-04-anchor-N25",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid25",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N30",
+        "config_id": "G2M-T600-26-anchor-N30",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid30",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N30",
+        "config_id": "G2M-T1000-03-anchor-N30",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid30",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N30",
+        "config_id": "DH-T600-13-anchor-N30",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid30",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N30",
+        "config_id": "DH-T1000-04-anchor-N30",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid30",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N40",
+        "config_id": "G2M-T600-26-anchor-N40",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid40",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N40",
+        "config_id": "G2M-T1000-03-anchor-N40",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid40",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N40",
+        "config_id": "DH-T600-13-anchor-N40",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid40",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N40",
+        "config_id": "DH-T1000-04-anchor-N40",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid40",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N50",
+        "config_id": "G2M-T600-26-anchor-N50",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid50",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N50",
+        "config_id": "G2M-T1000-03-anchor-N50",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid50",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N50",
+        "config_id": "DH-T600-13-anchor-N50",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid50",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N50",
+        "config_id": "DH-T1000-04-anchor-N50",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid50",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N55",
+        "config_id": "G2M-T600-26-anchor-N55",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid55",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N55",
+        "config_id": "G2M-T1000-03-anchor-N55",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid55",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N55",
+        "config_id": "DH-T600-13-anchor-N55",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid55",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N55",
+        "config_id": "DH-T1000-04-anchor-N55",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid55",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N60",
+        "config_id": "G2M-T600-26-anchor-N60",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid60",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N60",
+        "config_id": "G2M-T1000-03-anchor-N60",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid60",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N60",
+        "config_id": "DH-T600-13-anchor-N60",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid60",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N60",
+        "config_id": "DH-T1000-04-anchor-N60",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid60",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N70",
+        "config_id": "G2M-T600-26-anchor-N70",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid70",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N70",
+        "config_id": "G2M-T1000-03-anchor-N70",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid70",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N70",
+        "config_id": "DH-T600-13-anchor-N70",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid70",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N70",
+        "config_id": "DH-T1000-04-anchor-N70",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid70",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N75",
+        "config_id": "G2M-T600-26-anchor-N75",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid75",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N75",
+        "config_id": "G2M-T1000-03-anchor-N75",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid75",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N75",
+        "config_id": "DH-T600-13-anchor-N75",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid75",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N75",
+        "config_id": "DH-T1000-04-anchor-N75",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid75",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N80",
+        "config_id": "G2M-T600-26-anchor-N80",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid80",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N80",
+        "config_id": "G2M-T1000-03-anchor-N80",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid80",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N80",
+        "config_id": "DH-T600-13-anchor-N80",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid80",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N80",
+        "config_id": "DH-T1000-04-anchor-N80",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid80",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N90",
+        "config_id": "G2M-T600-26-anchor-N90",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid90",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N90",
+        "config_id": "G2M-T1000-03-anchor-N90",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid90",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N90",
+        "config_id": "DH-T600-13-anchor-N90",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid90",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N90",
+        "config_id": "DH-T1000-04-anchor-N90",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid90",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N95",
+        "config_id": "G2M-T600-26-anchor-N95",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid95",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N95",
+        "config_id": "G2M-T1000-03-anchor-N95",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid95",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N95",
+        "config_id": "DH-T600-13-anchor-N95",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid95",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N95",
+        "config_id": "DH-T1000-04-anchor-N95",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid95",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N100",
+        "config_id": "G2M-T600-26-anchor-N100",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid100",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N100",
+        "config_id": "G2M-T1000-03-anchor-N100",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid100",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N100",
+        "config_id": "DH-T600-13-anchor-N100",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid100",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N100",
+        "config_id": "DH-T1000-04-anchor-N100",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid100",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N120",
+        "config_id": "G2M-T600-26-anchor-N120",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid120",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N120",
+        "config_id": "G2M-T1000-03-anchor-N120",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid120",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N120",
+        "config_id": "DH-T600-13-anchor-N120",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid120",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N120",
+        "config_id": "DH-T1000-04-anchor-N120",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid120",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N150",
+        "config_id": "G2M-T600-26-anchor-N150",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid150",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N150",
+        "config_id": "G2M-T1000-03-anchor-N150",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid150",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N150",
+        "config_id": "DH-T600-13-anchor-N150",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid150",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N150",
+        "config_id": "DH-T1000-04-anchor-N150",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid150",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N180",
+        "config_id": "G2M-T600-26-anchor-N180",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid180",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N180",
+        "config_id": "G2M-T1000-03-anchor-N180",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid180",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N180",
+        "config_id": "DH-T600-13-anchor-N180",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid180",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N180",
+        "config_id": "DH-T1000-04-anchor-N180",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid180",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N200",
+        "config_id": "G2M-T600-26-anchor-N200",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid200",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N200",
+        "config_id": "G2M-T1000-03-anchor-N200",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid200",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N200",
+        "config_id": "DH-T600-13-anchor-N200",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid200",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N200",
+        "config_id": "DH-T1000-04-anchor-N200",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid200",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N220",
+        "config_id": "G2M-T600-26-anchor-N220",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid220",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N220",
+        "config_id": "G2M-T1000-03-anchor-N220",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid220",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N220",
+        "config_id": "DH-T600-13-anchor-N220",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid220",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N220",
+        "config_id": "DH-T1000-04-anchor-N220",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid220",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N250",
+        "config_id": "G2M-T600-26-anchor-N250",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid250",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N250",
+        "config_id": "G2M-T1000-03-anchor-N250",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid250",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N250",
+        "config_id": "DH-T600-13-anchor-N250",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid250",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N250",
+        "config_id": "DH-T1000-04-anchor-N250",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid250",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N280",
+        "config_id": "G2M-T600-26-anchor-N280",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid280",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N280",
+        "config_id": "G2M-T1000-03-anchor-N280",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid280",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N280",
+        "config_id": "DH-T600-13-anchor-N280",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid280",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N280",
+        "config_id": "DH-T1000-04-anchor-N280",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid280",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N300",
+        "config_id": "G2M-T600-26-anchor-N300",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid300",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N300",
+        "config_id": "G2M-T1000-03-anchor-N300",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid300",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N300",
+        "config_id": "DH-T600-13-anchor-N300",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid300",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N300",
+        "config_id": "DH-T1000-04-anchor-N300",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid300",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T600-26-anchor-N500",
+        "config_id": "G2M-T600-26-anchor-N500",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid500",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N500",
+        "config_id": "G2M-T1000-03-anchor-N500",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid500",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 0
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-N500",
+        "config_id": "DH-T600-13-anchor-N500",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid500",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N500",
+        "config_id": "DH-T1000-04-anchor-N500",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid500",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      }
+    ]
+  },
+  "cost_accounting": {
+    "dataset_sweep_summary_json": "summary/dataset_sweep_summary.json",
+    "dataset_sweep_summary_csv": "summary/dataset_sweep_summary.csv",
+    "fields": [
+      "dataset_size",
+      "blocks",
+      "split_counts",
+      "generation_seconds",
+      "elapsed_seconds",
+      "artifact_validation_status",
+      "benchmark_manifest_path",
+      "frozen_split_manifest_path"
+    ],
+    "siesta_wall_time_source": "RUN.out timer: Elapsed wall time (sec), plus runner generation_seconds/elapsed_seconds per dataset row."
+  },
+  "notes": {
+    "intended_use": "Corrected paper-ready-like graphene snapshot-scaling benchmark for dataset-size/N_min analysis.",
+    "expected_dataset_count": 23,
+    "expected_dataset_recipe_ids": [
+      "graphene_w90_scale_iid10",
+      "graphene_w90_scale_iid25",
+      "graphene_w90_scale_iid50",
+      "graphene_w90_scale_iid100",
+      "graphene_w90_scale_iid200",
+      "graphene_w90_scale_iid300",
+      "graphene_w90_scale_iid500"
+    ],
+    "expected_total_snapshots": 3000,
+    "expected_training_runs": 92,
+    "temperature_distribution": "20% at 150 K, 60% at 300 K, 20% at 450 K for every dataset size.",
+    "paper_ready_parallelism": "Graph2Mat 7 parallel jobs, DeepH 5 parallel jobs, alternating model batches, starting with DeepH.",
+    "scientific_policy": "Only MD size varies. SIESTA physics/template, material, basis and pseudopotentials are held fixed. Test/validation split policy remains blocked_with_gap.",
+    "material_scope": "This payload is graphene-only.",
+    "expected_dataset_sizes": [
+      10,
+      20,
+      25,
+      30,
+      40,
+      50,
+      55,
+      60,
+      70,
+      75,
+      80,
+      90,
+      95,
+      100,
+      120,
+      150,
+      180,
+      200,
+      220,
+      250,
+      280,
+      300,
+      500
+    ],
+    "paper_ready_similarity": "Uses two fixed paper-ready anchors per model: G2M-T600-26, G2M-T1000-03, DH-T600-13 and DH-T1000-04. Hyperparameter search is disabled so dataset size remains the main variable.",
+    "batch_size_guard": "Graph2Mat anchors use batch_size 40 and 32; DeepH anchors use batch_size 4 and 8. Reject this payload if any generated Graph2Mat config has batch_size > 80.",
+    "manual_anchor_configs_per_dataset": 4,
+    "discretization_policy": "Dense dataset-size grid from 10 to 500 snapshots, reusing requested/previous scaling sizes where possible: 10,20,25,30,40,50,55,60,70,75,80,90,95,100,120,150,180,200,220,250,280,300,500.",
+    "dataset_root_policy": "Uses a fresh dataset root to avoid overwriting or colliding with previous snapshot-scaling datasets that were generated with a different training payload."
+  },
+  "run_id": "graphene_w90_snapshot_scaling_10_500_paper_ready_like_20260608"
+}
