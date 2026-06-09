@@ -1171,8 +1171,20 @@
                   <option value="inverse_square">1/x^2</option>
                   <option value="quadratic">quadratic</option>
                   <option value="linear">linear</option>
+                  <option value="moving_average">moving average</option>
                   <option value="none">none</option>
                 </select>
+              </label>
+              <label class="field">
+                <span>Moving average window</span>
+                <input
+                  id="dataset-minimum-moving-average-window"
+                  type="number"
+                  min="1"
+                  step="1"
+                  value="3"
+                />
+                <small>Ventana en número de puntos observados. Solo afecta a moving average.</small>
               </label>
             </div>
             <div class="grid two split-grid">

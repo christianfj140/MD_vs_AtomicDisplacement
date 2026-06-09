@@ -635,6 +635,7 @@ def thresholds_by_method_from_fit(
     relative_tolerance: float,
     plateau_gain: float,
     fit_model: str,
+    moving_average_window: int = 3,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     out: dict[str, dict[str, Any]] = {}
     fit_details: dict[str, dict[str, Any]] = {}
@@ -646,7 +647,11 @@ def thresholds_by_method_from_fit(
             key=lambda row: int(row["dataset_size_x"]),
         )
 
-        curve_rows, fit = fitted_curve_rows(observed_rows, fit_model=fit_model)
+        curve_rows, fit = fitted_curve_rows(
+            observed_rows,
+            fit_model=fit_model,
+            moving_average_window=moving_average_window,
+        )
         fit_details[method] = fit
 
         if not curve_rows:
@@ -988,8 +993,69 @@ def fit_lowess_model(model: str, n_values: list[float], y_values: list[float]) -
     return summary
 
 
-    
+def fit_moving_average_model(
+    n_values: list[float],
+    y_values: list[float],
+    *,
+    window_size: int,
+) -> dict[str, Any]:
+    clean = sorted(
+        [
+            (float(n), float(y))
+            for n, y in zip(n_values, y_values)
+            if n > 0 and math.isfinite(float(y))
+        ],
+        key=lambda item: item[0],
+    )
+
+    if not clean:
+        return {
+            "model": "moving_average",
+            "status": "failed",
+            "error": "No finite points for moving average.",
+            "n_points": 0,
+        }
+
+    window = max(1, min(int(window_size or 3), len(clean)))
+    left_span = (window - 1) // 2
+    right_span = window - left_span - 1
+
+    curve_points: list[dict[str, Any]] = []
+    smoothed_values: list[float] = []
+
+    for index, (n_value, _y_value) in enumerate(clean):
+        start = max(0, index - left_span)
+        end = min(len(clean), index + right_span + 1)
+        local_values = [value for _n, value in clean[start:end]]
+        smoothed = mean(local_values) or 0.0
+        smoothed_values.append(float(smoothed))
+        curve_points.append(
+            {
+                "x": float(n_value),
+                "y": float(smoothed),
+                "window_count": len(local_values),
+            }
+        )
+
+    sorted_n = [item[0] for item in clean]
+    sorted_y = [item[1] for item in clean]
+
+    summary = fit_summary("moving_average", sorted_n, sorted_y, smoothed_values, [])
+    summary["status"] = "ok"
+    summary["formula"] = f"centered moving average over observed N, window={window}"
+    summary["curve_points"] = curve_points
+    summary["moving_average_window"] = window
+    summary["fit_domain"] = {
+        "min_n": min(sorted_n),
+        "max_n": max(sorted_n),
+    }
+    return summary
+
+
+
 def predict_fit(model: str, coefficients: list[float], n_values: list[float]) -> list[float]:
+    if model in LOWESS_FIT_MODELS or model == "moving_average":
+        raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
     if model in LOWESS_FIT_MODELS:
         raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
     if model == "power_law":
@@ -1027,6 +1093,7 @@ def fitted_curve_rows(
     rows: list[dict[str, Any]],
     *,
     fit_model: str,
+    moving_average_window: int = 3,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     clean_rows = sorted(
         [
@@ -1053,13 +1120,19 @@ def fitted_curve_rows(
         fit = fit_power_law(n_values, y_values)
     elif fit_model in LOWESS_FIT_MODELS:
         fit = fit_lowess_model(fit_model, n_values, y_values)
+    elif fit_model == "moving_average":
+        fit = fit_moving_average_model(
+            n_values,
+            y_values,
+            window_size=moving_average_window,
+        )
     else:
         fit = fit_linear_model(fit_model, n_values, y_values)
 
     if fit.get("status") not in {None, "ok"}:
         return [], fit
 
-    if fit_model in LOWESS_FIT_MODELS:
+    if fit_model in LOWESS_FIT_MODELS or fit_model == "moving_average":
         curve_points = fit.get("curve_points") or []
         curve_rows = [
             {
@@ -1129,7 +1202,12 @@ def fit_summary(
     }
 
 
-def fit_models_for_method(best_rows: list[dict[str, Any]], fit_models: list[str]) -> dict[str, dict[str, Any]]:
+def fit_models_for_method(
+    best_rows: list[dict[str, Any]],
+    fit_models: list[str],
+    *,
+    moving_average_window: int = 3,
+) -> dict[str, dict[str, Any]]:
     rows = sorted(
         [
             row
@@ -1150,6 +1228,12 @@ def fit_models_for_method(best_rows: list[dict[str, Any]], fit_models: list[str]
                 out[model] = fit_power_law(n_values, y_values)
             elif model in LOWESS_FIT_MODELS:
                 out[model] = fit_lowess_model(model, n_values, y_values)
+            elif model == "moving_average":
+                out[model] = fit_moving_average_model(
+                    n_values,
+                    y_values,
+                    window_size=moving_average_window,
+                )
             else:
                 out[model] = fit_linear_model(model, n_values, y_values)
             out[model]["status"] = "ok"
@@ -1160,6 +1244,7 @@ def fit_models_for_method(best_rows: list[dict[str, Any]], fit_models: list[str]
 
 def required_fit_points(model: str) -> int:
     return {
+        "moving_average": 1,
         "quadratic": 3,
         "power_law": 3,
         "lowess_logx": 3,
@@ -1178,6 +1263,7 @@ def parse_fit_models(value: str) -> list[str]:
     "lowess_logx",
     "lowess_logx_robust",
     "monotone_lowess_logx",
+    "moving_average",
     }
     models = [item.strip() for item in value.split(",") if item.strip()]
     unknown = [model for model in models if model not in allowed]
@@ -1386,6 +1472,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_roots = [Path(item).resolve() for item in args.run_root]
     fit_models = parse_fit_models(args.fit_models)
+    moving_average_window = max(1, int(args.moving_average_window or 3))
     warnings: list[str] = []
     sources: list[str] = []
     raw_rows: list[dict[str, Any]] = []
@@ -1416,11 +1503,12 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.n_min_source == "fit":
         fit_thresholds, fit_threshold_details, fit_threshold_warnings = thresholds_by_method_from_fit(
-            best_rows,
-            threshold_mev=float(args.threshold_mev),
-            relative_tolerance=float(args.relative_tolerance),
-            plateau_gain=float(args.plateau_gain),
-            fit_model=args.n_min_fit_model,
+        best_rows,
+        threshold_mev=float(args.threshold_mev),
+        relative_tolerance=float(args.relative_tolerance),
+        plateau_gain=float(args.plateau_gain),
+        fit_model=args.n_min_fit_model,
+        moving_average_window=moving_average_window,
         )
         warnings.extend(fit_threshold_warnings)
 
@@ -1432,7 +1520,11 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
 
 
     fits = {
-        method: fit_models_for_method([row for row in best_rows if row["method"] == method], fit_models)
+        method: fit_models_for_method(
+            [row for row in best_rows if row["method"] == method],
+            fit_models,
+            moving_average_window=moving_average_window,
+        )
         for method in sorted({str(row["method"]) for row in best_rows})
     }
 
@@ -1507,6 +1599,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "observed_thresholds": observed_thresholds,
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
+        "moving_average_window": moving_average_window,
     }
     summary_path = output_dir / "dataset_size_minimum_summary.json"
     write_json(summary_path, summary)
@@ -1536,6 +1629,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--n-min-fit-model",
         default="power_law",
         help="Fit model used when --n-min-source=fit.",
+    )
+    parser.add_argument(
+    "--moving-average-window",
+    type=int,
+    default=3,
+    help="Window size in observed points for moving_average fit model.",
     )
     return parser
 

@@ -1117,8 +1117,8 @@ def build_method_provenance(
             entry.update({key: first_material.get(key) for key in MATERIAL_FLAT_FIELDS if key in first_material})
         if material_hashes:
             entry["material_compatibility_hashes"] = material_hashes
-            if len(material_hashes) == 1 and not entry.get("material_compatibility_hash"):
-                entry["material_compatibility_hash"] = material_hashes[0]
+        if len(material_hashes) == 1 and not entry.get("material_compatibility_hash"):
+            entry["material_compatibility_hash"] = material_hashes[0]
         provenance[method_id] = entry
     return provenance
 
@@ -5977,6 +5977,13 @@ def dataset_size_minimum_available_combinations(outputs: list[dict[str, Any]]) -
     return combinations
 
 
+
+def dataset_size_minimum_command_text(command: list[str] | None) -> str:
+    if not command:
+        return "<command_not_built>"
+    return " ".join(shlex.quote(str(part)) for part in command)
+
+
 def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]:
     """Run read-only dataset-size-minimum post-processing on completed sweeps."""
     run_roots_raw = payload.get("run_roots")
@@ -5986,14 +5993,30 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     if not DATASET_SIZE_MINIMUM_SCRIPT.exists():
         raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
 
-
     n_min_source = str(payload.get("n_min_source") or "observed").strip()
     n_min_fit_model = str(payload.get("n_min_fit_model") or payload.get("fit_model") or "power_law").strip()
 
     if n_min_source not in {"observed", "fit"}:
         raise RuntimeError("n_min_source debe ser 'observed' o 'fit'.")
 
+    threshold_mev = float(payload.get("threshold_mev") or 10.0)
+    primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
+    x_axis = str(payload.get("x_axis") or "n_train").strip()
 
+    if x_axis not in {"n_total", "n_train"}:
+        raise RuntimeError("x_axis debe ser n_total o n_train.")
+
+    relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
+    plateau_gain = float(payload.get("plateau_gain") or 0.05)
+    fit_models = str(
+        payload.get("fit_models")
+        or "linear,quadratic,inverse,inverse_square,power_law,"
+        "lowess_logx,lowess_logx_robust,monotone_lowess_logx,moving_average"
+    )
+
+    moving_average_window = int(payload.get("moving_average_window") or 3)
+    if moving_average_window <= 0:
+        raise RuntimeError("moving_average_window debe ser un entero positivo.")
 
     run_roots: list[Path] = []
     for item in run_roots_raw:
@@ -6032,16 +6055,6 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
                 f"El sweep {path.name} esta en curso; no se ejecutara el postproceso sobre el."
             )
 
-    threshold_mev = float(payload.get("threshold_mev") or 10.0)
-    primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
-    x_axis = str(payload.get("x_axis") or "n_train").strip()
-    if x_axis not in {"n_total", "n_train"}:
-        raise RuntimeError("x_axis debe ser n_total o n_train.")
-
-    relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
-    plateau_gain = float(payload.get("plateau_gain") or 0.05)
-    fit_models = str(payload.get("fit_models") or "linear,quadratic,inverse,inverse_square,power_law")
-
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = (
         RESULTS_ROOT / f"dataset_size_minimum_ui_{stamp}" / f"threshold_{threshold_mev:g}meV"
@@ -6069,9 +6082,10 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         n_min_source,
         "--n-min-fit-model",
         n_min_fit_model,
+        "--moving-average-window",
+        str(moving_average_window),
     ]
 
-    # CRITICO: esto debe estar antes de subprocess.run().
     for path in run_roots:
         command.extend(["--run-root", str(path)])
 
@@ -6093,11 +6107,23 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
             summary = None
 
     if completed.returncode != 0:
+        if summary and summary.get("status") == "no_usable_metric_rows":
+            return {
+                "status": "no_usable_metric_rows",
+                "output_dir": str(output_dir),
+                "summary_path": str(summary_path),
+                "command": command,
+                "run_roots": [str(path) for path in run_roots],
+                "summary": summary,
+                "warnings": summary.get("warnings") or [],
+            }
+
         stderr = (completed.stderr or completed.stdout or "").strip()
+        command_text = " ".join(shlex.quote(str(part)) for part in command)
         raise RuntimeError(
             "Postproceso dataset-size-minimum fallo"
             + (f": {stderr}" if stderr else ".")
-            + f" Comando: {' '.join(shlex.quote(part) for part in command)}"
+            + f" Comando: {command_text}"
         )
 
     return {
@@ -6147,6 +6173,8 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "result_rows_count": len(result_rows),
                 "run_roots": summary.get("run_roots") or [],
                 "modified_at": summary_path.stat().st_mtime,
+                "moving_average_window": summary.get("moving_average_window")
+
             }
         )
     run_root_sources = discover_dataset_size_minimum_run_roots()
