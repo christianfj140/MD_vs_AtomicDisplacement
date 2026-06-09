@@ -367,6 +367,19 @@ def pivot_metric_scaling_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return list(grouped.values())
 
 
+def metric_file_row_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        if path.suffix == ".json":
+            rows = load_json_metric_rows(path)
+        else:
+            rows = [dict(row) for row in read_csv(path)]
+        return len(pivot_metric_scaling_rows(rows))
+    except (OSError, json.JSONDecodeError, csv.Error, ValueError):
+        return 0
+
+
 def discover_metric_files(run_root: Path) -> list[Path]:
     preferred_groups = [
         [run_root / "summary" / "ranking" / "normalized_run_metrics.json"],
@@ -374,14 +387,25 @@ def discover_metric_files(run_root: Path) -> list[Path]:
         [run_root / "sweep" / "training_sweep_metrics.csv"],
         [run_root / "final_test" / "sweep" / "training_sweep_metrics.csv"],
     ]
+
+    existing_preferred: list[Path] = []
     for group in preferred_groups:
-        found = [path for path in group if path.exists()]
-        if found:
-            return found
-    # Shallow fallback for archived runs without scanning unrelated large trees.
+        existing = [path for path in group if path.exists()]
+        existing_preferred.extend(existing)
+        usable = [path for path in existing if metric_file_row_count(path) > 0]
+        if usable:
+            return usable
+
+    found: list[Path] = []
     found.extend(sorted(run_root.glob("*/summary/ranking/normalized_run_metrics.json")))
+    found.extend(sorted(run_root.glob("*/summary/ranking/normalized_run_metrics.csv")))
     found.extend(sorted(run_root.glob("runs/*/sweep/training_sweep_metrics.csv")))
-    return found
+
+    usable_fallback = [path for path in found if metric_file_row_count(path) > 0]
+    if usable_fallback:
+        return usable_fallback
+
+    return existing_preferred or found
 
 
 def load_run_root_rows(run_root: Path) -> tuple[list[dict[str, Any]], list[str], list[str]]:
@@ -604,7 +628,70 @@ def thresholds_by_method(
         }
     return out
 
+def thresholds_by_method_from_fit(
+    best_rows: list[dict[str, Any]],
+    *,
+    threshold_mev: float,
+    relative_tolerance: float,
+    plateau_gain: float,
+    fit_model: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
+    out: dict[str, dict[str, Any]] = {}
+    fit_details: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
 
+    for method in sorted({str(row["method"]) for row in best_rows}):
+        observed_rows = sorted(
+            [row for row in best_rows if row["method"] == method],
+            key=lambda row: int(row["dataset_size_x"]),
+        )
+
+        curve_rows, fit = fitted_curve_rows(observed_rows, fit_model=fit_model)
+        fit_details[method] = fit
+
+        if not curve_rows:
+            warnings.append(
+                f"fit_thresholds_unavailable:{method}:{fit_model}:{fit.get('status')}"
+            )
+            continue
+
+        values = [
+            finite_number(row.get("primary_metric_mev_mean"))
+            for row in curve_rows
+        ]
+        clean_values = [value for value in values if value is not None]
+
+        out[method] = {
+            "available_sizes": [
+                int(round(float(row["dataset_size_x"])))
+                for row in observed_rows
+            ],
+            "fit_model": fit_model,
+            "fit_domain": fit.get("fit_domain") or {},
+            "best_observed_mev": min(
+                float(row["primary_metric_mev_mean"])
+                for row in observed_rows
+                if finite_number(row.get("primary_metric_mev_mean")) is not None
+            ),
+            "best_fit_mev": min(clean_values) if clean_values else None,
+            "N_min_abs": n_min_abs(curve_rows, threshold_mev),
+            "N_min_rel95": n_min_rel95(curve_rows, relative_tolerance),
+            "N_min_plateau": n_min_plateau(curve_rows, plateau_gain),
+
+            # Cost_eff necesita costes reales. No tiene sentido deducirlo
+            # solo desde una curva de error si no ajustas tambien coste(N).
+            "N_min_cost_eff": n_min_cost_eff(observed_rows, relative_tolerance),
+
+            "N_min_abs_source": "fit",
+            "N_min_rel95_source": "fit",
+            "N_min_plateau_source": "fit",
+            "N_min_cost_eff_source": "observed_cost",
+        }
+
+    return out, fit_details, warnings
+
+
+    
 def fit_design(model: str, n_values: list[float]) -> list[list[float]]:
     if model == "linear":
         return [[1.0, n] for n in n_values]
@@ -691,8 +778,220 @@ def fit_power_law(n_values: list[float], y_values: list[float]) -> dict[str, Any
     summary["formula"] = "y = E_inf + A N^-alpha"
     return summary
 
+LOWESS_FIT_MODELS = {"lowess_logx", "lowess_logx_robust", "monotone_lowess_logx"}
 
+
+def tricube_weight(u: float) -> float:
+    value = min(1.0, max(0.0, abs(float(u))))
+    return (1.0 - value**3) ** 3
+
+
+def median(values: list[float]) -> float | None:
+    clean = sorted(value for value in values if math.isfinite(value))
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return clean[mid]
+    return 0.5 * (clean[mid - 1] + clean[mid])
+
+
+def weighted_local_linear_estimate(
+    points: list[dict[str, float]],
+    x0: float,
+    robust_weights: list[float],
+    *,
+    frac: float = 0.45,
+) -> float | None:
+    if not points:
+        return None
+
+    distances = sorted(abs(point["tx"] - x0) for point in points)
+    k = max(2, math.ceil(frac * len(points)))
+    bandwidth = distances[min(k - 1, len(distances) - 1)] if distances else 1.0
+    if bandwidth <= 0.0:
+        bandwidth = distances[-1] if distances and distances[-1] > 0.0 else 1.0
+
+    sw = swx = swy = swxx = swxy = 0.0
+
+    for index, point in enumerate(points):
+        dx = point["tx"] - x0
+        local_weight = tricube_weight(abs(dx) / bandwidth)
+        robust_weight = robust_weights[index] if index < len(robust_weights) else 1.0
+        weight = local_weight * robust_weight
+
+        if not math.isfinite(weight) or weight <= 0.0:
+            continue
+
+        sw += weight
+        swx += weight * dx
+        swy += weight * point["y"]
+        swxx += weight * dx * dx
+        swxy += weight * dx * point["y"]
+
+    if sw <= 0.0:
+        return None
+
+    denom = sw * swxx - swx * swx
+    if abs(denom) < 1e-14:
+        return swy / sw
+
+    slope = (sw * swxy - swx * swy) / denom
+    intercept = (swy - slope * swx) / sw
+    return intercept
+
+
+def dense_integer_grid(n_values: list[float], *, max_points: int = 2500) -> list[float]:
+    if not n_values:
+        return []
+    n_min = int(math.ceil(min(n_values)))
+    n_max = int(math.floor(max(n_values)))
+    if n_max < n_min:
+        return [float(round(n_values[0]))]
+    if n_max - n_min + 1 <= max_points:
+        return [float(n) for n in range(n_min, n_max + 1)]
+    return [
+        float(round(n_min + (n_max - n_min) * index / (max_points - 1)))
+        for index in range(max_points)
+    ]
+
+
+def lowess_predict_curve(
+    n_values: list[float],
+    y_values: list[float],
+    *,
+    model: str,
+    grid_values: list[float] | None = None,
+    frac: float = 0.45,
+) -> tuple[list[float], list[float], list[float]]:
+    clean = sorted(
+        [
+            {"n": float(n), "y": float(y), "tx": math.log(float(n))}
+            for n, y in zip(n_values, y_values)
+            if n > 0 and math.isfinite(float(y))
+        ],
+        key=lambda row: row["n"],
+    )
+
+    if len(clean) < 3:
+        return [], [], []
+
+    robust_iterations = 2 if model in {"lowess_logx_robust", "monotone_lowess_logx"} else 0
+    robust_weights = [1.0 for _ in clean]
+
+    for _iteration in range(robust_iterations):
+        fitted_at_observed = [
+            weighted_local_linear_estimate(clean, point["tx"], robust_weights, frac=frac)
+            for point in clean
+        ]
+        residuals = [
+            abs(point["y"] - fit)
+            for point, fit in zip(clean, fitted_at_observed)
+            if fit is not None and math.isfinite(fit)
+        ]
+        mad = median(residuals)
+        if mad is None or mad <= 1e-12:
+            break
+
+        next_weights: list[float] = []
+        for point, fit in zip(clean, fitted_at_observed):
+            if fit is None or not math.isfinite(fit):
+                next_weights.append(0.0)
+                continue
+            u = abs(point["y"] - fit) / (6.0 * mad)
+            if u >= 1.0:
+                next_weights.append(0.0)
+            else:
+                next_weights.append((1.0 - u * u) ** 2)
+        robust_weights = next_weights
+
+    observed_predictions = [
+        weighted_local_linear_estimate(clean, point["tx"], robust_weights, frac=frac)
+        for point in clean
+    ]
+
+    grid = grid_values or dense_integer_grid([point["n"] for point in clean])
+    curve_y: list[float] = []
+    for n in grid:
+        value = weighted_local_linear_estimate(clean, math.log(float(n)), robust_weights, frac=frac)
+        curve_y.append(float("nan") if value is None else float(value))
+
+    if model == "monotone_lowess_logx":
+        best = math.inf
+        monotone_y: list[float] = []
+        for value in curve_y:
+            if math.isfinite(value):
+                best = min(best, value)
+                monotone_y.append(best)
+            else:
+                monotone_y.append(value)
+        curve_y = monotone_y
+
+    observed_pred_clean = [
+        float(value)
+        for value in observed_predictions
+        if value is not None and math.isfinite(float(value))
+    ]
+
+    return grid, curve_y, observed_pred_clean
+
+
+def fit_lowess_model(model: str, n_values: list[float], y_values: list[float]) -> dict[str, Any]:
+    grid, curve_y, observed_pred = lowess_predict_curve(n_values, y_values, model=model)
+
+    if not grid or not curve_y:
+        return {
+            "model": model,
+            "status": "failed",
+            "error": "LOWESS produced no curve points.",
+            "n_points": len(n_values),
+        }
+
+    # Recalcula predicciones exactamente en los N observados para métricas de ajuste.
+    _obs_grid, _obs_curve, obs_pred = lowess_predict_curve(
+        n_values,
+        y_values,
+        model=model,
+        grid_values=n_values,
+    )
+
+    if len(obs_pred) != len(y_values):
+        obs_pred = [
+            value
+            for value in _obs_curve
+            if math.isfinite(value)
+        ]
+
+    if len(obs_pred) != len(y_values):
+        # Fallback seguro: usa interpolación de la curva densa más cercana.
+        obs_pred = []
+        for n in n_values:
+            nearest_index = min(range(len(grid)), key=lambda idx: abs(grid[idx] - n))
+            obs_pred.append(curve_y[nearest_index])
+
+    summary = fit_summary(model, n_values, y_values, obs_pred, [])
+    summary["status"] = "ok"
+    summary["formula"] = {
+        "lowess_logx": "LOWESS over log(N)",
+        "lowess_logx_robust": "robust LOWESS over log(N)",
+        "monotone_lowess_logx": "robust LOWESS over log(N), monotone non-increasing",
+    }[model]
+    summary["curve_points"] = [
+        {"x": float(n), "y": float(y)}
+        for n, y in zip(grid, curve_y)
+        if math.isfinite(float(y))
+    ]
+    summary["fit_domain"] = {
+        "min_n": min(n_values),
+        "max_n": max(n_values),
+    }
+    return summary
+
+
+    
 def predict_fit(model: str, coefficients: list[float], n_values: list[float]) -> list[float]:
+    if model in LOWESS_FIT_MODELS:
+        raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
     if model == "power_law":
         e_inf, amplitude, alpha = coefficients
         return [e_inf + amplitude * (n ** (-alpha)) for n in n_values]
@@ -700,6 +999,104 @@ def predict_fit(model: str, coefficients: list[float], n_values: list[float]) ->
     for design_row in fit_design(model, n_values):
         predictions.append(sum(coef * value for coef, value in zip(coefficients, design_row)))
     return predictions
+
+def dense_n_grid(rows: list[dict[str, Any]], *, max_points: int = 2000) -> list[float]:
+    values = sorted(
+        {
+            int(row["dataset_size_x"])
+            for row in rows
+            if finite_number(row.get("dataset_size_x")) is not None
+            and int(row["dataset_size_x"]) > 0
+        }
+    )
+    if not values:
+        return []
+    n_min = values[0]
+    n_max = values[-1]
+    if n_max <= n_min:
+        return [float(n_min)]
+    if n_max - n_min + 1 <= max_points:
+        return [float(n) for n in range(n_min, n_max + 1)]
+    return [
+        n_min + (n_max - n_min) * index / (max_points - 1)
+        for index in range(max_points)
+    ]
+
+
+def fitted_curve_rows(
+    rows: list[dict[str, Any]],
+    *,
+    fit_model: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    clean_rows = sorted(
+        [
+            row
+            for row in rows
+            if finite_number(row.get("primary_metric_mev_mean")) is not None
+            and finite_number(row.get("dataset_size_x")) is not None
+            and int(row["dataset_size_x"]) > 0
+        ],
+        key=lambda row: int(row["dataset_size_x"]),
+    )
+
+    if len(clean_rows) < required_fit_points(fit_model):
+        return [], {
+            "status": "skipped_insufficient_points",
+            "fit_model": fit_model,
+            "n_points": len(clean_rows),
+        }
+
+    n_values = [float(row["dataset_size_x"]) for row in clean_rows]
+    y_values = [float(row["primary_metric_mev_mean"]) for row in clean_rows]
+
+    if fit_model == "power_law":
+        fit = fit_power_law(n_values, y_values)
+    elif fit_model in LOWESS_FIT_MODELS:
+        fit = fit_lowess_model(fit_model, n_values, y_values)
+    else:
+        fit = fit_linear_model(fit_model, n_values, y_values)
+
+    if fit.get("status") not in {None, "ok"}:
+        return [], fit
+
+    if fit_model in LOWESS_FIT_MODELS:
+        curve_points = fit.get("curve_points") or []
+        curve_rows = [
+            {
+                "dataset_size_x": float(point["x"]),
+                "primary_metric_mev_mean": float(point["y"]),
+                "method": clean_rows[0]["method"],
+                "config_id": f"fit:{fit_model}",
+                "epoch_label": "fit",
+            }
+            for point in curve_points
+            if finite_number(point.get("x")) is not None
+            and finite_number(point.get("y")) is not None
+        ]
+    else:
+        grid = dense_n_grid(clean_rows)
+        y_grid = predict_fit(fit_model, [float(x) for x in fit["coefficients"]], grid)
+        curve_rows = [
+            {
+                "dataset_size_x": n_value,
+                "primary_metric_mev_mean": y_value,
+                "method": clean_rows[0]["method"],
+                "config_id": f"fit:{fit_model}",
+                "epoch_label": "fit",
+            }
+            for n_value, y_value in zip(grid, y_grid)
+            if math.isfinite(y_value)
+        ]
+
+    fit["status"] = "ok"
+    fit["fit_model"] = fit_model
+    fit["fit_grid_points"] = len(curve_rows)
+    fit["fit_domain"] = fit.get("fit_domain") or {
+        "min_n": min(n_values),
+        "max_n": max(n_values),
+    }
+    return curve_rows, fit
+
 
 
 def fit_summary(
@@ -751,6 +1148,8 @@ def fit_models_for_method(best_rows: list[dict[str, Any]], fit_models: list[str]
         try:
             if model == "power_law":
                 out[model] = fit_power_law(n_values, y_values)
+            elif model in LOWESS_FIT_MODELS:
+                out[model] = fit_lowess_model(model, n_values, y_values)
             else:
                 out[model] = fit_linear_model(model, n_values, y_values)
             out[model]["status"] = "ok"
@@ -760,18 +1159,38 @@ def fit_models_for_method(best_rows: list[dict[str, Any]], fit_models: list[str]
 
 
 def required_fit_points(model: str) -> int:
-    return {"quadratic": 3, "power_law": 3}.get(model, 2)
+    return {
+        "quadratic": 3,
+        "power_law": 3,
+        "lowess_logx": 3,
+        "lowess_logx_robust": 3,
+        "monotone_lowess_logx": 3,
+    }.get(model, 2)
 
 
 def parse_fit_models(value: str) -> list[str]:
-    allowed = {"linear", "quadratic", "inverse", "inverse_square", "power_law"}
+    allowed = {
+    "linear",
+    "quadratic",
+    "inverse",
+    "inverse_square",
+    "power_law",
+    "lowess_logx",
+    "lowess_logx_robust",
+    "monotone_lowess_logx",
+    }
     models = [item.strip() for item in value.split(",") if item.strip()]
     unknown = [model for model in models if model not in allowed]
     if unknown:
         raise SystemExit(f"Unknown fit model(s): {', '.join(unknown)}")
     return models or ["linear"]
 
-
+def canonical_fit_model(model: str) -> str:
+    model = str(model or "").strip()
+    if model == "power_law_floor":
+        return "power_law"
+    return model
+    
 def import_matplotlib():
     import matplotlib
 
@@ -821,8 +1240,14 @@ def plot_metric_vs_size(
             fit = fits.get(method, {}).get(model, {})
             if fit.get("status") != "ok":
                 continue
-            x_grid = [min(xs) + (max(xs) - min(xs)) * idx / 200.0 for idx in range(201)] if max(xs) > min(xs) else xs
-            y_grid = predict_fit(model, [float(item) for item in fit.get("coefficients") or []], [float(item) for item in x_grid])
+            curve_points = fit.get("curve_points") or []
+            if curve_points:
+                x_grid = [float(point["x"]) for point in curve_points if finite_number(point.get("x")) is not None]
+                y_grid = [float(point["y"]) for point in curve_points if finite_number(point.get("y")) is not None]
+            else:
+                x_grid = [min(xs) + (max(xs) - min(xs)) * idx / 200.0 for idx in range(201)] if max(xs) > min(xs) else xs
+                y_grid = predict_fit(model, [float(item) for item in fit.get("coefficients") or []], [float(item) for item in x_grid])
+
             ax.plot(x_grid, y_grid, color=color, alpha=0.35, linewidth=1.3, label=f"{method} fit {model}")
     ax.axhline(threshold_mev, color="#111111", linestyle=":", linewidth=1.4, alpha=0.8, label=f"threshold {threshold_mev:g} meV")
     ax.set_xlabel("Training snapshots" if x_axis == "n_train" else "Total snapshots")
@@ -978,12 +1403,34 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     warnings.extend(normalize_warnings)
     grouped_rows = group_config_rows(normalized_rows)
     best_rows = best_by_method_size(grouped_rows)
-    thresholds = thresholds_by_method(
-        best_rows,
-        threshold_mev=float(args.threshold_mev),
-        relative_tolerance=float(args.relative_tolerance),
-        plateau_gain=float(args.plateau_gain),
+
+    observed_thresholds = thresholds_by_method(
+    best_rows,
+    threshold_mev=float(args.threshold_mev),
+    relative_tolerance=float(args.relative_tolerance),
+    plateau_gain=float(args.plateau_gain),
     )
+
+    fit_thresholds: dict[str, dict[str, Any]] = {}
+    fit_threshold_details: dict[str, dict[str, Any]] = {}
+
+    if args.n_min_source == "fit":
+        fit_thresholds, fit_threshold_details, fit_threshold_warnings = thresholds_by_method_from_fit(
+            best_rows,
+            threshold_mev=float(args.threshold_mev),
+            relative_tolerance=float(args.relative_tolerance),
+            plateau_gain=float(args.plateau_gain),
+            fit_model=args.n_min_fit_model,
+        )
+        warnings.extend(fit_threshold_warnings)
+
+    thresholds = fit_thresholds if args.n_min_source == "fit" and fit_thresholds else observed_thresholds
+
+    if args.n_min_source == "fit" and not fit_thresholds:
+        warnings.append("fit_thresholds_empty; falling back to observed thresholds")
+        thresholds = observed_thresholds
+
+
     fits = {
         method: fit_models_for_method([row for row in best_rows if row["method"] == method], fit_models)
         for method in sorted({str(row["method"]) for row in best_rows})
@@ -1055,6 +1502,11 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "warnings": sorted(set(warnings)),
         "status": "ok" if best_rows else "no_usable_metric_rows",
         "forbidden_compute_commands": FORBIDDEN_COMPUTE_COMMANDS,
+        "n_min_source": args.n_min_source,
+        "n_min_fit_model": args.n_min_fit_model,
+        "observed_thresholds": observed_thresholds,
+        "fit_thresholds": fit_thresholds,
+        "fit_threshold_details": fit_threshold_details,
     }
     summary_path = output_dir / "dataset_size_minimum_summary.json"
     write_json(summary_path, summary)
@@ -1074,6 +1526,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plateau-gain", type=float, default=0.05)
     parser.add_argument("--x-axis", choices=["n_total", "n_train"], default="n_train")
     parser.add_argument("--fit-models", default=DEFAULT_FIT_MODELS)
+    parser.add_argument(
+        "--n-min-source",
+        choices=["observed", "fit"],
+        default="observed",
+        help="Use observed points or fitted curve to compute N_min thresholds.",
+    )
+    parser.add_argument(
+        "--n-min-fit-model",
+        default="power_law",
+        help="Fit model used when --n-min-source=fit.",
+    )
     return parser
 
 

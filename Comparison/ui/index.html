@@ -1138,6 +1138,13 @@
                 </select>
               </label>
               <label class="field">
+                <span>N_min source</span>
+                <select id="dataset-minimum-nmin-source">
+                  <option value="observed">observed points</option>
+                  <option value="fit" selected>selected fit</option>
+                </select>
+              </label>
+              <label class="field">
                 <span>Threshold meV</span>
                 <select id="dataset-minimum-threshold-preset">
                   <option value="20" selected>20 meV</option>
@@ -1155,7 +1162,11 @@
               <label class="field">
                 <span>Fit</span>
                 <select id="dataset-minimum-fit">
-                  <option value="power_law" selected>power law</option>
+                  <option value="lowess_logx_robust" selected>robust LOWESS log-N</option>
+                  <option value="lowess_logx">LOWESS log-N</option>
+                  <option value="monotone_lowess_logx">monotone LOWESS log-N</option>
+                  <option value="cumulative_best">cumulative best envelope</option>
+                  <option value="power_law">power law</option>
                   <option value="inverse">1/x</option>
                   <option value="inverse_square">1/x^2</option>
                   <option value="quadratic">quadratic</option>

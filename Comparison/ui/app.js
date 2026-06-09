@@ -2563,12 +2563,29 @@ async function runDatasetMinimumAnalysis() {
   const button = document.getElementById("g2m-deeph-dataset-minimum-run");
   if (button) button.disabled = true;
   try {
+    const selectedFit = datasetMinimumSelectedFit();
+
     const payload = {
       run_roots: runRoots,
       primary_metric: datasetMinimumSelectedMetric(),
       threshold_mev: datasetMinimumSelectedThreshold(),
       x_axis: datasetMinimumSelectedXAxis(),
+      fit_models: [
+        "linear",
+        "quadratic",
+        "inverse",
+        "inverse_square",
+        "power_law",
+        "lowess_logx",
+        "lowess_logx_robust",
+        "monotone_lowess_logx",
+      ].join(","),
+      n_min_source: datasetMinimumSelectedNMinSource
+        ? datasetMinimumSelectedNMinSource()
+        : "fit",
+      n_min_fit_model: selectedFit === "none" ? "power_law" : selectedFit,
     };
+    
     await request("/api/g2m-deeph/dataset-size-minimum/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2628,6 +2645,11 @@ function formatCompactNumber(value) {
   if (number == null) return "-";
   return Number.isInteger(number) ? String(number) : Number(number.toPrecision(5)).toString();
 }
+
+function datasetMinimumSelectedNMinSource() {
+  return datasetMinimumControlValue("dataset-minimum-nmin-source", "fit");
+}
+
 
 function datasetMinimumFindOutput(payload = {}) {
   const metric = datasetMinimumSelectedMetric();
@@ -2761,15 +2783,253 @@ function datasetMinimumPowerLawFitLinePoints(points) {
   }));
 }
 
+function tricubeWeight(u) {
+  const value = Math.max(0, Math.min(1, Math.abs(u)));
+  return (1 - value ** 3) ** 3;
+}
+
+function median(values) {
+  const clean = values
+    .filter((value) => Number.isFinite(value))
+    .slice()
+    .sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const mid = Math.floor(clean.length / 2);
+  return clean.length % 2 ? clean[mid] : 0.5 * (clean[mid - 1] + clean[mid]);
+}
+
+function weightedLocalLinearEstimate(points, x0, robustWeights, frac = 0.45) {
+  const distances = points
+    .map((point) => Math.abs(point.tx - x0))
+    .sort((a, b) => a - b);
+
+  const k = Math.max(2, Math.ceil(frac * points.length));
+  const bandwidth = distances[Math.min(k - 1, distances.length - 1)] || distances[distances.length - 1] || 1;
+
+  let sw = 0;
+  let swx = 0;
+  let swy = 0;
+  let swxx = 0;
+  let swxy = 0;
+
+  points.forEach((point, index) => {
+    const distance = Math.abs(point.tx - x0);
+    const localWeight = bandwidth > 0 ? tricubeWeight(distance / bandwidth) : 1;
+    const robustWeight = robustWeights?.[index] ?? 1;
+    const weight = localWeight * robustWeight;
+
+    if (!Number.isFinite(weight) || weight <= 0) return;
+
+    const dx = point.tx - x0;
+    sw += weight;
+    swx += weight * dx;
+    swy += weight * point.y;
+    swxx += weight * dx * dx;
+    swxy += weight * dx * point.y;
+  });
+
+  if (sw <= 0) return null;
+
+  const denom = sw * swxx - swx * swx;
+  if (Math.abs(denom) < 1e-14) {
+    return swy / sw;
+  }
+
+  const slope = (sw * swxy - swx * swy) / denom;
+  const intercept = (swy - slope * swx) / sw;
+  return intercept;
+}
+
+
+function datasetMinimumPowerLawFloorFitLinePoints(points) {
+  const clean = points
+    .map((point) => ({
+      x: finiteNumber(point.x),
+      y: finiteNumber(point.y),
+    }))
+    .filter((point) => point.x != null && point.x > 0 && point.y != null && point.y >= 0)
+    .sort((a, b) => a.x - b.x);
+
+  if (clean.length < 4) return [];
+
+  let best = null;
+
+  for (let alphaIndex = 0; alphaIndex < 160; alphaIndex += 1) {
+    const alpha = 0.05 + ((3.5 - 0.05) * alphaIndex) / 159;
+    const transformed = clean.map((point) => ({
+      x: point.x ** (-alpha),
+      y: point.y,
+    }));
+
+    const coeffs = polynomialCoefficients(transformed, 1);
+    if (!coeffs) continue;
+
+    const c = coeffs[0];
+    const a = coeffs[1];
+
+    if (!Number.isFinite(c) || !Number.isFinite(a) || c < 0 || a < 0) continue;
+
+    const sse = clean.reduce((sum, point) => {
+      const predicted = c + a * point.x ** (-alpha);
+      return sum + (point.y - predicted) ** 2;
+    }, 0);
+
+    if (!best || sse < best.sse) {
+      best = { alpha, c, a, sse };
+    }
+  }
+
+  if (!best) return [];
+
+  const minX = clean[0].x;
+  const maxX = clean[clean.length - 1].x;
+  return Array.from({ length: 160 }, (_, index) => {
+    const x = Math.exp(Math.log(minX) + ((Math.log(maxX) - Math.log(minX)) * index) / 159);
+    return {
+      x,
+      y: best.c + best.a * x ** (-best.alpha),
+    };
+  });
+}
+
+
+function datasetMinimumLowessLinePoints(points, options = {}) {
+  const frac = options.frac ?? 0.45;
+  const robustIterations = options.robustIterations ?? 2;
+  const monotone = Boolean(options.monotone);
+
+  const clean = points
+    .map((point) => ({
+      x: finiteNumber(point.x),
+      y: finiteNumber(point.y),
+    }))
+    .filter((point) => point.x != null && point.x > 0 && point.y != null)
+    .sort((a, b) => a.x - b.x)
+    .map((point) => ({
+      ...point,
+      tx: Math.log(point.x),
+    }));
+
+  if (clean.length < 3) return [];
+
+  let robustWeights = clean.map(() => 1);
+
+  for (let iteration = 0; iteration < robustIterations; iteration += 1) {
+    const fitted = clean.map((point) =>
+      weightedLocalLinearEstimate(clean, point.tx, robustWeights, frac),
+    );
+
+    const residuals = clean.map((point, index) => {
+      const fit = fitted[index];
+      return fit == null ? null : Math.abs(point.y - fit);
+    });
+
+    const mad = median(residuals);
+    if (mad == null || mad <= 1e-12) break;
+
+    robustWeights = residuals.map((residual) => {
+      if (residual == null) return 0;
+      const u = residual / (6 * mad);
+      if (u >= 1) return 0;
+      return (1 - u * u) ** 2;
+    });
+  }
+
+  const txMin = clean[0].tx;
+  const txMax = clean[clean.length - 1].tx;
+  const gridSize = 160;
+
+  let line = Array.from({ length: gridSize }, (_, index) => {
+    const tx = txMin + ((txMax - txMin) * index) / (gridSize - 1);
+    const y = weightedLocalLinearEstimate(clean, tx, robustWeights, frac);
+    return {
+      x: Math.exp(tx),
+      y,
+    };
+  }).filter((point) => point.y != null && Number.isFinite(point.y));
+
+  if (monotone) {
+    let best = Number.POSITIVE_INFINITY;
+    line = line.map((point) => {
+      best = Math.min(best, point.y);
+      return { ...point, y: best };
+    });
+  }
+
+  return line;
+}
+
+function datasetMinimumCumulativeBestLinePoints(points) {
+  const clean = points
+    .map((point) => ({
+      x: finiteNumber(point.x),
+      y: finiteNumber(point.y),
+    }))
+    .filter((point) => point.x != null && point.y != null)
+    .sort((a, b) => a.x - b.x);
+
+  let best = Number.POSITIVE_INFINITY;
+  return clean.map((point) => {
+    best = Math.min(best, point.y);
+    return {
+      x: point.x,
+      y: best,
+    };
+  });
+}
+
+
 function datasetMinimumFitLinePoints(points, fitKind) {
   if (fitKind === "none") return [];
-  if (fitKind === "power_law") return datasetMinimumPowerLawFitLinePoints(points);
+
+  if (fitKind === "lowess_logx") {
+    return datasetMinimumLowessLinePoints(points, {
+      frac: 0.45,
+      robustIterations: 0,
+      monotone: false,
+    });
+  }
+
+  if (fitKind === "lowess_logx_robust") {
+    return datasetMinimumLowessLinePoints(points, {
+      frac: 0.45,
+      robustIterations: 2,
+      monotone: false,
+    });
+  }
+
+  if (fitKind === "monotone_lowess_logx") {
+    return datasetMinimumLowessLinePoints(points, {
+      frac: 0.45,
+      robustIterations: 2,
+      monotone: true,
+    });
+  }
+
+  if (fitKind === "cumulative_best") {
+    return datasetMinimumCumulativeBestLinePoints(points);
+  }
+
+  if (fitKind === "power_law") {
+    return datasetMinimumPowerLawFitLinePoints(points);
+  }
+
+  if (fitKind === "power_law_floor") {
+    return datasetMinimumPowerLawFloorFitLinePoints(points);
+  }
+
   const reciprocalPower = fitKindReciprocalPower(fitKind);
   if (reciprocalPower != null) return reciprocalFitLinePoints(points, reciprocalPower);
+
   return fitLinePoints(points, fitKindDegree(fitKind));
 }
 
 function datasetMinimumFitLabel(fitKind) {
+  if (fitKind === "lowess_logx") return "LOWESS log-N";
+  if (fitKind === "lowess_logx_robust") return "robust LOWESS log-N";
+  if (fitKind === "monotone_lowess_logx") return "monotone LOWESS log-N";
+  if (fitKind === "cumulative_best") return "cumulative best";
+  if (fitKind === "power_law_floor") return "power law + floor";
   if (fitKind === "power_law") return "power law";
   if (fitKind === "none") return "no fit";
   return fitKindLabel(fitKind);

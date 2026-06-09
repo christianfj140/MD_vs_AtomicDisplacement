@@ -76,6 +76,12 @@ from material_presets import (  # noqa: E402
     DEFAULT_PRESET_DIR as MATERIAL_PRESET_DIR,
     resolve_material_bundle,
 )
+from g2m_deeph_dataset_size_minimum import (
+    discover_metric_files as discover_dataset_minimum_metric_files,
+    load_json_metric_rows as load_dataset_minimum_json_metric_rows,
+    pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
+    read_csv as read_dataset_minimum_csv,
+)
 LOG_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
@@ -5767,6 +5773,62 @@ def _dataset_size_minimum_summary_paths() -> list[Path]:
     return sorted(set(found), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
+
+def _dataset_size_minimum_candidate_run_roots() -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        if not path.is_dir():
+            return
+        resolved = str(path.resolve())
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(path)
+
+    for campaign_root in sorted(RESULTS_ROOT.glob("graphene_w90_snapshot_scaling_*")):
+        if not campaign_root.is_dir():
+            continue
+
+        if (campaign_root / "summary").exists() or (campaign_root / "sweep").exists():
+            add(campaign_root)
+
+        for child in sorted(campaign_root.iterdir()):
+            if child.is_dir():
+                add(child)
+
+    for run_root in sorted(RESULTS_ROOT.glob("g2m_deeph_*/runs/*")):
+        add(run_root)
+
+    return roots
+
+
+def _dataset_size_minimum_rows_from_metric_file(path: Path) -> list[dict[str, Any]]:
+    if path.suffix == ".json":
+        rows = load_dataset_minimum_json_metric_rows(path)
+    else:
+        rows = [dict(row) for row in read_dataset_minimum_csv(path)]
+    return pivot_dataset_minimum_metric_rows(rows)
+
+
+def iter_dataset_size_minimum_metric_sources() -> list[tuple[Path, Path]]:
+    found: list[tuple[Path, Path]] = []
+    seen: set[str] = set()
+
+    for run_root in _dataset_size_minimum_candidate_run_roots():
+        for metric_path in discover_dataset_minimum_metric_files(run_root):
+            if not metric_path.is_file():
+                continue
+            resolved = str(metric_path.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            found.append((run_root.resolve(), metric_path.resolve()))
+
+    return sorted(found, key=lambda item: item[1].stat().st_mtime, reverse=True)
+
+
 def iter_dataset_size_minimum_metrics_paths() -> list[Path]:
     """Find normalized ranking metrics without scanning all of Comparison/results.
 
@@ -5805,70 +5867,82 @@ def iter_dataset_size_minimum_metrics_paths() -> list[Path]:
     return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
 
 
+
 def discover_dataset_size_minimum_run_roots() -> list[dict[str, Any]]:
-    """Discover completed scaling sweeps with normalized ranking metrics."""
+
     active_roots = active_g2m_deeph_run_roots()
-    seen: set[str] = set()
-    items: list[dict[str, Any]] = []
-    for metrics_path in iter_dataset_size_minimum_metrics_paths():
-        run_root = metrics_path.parent.parent.parent.resolve()
-        key = str(run_root)
-        if key in seen:
-            continue
-        seen.add(key)
-        metric_rows = 0
-        dataset_sizes: set[int] = set()
+    grouped_sources: dict[str, dict[str, Any]] = {}
+
+    for run_root, metrics_path in iter_dataset_size_minimum_metric_sources():
+        key = str(run_root.resolve())
+        item = grouped_sources.setdefault(
+            key,
+            {
+                "run_root": run_root.resolve(),
+                "metric_files": [],
+                "rows": [],
+                "errors": [],
+                "modified_at": 0.0,
+            },
+        )
+        item["metric_files"].append(metrics_path)
+        item["modified_at"] = max(item["modified_at"], metrics_path.stat().st_mtime)
         try:
-            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            items.append(
-                {
-                    "run_root": key,
-                    "label": run_root.name,
-                    "metrics_path": str(metrics_path),
-                    "metric_rows": 0,
-                    "dataset_sizes": [],
-                    "selectable": False,
-                    "blocked_reason": f"invalid_metrics_json:{exc}",
-                    "modified_at": metrics_path.stat().st_mtime,
-                }
-            )
-            continue
-        rows = payload.get("metric_scaling_rows") if isinstance(payload, dict) else payload
-        if not isinstance(rows, list):
-            rows = []
-        metric_rows = len(rows)
+            item["rows"].extend(_dataset_size_minimum_rows_from_metric_file(metrics_path))
+        except (OSError, json.JSONDecodeError, csv.Error, ValueError) as exc:
+            item["errors"].append(f"{metrics_path.name}:{exc}")
+
+    items: list[dict[str, Any]] = []
+    for key, payload in grouped_sources.items():
+        run_root = Path(payload["run_root"])
+        rows = payload["rows"]
+        metric_files = payload["metric_files"]
+        dataset_sizes: set[int] = set()
+
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            for field in ("dataset_size", "n_total", "n_train"):
+            for field in (
+                "dataset_size",
+                "dataset_size_x",
+                "n_total",
+                "n_train",
+                "dataset_size_total",
+                "dataset_size_train",
+                "train_dataset_size",
+                "train_size",
+            ):
                 value = row.get(field)
                 if value in (None, ""):
                     continue
                 try:
                     dataset_sizes.add(int(round(float(value))))
+                    break
                 except (TypeError, ValueError):
                     continue
+
         is_active = key in active_roots
-        incomplete = metric_rows == 0
+        incomplete = len(rows) == 0
         blocked_reason = None
         if is_active:
             blocked_reason = "sweep_en_curso"
         elif incomplete:
             blocked_reason = "sin_metricas"
+
         items.append(
             {
                 "run_root": key,
                 "label": run_root.name,
-                "metrics_path": str(metrics_path),
-                "metric_rows": metric_rows,
+                "metrics_path": str(metric_files[0]) if metric_files else "",
+                "metric_files": [str(path) for path in metric_files],
+                "metric_rows": len(rows),
                 "dataset_sizes": sorted(dataset_sizes),
                 "selectable": not is_active and not incomplete,
                 "blocked_reason": blocked_reason,
-                "modified_at": metrics_path.stat().st_mtime,
+                "discovery_errors": payload["errors"],
+                "modified_at": payload["modified_at"],
             }
         )
-    return items
+
+    return sorted(items, key=lambda item: item.get("modified_at") or 0.0, reverse=True)
 
 
 def dataset_size_minimum_available_combinations(outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -5908,8 +5982,18 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     run_roots_raw = payload.get("run_roots")
     if not isinstance(run_roots_raw, list) or not run_roots_raw:
         raise RuntimeError("Envia run_roots como lista no vacia de sweeps terminados.")
+
     if not DATASET_SIZE_MINIMUM_SCRIPT.exists():
         raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
+
+
+    n_min_source = str(payload.get("n_min_source") or "observed").strip()
+    n_min_fit_model = str(payload.get("n_min_fit_model") or payload.get("fit_model") or "power_law").strip()
+
+    if n_min_source not in {"observed", "fit"}:
+        raise RuntimeError("n_min_source debe ser 'observed' o 'fit'.")
+
+
 
     run_roots: list[Path] = []
     for item in run_roots_raw:
@@ -5918,14 +6002,28 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
             path = (REPO_ROOT / path).resolve()
         else:
             path = path.resolve()
+
         if not path.exists():
             raise RuntimeError(f"run_root no encontrado: {path}")
-        metrics_path = path / "summary" / "ranking" / "normalized_run_metrics.json"
-        if not metrics_path.exists():
-            raise RuntimeError(
-                f"run_root sin metricas normalizadas ({metrics_path.name}): {path}"
-            )
+
+        metric_files = discover_dataset_minimum_metric_files(path)
+        if not metric_files:
+            raise RuntimeError(f"run_root sin metricas compatibles para dataset-size-minimum: {path}")
+
+        usable_rows = 0
+        for metric_file in metric_files:
+            try:
+                usable_rows += len(_dataset_size_minimum_rows_from_metric_file(metric_file))
+            except (OSError, json.JSONDecodeError, csv.Error, ValueError):
+                continue
+
+        if usable_rows <= 0:
+            raise RuntimeError(f"run_root sin filas metricas compatibles para dataset-size-minimum: {path}")
+
         run_roots.append(path)
+
+    if not run_roots:
+        raise RuntimeError("No hay run_roots validos para dataset-size-minimum.")
 
     blocked_roots = active_g2m_deeph_run_roots()
     for path in run_roots:
@@ -5939,6 +6037,7 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     x_axis = str(payload.get("x_axis") or "n_train").strip()
     if x_axis not in {"n_total", "n_train"}:
         raise RuntimeError("x_axis debe ser n_total o n_train.")
+
     relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
     plateau_gain = float(payload.get("plateau_gain") or 0.05)
     fit_models = str(payload.get("fit_models") or "linear,quadratic,inverse,inverse_square,power_law")
@@ -5966,7 +6065,13 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         x_axis,
         "--fit-models",
         fit_models,
+        "--n-min-source",
+        n_min_source,
+        "--n-min-fit-model",
+        n_min_fit_model,
     ]
+
+    # CRITICO: esto debe estar antes de subprocess.run().
     for path in run_roots:
         command.extend(["--run-root", str(path)])
 
@@ -5978,6 +6083,7 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         check=False,
         timeout=300,
     )
+
     summary_path = output_dir / "dataset_size_minimum_summary.json"
     summary: dict[str, Any] | None = None
     if summary_path.exists():
@@ -5985,12 +6091,15 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             summary = None
+
     if completed.returncode != 0:
         stderr = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(
             "Postproceso dataset-size-minimum fallo"
             + (f": {stderr}" if stderr else ".")
+            + f" Comando: {' '.join(shlex.quote(part) for part in command)}"
         )
+
     return {
         "status": (summary or {}).get("status") or "ok",
         "output_dir": str(output_dir),
