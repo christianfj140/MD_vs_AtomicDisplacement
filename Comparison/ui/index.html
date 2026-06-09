@@ -1117,10 +1117,15 @@
                 <p class="eyebrow">Dataset size minimum</p>
                 <h3>Minimum snapshots for target precision</h3>
                 <p class="field-help">
-                  Visualizacion read-only desde <code>dataset_size_minimum_existing_sweeps_*</code>. No modifica datos crudos ni lanza jobs.
+                  Postproceso read-only sobre sweeps terminados. Calcula <code>N_min_abs</code>,
+                  <code>N_min_rel95</code>, <code>N_min_plateau</code> y <code>N_min_cost_eff</code>
+                  sin tocar entrenamientos ni sweeps en curso.
                 </p>
               </div>
-              <button id="g2m-deeph-dataset-minimum-refresh" class="button secondary" type="button">Refresh minimum</button>
+              <div class="button-row">
+                <button id="g2m-deeph-dataset-minimum-run" class="button primary" type="button">Run analysis</button>
+                <button id="g2m-deeph-dataset-minimum-refresh" class="button secondary" type="button">Refresh minimum</button>
+              </div>
             </div>
             <div class="grid four split-grid">
               <label class="field">
@@ -1134,7 +1139,11 @@
               </label>
               <label class="field">
                 <span>Threshold meV</span>
+                <select id="dataset-minimum-threshold-preset">
+                  <option value="20" selected>20 meV</option>
+                </select>
                 <input id="dataset-minimum-threshold" type="number" min="0" step="1" value="20" />
+                <small>Solo afecta a <code>N_min_abs</code>.</small>
               </label>
               <label class="field">
                 <span>Eje x</span>
@@ -1154,6 +1163,24 @@
                   <option value="none">none</option>
                 </select>
               </label>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field">
+                <span>N_min en grafico</span>
+                <select id="dataset-minimum-criterion">
+                  <option value="all" selected>Todos (abs, rel95, plateau, cost_eff)</option>
+                  <option value="N_min_abs">N_min_abs</option>
+                  <option value="N_min_rel95">N_min_rel95</option>
+                  <option value="N_min_plateau">N_min_plateau</option>
+                  <option value="N_min_cost_eff">N_min_cost_eff</option>
+                </select>
+              </label>
+              <div class="field">
+                <span>Sweeps fuente (solo terminados)</span>
+                <div id="dataset-minimum-run-sources" class="dataset-minimum-run-sources muted-text">
+                  Loading completed sweeps...
+                </div>
+              </div>
             </div>
             <div id="dataset-minimum-status" class="comparison-status-banner diagnostic">
               Loading dataset-size-minimum outputs...

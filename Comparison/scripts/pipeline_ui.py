@@ -5707,12 +5707,303 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+DATASET_SIZE_MINIMUM_SCRIPT = Path(__file__).resolve().parent / "g2m_deeph_dataset_size_minimum.py"
+DATASET_SIZE_MINIMUM_CRITERIA: list[dict[str, Any]] = [
+    {
+        "id": "N_min_abs",
+        "label": "N_min_abs",
+        "description": "Primer N donde y(N) cruza el umbral absoluto (meV).",
+        "requires_threshold": True,
+        "plot_dash": "dash",
+    },
+    {
+        "id": "N_min_rel95",
+        "label": "N_min_rel95",
+        "description": "Primer N dentro de la tolerancia relativa respecto al mejor observado.",
+        "requires_threshold": False,
+        "plot_dash": "dot",
+    },
+    {
+        "id": "N_min_plateau",
+        "label": "N_min_plateau",
+        "description": "Primer N donde la mejora futura restante cae por debajo del umbral de plateau.",
+        "requires_threshold": False,
+        "plot_dash": "dashdot",
+    },
+    {
+        "id": "N_min_cost_eff",
+        "label": "N_min_cost_eff",
+        "description": "Menor N con coste minimo entre puntos ya cercanos al mejor observado.",
+        "requires_threshold": False,
+        "plot_dash": "longdash",
+    },
+]
+
+
+def active_g2m_deeph_run_roots() -> set[str]:
+    """Run roots that must not be post-processed while a benchmark is active."""
+    roots: set[str] = set()
+    try:
+        status = G2M_DEEPH_RUNNER.status()
+    except Exception:
+        return roots
+    if status.get("running") and status.get("run_root"):
+        roots.add(str(Path(str(status["run_root"])).resolve()))
+    return roots
+
+
+def _dataset_size_minimum_summary_paths() -> list[Path]:
+    patterns = (
+        "dataset_size_minimum_existing_sweeps_*/dataset_size_minimum_summary.json",
+        "dataset_size_minimum_existing_sweeps_*/*/dataset_size_minimum_summary.json",
+        "dataset_size_minimum_ui_*/dataset_size_minimum_summary.json",
+        "dataset_size_minimum_ui_*/*/dataset_size_minimum_summary.json",
+        "dataset_size_minimum_*/dataset_size_minimum_summary.json",
+        "dataset_size_minimum_*/**/dataset_size_minimum_summary.json",
+    )
+    found: list[Path] = []
+    for pattern in patterns:
+        found.extend(RESULTS_ROOT.glob(pattern))
+    return sorted(set(found), key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def iter_dataset_size_minimum_metrics_paths() -> list[Path]:
+    """Find normalized ranking metrics without scanning all of Comparison/results.
+
+    A recursive ``**/summary/ranking/normalized_run_metrics.json`` glob can take
+    more than a minute on large result trees and leave the UI with an empty
+    sweep list. Limit discovery to known benchmark layouts instead.
+    """
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        resolved = str(path.resolve())
+        if resolved in seen or not path.is_file():
+            return
+        seen.add(resolved)
+        found.append(path)
+
+    for campaign_root in sorted(RESULTS_ROOT.glob("graphene_w90_snapshot_scaling_*")):
+        if not campaign_root.is_dir():
+            continue
+        for run_root in campaign_root.iterdir():
+            if not run_root.is_dir():
+                continue
+            add(run_root / "summary" / "ranking" / "normalized_run_metrics.json")
+
+    for path in RESULTS_ROOT.glob(
+        "graphene_w90_snapshot_scaling_*_ui_alias/summary/ranking/normalized_run_metrics.json"
+    ):
+        add(path)
+
+    for path in RESULTS_ROOT.glob(
+        "g2m_deeph_*/runs/*/summary/ranking/normalized_run_metrics.json"
+    ):
+        add(path)
+
+    return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def discover_dataset_size_minimum_run_roots() -> list[dict[str, Any]]:
+    """Discover completed scaling sweeps with normalized ranking metrics."""
+    active_roots = active_g2m_deeph_run_roots()
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for metrics_path in iter_dataset_size_minimum_metrics_paths():
+        run_root = metrics_path.parent.parent.parent.resolve()
+        key = str(run_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        metric_rows = 0
+        dataset_sizes: set[int] = set()
+        try:
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            items.append(
+                {
+                    "run_root": key,
+                    "label": run_root.name,
+                    "metrics_path": str(metrics_path),
+                    "metric_rows": 0,
+                    "dataset_sizes": [],
+                    "selectable": False,
+                    "blocked_reason": f"invalid_metrics_json:{exc}",
+                    "modified_at": metrics_path.stat().st_mtime,
+                }
+            )
+            continue
+        rows = payload.get("metric_scaling_rows") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            rows = []
+        metric_rows = len(rows)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for field in ("dataset_size", "n_total", "n_train"):
+                value = row.get(field)
+                if value in (None, ""):
+                    continue
+                try:
+                    dataset_sizes.add(int(round(float(value))))
+                except (TypeError, ValueError):
+                    continue
+        is_active = key in active_roots
+        incomplete = metric_rows == 0
+        blocked_reason = None
+        if is_active:
+            blocked_reason = "sweep_en_curso"
+        elif incomplete:
+            blocked_reason = "sin_metricas"
+        items.append(
+            {
+                "run_root": key,
+                "label": run_root.name,
+                "metrics_path": str(metrics_path),
+                "metric_rows": metric_rows,
+                "dataset_sizes": sorted(dataset_sizes),
+                "selectable": not is_active and not incomplete,
+                "blocked_reason": blocked_reason,
+                "modified_at": metrics_path.stat().st_mtime,
+            }
+        )
+    return items
+
+
+def dataset_size_minimum_available_combinations(outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    combinations: list[dict[str, Any]] = []
+    seen: set[tuple[str, float | None]] = set()
+    for output in outputs:
+        if output.get("status") != "ok":
+            continue
+        metric = str(output.get("primary_metric") or "")
+        threshold = output.get("threshold_mev")
+        try:
+            threshold_value = float(threshold) if threshold not in (None, "") else None
+        except (TypeError, ValueError):
+            threshold_value = None
+        key = (metric, threshold_value)
+        if key in seen:
+            continue
+        seen.add(key)
+        combinations.append(
+            {
+                "primary_metric": metric,
+                "threshold_mev": threshold_value,
+                "label": f"{metric} · {threshold_value:g} meV" if threshold_value is not None else metric,
+            }
+        )
+    combinations.sort(
+        key=lambda item: (
+            str(item.get("primary_metric") or ""),
+            item.get("threshold_mev") if item.get("threshold_mev") is not None else math.inf,
+        )
+    )
+    return combinations
+
+
+def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run read-only dataset-size-minimum post-processing on completed sweeps."""
+    run_roots_raw = payload.get("run_roots")
+    if not isinstance(run_roots_raw, list) or not run_roots_raw:
+        raise RuntimeError("Envia run_roots como lista no vacia de sweeps terminados.")
+    if not DATASET_SIZE_MINIMUM_SCRIPT.exists():
+        raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
+
+    run_roots: list[Path] = []
+    for item in run_roots_raw:
+        path = Path(str(item)).expanduser()
+        if not path.is_absolute():
+            path = (REPO_ROOT / path).resolve()
+        else:
+            path = path.resolve()
+        if not path.exists():
+            raise RuntimeError(f"run_root no encontrado: {path}")
+        metrics_path = path / "summary" / "ranking" / "normalized_run_metrics.json"
+        if not metrics_path.exists():
+            raise RuntimeError(
+                f"run_root sin metricas normalizadas ({metrics_path.name}): {path}"
+            )
+        run_roots.append(path)
+
+    blocked_roots = active_g2m_deeph_run_roots()
+    for path in run_roots:
+        if str(path) in blocked_roots:
+            raise RuntimeError(
+                f"El sweep {path.name} esta en curso; no se ejecutara el postproceso sobre el."
+            )
+
+    threshold_mev = float(payload.get("threshold_mev") or 10.0)
+    primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
+    x_axis = str(payload.get("x_axis") or "n_train").strip()
+    if x_axis not in {"n_total", "n_train"}:
+        raise RuntimeError("x_axis debe ser n_total o n_train.")
+    relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
+    plateau_gain = float(payload.get("plateau_gain") or 0.05)
+    fit_models = str(payload.get("fit_models") or "linear,quadratic,inverse,inverse_square,power_law")
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = (
+        RESULTS_ROOT / f"dataset_size_minimum_ui_{stamp}" / f"threshold_{threshold_mev:g}meV"
+    ).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        sys.executable,
+        str(DATASET_SIZE_MINIMUM_SCRIPT),
+        "--output-dir",
+        str(output_dir),
+        "--primary-metric",
+        primary_metric,
+        "--threshold-mev",
+        str(threshold_mev),
+        "--relative-tolerance",
+        str(relative_tolerance),
+        "--plateau-gain",
+        str(plateau_gain),
+        "--x-axis",
+        x_axis,
+        "--fit-models",
+        fit_models,
+    ]
+    for path in run_roots:
+        command.extend(["--run-root", str(path)])
+
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    summary_path = output_dir / "dataset_size_minimum_summary.json"
+    summary: dict[str, Any] | None = None
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            summary = None
+    if completed.returncode != 0:
+        stderr = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            "Postproceso dataset-size-minimum fallo"
+            + (f": {stderr}" if stderr else ".")
+        )
+    return {
+        "status": (summary or {}).get("status") or "ok",
+        "output_dir": str(output_dir),
+        "summary_path": str(summary_path),
+        "command": command,
+        "run_roots": [str(path) for path in run_roots],
+        "summary": summary,
+    }
+
+
 def dataset_size_minimum_payload() -> dict[str, Any]:
     """Return read-only dataset-size-minimum post-processing outputs."""
-    summary_paths = [
-        *RESULTS_ROOT.glob("dataset_size_minimum_existing_sweeps_*/dataset_size_minimum_summary.json"),
-        *RESULTS_ROOT.glob("dataset_size_minimum_existing_sweeps_*/*/dataset_size_minimum_summary.json"),
-    ]
+    summary_paths = _dataset_size_minimum_summary_paths()
     outputs: list[dict[str, Any]] = []
     for summary_path in sorted(set(summary_paths), key=lambda path: path.stat().st_mtime, reverse=True):
         try:
@@ -5745,17 +6036,29 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "warnings": summary.get("warnings") or [],
                 "best_rows": best_rows,
                 "result_rows_count": len(result_rows),
+                "run_roots": summary.get("run_roots") or [],
                 "modified_at": summary_path.stat().st_mtime,
             }
         )
+    run_root_sources = discover_dataset_size_minimum_run_roots()
+    active_run_roots = sorted(active_g2m_deeph_run_roots())
     return {
         "available": any(item.get("status") == "ok" for item in outputs),
-        "schema": "dataset_size_minimum_ui_payload_v1",
+        "schema": "dataset_size_minimum_ui_payload_v2",
         "outputs": outputs,
+        "criteria": DATASET_SIZE_MINIMUM_CRITERIA,
+        "available_combinations": dataset_size_minimum_available_combinations(outputs),
+        "run_root_sources": run_root_sources,
+        "active_run_roots": active_run_roots,
+        "default_run_roots": [
+            item["run_root"]
+            for item in run_root_sources
+            if item.get("selectable")
+        ][:1],
         "message": (
             f"{len(outputs)} dataset-size-minimum output(s) found."
             if outputs
-            else "No dataset_size_minimum_existing_sweeps_* summaries found under Comparison/results."
+            else "No dataset_size_minimum summaries found under Comparison/results."
         ),
         "diagnostic_warning": (
             "Dataset-size-minimum outputs are diagnostic post-processing unless they come from "
@@ -14349,6 +14652,13 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     self,
                     G2M_DEEPH_RUNNER.stop(),
                     status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/g2m-deeph/dataset-size-minimum/analyze":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    run_dataset_size_minimum_analysis(payload),
+                    status=HTTPStatus.CREATED,
                 )
             elif path == "/api/experiment":
                 payload = read_json_body(self)

@@ -1746,6 +1746,39 @@ pre {
   margin: 12px 0;
 }
 
+.dataset-minimum-run-sources {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-steel);
+}
+
+.dataset-minimum-run-source {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 10px;
+  align-items: start;
+  font-size: 12px;
+}
+
+.dataset-minimum-run-source input {
+  margin-top: 2px;
+}
+
+.dataset-minimum-run-source-meta {
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.dataset-minimum-run-source-blocked {
+  opacity: 0.72;
+}
+
 .comparison-status-banner {
   padding: 12px 14px;
   border: 1px solid rgba(31, 139, 98, 0.32);

@@ -155,5 +155,99 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertIn("FORBIDDEN_COMPUTE_COMMANDS", source)
 
 
+class DatasetSizeMinimumUiApiTests(unittest.TestCase):
+    def test_iter_metrics_paths_avoids_recursive_results_scan(self) -> None:
+        import importlib.util
+        import time
+
+        spec = importlib.util.spec_from_file_location(
+            "pipeline_ui_iter_metrics_test",
+            SCRIPTS_DIR / "pipeline_ui.py",
+        )
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        started = time.time()
+        paths = module.iter_dataset_size_minimum_metrics_paths()
+        elapsed = time.time() - started
+
+        self.assertLess(elapsed, 2.0)
+        self.assertGreaterEqual(len(paths), 1)
+        for path in paths:
+            self.assertTrue(path.name == "normalized_run_metrics.json")
+            self.assertIn("summary", path.parts)
+            self.assertIn("ranking", path.parts)
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "pipeline_ui_dataset_minimum_test",
+            SCRIPTS_DIR / "pipeline_ui.py",
+        )
+        assert spec and spec.loader
+        cls.pipeline_ui = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = cls.pipeline_ui
+        spec.loader.exec_module(cls.pipeline_ui)
+
+    def test_discover_run_roots_marks_active_root_as_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = base / "graphene_w90_snapshot_scaling_test" / "finished_sweep"
+            metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(
+                json.dumps(
+                    {
+                        "metric_scaling_rows": [
+                            {
+                                "method": "graph2mat",
+                                "dataset_size": 10,
+                                "metric_key": "h_mae_eV_mean",
+                                "metric_value": 0.02,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            original_results_root = self.pipeline_ui.RESULTS_ROOT
+            original_status = self.pipeline_ui.G2M_DEEPH_RUNNER.status
+            try:
+                self.pipeline_ui.RESULTS_ROOT = base
+                self.pipeline_ui.G2M_DEEPH_RUNNER.status = lambda: {
+                    "running": True,
+                    "run_root": str(run_root),
+                }
+                items = self.pipeline_ui.discover_dataset_size_minimum_run_roots()
+            finally:
+                self.pipeline_ui.RESULTS_ROOT = original_results_root
+                self.pipeline_ui.G2M_DEEPH_RUNNER.status = original_status
+            self.assertEqual(len(items), 1)
+            self.assertFalse(items[0]["selectable"])
+            self.assertEqual(items[0]["blocked_reason"], "sweep_en_curso")
+
+    def test_run_analysis_rejects_active_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = base / "active_sweep"
+            metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps({"metric_scaling_rows": []}), encoding="utf-8")
+            original_status = self.pipeline_ui.G2M_DEEPH_RUNNER.status
+            try:
+                self.pipeline_ui.G2M_DEEPH_RUNNER.status = lambda: {
+                    "running": True,
+                    "run_root": str(run_root),
+                }
+                with self.assertRaises(RuntimeError):
+                    self.pipeline_ui.run_dataset_size_minimum_analysis({"run_roots": [str(run_root)]})
+            finally:
+                self.pipeline_ui.G2M_DEEPH_RUNNER.status = original_status
+
+
 if __name__ == "__main__":
     unittest.main()

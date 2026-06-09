@@ -658,6 +658,7 @@ const state = {
   g2mDeephDefaultPlotRunIds: [],
   g2mDeephSelectedPlotRunIds: [],
   datasetMinimumPayload: null,
+  datasetMinimumRunRootSelection: null,
   g2mDeephPlotsInFlight: false,
   g2mDeephLastPlotRefreshAt: 0,
   g2mDeephLastCompletedPlotSignature: null,
@@ -2408,6 +2409,180 @@ function renderG2MDeepHPlotsPayload(payload) {
   schedulePlotResize();
 }
 
+const DATASET_MINIMUM_CRITERIA = {
+  N_min_abs: { label: "N_min_abs", dash: "dash", width: 1.8 },
+  N_min_rel95: { label: "N_min_rel95", dash: "dot", width: 1.2 },
+  N_min_plateau: { label: "N_min_plateau", dash: "dashdot", width: 1.2 },
+  N_min_cost_eff: { label: "N_min_cost_eff", dash: "longdash", width: 1.2 },
+};
+
+function datasetMinimumSelectedCriterion() {
+  return datasetMinimumControlValue("dataset-minimum-criterion", "all");
+}
+
+function datasetMinimumCriteriaToPlot() {
+  const selected = datasetMinimumSelectedCriterion();
+  if (selected === "all") return Object.keys(DATASET_MINIMUM_CRITERIA);
+  return DATASET_MINIMUM_CRITERIA[selected] ? [selected] : Object.keys(DATASET_MINIMUM_CRITERIA);
+}
+
+function datasetMinimumSelectedRunRoots() {
+  if (Array.isArray(state.datasetMinimumRunRootSelection)) {
+    return state.datasetMinimumRunRootSelection
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+  }
+  return Array.from(document.querySelectorAll(".dataset-minimum-run-root:checked"))
+    .map((node) => String(node.value || "").trim())
+    .filter(Boolean);
+}
+
+function setDatasetMinimumRunRootSelection(runRoots) {
+  state.datasetMinimumRunRootSelection = Array.from(new Set(
+    (runRoots || []).map((value) => String(value || "").trim()).filter(Boolean),
+  ));
+}
+
+function syncDatasetMinimumRunRootSelectionFromDom() {
+  const selected = Array.from(document.querySelectorAll(".dataset-minimum-run-root:checked"))
+    .map((node) => String(node.value || "").trim())
+    .filter(Boolean);
+  setDatasetMinimumRunRootSelection(selected);
+  return selected;
+}
+
+function populateDatasetMinimumThresholdPresets(payload = {}) {
+  const select = document.getElementById("dataset-minimum-threshold-preset");
+  const input = document.getElementById("dataset-minimum-threshold");
+  if (!select) return;
+  const currentMetric = datasetMinimumSelectedMetric();
+  const currentThreshold = datasetMinimumSelectedThreshold();
+  const thresholds = Array.from(
+    new Set(
+      (payload.available_combinations || [])
+        .filter((item) => item.primary_metric === currentMetric && finiteNumber(item.threshold_mev) != null)
+        .map((item) => finiteNumber(item.threshold_mev)),
+    ),
+  ).sort((a, b) => a - b);
+  if (!thresholds.length && currentThreshold != null) thresholds.push(currentThreshold);
+  if (!thresholds.length) thresholds.push(20);
+  select.innerHTML = "";
+  for (const threshold of thresholds) {
+    const option = document.createElement("option");
+    option.value = String(threshold);
+    option.textContent = `${formatCompactNumber(threshold)} meV`;
+    if (currentThreshold != null && Math.abs(currentThreshold - threshold) < 1e-9) option.selected = true;
+    select.appendChild(option);
+  }
+  if (input && finiteNumber(select.value) != null) input.value = String(select.value);
+}
+
+function syncDatasetMinimumThresholdFromPreset() {
+  const select = document.getElementById("dataset-minimum-threshold-preset");
+  const input = document.getElementById("dataset-minimum-threshold");
+  if (!select || !input) return;
+  const value = finiteNumber(select.value);
+  if (value != null) input.value = String(value);
+}
+
+function syncDatasetMinimumThresholdPresetFromInput() {
+  const select = document.getElementById("dataset-minimum-threshold-preset");
+  const input = document.getElementById("dataset-minimum-threshold");
+  if (!select || !input) return;
+  const value = finiteNumber(input.value);
+  if (value == null) return;
+  const match = Array.from(select.options).find((option) => {
+    const optionValue = finiteNumber(option.value);
+    return optionValue != null && Math.abs(optionValue - value) < 1e-9;
+  });
+  if (match) select.value = match.value;
+}
+
+function renderDatasetMinimumRunSources(payload = {}) {
+  const container = document.getElementById("dataset-minimum-run-sources");
+  if (!container) return;
+  container.textContent = "";
+  const sources = payload.run_root_sources || [];
+  if (!sources.length) {
+    container.textContent = payload?.run_root_discovery_error
+      || "No se detectaron sweeps terminados con summary/ranking/normalized_run_metrics.json.";
+    return;
+  }
+  const selectableRoots = sources
+    .filter((source) => source.selectable)
+    .map((source) => String(source.run_root || ""));
+  const previousSelection = datasetMinimumSelectedRunRoots()
+    .filter((runRoot) => selectableRoots.includes(runRoot));
+  const defaultRoots = (payload.default_run_roots || [])
+    .map((value) => String(value || ""))
+    .filter((runRoot) => selectableRoots.includes(runRoot));
+  const selectedRoots = new Set(
+    previousSelection.length
+      ? previousSelection
+      : defaultRoots.length
+        ? defaultRoots
+        : selectableRoots.slice(0, 1),
+  );
+  setDatasetMinimumRunRootSelection(Array.from(selectedRoots));
+  for (const source of sources) {
+    const row = document.createElement("label");
+    row.className = `dataset-minimum-run-source${source.selectable ? "" : " dataset-minimum-run-source-blocked"}`;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "dataset-minimum-run-root";
+    checkbox.value = String(source.run_root || "");
+    checkbox.disabled = !source.selectable;
+    checkbox.checked = source.selectable && selectedRoots.has(String(source.run_root || ""));
+    checkbox.addEventListener("change", () => {
+      syncDatasetMinimumRunRootSelectionFromDom();
+      renderDatasetMinimumStatus(datasetMinimumFindOutput(state.datasetMinimumPayload || {}), state.datasetMinimumPayload);
+    });
+    const meta = document.createElement("div");
+    const sizes = Array.isArray(source.dataset_sizes) ? source.dataset_sizes.join(", ") : "-";
+    const blocked = source.blocked_reason
+      ? `<div class="dataset-minimum-run-source-meta">Bloqueado: ${escapeHtml(String(source.blocked_reason))}</div>`
+      : "";
+    meta.innerHTML = `
+      <strong>${escapeHtml(String(source.label || source.run_root || "sweep"))}</strong>
+      <div class="dataset-minimum-run-source-meta">${escapeHtml(String(source.run_root || ""))}</div>
+      <div class="dataset-minimum-run-source-meta">${source.metric_rows || 0} filas · N: ${escapeHtml(sizes || "-")}</div>
+      ${blocked}
+    `;
+    row.appendChild(checkbox);
+    row.appendChild(meta);
+    container.appendChild(row);
+  }
+}
+
+async function runDatasetMinimumAnalysis() {
+  const runRoots = datasetMinimumSelectedRunRoots();
+  if (!runRoots.length) {
+    showToast("Selecciona al menos un sweep terminado.");
+    return;
+  }
+  const button = document.getElementById("g2m-deeph-dataset-minimum-run");
+  if (button) button.disabled = true;
+  try {
+    const payload = {
+      run_roots: runRoots,
+      primary_metric: datasetMinimumSelectedMetric(),
+      threshold_mev: datasetMinimumSelectedThreshold(),
+      x_axis: datasetMinimumSelectedXAxis(),
+    };
+    await request("/api/g2m-deeph/dataset-size-minimum/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    showToast("Dataset-size-minimum analysis completed");
+    await loadDatasetMinimum();
+  } catch (error) {
+    showToast(error.message || String(error));
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 const DATASET_MINIMUM_METRIC_LABELS = {
   h_mae_eV_mean: "H-MAE",
   h_rmse_eV: "H-RMSE",
@@ -2464,7 +2639,14 @@ function datasetMinimumFindOutput(payload = {}) {
     return output.primary_metric === metric && threshold != null && outThreshold != null && Math.abs(outThreshold - threshold) < 1e-9;
   });
   if (exact) return exact;
-  return null;
+  const sameMetric = outputs
+    .filter((output) => output.primary_metric === metric && finiteNumber(output.threshold_mev) != null)
+    .sort((left, right) => {
+      const leftDelta = Math.abs(finiteNumber(left.threshold_mev) - (threshold ?? Number.POSITIVE_INFINITY));
+      const rightDelta = Math.abs(finiteNumber(right.threshold_mev) - (threshold ?? Number.POSITIVE_INFINITY));
+      return leftDelta - rightDelta;
+    });
+  return sameMetric[0] || null;
 }
 
 function datasetMinimumAxisField(axis) {
@@ -2675,33 +2857,36 @@ function renderDatasetMinimumPlot(output, axis) {
     });
   }
   const thresholds = output.thresholds || {};
+  let annotationOffset = 0;
   methods.forEach((method, index) => {
     const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
-    const nAbs = datasetMinimumDisplayN(output, method, thresholds[method]?.N_min_abs, axis);
-    const nRel = datasetMinimumDisplayN(output, method, thresholds[method]?.N_min_rel95, axis);
-    const nValue = finiteNumber(nAbs) ?? finiteNumber(nRel);
-    if (nValue == null) return;
-    const isAbs = finiteNumber(nAbs) != null;
-    shapes.push({
-      type: "line",
-      xref: "x",
-      x0: nValue,
-      x1: nValue,
-      yref: "paper",
-      y0: 0,
-      y1: 1,
-      line: { color, width: isAbs ? 1.8 : 1.2, dash: isAbs ? "dash" : "dot" },
-    });
-    annotations.push({
-      text: `${methodDisplayLabel(method)} ${isAbs ? "N_min_abs" : "N_min_rel95"}=${Math.round(nValue)}`,
-      xref: "x",
-      x: nValue,
-      yref: "paper",
-      y: 1.02 + index * 0.055,
-      showarrow: false,
-      font: { size: 12, color },
-      bgcolor: "rgba(255,255,255,0.82)",
-    });
+    for (const criterionKey of datasetMinimumCriteriaToPlot()) {
+      const criterion = DATASET_MINIMUM_CRITERIA[criterionKey];
+      if (!criterion) continue;
+      const nValue = finiteNumber(datasetMinimumDisplayN(output, method, thresholds[method]?.[criterionKey], axis));
+      if (nValue == null) continue;
+      shapes.push({
+        type: "line",
+        xref: "x",
+        x0: nValue,
+        x1: nValue,
+        yref: "paper",
+        y0: 0,
+        y1: 1,
+        line: { color, width: criterion.width, dash: criterion.dash },
+      });
+      annotations.push({
+        text: `${methodDisplayLabel(method)} ${criterion.label}=${Math.round(nValue)}`,
+        xref: "x",
+        x: nValue,
+        yref: "paper",
+        y: 1.02 + (index * 0.055) + (annotationOffset * 0.028),
+        showarrow: false,
+        font: { size: 11, color },
+        bgcolor: "rgba(255,255,255,0.82)",
+      });
+      annotationOffset += 1;
+    }
   });
   const yValues = rows.map((row) => row.y_value).concat(threshold == null ? [] : [threshold]);
   const title = `Dataset size minimum · ${DATASET_MINIMUM_METRIC_LABELS[output.primary_metric] || output.primary_metric || "metric"}`;
@@ -2721,7 +2906,7 @@ function renderDatasetMinimumPlot(output, axis) {
       range: paddedLinearRange(yValues, { forceZeroMin: true }),
     },
     legend: { orientation: "h", y: -0.22 },
-    margin: { t: 84, r: 48, b: 70, l: 72 },
+    margin: { t: 84 + Math.min(annotationOffset * 10, 96), r: 48, b: 70, l: 72 },
   });
   renderPlot(card, traces, layout, {
     toImageButtonOptions: { filename: "dataset_size_minimum" },
@@ -2741,19 +2926,38 @@ function renderDatasetMinimumStatus(output, payload) {
     const metric = datasetMinimumSelectedMetric();
     const threshold = datasetMinimumSelectedThreshold();
     status.classList.add("invalid");
-    status.textContent = `No hay output para ${DATASET_MINIMUM_METRIC_LABELS[metric] || metric} con threshold ${threshold ?? "-"} meV. Ejecuta el postproceso para esa combinacion.`;
+    const combinations = (payload?.available_combinations || [])
+      .filter((item) => item.primary_metric === metric)
+      .map((item) => `${item.threshold_mev ?? "?"} meV`)
+      .join(", ");
+    status.textContent = `No hay output para ${DATASET_MINIMUM_METRIC_LABELS[metric] || metric} con threshold ${threshold ?? "-"} meV.${combinations ? ` Disponibles: ${combinations}.` : " Ejecuta Run analysis."}`;
     return;
   }
+  const requestedThreshold = datasetMinimumSelectedThreshold();
+  const outputThreshold = finiteNumber(output.threshold_mev);
+  const thresholdNote = requestedThreshold != null && outputThreshold != null && Math.abs(requestedThreshold - outputThreshold) > 1e-9
+    ? ` Mostrando output precomputado mas cercano (${formatCompactNumber(outputThreshold)} meV).`
+    : "";
   const warnings = (output.warnings || []).filter(Boolean);
   const axis = datasetMinimumSelectedXAxis();
   const axisNote = axis !== (output.x_axis || "n_train")
     ? ` N_min fue calculado sobre ${output.x_axis || "n_train"} y se remapea visualmente a ${axis}.`
     : "";
-  status.textContent = `${payload.diagnostic_warning || "Dataset-size-minimum output diagnostico."}${axisNote}${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}`;
+  const selectedRoots = datasetMinimumSelectedRunRoots();
+  const selectionNote = selectedRoots.length
+    ? ` Sweeps seleccionados: ${selectedRoots.length}. Pulsa Run analysis para recalcular con esa seleccion.`
+    : " Selecciona al menos un sweep terminado.";
+  const outputRoots = Array.isArray(output.run_roots) ? output.run_roots : [];
+  const outputNote = outputRoots.length
+    ? ` Output actual generado con ${outputRoots.length} sweep(s).`
+    : "";
+  status.textContent = `${payload.diagnostic_warning || "Dataset-size-minimum output diagnostico."}${thresholdNote}${outputNote}${selectionNote}${axisNote}${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}`;
 }
 
 function renderDatasetMinimum(payload = state.datasetMinimumPayload) {
   state.datasetMinimumPayload = payload || null;
+  populateDatasetMinimumThresholdPresets(payload || {});
+  renderDatasetMinimumRunSources(payload || {});
   const output = datasetMinimumFindOutput(payload || {});
   const axis = datasetMinimumSelectedXAxis();
   renderDatasetMinimumStatus(output, payload);
@@ -2768,6 +2972,8 @@ function renderDatasetMinimum(payload = state.datasetMinimumPayload) {
 }
 
 async function loadDatasetMinimum() {
+  const sourcesNode = document.getElementById("dataset-minimum-run-sources");
+  if (sourcesNode) sourcesNode.textContent = "Cargando sweeps disponibles...";
   if (!window.Plotly) await ensurePlotlyLoaded();
   const payload = await request("/api/g2m-deeph/dataset-size-minimum");
   renderDatasetMinimum(payload);
@@ -9272,15 +9478,27 @@ function setupEvents() {
       .then(() => showToast("Dataset-size minimum refreshed"))
       .catch((error) => showToast(error.message));
   });
+  document.getElementById("g2m-deeph-dataset-minimum-run")?.addEventListener("click", () => {
+    runDatasetMinimumAnalysis().catch((error) => showToast(error.message));
+  });
   [
     "dataset-minimum-metric",
     "dataset-minimum-threshold",
+    "dataset-minimum-threshold-preset",
     "dataset-minimum-x-axis",
     "dataset-minimum-fit",
+    "dataset-minimum-criterion",
   ].forEach((id) => {
     const node = document.getElementById(id);
-    node?.addEventListener("change", () => renderDatasetMinimum());
-    node?.addEventListener("input", () => renderDatasetMinimum());
+    node?.addEventListener("change", () => {
+      if (id === "dataset-minimum-threshold-preset") syncDatasetMinimumThresholdFromPreset();
+      if (id === "dataset-minimum-threshold") syncDatasetMinimumThresholdPresetFromInput();
+      renderDatasetMinimum();
+    });
+    node?.addEventListener("input", () => {
+      if (id === "dataset-minimum-threshold") syncDatasetMinimumThresholdPresetFromInput();
+      renderDatasetMinimum();
+    });
   });
   document.getElementById("g2m-deeph-plot-runs-default")?.addEventListener("click", () => {
     const recentMetricRuns = (state.g2mDeephPlotRuns || [])
