@@ -77,8 +77,12 @@ from material_presets import (  # noqa: E402
     resolve_material_bundle,
 )
 from g2m_deeph_dataset_size_minimum import (
+    best_by_method_size as dataset_minimum_best_by_method_size,
     discover_metric_files as discover_dataset_minimum_metric_files,
+    group_config_rows as dataset_minimum_group_config_rows,
     load_json_metric_rows as load_dataset_minimum_json_metric_rows,
+    load_run_root_rows as dataset_minimum_load_run_root_rows,
+    normalize_rows as dataset_minimum_normalize_rows,
     pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
     read_csv as read_dataset_minimum_csv,
 )
@@ -5984,39 +5988,9 @@ def dataset_size_minimum_command_text(command: list[str] | None) -> str:
     return " ".join(shlex.quote(str(part)) for part in command)
 
 
-def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]:
-    """Run read-only dataset-size-minimum post-processing on completed sweeps."""
-    run_roots_raw = payload.get("run_roots")
+def resolve_dataset_size_minimum_run_roots(run_roots_raw: list[Any]) -> list[Path]:
     if not isinstance(run_roots_raw, list) or not run_roots_raw:
         raise RuntimeError("Envia run_roots como lista no vacia de sweeps terminados.")
-
-    if not DATASET_SIZE_MINIMUM_SCRIPT.exists():
-        raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
-
-    n_min_source = str(payload.get("n_min_source") or "observed").strip()
-    n_min_fit_model = str(payload.get("n_min_fit_model") or payload.get("fit_model") or "power_law").strip()
-
-    if n_min_source not in {"observed", "fit"}:
-        raise RuntimeError("n_min_source debe ser 'observed' o 'fit'.")
-
-    threshold_mev = float(payload.get("threshold_mev") or 10.0)
-    primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
-    x_axis = str(payload.get("x_axis") or "n_train").strip()
-
-    if x_axis not in {"n_total", "n_train"}:
-        raise RuntimeError("x_axis debe ser n_total o n_train.")
-
-    relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
-    plateau_gain = float(payload.get("plateau_gain") or 0.05)
-    fit_models = str(
-        payload.get("fit_models")
-        or "linear,quadratic,inverse,inverse_square,power_law,"
-        "lowess_logx,lowess_logx_robust,monotone_lowess_logx,moving_average"
-    )
-
-    moving_average_window = int(payload.get("moving_average_window") or 3)
-    if moving_average_window <= 0:
-        raise RuntimeError("moving_average_window debe ser un entero positivo.")
 
     run_roots: list[Path] = []
     for item in run_roots_raw:
@@ -6054,6 +6028,95 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
             raise RuntimeError(
                 f"El sweep {path.name} esta en curso; no se ejecutara el postproceso sobre el."
             )
+
+    return run_roots
+
+
+def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build plot-ready best_rows from completed sweeps without writing artifacts."""
+    run_roots = resolve_dataset_size_minimum_run_roots(payload.get("run_roots") or [])
+
+    primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
+    x_axis = str(payload.get("x_axis") or "n_train").strip()
+    if x_axis not in {"n_total", "n_train"}:
+        raise RuntimeError("x_axis debe ser n_total o n_train.")
+
+    sources_by_root = {
+        str(item.get("run_root") or ""): item for item in discover_dataset_size_minimum_run_roots()
+    }
+
+    best_rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    resolved_roots: list[str] = []
+
+    for run_root in run_roots:
+        key = str(run_root.resolve())
+        source_meta = sources_by_root.get(key) or {}
+        if source_meta.get("selectable") is False:
+            reason = source_meta.get("blocked_reason") or "no_selectable"
+            raise RuntimeError(f"El sweep {run_root.name} no es selectable: {reason}")
+
+        loaded, _sources, root_warnings = dataset_minimum_load_run_root_rows(run_root)
+        normalized, normalize_warnings = dataset_minimum_normalize_rows(
+            loaded,
+            primary_metric=primary_metric,
+            x_axis=x_axis,
+        )
+        grouped = dataset_minimum_group_config_rows(normalized)
+        preview_best = dataset_minimum_best_by_method_size(grouped)
+        sweep_label = str(source_meta.get("label") or run_root.name)
+        for row in preview_best:
+            enriched = dict(row)
+            enriched["sweep_label"] = sweep_label
+            enriched["source_run_root"] = key
+            best_rows.append(enriched)
+        warnings.extend(root_warnings + normalize_warnings)
+        if preview_best:
+            resolved_roots.append(key)
+
+    status = "ok" if best_rows else "no_usable_metric_rows"
+    return {
+        "status": status,
+        "primary_metric": primary_metric,
+        "x_axis": x_axis,
+        "run_roots": resolved_roots,
+        "best_rows": best_rows,
+        "warnings": warnings,
+        "is_preview": True,
+    }
+
+
+def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run read-only dataset-size-minimum post-processing on completed sweeps."""
+    if not DATASET_SIZE_MINIMUM_SCRIPT.exists():
+        raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
+
+    n_min_source = str(payload.get("n_min_source") or "observed").strip()
+    n_min_fit_model = str(payload.get("n_min_fit_model") or payload.get("fit_model") or "power_law").strip()
+
+    if n_min_source not in {"observed", "fit"}:
+        raise RuntimeError("n_min_source debe ser 'observed' o 'fit'.")
+
+    threshold_mev = float(payload.get("threshold_mev") or 10.0)
+    primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
+    x_axis = str(payload.get("x_axis") or "n_train").strip()
+
+    if x_axis not in {"n_total", "n_train"}:
+        raise RuntimeError("x_axis debe ser n_total o n_train.")
+
+    relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
+    plateau_gain = float(payload.get("plateau_gain") or 0.05)
+    fit_models = str(
+        payload.get("fit_models")
+        or "linear,quadratic,inverse,inverse_square,power_law,"
+        "lowess_logx,lowess_logx_robust,monotone_lowess_logx,moving_average"
+    )
+
+    moving_average_window = int(payload.get("moving_average_window") or 3)
+    if moving_average_window <= 0:
+        raise RuntimeError("moving_average_window debe ser un entero positivo.")
+
+    run_roots = resolve_dataset_size_minimum_run_roots(payload.get("run_roots") or [])
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = (
@@ -6173,6 +6236,9 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "result_rows_count": len(result_rows),
                 "run_roots": summary.get("run_roots") or [],
                 "modified_at": summary_path.stat().st_mtime,
+                "moving_average_window": summary.get("moving_average_window"),
+                "n_min_source": summary.get("n_min_source"),
+                "n_min_fit_model": summary.get("n_min_fit_model"),
                 "moving_average_window": summary.get("moving_average_window")
 
             }
@@ -14797,6 +14863,9 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     run_dataset_size_minimum_analysis(payload),
                     status=HTTPStatus.CREATED,
                 )
+            elif path == "/api/g2m-deeph/dataset-size-minimum/preview":
+                payload = read_json_body(self)
+                json_response(self, dataset_size_minimum_preview(payload))
             elif path == "/api/experiment":
                 payload = read_json_body(self)
                 material_config = parse_material_payload(

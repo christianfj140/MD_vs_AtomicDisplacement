@@ -248,6 +248,54 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             finally:
                 self.pipeline_ui.G2M_DEEPH_RUNNER.status = original_status
 
+    def test_preview_builds_best_rows_for_completed_sweep(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = base / "finished_sweep"
+            metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(
+                json.dumps(
+                    {
+                        "metric_scaling_rows": [
+                            {
+                                "method": "graph2mat",
+                                "dataset_size": 10,
+                                "metric_key": "h_mae_eV_mean",
+                                "metric_value": 0.02,
+                            },
+                            {
+                                "method": "deeph",
+                                "dataset_size": 10,
+                                "metric_key": "h_mae_eV_mean",
+                                "metric_value": 0.03,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            original_results_root = self.pipeline_ui.RESULTS_ROOT
+            try:
+                self.pipeline_ui.RESULTS_ROOT = base
+                preview = self.pipeline_ui.dataset_size_minimum_preview(
+                    {
+                        "run_roots": [str(run_root)],
+                        "primary_metric": "h_mae_eV_mean",
+                        "x_axis": "n_train",
+                    }
+                )
+            finally:
+                self.pipeline_ui.RESULTS_ROOT = original_results_root
+
+            self.assertEqual(preview["status"], "ok")
+            self.assertEqual(len(preview["best_rows"]), 2)
+            self.assertEqual(
+                sorted(row["method"] for row in preview["best_rows"]),
+                ["deeph", "graph2mat"],
+            )
+            self.assertTrue(all(row.get("sweep_label") for row in preview["best_rows"]))
+
 
 if __name__ == "__main__":
     unittest.main()
