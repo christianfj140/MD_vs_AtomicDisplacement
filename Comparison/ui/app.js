@@ -2584,6 +2584,7 @@ async function runDatasetMinimumAnalysis() {
         "quadratic",
         "inverse",
         "inverse_square",
+        "power_law_floor",
         "power_law",
         "lowess_logx",
         "lowess_logx_robust",
@@ -2641,6 +2642,15 @@ const DATASET_MINIMUM_METHOD_COLORS = {
   graph2mat: "#1f77b4",
 };
 
+function datasetMinimumCanonicalFitModel(fitKind) {
+  if (fitKind === "power_law" || fitKind === "power_law_floor") return "power_law_floor";
+  return String(fitKind || "power_law_floor");
+}
+
+function datasetMinimumFitModelsEquivalent(left, right) {
+  return datasetMinimumCanonicalFitModel(left) === datasetMinimumCanonicalFitModel(right);
+}
+
 function datasetMinimumBackendFitModel(fitKind) {
   const allowed = new Set([
     "linear",
@@ -2648,16 +2658,19 @@ function datasetMinimumBackendFitModel(fitKind) {
     "inverse",
     "inverse_square",
     "power_law",
+    "power_law_floor",
     "lowess_logx",
     "lowess_logx_robust",
     "monotone_lowess_logx",
     "moving_average",
   ]);
 
-  if (allowed.has(fitKind)) return fitKind;
+  if (allowed.has(fitKind)) {
+    return datasetMinimumCanonicalFitModel(fitKind);
+  }
 
   // cumulative_best y none son visuales/frontend, no modelos backend para N_min.
-  return "power_law";
+  return "power_law_floor";
 }
 
 
@@ -2691,7 +2704,7 @@ function datasetMinimumSelectedXAxis() {
 }
 
 function datasetMinimumSelectedFit() {
-  return datasetMinimumControlValue("dataset-minimum-fit", "power_law");
+  return datasetMinimumControlValue("dataset-minimum-fit", "power_law_floor");
 }
 
 function datasetMinimumSelectedMovingAverageWindow() {
@@ -2720,12 +2733,28 @@ function datasetMinimumSelectedNMinSource() {
 }
 
 function datasetMinimumSelectedAggregationMode() {
-  return datasetMinimumControlValue("dataset-minimum-aggregation-mode", "mean_replicates");
+  return datasetMinimumControlValue("dataset-minimum-aggregation-mode", "mean_seeds_per_config");
 }
 
 function datasetMinimumAggregationModeLabel(mode) {
-  if (mode === "best_config") return "Best config — diagnostic";
-  return "Mean replicates — recommended";
+  if (mode === "mean_seeds_per_config") return "Mean seeds per config — paper-level";
+  if (mode === "best_config_mean") return "Best config by seed mean — paper-level if config policy is locked";
+  if (mode === "best_config") return "Best single run — diagnostic only";
+  if (mode === "mean_replicates") return "Mean all replicates — diagnostic/mixed";
+  return String(mode || "unknown");
+}
+
+function datasetMinimumUsesBackendAggregationMode(mode) {
+  return mode === "mean_replicates"
+    || mode === "mean_seeds_per_config"
+    || mode === "best_config_mean";
+}
+
+function datasetMinimumAggregationSeriesSuffix(mode) {
+  if (mode === "best_config") return "best config";
+  if (mode === "best_config_mean") return "best config (seed mean)";
+  if (mode === "mean_seeds_per_config") return "seed mean";
+  return "mean";
 }
 
 function datasetMinimumSelectedBootstrapReplicates() {
@@ -2759,7 +2788,9 @@ function datasetMinimumEffectiveAggregationMode(output = {}) {
 }
 
 function datasetMinimumOutputNMinFitModel(output = {}) {
-  return String(output.n_min_fit_model || "power_law");
+  return datasetMinimumCanonicalFitModel(
+    output.actual_fit_model || output.requested_fit_model || output.n_min_fit_model || "power_law_floor",
+  );
 }
 
 function datasetMinimumOutputMovingAverageWindow(output = {}) {
@@ -2781,11 +2812,14 @@ function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
     return false;
   }
 
-  const nMinSource = String(output.n_min_source || "observed");
-  if (nMinSource !== datasetMinimumSelectedNMinSource()) return false;
+  const requestedSource = String(
+    output.requested_n_min_source || output.n_min_source || "observed",
+  );
+  if (requestedSource !== datasetMinimumSelectedNMinSource()) return false;
 
   const selectedFit = datasetMinimumBackendFitModel(datasetMinimumSelectedFit());
-  if (datasetMinimumOutputNMinFitModel(output) !== selectedFit) return false;
+  const outputFit = output.requested_fit_model || output.n_min_fit_model || output.actual_fit_model;
+  if (!datasetMinimumFitModelsEquivalent(outputFit, selectedFit)) return false;
 
   if (
     datasetMinimumEffectiveAggregationMode(output)
@@ -3450,7 +3484,7 @@ function datasetMinimumFitLinePoints(points, fitKind, options = {}) {
     return datasetMinimumCumulativeBestLinePoints(points);
   }
 
-  if (fitKind === "power_law") {
+  if (fitKind === "power_law" || fitKind === "power_law_floor") {
     return datasetMinimumPowerLawFitLinePoints(points);
   }
 
@@ -3461,12 +3495,13 @@ function datasetMinimumFitLinePoints(points, fitKind, options = {}) {
 }
 
 function datasetMinimumFitLabel(fitKind) {
-  if (fitKind === "lowess_logx") return "LOWESS log-N";
-  if (fitKind === "lowess_logx_robust") return "robust LOWESS log-N";
-  if (fitKind === "monotone_lowess_logx") return "monotone LOWESS log-N";
+  if (fitKind === "lowess_logx") return "LOWESS log-N (diagnostic)";
+  if (fitKind === "lowess_logx_robust") return "robust LOWESS log-N (diagnostic)";
+  if (fitKind === "monotone_lowess_logx") return "monotone LOWESS log-N (diagnostic)";
+  if (fitKind === "moving_average") return "moving average (diagnostic)";
   if (fitKind === "cumulative_best") return "cumulative best";
-  if (fitKind === "power_law_floor") return "power law + floor";
-  if (fitKind === "power_law") return "power law + floor";
+  if (fitKind === "power_law_floor") return "power law + floor (constrained)";
+  if (fitKind === "power_law") return "power law + floor (constrained)";
   if (fitKind === "none") return "no fit";
   return fitKindLabel(fitKind);
 }
@@ -3568,7 +3603,8 @@ function datasetMinimumResolvePlotOutput(output, preview) {
       ...output,
       best_rows: plotRows,
       aggregated_rows: plotRows,
-      aggregated: output.aggregation_mode === "mean_replicates" || Boolean(output.aggregated),
+      aggregated: datasetMinimumUsesBackendAggregationMode(output.aggregation_mode)
+        || Boolean(output.aggregated),
       is_preview: false,
     };
   }
@@ -3689,7 +3725,10 @@ function datasetMinimumBackendFitLine(method, output, selectedFit) {
     ? [minX]
     : Array.from({ length: 100 }, (_, index) => minX + ((maxX - minX) * index) / 99);
 
-  if (selectedFit === "power_law" && coefficients.length >= 3) {
+  if (
+    (selectedFit === "power_law" || selectedFit === "power_law_floor")
+    && coefficients.length >= 3
+  ) {
     const [eInf, amplitude, alpha] = coefficients;
     return grid.map((x) => ({ x, y: eInf + amplitude * (x ** (-alpha)) }));
   }
@@ -3734,14 +3773,16 @@ function renderDatasetMinimumPlot(output, axis) {
     || (output?.is_preview ? datasetMinimumSelectedAggregationMode() : "mean_replicates");
   const selectedRootCount = datasetMinimumSelectedRunRoots().length;
   const useBackendAggregation = !output?.is_preview && (
-    aggregationMode === "mean_replicates"
+    datasetMinimumUsesBackendAggregationMode(aggregationMode)
     || rows.some((row) => row.is_aggregated_mean || (row.replicate_count || 0) > 1)
   );
-  const aggregated = aggregationMode === "mean_replicates"
+  const aggregated = datasetMinimumUsesBackendAggregationMode(aggregationMode)
     || useBackendAggregation
     || Boolean(output?.aggregated)
     || datasetMinimumShouldAggregateRows(rows, selectedRootCount);
-  const plotRows = useBackendAggregation || aggregationMode === "mean_replicates" || !output?.is_preview
+  const plotRows = useBackendAggregation
+    || datasetMinimumUsesBackendAggregationMode(aggregationMode)
+    || !output?.is_preview
     ? rows
     : aggregated
       ? datasetMinimumAggregateRowsByMethod(rows, axis)
@@ -3762,7 +3803,7 @@ function renderDatasetMinimumPlot(output, axis) {
     const method = String(sample.method || "unknown");
     const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
     const seriesLabel = aggregated
-      ? `${methodDisplayLabel(method)} ${aggregationMode === "best_config" ? "best config" : "mean"}`
+      ? `${methodDisplayLabel(method)} ${datasetMinimumAggregationSeriesSuffix(aggregationMode)}`
       : datasetMinimumPlotSeriesLabel(sample, multiSweep, aggregated);
     const errorValues = group.map((row) => datasetMinimumRowErrorBarDelta(row));
     const hasErrorBars = errorValues.some((value) => value != null && value > 0);
@@ -3966,9 +4007,18 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const aggregationNote = ` Aggregation: ${datasetMinimumAggregationModeLabel(aggregationMode)}.`;
   const bestConfigWarning = aggregationMode === "best_config"
     ? " Warning: best_config is diagnostic only, not recommended for paper-level reporting."
+    : aggregationMode === "mean_replicates"
+      ? " Warning: mean_replicates mixes configs/seeds and is diagnostic only."
+      : "";
+  const requestedSource = output.requested_n_min_source || output.n_min_source || "observed";
+  const actualSource = output.actual_n_min_source || output.n_min_source || requestedSource;
+  const nMinSourceNote = output.fallback_used
+    ? ` N_min source: requested=${requestedSource}, actual=${actualSource} (FIT FAILED; explicit observed fallback).`
+    : ` N_min source: ${actualSource}.`;
+  const fitNote = ` Fit: ${datasetMinimumFitLabel(datasetMinimumSelectedFit())} (canonical: ${output.canonical_fit_model || datasetMinimumOutputNMinFitModel(output)}).`;
+  const fallbackNote = output.fallback_used
+    ? ` WARNING: canonical fit failed (${output.fallback_reason || "unknown"}); thresholds use observed points.`
     : "";
-  const nMinSourceNote = ` N_min source: ${output.n_min_source || "observed"}.`;
-  const fitNote = ` Fit: ${datasetMinimumFitLabel(datasetMinimumSelectedFit())} (backend: ${datasetMinimumOutputNMinFitModel(output)}).`;
   const windowNote = datasetMinimumOutputNMinFitModel(output) === "moving_average"
     ? ` Moving-average window: ${datasetMinimumOutputMovingAverageWindow(output)}.`
     : "";
@@ -3985,6 +4035,13 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     temporalNote = ` Estimated N_eff range: ${JSON.stringify(output.estimated_n_eff_train)}.`;
   } else {
     temporalNote = " N is nominal; N_eff not estimated.";
+  }
+  temporalNote += " N_min thresholds use nominal N_train, not N_eff.";
+  if (temporal.n_eff_convention) {
+    temporalNote += ` Convention: ${temporal.n_eff_convention}.`;
+  }
+  if ((temporal.warnings || []).some((item) => String(item).includes("n_eff_much_smaller_than_nominal"))) {
+    temporalNote += " WARNING: N_eff much smaller than nominal N.";
   }
   if (output.autocorrelation_available === false && (temporal.warnings || []).length) {
     const temporalWarnings = (temporal.warnings || []).filter((item) =>
@@ -4006,7 +4063,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : "";
 
   status.textContent =
-    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${fitNote}${windowNote}${bootstrapNote}${temporalNote}` +
+    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${temporalNote}` +
     `${thresholdNote}${outputNote}${axisNote}` +
     `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}` +
     `${payload.diagnostic_warning ? ` ${payload.diagnostic_warning}` : ""}`;

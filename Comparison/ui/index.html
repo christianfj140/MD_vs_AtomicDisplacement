@@ -1147,10 +1147,12 @@
               <label class="field">
                 <span>Aggregation</span>
                 <select id="dataset-minimum-aggregation-mode">
-                  <option value="mean_replicates" selected>Mean replicates — recommended</option>
-                  <option value="best_config">Best config — diagnostic</option>
+                  <option value="mean_seeds_per_config" selected>Mean seeds per config — paper-level</option>
+                  <option value="best_config_mean">Best config by seed mean — paper-level if config policy is locked</option>
+                  <option value="mean_replicates">Mean all replicates — diagnostic/mixed</option>
+                  <option value="best_config">Best single run — diagnostic only</option>
                 </select>
-                <small>Mean replicates promedia replicas; best config es solo diagnostico (no paper-level).</small>
+                <small>Paper-level modes average seeds within each config; diagnostic modes mix configs or pick single runs.</small>
               </label>
               <label class="field">
                 <span>Bootstrap replicates</span>
@@ -1192,16 +1194,17 @@
               <label class="field">
                 <span>Fit</span>
                 <select id="dataset-minimum-fit">
-                  <option value="lowess_logx_robust" selected>robust LOWESS log-N</option>
-                  <option value="lowess_logx">LOWESS log-N</option>
-                  <option value="monotone_lowess_logx">monotone LOWESS log-N</option>
+                  <option value="power_law_floor" selected>power law + floor (constrained)</option>
+                  <option value="lowess_logx_robust">robust LOWESS log-N (diagnostic)</option>
+                  <option value="lowess_logx">LOWESS log-N (diagnostic)</option>
+                  <option value="monotone_lowess_logx">monotone LOWESS log-N (diagnostic)</option>
                   <option value="cumulative_best">cumulative best envelope</option>
-                  <option value="power_law">power law + floor</option>
+                  <option value="power_law">power law + floor (legacy alias)</option>
                   <option value="inverse">1/x</option>
                   <option value="inverse_square">1/x^2</option>
                   <option value="quadratic">quadratic</option>
                   <option value="linear">linear</option>
-                  <option value="moving_average">moving average</option>
+                  <option value="moving_average">moving average (diagnostic)</option>
                   <option value="none">none</option>
                 </select>
               </label>

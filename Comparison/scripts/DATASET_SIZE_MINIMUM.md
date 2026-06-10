@@ -27,7 +27,8 @@ analysis adds `temporal_diagnostics` to the summary:
 |---|---|
 | `nominal_n_train` | Train split size from manifests |
 | `estimated_n_eff_train` | Diagnostic effective train size when a cheap scalar series exists |
-| `autocorrelation_available` | Whether ACF / τ_int / N_eff could be estimated |
+| `autocorrelation_available` | Whether ACF / statistical_inefficiency / N_eff could be estimated |
+| `autocorrelation_convention` | Registered convention id (`sokal_positive_lag_inefficiency_v1`) |
 | `temporal_diagnostics.datasets[]` | Per-dataset block counts, `temporal_gap`, split strategy, warnings |
 
 Autocorrelation uses a lightweight scalar per snapshot when available (for
@@ -35,8 +36,8 @@ example total energy or displacement magnitude from `metadata.json`). It
 computes:
 
 - autocorrelation function up to a modest lag cap;
-- integrated autocorrelation time `τ_int`;
-- `N_eff ≈ N / (2 τ_int)` (standard batch-means style approximation).
+- `statistical_inefficiency = 1 + 2 Σ ρ(k)` (positive lags only; `tau_int` is a legacy alias);
+- `N_eff = N / statistical_inefficiency`.
 
 **Important:** `N_eff` is reported for transparency. The main `N_min` curves and
 bootstrap CIs still use nominal `N` until a future protocol explicitly switches
@@ -47,6 +48,7 @@ to effective sizes.
 - `temporal_metadata_missing_*` — no usable temporal manifests; only nominal N is known.
 - `temporal_gap_le_1_*` — adjacent MD frames may leak across split boundaries.
 - `autocorrelation_unavailable_*` — no cheap scalar series; N_eff is not estimated.
+- `n_eff_much_smaller_than_nominal` — estimated N_eff is far below nominal N_train.
 - `N is nominal; N_eff not estimated` — safe default message in UI/report.
 
 Treat `N_min` as a **lower bound subject to temporal independence assumptions**

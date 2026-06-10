@@ -10,7 +10,9 @@ Nominal N vs effective N (N_eff):
     rows. MD trajectory snapshots can be temporally autocorrelated, so those
     counts overstate independent samples. When temporal metadata and a cheap
     per-snapshot scalar series are available, this script also reports a
-    diagnostic N_eff ≈ N / (2 τ_int) without changing the main N_min fits.
+    diagnostic N_eff ≈ N / statistical_inefficiency with
+    statistical_inefficiency = 1 + 2 Σ ρ(k) (positive lags only), without changing
+    the main N_min fits.
     Interpret N_min cautiously when N_eff ≪ N or when autocorrelation diagnostics
     are unavailable. See Comparison/scripts/DATASET_SIZE_MINIMUM.md.
 """
@@ -34,9 +36,18 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_PRIMARY_METRIC = "h_mae_eV_mean"
-DEFAULT_FIT_MODELS = "linear,quadratic,inverse,inverse_square,power_law"
+DEFAULT_FIT_MODELS = "linear,quadratic,inverse,inverse_square,power_law_floor"
+CANONICAL_POWER_LAW_MODEL = "power_law_floor"
+POWER_LAW_LEGACY_ALIASES = frozenset({"power_law"})
+NONNEG_PREDICTION_TOL = 1e-9
 DEFAULT_AGGREGATION_MODE = "mean_replicates"
-AGGREGATION_MODES = ("mean_replicates", "best_config")
+AGGREGATION_MODES = (
+    "mean_replicates",
+    "best_config",
+    "mean_seeds_per_config",
+    "best_config_mean",
+)
+BASE_CONFIG_SEED_SUFFIX = re.compile(r"-seed[1-4]$", re.IGNORECASE)
 DEFAULT_BOOTSTRAP_SEED = 12345
 DEFAULT_CI_LEVEL = 0.95
 BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", "N_min_rel95", "N_min_plateau")
@@ -542,6 +553,12 @@ def group_config_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def extract_base_config_id(config_id: Any) -> str:
+    text = str(config_id or "").strip() or "unknown"
+    stripped = BASE_CONFIG_SEED_SUFFIX.sub("", text)
+    return stripped or text
+
+
 def resolve_aggregation_mode(value: str | None, *, run_root_count: int) -> str:
     """Pick aggregation mode; default preserves single-root best_config behavior."""
     if value is None or not str(value).strip():
@@ -620,6 +637,111 @@ def aggregate_rows_mean_replicates(rows: list[dict[str, Any]]) -> list[dict[str,
             }
         )
     return out
+
+
+def aggregate_rows_mean_seeds_per_config(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Average seed replicates for each (method, dataset_size_x, base_config_id)."""
+    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        metric = row_primary_metric_mev(row)
+        size = int_number(row.get("dataset_size_x"))
+        if metric is None or size is None:
+            continue
+        base_config_id = extract_base_config_id(row.get("config_id"))
+        grouped[(str(row["method"]), int(size), base_config_id)].append(row)
+
+    out: list[dict[str, Any]] = []
+    for (method, size, base_config_id), items in sorted(
+        grouped.items(),
+        key=lambda item: (item[0][0], item[0][1], item[0][2]),
+    ):
+        metric_values = [
+            float(metric)
+            for item in items
+            if (metric := row_primary_metric_mev(item)) is not None
+        ]
+        costs = [
+            value
+            for item in items
+            if (value := finite_number(item.get("gpu_hours_total_mean") or item.get("gpu_hours_total"))) is not None
+        ]
+        elapsed = [
+            value
+            for item in items
+            if (value := finite_number(item.get("elapsed_seconds_mean") or item.get("elapsed_seconds"))) is not None
+        ]
+        first = items[0]
+        config_ids = sorted({str(item.get("config_id") or "") for item in items if item.get("config_id")})
+        seeds = sorted({str(item.get("seed") or "") for item in items if item.get("seed") not in (None, "", "unknown")})
+        source_roots = sorted(
+            {str(item.get("source_run_root") or "") for item in items if item.get("source_run_root")}
+        )
+        out.append(
+            {
+                "method": method,
+                "dataset_size_x": size,
+                "dataset_size_total": first.get("dataset_size_total"),
+                "dataset_size_train": first.get("dataset_size_train"),
+                "base_config_id": base_config_id,
+                "config_id": base_config_id,
+                "epoch_label": first.get("epoch_label") or f"mean of {len(items)} seed(s)",
+                "primary_metric": first.get("primary_metric"),
+                "primary_metric_unit": first.get("primary_metric_unit"),
+                "primary_metric_mev_mean": mean(metric_values),
+                "primary_metric_mev_std": std(metric_values),
+                "primary_metric_mev_sem": sem(metric_values),
+                "seed_count": len(seeds) if seeds else len(items),
+                "seeds": seeds,
+                "config_ids": config_ids,
+                "replicate_count": len(items),
+                "y_min": min(metric_values) if metric_values else None,
+                "y_max": max(metric_values) if metric_values else None,
+                "source_run_roots": source_roots,
+                "gpu_hours_total_mean": mean(costs),
+                "elapsed_seconds_mean": mean(elapsed),
+                "is_aggregated_mean": True,
+                "aggregation_mode": "mean_seeds_per_config",
+                "selection_basis": "mean_over_seeds",
+            }
+        )
+    return out
+
+
+def aggregate_rows_best_config_mean(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pick the lowest seed-mean config for each (method, dataset_size_x)."""
+    seed_means = aggregate_rows_mean_seeds_per_config(rows)
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in seed_means:
+        grouped[(str(row["method"]), int(row["dataset_size_x"]))].append(row)
+
+    best: list[dict[str, Any]] = []
+    for (_method, _size), items in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        chosen = min(
+            items,
+            key=lambda row: (
+                finite_number(row.get("primary_metric_mev_mean")) or math.inf,
+                finite_number(row.get("gpu_hours_total_mean")) or math.inf,
+                str(row.get("base_config_id") or row.get("config_id")),
+            ),
+        )
+        out = dict(chosen)
+        out["is_best_for_method_size"] = True
+        out["aggregation_mode"] = "best_config_mean"
+        out["selection_basis"] = "mean_over_seeds"
+        out["config_id"] = out.get("base_config_id") or out.get("config_id")
+        best.append(out)
+    return best
+
+
+def analysis_rows_for_aggregation_mode(
+    normalized_rows: list[dict[str, Any]],
+    grouped_rows: list[dict[str, Any]],
+    *,
+    aggregation_mode: str,
+) -> list[dict[str, Any]]:
+    if aggregation_mode == "best_config":
+        return best_by_method_size(grouped_rows)
+    return analysis_rows_from_normalized(normalized_rows, aggregation_mode=aggregation_mode)
 
 
 def best_by_method_size(grouped_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -820,16 +942,17 @@ def thresholds_by_method_from_fit(
             key=lambda row: int(row["dataset_size_x"]),
         )
 
+        canonical_model = canonical_fit_model(fit_model)
         curve_rows, fit = fitted_curve_rows(
             observed_rows,
-            fit_model=fit_model,
+            fit_model=canonical_model,
             moving_average_window=moving_average_window,
         )
         fit_details[method] = fit
 
         if not curve_rows:
             warnings.append(
-                f"fit_thresholds_unavailable:{method}:{fit_model}:{fit.get('status')}"
+                f"fit_thresholds_unavailable:{method}:{canonical_model}:{fit.get('status')}"
             )
             continue
 
@@ -844,7 +967,9 @@ def thresholds_by_method_from_fit(
                 int(round(float(row["dataset_size_x"])))
                 for row in observed_rows
             ],
-            "fit_model": fit_model,
+            "fit_model": canonical_model,
+            "requested_fit_model": fit_model,
+            "canonical_fit_model": canonical_model,
             "fit_domain": fit.get("fit_domain") or {},
             "best_observed_mev": min(
                 float(row["primary_metric_mev_mean"])
@@ -934,27 +1059,151 @@ def fit_linear_model(model: str, n_values: list[float], y_values: list[float]) -
     return fit_summary(model, n_values, y_values, predicted, coefficients)
 
 
-def fit_power_law(n_values: list[float], y_values: list[float]) -> dict[str, Any]:
+def canonical_fit_model(model: str) -> str:
+    model = str(model or "").strip()
+    if model in POWER_LAW_LEGACY_ALIASES or model == CANONICAL_POWER_LAW_MODEL:
+        return CANONICAL_POWER_LAW_MODEL
+    return model
+
+
+def fit_models_equivalent(left: str, right: str) -> bool:
+    return canonical_fit_model(left) == canonical_fit_model(right)
+
+
+def is_power_law_fit_model(model: str) -> bool:
+    return canonical_fit_model(model) == CANONICAL_POWER_LAW_MODEL
+
+
+def power_law_floor_predictions(
+    coefficients: list[float],
+    n_values: list[float],
+) -> list[float]:
+    e_inf, amplitude, alpha = coefficients
+    return [float(e_inf) + float(amplitude) * (float(n) ** (-float(alpha))) for n in n_values]
+
+
+def predictions_nonnegative_on_domain(
+    coefficients: list[float],
+    n_values: list[float],
+) -> bool:
+    return all(
+        value >= -NONNEG_PREDICTION_TOL
+        for value in power_law_floor_predictions(coefficients, n_values)
+    )
+
+
+def nonnegative_floor_coefficients(
+    transformed: list[float],
+    y_values: list[float],
+) -> tuple[float, float]:
+    candidates: list[tuple[float, float]] = []
+    design = [[1.0, value] for value in transformed]
+    coefficients = least_squares_coefficients(design, y_values)
+    candidates.append((max(0.0, float(coefficients[0])), max(0.0, float(coefficients[1]))))
+
+    denom = sum(value * value for value in transformed)
+    if denom > 0:
+        amplitude = sum(t * y for t, y in zip(transformed, y_values)) / denom
+        candidates.append((0.0, max(0.0, float(amplitude))))
+
+    floor = max(0.0, float(sum(y_values) / len(y_values)))
+    candidates.append((floor, 0.0))
+    candidates.append((0.0, 0.0))
+
+    unique: list[tuple[float, float]] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return min(
+        unique,
+        key=lambda pair: sum(
+            (y - (pair[0] + pair[1] * transformed_value)) ** 2
+            for transformed_value, y in zip(transformed, y_values)
+        ),
+    )
+
+
+def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[str, Any]:
+    """Constrained canonical model: y(N) = E_inf + A * N^(-alpha)."""
+    if len(n_values) < required_fit_points(CANONICAL_POWER_LAW_MODEL):
+        return {
+            "model": CANONICAL_POWER_LAW_MODEL,
+            "status": "skipped_insufficient_points",
+            "n_points": len(n_values),
+            "formula": "y = E_inf + A N^-alpha",
+        }
+
+    n_min = min(n_values)
+    n_max = max(n_values)
+    if n_min <= 0:
+        return {
+            "model": CANONICAL_POWER_LAW_MODEL,
+            "status": "failed_invalid_domain",
+            "n_points": len(n_values),
+            "formula": "y = E_inf + A N^-alpha",
+        }
+
     best: dict[str, Any] | None = None
-    # Alpha grid; for each alpha the fit is linear in E_inf and A.
     for idx in range(160):
         alpha = 0.05 + (4.0 - 0.05) * idx / 159.0
+        if alpha <= 0:
+            continue
         transformed = [n ** (-alpha) for n in n_values]
-        design = [[1.0, value] for value in transformed]
-        coefficients = least_squares_coefficients(design, y_values)
-        pred = [sum(coef * item for coef, item in zip(coefficients, row)) for row in design]
-        sse = sum((y - yhat) ** 2 for y, yhat in zip(y_values, pred))
+        e_inf, amplitude = nonnegative_floor_coefficients(transformed, y_values)
+        coefficients = [float(e_inf), float(amplitude), float(alpha)]
+        if e_inf < 0 or amplitude < 0:
+            continue
+        if not predictions_nonnegative_on_domain(coefficients, n_values):
+            continue
+        predicted = power_law_floor_predictions(coefficients, n_values)
+        sse = sum((y - yhat) ** 2 for y, yhat in zip(y_values, predicted))
         if best is None or sse < best["sse"]:
             best = {
                 "alpha": float(alpha),
-                "coefficients": [float(coefficients[0]), float(coefficients[1]), float(alpha)],
-                "predicted": pred,
+                "coefficients": coefficients,
+                "predicted": predicted,
                 "sse": sse,
             }
-    assert best is not None
-    summary = fit_summary("power_law", n_values, y_values, best["predicted"], best["coefficients"])
+
+    if best is None:
+        return {
+            "model": CANONICAL_POWER_LAW_MODEL,
+            "status": "failed_constraint_violation",
+            "n_points": len(n_values),
+            "formula": "y = E_inf + A N^-alpha",
+        }
+
+    summary = fit_summary(
+        CANONICAL_POWER_LAW_MODEL,
+        n_values,
+        y_values,
+        best["predicted"],
+        best["coefficients"],
+    )
+    summary["status"] = "ok"
     summary["formula"] = "y = E_inf + A N^-alpha"
+    summary["constraints"] = {
+        "e_inf_nonnegative": best["coefficients"][0] >= 0,
+        "amplitude_nonnegative": best["coefficients"][1] >= 0,
+        "alpha_positive": best["coefficients"][2] > 0,
+        "predictions_nonnegative_on_observed_domain": True,
+    }
+    summary["fit_domain"] = {"min_n": float(n_min), "max_n": float(n_max)}
+    summary["coefficients_named"] = {
+        "e_inf": best["coefficients"][0],
+        "amplitude": best["coefficients"][1],
+        "alpha": best["coefficients"][2],
+    }
     return summary
+
+
+def fit_power_law(n_values: list[float], y_values: list[float]) -> dict[str, Any]:
+    """Legacy alias for the constrained canonical power-law + floor model."""
+    result = fit_power_law_floor(n_values, y_values)
+    if result.get("status") == "ok":
+        result = dict(result)
+        result["legacy_model_alias"] = "power_law"
+    return result
 
 LOWESS_FIT_MODELS = {"lowess_logx", "lowess_logx_robust", "monotone_lowess_logx"}
 
@@ -1231,9 +1480,8 @@ def predict_fit(model: str, coefficients: list[float], n_values: list[float]) ->
         raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
     if model in LOWESS_FIT_MODELS:
         raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
-    if model == "power_law":
-        e_inf, amplitude, alpha = coefficients
-        return [e_inf + amplitude * (n ** (-alpha)) for n in n_values]
+    if is_power_law_fit_model(model):
+        return power_law_floor_predictions([float(item) for item in coefficients], n_values)
     predictions = []
     for design_row in fit_design(model, n_values):
         predictions.append(sum(coef * value for coef, value in zip(coefficients, design_row)))
@@ -1289,8 +1537,8 @@ def fitted_curve_rows(
     n_values = [float(row["dataset_size_x"]) for row in clean_rows]
     y_values = [float(row["primary_metric_mev_mean"]) for row in clean_rows]
 
-    if fit_model == "power_law":
-        fit = fit_power_law(n_values, y_values)
+    if is_power_law_fit_model(fit_model):
+        fit = fit_power_law_floor(n_values, y_values)
     elif fit_model in LOWESS_FIT_MODELS:
         fit = fit_lowess_model(fit_model, n_values, y_values)
     elif fit_model == "moving_average":
@@ -1397,8 +1645,8 @@ def fit_models_for_method(
             out[model] = {"model": model, "status": "skipped_insufficient_points", "n_points": len(n_values)}
             continue
         try:
-            if model == "power_law":
-                out[model] = fit_power_law(n_values, y_values)
+            if is_power_law_fit_model(model):
+                out[model] = fit_power_law_floor(n_values, y_values)
             elif model in LOWESS_FIT_MODELS:
                 out[model] = fit_lowess_model(model, n_values, y_values)
             elif model == "moving_average":
@@ -1420,6 +1668,7 @@ def required_fit_points(model: str) -> int:
         "moving_average": 1,
         "quadratic": 3,
         "power_law": 3,
+        "power_law_floor": 3,
         "lowess_logx": 3,
         "lowess_logx_robust": 3,
         "monotone_lowess_logx": 3,
@@ -1433,6 +1682,7 @@ def parse_fit_models(value: str) -> list[str]:
     "inverse",
     "inverse_square",
     "power_law",
+    "power_law_floor",
     "lowess_logx",
     "lowess_logx_robust",
     "monotone_lowess_logx",
@@ -1444,12 +1694,6 @@ def parse_fit_models(value: str) -> list[str]:
         raise SystemExit(f"Unknown fit model(s): {', '.join(unknown)}")
     return models or ["linear"]
 
-def canonical_fit_model(model: str) -> str:
-    model = str(model or "").strip()
-    if model == "power_law_floor":
-        return "power_law"
-    return model
-    
 def import_matplotlib():
     import matplotlib
 
@@ -1585,6 +1829,10 @@ TRAJECTORY_ID_KEYS = ("trajectory_id", "md_trajectory_id", "source_trajectory_id
 BLOCKED_SPLIT_STRATEGIES = {"blocked_with_gap", "blocked", "blocked_split"}
 MAX_METADATA_SCALAR_READS = 5000
 MAX_AUTOCORR_LAG_CAP = 200
+AUTOCORRELATION_CONVENTION = "sokal_positive_lag_inefficiency_v1"
+TAU_INT_CONVENTION = "statistical_inefficiency = 1 + 2 * sum_{k>0} rho(k) for rho(k) > 0"
+N_EFF_CONVENTION = "N_eff = N / statistical_inefficiency"
+N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO = 0.25
 
 
 def first_non_empty_text(record: dict[str, Any], *keys: str) -> str | None:
@@ -1749,22 +1997,48 @@ def autocorrelation_function(values: list[float], max_lag: int | None = None) ->
     return acf
 
 
-def integrated_autocorrelation_time(acf: list[float]) -> float | None:
+def statistical_inefficiency_from_acf(acf: list[float]) -> float | None:
+    """Batch-means inefficiency g = 1 + 2 * sum of positive-lag autocorrelations."""
     if not acf:
         return None
-    tau = 1.0
+    inefficiency = 1.0
     for lag in range(1, len(acf)):
         rho = acf[lag]
         if rho <= 0:
             break
-        tau += 2.0 * rho
-    return max(tau, 1.0)
+        inefficiency += 2.0 * rho
+    return max(inefficiency, 1.0)
 
 
-def effective_sample_size(n: int, tau_int: float) -> float | None:
-    if n <= 0 or not math.isfinite(tau_int) or tau_int <= 0:
+def integrated_autocorrelation_time(acf: list[float]) -> float | None:
+    """Legacy alias: equals statistical_inefficiency under this convention."""
+    return statistical_inefficiency_from_acf(acf)
+
+
+def effective_sample_size(n: int, statistical_inefficiency: float) -> float | None:
+    if n <= 0 or not math.isfinite(statistical_inefficiency) or statistical_inefficiency <= 0:
         return None
-    return n / (2.0 * tau_int)
+    return n / statistical_inefficiency
+
+
+def autocorrelation_convention_payload() -> dict[str, str]:
+    return {
+        "autocorrelation_convention": AUTOCORRELATION_CONVENTION,
+        "tau_int_convention": TAU_INT_CONVENTION,
+        "n_eff_convention": N_EFF_CONVENTION,
+    }
+
+
+def maybe_warn_n_eff_much_smaller_than_nominal(
+    warnings: list[str],
+    *,
+    nominal_n: int | None,
+    n_eff: float | None,
+) -> None:
+    if nominal_n is None or n_eff is None or nominal_n <= 0:
+        return
+    if n_eff / float(nominal_n) < N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO:
+        warnings.append("n_eff_much_smaller_than_nominal")
 
 
 def compute_scalar_autocorrelation_diagnostics(
@@ -1781,15 +2055,23 @@ def compute_scalar_autocorrelation_diagnostics(
             "autocorrelation_available": False,
         }
     acf = autocorrelation_function(clean, max_lag=max_lag)
-    tau_int = integrated_autocorrelation_time(acf)
-    n_eff = effective_sample_size(n, tau_int) if tau_int is not None else None
+    statistical_inefficiency = statistical_inefficiency_from_acf(acf)
+    n_eff = (
+        effective_sample_size(n, statistical_inefficiency)
+        if statistical_inefficiency is not None
+        else None
+    )
     return {
         "n": n,
         "status": "ok",
         "autocorrelation_available": True,
         "acf": acf[: min(len(acf), 25)],
-        "tau_int": tau_int,
+        "statistical_inefficiency": statistical_inefficiency,
+        "tau_int": statistical_inefficiency,
+        "tau_int_convention": TAU_INT_CONVENTION,
         "n_eff": n_eff,
+        "n_eff_convention": N_EFF_CONVENTION,
+        "autocorrelation_convention": AUTOCORRELATION_CONVENTION,
     }
 
 
@@ -1941,6 +2223,7 @@ def diagnose_dataset_temporal_metadata(
             if block_diag.get("status") == "ok":
                 per_block[block_id] = {
                     "n": block_diag.get("n"),
+                    "statistical_inefficiency": block_diag.get("statistical_inefficiency"),
                     "tau_int": block_diag.get("tau_int"),
                     "n_eff": block_diag.get("n_eff"),
                 }
@@ -1948,6 +2231,7 @@ def diagnose_dataset_temporal_metadata(
         autocorrelation = {
             "available": bool(autocorr.get("autocorrelation_available")),
             "scalar_series_key": series_key,
+            **autocorrelation_convention_payload(),
             "train": {
                 **autocorr,
                 "records_used": len(used_records),
@@ -1955,6 +2239,11 @@ def diagnose_dataset_temporal_metadata(
             "by_block": per_block,
         }
         estimated_n_eff_train = finite_number(autocorr.get("n_eff"))
+        maybe_warn_n_eff_much_smaller_than_nominal(
+            warnings,
+            nominal_n=int_number(nominal_n_train),
+            n_eff=estimated_n_eff_train,
+        )
 
     return {
         "dataset_id": dataset_id or root.name,
@@ -2060,8 +2349,17 @@ def summarize_temporal_diagnostics(
     for item in datasets:
         warnings.extend(item.get("warnings") or [])
 
+    maybe_warn_n_eff_much_smaller_than_nominal(
+        warnings,
+        nominal_n=int_number(nominal_n_train),
+        n_eff=finite_number(estimated_n_eff_train)
+        if not isinstance(estimated_n_eff_train, dict)
+        else finite_number((estimated_n_eff_train or {}).get("median")),
+    )
+
     status_message = (
-        f"Estimated N_eff range: {json.dumps(estimated_n_eff_train, ensure_ascii=False)}"
+        f"Estimated N_eff range: {json.dumps(estimated_n_eff_train, ensure_ascii=False)} "
+        f"({N_EFF_CONVENTION}; N_min still uses nominal N)"
         if estimated_n_eff_train is not None
         else "N is nominal; N_eff not estimated"
     )
@@ -2073,6 +2371,7 @@ def summarize_temporal_diagnostics(
         "autocorrelation_available": autocorrelation_available,
         "status_message": status_message,
         "warnings": sorted(set(warnings)),
+        **autocorrelation_convention_payload(),
     }
 
 
@@ -2280,6 +2579,10 @@ def analysis_rows_from_normalized(
 ) -> list[dict[str, Any]]:
     if aggregation_mode == "mean_replicates":
         return aggregate_rows_mean_replicates(normalized_rows)
+    if aggregation_mode == "mean_seeds_per_config":
+        return aggregate_rows_mean_seeds_per_config(normalized_rows)
+    if aggregation_mode == "best_config_mean":
+        return aggregate_rows_best_config_mean(normalized_rows)
     grouped = group_config_rows(normalized_rows)
     return best_by_method_size(grouped)
 
@@ -2477,15 +2780,17 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     grouped_rows = group_config_rows(all_normalized_rows)
     raw_rows_count = len(all_normalized_rows)
 
-    if aggregation_mode == "mean_replicates":
-        best_rows = aggregate_rows_mean_replicates(all_normalized_rows)
-        if len(run_roots) > 1:
-            warnings.append(f"aggregated_mean_replicates_across_{len(run_roots)}_run_roots")
-    else:
-        best_rows = best_by_method_size(grouped_rows)
+    best_rows = analysis_rows_for_aggregation_mode(
+        all_normalized_rows,
+        grouped_rows,
+        aggregation_mode=aggregation_mode,
+    )
+    if aggregation_mode == "mean_replicates" and len(run_roots) > 1:
+        warnings.append(f"aggregated_mean_replicates_across_{len(run_roots)}_run_roots")
 
-    aggregated = aggregation_mode == "mean_replicates" and (
-        len(run_roots) > 1 or any(int(row.get("replicate_count") or 1) > 1 for row in best_rows)
+    aggregated = aggregation_mode in {"mean_seeds_per_config", "best_config_mean"} or (
+        aggregation_mode == "mean_replicates"
+        and (len(run_roots) > 1 or any(int(row.get("replicate_count") or 1) > 1 for row in best_rows))
     )
 
     observed_thresholds = thresholds_by_method(
@@ -2498,24 +2803,36 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     fit_thresholds: dict[str, dict[str, Any]] = {}
     fit_threshold_details: dict[str, dict[str, Any]] = {}
 
-    n_min_source = str(getattr(args, "n_min_source", None) or "observed")
-    n_min_fit_model = str(getattr(args, "n_min_fit_model", None) or "power_law")
+    requested_n_min_source = str(getattr(args, "n_min_source", None) or "observed")
+    requested_fit_model = str(getattr(args, "n_min_fit_model", None) or CANONICAL_POWER_LAW_MODEL)
+    canonical_fit = canonical_fit_model(requested_fit_model)
+    actual_n_min_source = requested_n_min_source
+    actual_fit_model = canonical_fit if requested_n_min_source == "fit" else None
+    fallback_used = False
+    fallback_reason: str | None = None
 
-    if n_min_source == "fit":
+    if requested_n_min_source == "fit":
         fit_thresholds, fit_threshold_details, fit_threshold_warnings = thresholds_by_method_from_fit(
         best_rows,
         threshold_mev=float(args.threshold_mev),
         relative_tolerance=float(args.relative_tolerance),
         plateau_gain=float(args.plateau_gain),
-        fit_model=n_min_fit_model,
+        fit_model=requested_fit_model,
         moving_average_window=moving_average_window,
         )
         warnings.extend(fit_threshold_warnings)
-
-    thresholds = fit_thresholds if n_min_source == "fit" and fit_thresholds else observed_thresholds
-
-    if n_min_source == "fit" and not fit_thresholds:
-        warnings.append("fit_thresholds_empty; falling back to observed thresholds")
+        if fit_thresholds:
+            thresholds = fit_thresholds
+        else:
+            fallback_used = True
+            fallback_reason = f"canonical_fit_failed:{canonical_fit}"
+            actual_n_min_source = "observed"
+            actual_fit_model = None
+            thresholds = observed_thresholds
+            warnings.append(f"n_min_explicit_fallback_to_observed:{fallback_reason}")
+    else:
+        fit_thresholds = {}
+        fit_threshold_details = {}
         thresholds = observed_thresholds
 
     bootstrap_replicates = parse_bootstrap_replicates(getattr(args, "bootstrap_replicates", 0))
@@ -2533,8 +2850,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             threshold_mev=float(args.threshold_mev),
             relative_tolerance=float(args.relative_tolerance),
             plateau_gain=float(args.plateau_gain),
-            n_min_source=n_min_source,
-            n_min_fit_model=n_min_fit_model,
+            n_min_source=actual_n_min_source,
+            n_min_fit_model=canonical_fit if requested_n_min_source == "fit" else requested_fit_model,
             moving_average_window=moving_average_window,
         )
         warnings.extend(bootstrap.get("warnings") or [])
@@ -2626,8 +2943,15 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "warnings": sorted(set(warnings)),
         "status": "ok" if best_rows else "no_usable_metric_rows",
         "forbidden_compute_commands": FORBIDDEN_COMPUTE_COMMANDS,
-        "n_min_source": n_min_source,
-        "n_min_fit_model": n_min_fit_model,
+        "n_min_source": actual_n_min_source,
+        "n_min_fit_model": actual_fit_model or requested_fit_model,
+        "requested_n_min_source": requested_n_min_source,
+        "actual_n_min_source": actual_n_min_source,
+        "requested_fit_model": requested_fit_model,
+        "actual_fit_model": actual_fit_model,
+        "canonical_fit_model": canonical_fit,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
         "observed_thresholds": observed_thresholds,
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
@@ -2667,8 +2991,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--n-min-fit-model",
-        default="power_law",
-        help="Fit model used when --n-min-source=fit.",
+        default=CANONICAL_POWER_LAW_MODEL,
+        help="Fit model used when --n-min-source=fit (power_law is a legacy alias).",
     )
     parser.add_argument(
     "--moving-average-window",
@@ -2682,6 +3006,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "How to combine replicate rows per method and dataset size. "
+            "Paper-level: mean_seeds_per_config, best_config_mean. "
+            "Diagnostic: mean_replicates, best_config. "
             "Default: best_config for one --run-root, mean_replicates for multiple."
         ),
     )

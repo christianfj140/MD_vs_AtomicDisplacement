@@ -143,6 +143,67 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 class DatasetSizeMinimumTests(unittest.TestCase):
+    def test_canonical_fit_model_maps_power_law_to_power_law_floor(self) -> None:
+        self.assertEqual(minimum.canonical_fit_model("power_law"), "power_law_floor")
+        self.assertEqual(minimum.canonical_fit_model("power_law_floor"), "power_law_floor")
+        self.assertTrue(minimum.fit_models_equivalent("power_law", "power_law_floor"))
+
+    def test_power_law_floor_fit_has_valid_constraints(self) -> None:
+        n_values = [10.0, 20.0, 40.0, 80.0]
+        y_values = [30.0, 22.0, 18.0, 15.0]
+        fit = minimum.fit_power_law_floor(n_values, y_values)
+        self.assertEqual(fit["status"], "ok")
+        self.assertEqual(fit["model"], "power_law_floor")
+        e_inf, amplitude, alpha = fit["coefficients"]
+        self.assertGreaterEqual(e_inf, 0.0)
+        self.assertGreaterEqual(amplitude, 0.0)
+        self.assertGreater(alpha, 0.0)
+        predictions = minimum.power_law_floor_predictions(fit["coefficients"], n_values)
+        self.assertTrue(all(value >= -1e-9 for value in predictions))
+
+    def test_power_law_alias_matches_floor_fit(self) -> None:
+        n_values = [10.0, 20.0, 40.0, 80.0]
+        y_values = [30.0, 22.0, 18.0, 15.0]
+        floor = minimum.fit_power_law_floor(n_values, y_values)
+        legacy = minimum.fit_power_law(n_values, y_values)
+        self.assertEqual(floor["coefficients"], legacy["coefficients"])
+
+    def test_fit_failure_sets_explicit_observed_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                        "seed": "1",
+                    }
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            summary = minimum.analyze(
+                make_analyze_args(
+                    run_root=[str(root)],
+                    output_dir=str(base / "out"),
+                    n_min_source="fit",
+                    n_min_fit_model="power_law_floor",
+                )
+            )
+            self.assertTrue(summary["fallback_used"])
+            self.assertEqual(summary["requested_n_min_source"], "fit")
+            self.assertEqual(summary["actual_n_min_source"], "observed")
+            self.assertEqual(summary["canonical_fit_model"], "power_law_floor")
+            self.assertIn("n_min_explicit_fallback_to_observed", " | ".join(summary["warnings"]))
+
     def test_mean_replicates_averages_same_method_and_size(self) -> None:
         rows = [
             {
@@ -193,6 +254,114 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertEqual(len(best), 1)
         self.assertAlmostEqual(best[0]["primary_metric_mev_mean"], 10.0)
         self.assertEqual(best[0]["config_id"], "cfg_a")
+
+    def test_extract_base_config_id_strips_seed_suffix(self) -> None:
+        self.assertEqual(minimum.extract_base_config_id("policy_a-seed1"), "policy_a")
+        self.assertEqual(minimum.extract_base_config_id("policy_a-seed4"), "policy_a")
+        self.assertEqual(minimum.extract_base_config_id("policy_a"), "policy_a")
+
+    def test_mean_seeds_per_config_averages_seeds_within_config(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 10.0,
+                "config_id": "policy_a-seed1",
+                "seed": "1",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 14.0,
+                "config_id": "policy_a-seed2",
+                "seed": "2",
+            },
+        ]
+        aggregated = minimum.aggregate_rows_mean_seeds_per_config(rows)
+        self.assertEqual(len(aggregated), 1)
+        row = aggregated[0]
+        self.assertAlmostEqual(row["primary_metric_mev_mean"], 12.0)
+        self.assertEqual(row["base_config_id"], "policy_a")
+        self.assertEqual(row["seed_count"], 2)
+        self.assertEqual(row["aggregation_mode"], "mean_seeds_per_config")
+
+    def test_mean_seeds_per_config_does_not_mix_distinct_configs(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 10.0,
+                "config_id": "policy_a-seed1",
+                "seed": "1",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 14.0,
+                "config_id": "policy_a-seed2",
+                "seed": "2",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 8.0,
+                "config_id": "policy_b-seed1",
+                "seed": "1",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 16.0,
+                "config_id": "policy_b-seed2",
+                "seed": "2",
+            },
+        ]
+        aggregated = minimum.aggregate_rows_mean_seeds_per_config(rows)
+        self.assertEqual(len(aggregated), 2)
+        by_config = {row["base_config_id"]: row["primary_metric_mev_mean"] for row in aggregated}
+        self.assertAlmostEqual(by_config["policy_a"], 12.0)
+        self.assertAlmostEqual(by_config["policy_b"], 12.0)
+
+    def test_best_config_mean_picks_config_by_seed_mean_not_best_seed(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 5.0,
+                "config_id": "policy_a-seed1",
+                "seed": "1",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 15.0,
+                "config_id": "policy_a-seed2",
+                "seed": "2",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 3.0,
+                "config_id": "policy_b-seed1",
+                "seed": "1",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 20.0,
+                "config_id": "policy_b-seed2",
+                "seed": "2",
+            },
+        ]
+        best = minimum.aggregate_rows_best_config_mean(rows)
+        self.assertEqual(len(best), 1)
+        self.assertEqual(best[0]["base_config_id"], "policy_a")
+        self.assertAlmostEqual(best[0]["primary_metric_mev_mean"], 10.0)
+        self.assertEqual(best[0]["aggregation_mode"], "best_config_mean")
+        self.assertEqual(best[0]["selection_basis"], "mean_over_seeds")
+
+        diagnostic_best = min(rows, key=lambda row: row["primary_metric_mev"])
+        self.assertEqual(diagnostic_best["config_id"], "policy_b-seed1")
 
     def test_mean_replicates_does_not_pick_best_value(self) -> None:
         rows = [
@@ -1253,6 +1422,27 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 any("temporal_gap_le_1" in warning for warning in diag["warnings"])
             )
 
+    def test_autocorrelation_convention_fields_on_iid_series(self) -> None:
+        rng = random.Random(7)
+        values = [rng.gauss(0.0, 1.0) for _ in range(300)]
+        diag = minimum.compute_scalar_autocorrelation_diagnostics(values)
+        self.assertEqual(diag["status"], "ok")
+        self.assertEqual(
+            diag["autocorrelation_convention"],
+            minimum.AUTOCORRELATION_CONVENTION,
+        )
+        self.assertAlmostEqual(diag["statistical_inefficiency"], diag["tau_int"])
+        self.assertGreater(float(diag["n_eff"]), 300 * 0.5)
+
+    def test_constant_scalar_series_does_not_crash(self) -> None:
+        diag = minimum.compute_scalar_autocorrelation_diagnostics([5.0] * 20)
+        self.assertIn(diag["status"], {"ok", "insufficient_samples"})
+
+    def test_fewer_than_three_samples_does_not_crash(self) -> None:
+        diag = minimum.compute_scalar_autocorrelation_diagnostics([1.0, 2.0])
+        self.assertEqual(diag["status"], "insufficient_samples")
+        self.assertFalse(diag["autocorrelation_available"])
+
     def test_autocorrelated_scalar_series_yields_n_eff_below_n(self) -> None:
         rho = 0.95
         noise = math.sqrt(1.0 - rho * rho)
@@ -1273,7 +1463,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertTrue(diag["autocorrelation_available"])
             n_eff = diag["estimated_n_eff_train"]
             self.assertIsNotNone(n_eff)
-            self.assertLess(float(n_eff), 80 * 0.75)
+            self.assertLess(float(n_eff), 80 * 0.5)
 
     def test_iid_scalar_series_yields_n_eff_near_nominal(self) -> None:
         rng = random.Random(123)
@@ -1291,7 +1481,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertTrue(diag["autocorrelation_available"])
             n_eff = diag["estimated_n_eff_train"]
             self.assertIsNotNone(n_eff)
-            self.assertGreater(float(n_eff), 200 * 0.2)
+            self.assertGreater(float(n_eff), 200 * 0.5)
 
     def test_analyze_includes_temporal_diagnostics_with_dataset_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1323,6 +1513,15 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertEqual(summary["nominal_n_train"], 10)
             self.assertIn("datasets", summary["temporal_diagnostics"])
             self.assertEqual(len(summary["temporal_diagnostics"]["datasets"]), 1)
+
+    def test_summarize_temporal_diagnostics_includes_convention(self) -> None:
+        summary = minimum.summarize_temporal_diagnostics([], run_roots=[])
+        self.assertEqual(
+            summary["autocorrelation_convention"],
+            minimum.AUTOCORRELATION_CONVENTION,
+        )
+        self.assertEqual(summary["n_eff_convention"], minimum.N_EFF_CONVENTION)
+        self.assertIn("N is nominal; N_eff not estimated", summary["status_message"])
 
 
 if __name__ == "__main__":

@@ -78,9 +78,11 @@ from material_presets import (  # noqa: E402
 )
 from g2m_deeph_dataset_size_minimum import (
     AGGREGATION_MODES,
-    aggregate_rows_mean_replicates as dataset_minimum_aggregate_rows_mean_replicates,
-    best_by_method_size as dataset_minimum_best_by_method_size,
+    CANONICAL_POWER_LAW_MODEL,
+    analysis_rows_for_aggregation_mode as dataset_minimum_analysis_rows_for_aggregation_mode,
+    canonical_fit_model as dataset_minimum_canonical_fit_model,
     discover_metric_files as discover_dataset_minimum_metric_files,
+    fit_models_equivalent as dataset_minimum_fit_models_equivalent,
     group_config_rows as dataset_minimum_group_config_rows,
     load_json_metric_rows as load_dataset_minimum_json_metric_rows,
     load_run_root_rows as dataset_minimum_load_run_root_rows,
@@ -6050,12 +6052,14 @@ def dataset_size_minimum_output_matches_controls(
     if out_threshold is None or abs(float(out_threshold) - threshold) >= 1e-9:
         return False
 
-    if str(output.get("n_min_source") or "observed") != str(controls.get("n_min_source") or "observed"):
+    if str(output.get("requested_n_min_source") or output.get("n_min_source") or "observed") != str(
+        controls.get("n_min_source") or "observed"
+    ):
         return False
 
-    if str(output.get("n_min_fit_model") or "power_law") != str(
-        controls.get("n_min_fit_model") or "power_law"
-    ):
+    output_fit = output.get("requested_fit_model") or output.get("n_min_fit_model") or CANONICAL_POWER_LAW_MODEL
+    control_fit = controls.get("n_min_fit_model") or CANONICAL_POWER_LAW_MODEL
+    if not dataset_minimum_fit_models_equivalent(str(output_fit), str(control_fit)):
         return False
 
     out_mode = output.get("aggregation_mode")
@@ -6153,12 +6157,13 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
             resolved_roots.append(key)
 
     grouped = dataset_minimum_group_config_rows(all_normalized)
-    if aggregation_mode == "mean_replicates":
-        best_rows = dataset_minimum_aggregate_rows_mean_replicates(all_normalized)
-        if len(run_roots) > 1:
-            warnings.append(f"aggregated_mean_replicates_across_{len(run_roots)}_run_roots")
-    else:
-        best_rows = dataset_minimum_best_by_method_size(grouped)
+    best_rows = dataset_minimum_analysis_rows_for_aggregation_mode(
+        all_normalized,
+        grouped,
+        aggregation_mode=aggregation_mode,
+    )
+    if aggregation_mode == "mean_replicates" and len(run_roots) > 1:
+        warnings.append(f"aggregated_mean_replicates_across_{len(run_roots)}_run_roots")
 
     for row in best_rows:
         if row.get("sweep_label"):
@@ -6171,9 +6176,12 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
                 row.setdefault("source_run_root", source_row.get("source_run_root"))
                 break
 
-    aggregated = aggregation_mode == "mean_replicates" and (
-        len(run_roots) > 1
-        or any(int(row.get("replicate_count") or 1) > 1 for row in best_rows)
+    aggregated = aggregation_mode in {"mean_seeds_per_config", "best_config_mean"} or (
+        aggregation_mode == "mean_replicates"
+        and (
+            len(run_roots) > 1
+            or any(int(row.get("replicate_count") or 1) > 1 for row in best_rows)
+        )
     )
 
     status = "ok" if best_rows else "no_usable_metric_rows"
@@ -6197,7 +6205,9 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
 
     n_min_source = str(payload.get("n_min_source") or "observed").strip()
-    n_min_fit_model = str(payload.get("n_min_fit_model") or payload.get("fit_model") or "power_law").strip()
+    n_min_fit_model = str(
+        payload.get("n_min_fit_model") or payload.get("fit_model") or CANONICAL_POWER_LAW_MODEL
+    ).strip()
 
     if n_min_source not in {"observed", "fit"}:
         raise RuntimeError("n_min_source debe ser 'observed' o 'fit'.")
@@ -6213,7 +6223,7 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     plateau_gain = float(payload.get("plateau_gain") or 0.05)
     fit_models = str(
         payload.get("fit_models")
-        or "linear,quadratic,inverse,inverse_square,power_law,"
+        or "linear,quadratic,inverse,inverse_square,power_law_floor,power_law,"
         "lowess_logx,lowess_logx_robust,monotone_lowess_logx,moving_average"
     )
 
@@ -6375,6 +6385,13 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "moving_average_window": summary.get("moving_average_window"),
                 "n_min_source": summary.get("n_min_source"),
                 "n_min_fit_model": summary.get("n_min_fit_model"),
+                "requested_n_min_source": summary.get("requested_n_min_source"),
+                "actual_n_min_source": summary.get("actual_n_min_source"),
+                "requested_fit_model": summary.get("requested_fit_model"),
+                "actual_fit_model": summary.get("actual_fit_model"),
+                "canonical_fit_model": summary.get("canonical_fit_model"),
+                "fallback_used": summary.get("fallback_used"),
+                "fallback_reason": summary.get("fallback_reason"),
                 "aggregation_mode": aggregation_mode,
                 "aggregated": summary.get("aggregated"),
                 "bootstrap": summary.get("bootstrap") or {},
