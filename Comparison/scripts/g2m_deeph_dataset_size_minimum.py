@@ -4,6 +4,15 @@
 This is a read-only post-processing script. It does not train, predict, run
 SIESTA, run Graph2Mat, run DeepH, or materialize new Hamiltonians. It consumes
 already-written metric tables/JSON files and writes derived CSV/JSON/plots.
+
+Nominal N vs effective N (N_eff):
+    N_min is computed on nominal train counts (N_train) from manifests or metric
+    rows. MD trajectory snapshots can be temporally autocorrelated, so those
+    counts overstate independent samples. When temporal metadata and a cheap
+    per-snapshot scalar series are available, this script also reports a
+    diagnostic N_eff ≈ N / (2 τ_int) without changing the main N_min fits.
+    Interpret N_min cautiously when N_eff ≪ N or when autocorrelation diagnostics
+    are unavailable. See Comparison/scripts/DATASET_SIZE_MINIMUM.md.
 """
 
 from __future__ import annotations
@@ -12,6 +21,7 @@ import argparse
 import csv
 import json
 import math
+import random
 import re
 import statistics
 import sys
@@ -25,6 +35,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_PRIMARY_METRIC = "h_mae_eV_mean"
 DEFAULT_FIT_MODELS = "linear,quadratic,inverse,inverse_square,power_law"
+DEFAULT_AGGREGATION_MODE = "mean_replicates"
+AGGREGATION_MODES = ("mean_replicates", "best_config")
+DEFAULT_BOOTSTRAP_SEED = 12345
+DEFAULT_CI_LEVEL = 0.95
+BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", "N_min_rel95", "N_min_plateau")
+MIN_BOOTSTRAP_SUCCESS_FOR_CI = 2
 ENERGY_METRICS_WITHOUT_EV = {"dos_mae_500_fermi_window"}
 
 FORBIDDEN_COMPUTE_COMMANDS = (
@@ -149,6 +165,19 @@ def std(values: Iterable[float]) -> float | None:
     if not clean:
         return None
     return statistics.stdev(clean) if len(clean) > 1 else 0.0
+
+
+def sem(values: Iterable[float]) -> float | None:
+    clean = [value for value in values if math.isfinite(value)]
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return 0.0
+    return statistics.stdev(clean) / math.sqrt(len(clean))
+
+
+def row_primary_metric_mev(row: dict[str, Any]) -> float | None:
+    return finite_number(row.get("primary_metric_mev_mean")) or finite_number(row.get("primary_metric_mev"))
 
 
 def model_key(value: Any) -> str:
@@ -513,6 +542,86 @@ def group_config_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def resolve_aggregation_mode(value: str | None, *, run_root_count: int) -> str:
+    """Pick aggregation mode; default preserves single-root best_config behavior."""
+    if value is None or not str(value).strip():
+        return "mean_replicates" if run_root_count > 1 else "best_config"
+    mode = str(value).strip()
+    if mode not in AGGREGATION_MODES:
+        raise ValueError(f"Unknown aggregation_mode: {mode}")
+    return mode
+
+
+def parse_aggregation_mode(value: str | None) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    mode = str(value).strip()
+    if mode not in AGGREGATION_MODES:
+        raise SystemExit(f"Unknown aggregation_mode: {mode}")
+    return mode
+
+
+def aggregate_rows_mean_replicates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Average replicate rows for each (method, dataset_size_x)."""
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        metric = row_primary_metric_mev(row)
+        size = int_number(row.get("dataset_size_x"))
+        if metric is None or size is None:
+            continue
+        grouped[(str(row["method"]), int(size))].append(row)
+
+    out: list[dict[str, Any]] = []
+    for (method, size), items in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        metric_values = [
+            float(metric)
+            for item in items
+            if (metric := row_primary_metric_mev(item)) is not None
+        ]
+        costs = [
+            value
+            for item in items
+            if (value := finite_number(item.get("gpu_hours_total_mean") or item.get("gpu_hours_total"))) is not None
+        ]
+        elapsed = [
+            value
+            for item in items
+            if (value := finite_number(item.get("elapsed_seconds_mean") or item.get("elapsed_seconds"))) is not None
+        ]
+        first = items[0]
+        config_ids = sorted({str(item.get("config_id") or "") for item in items if item.get("config_id")})
+        seeds = sorted({str(item.get("seed") or "") for item in items if item.get("seed") not in (None, "", "unknown")})
+        source_roots = sorted(
+            {str(item.get("source_run_root") or "") for item in items if item.get("source_run_root")}
+        )
+        out.append(
+            {
+                "method": method,
+                "dataset_size_x": size,
+                "dataset_size_total": first.get("dataset_size_total"),
+                "dataset_size_train": first.get("dataset_size_train"),
+                "config_id": "aggregated_mean",
+                "epoch_label": f"mean of {len(items)} replicate(s)",
+                "primary_metric": first.get("primary_metric"),
+                "primary_metric_unit": first.get("primary_metric_unit"),
+                "primary_metric_mev_mean": mean(metric_values),
+                "primary_metric_mev_std": std(metric_values),
+                "primary_metric_mev_sem": sem(metric_values),
+                "replicate_count": len(items),
+                "y_min": min(metric_values) if metric_values else None,
+                "y_max": max(metric_values) if metric_values else None,
+                "config_ids": config_ids,
+                "seeds": seeds,
+                "source_run_roots": source_roots,
+                "gpu_hours_total_mean": mean(costs),
+                "elapsed_seconds_mean": mean(elapsed),
+                "is_aggregated_mean": True,
+                "aggregation_mode": "mean_replicates",
+            }
+        )
+    return out
+
+
 def best_by_method_size(grouped_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in grouped_rows:
@@ -532,6 +641,7 @@ def best_by_method_size(grouped_rows: list[dict[str, Any]]) -> list[dict[str, An
         )
         out = dict(chosen)
         out["is_best_for_method_size"] = True
+        out["aggregation_mode"] = "best_config"
         best.append(out)
     return best
 
@@ -1449,6 +1559,523 @@ def plot_cost_efficiency(best_rows: list[dict[str, Any]], output_dir: Path, *, x
     return outputs
 
 
+TEMPORAL_SCALAR_KEYS = (
+    "total_energy",
+    "total_energy_eV",
+    "energy_eV",
+    "siesta_total_energy",
+    "kinetic_energy_eV",
+    "potential_energy_eV",
+    "displacement_magnitude",
+    "displacement_amplitude",
+    "instantaneous_temperature_K",
+    "temperature_instant_K",
+)
+TEMPORAL_INDEX_KEYS = (
+    "md_step",
+    "snapshot_index",
+    "source_frame_index",
+    "md_source_frame_index",
+    "frame_index",
+    "time_index",
+    "sample_index_within_block",
+)
+BLOCK_ID_KEYS = ("block_id", "md_block_id", "source_block_id")
+TRAJECTORY_ID_KEYS = ("trajectory_id", "md_trajectory_id", "source_trajectory_id")
+BLOCKED_SPLIT_STRATEGIES = {"blocked_with_gap", "blocked", "blocked_split"}
+MAX_METADATA_SCALAR_READS = 5000
+MAX_AUTOCORR_LAG_CAP = 200
+
+
+def first_non_empty_text(record: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def temporal_index_value(record: dict[str, Any]) -> int | None:
+    for key in TEMPORAL_INDEX_KEYS:
+        value = int_number(record.get(key))
+        if value is not None:
+            return value
+    sample_dir = str(record.get("sample_dir") or record.get("snapshot_dir") or "")
+    if sample_dir:
+        name = Path(sample_dir).name
+        if name.isdigit():
+            return int(name)
+    return None
+
+
+def split_name_normalized(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"training", "train"}:
+        return "train"
+    if text in {"validation", "val"}:
+        return "validation"
+    if text == "test":
+        return "test"
+    return text
+
+
+def resolve_split_root(dataset_root: Path, frozen: dict[str, Any] | None) -> Path | None:
+    if isinstance(frozen, dict):
+        split_root_text = str(frozen.get("split_root") or "").strip()
+        if split_root_text:
+            split_root = Path(split_root_text)
+            if split_root.exists():
+                return split_root
+    candidate = dataset_root / "splits"
+    return candidate if candidate.exists() else None
+
+
+def load_split_manifest_index(split_root: Path) -> dict[str, dict[str, str]]:
+    index: dict[str, dict[str, str]] = {}
+    for split in ("train", "validation", "test"):
+        for row in read_csv(split_root / f"{split}_manifest.csv"):
+            merged = dict(row)
+            merged.setdefault("split", split)
+            for key in (str(row.get("sample_dir") or ""), str(row.get("sample_id") or "")):
+                if key:
+                    index[key] = merged
+    return index
+
+
+def merge_manifest_row(base: dict[str, Any], manifest_row: dict[str, str] | None) -> dict[str, Any]:
+    merged = dict(base)
+    if not manifest_row:
+        return merged
+    for key, value in manifest_row.items():
+        if value in (None, "") or str(value).strip() == "":
+            continue
+        if merged.get(key) in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def load_temporal_sample_records(dataset_root: Path) -> list[dict[str, Any]]:
+    root = Path(dataset_root)
+    records: list[dict[str, Any]] = []
+    frozen = read_json(root / "frozen_split_manifest.json")
+    split_root = resolve_split_root(root, frozen if isinstance(frozen, dict) else None)
+    manifest_index = load_split_manifest_index(split_root) if split_root else {}
+
+    if isinstance(frozen, dict):
+        for row in frozen.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            sample_dir = str(row.get("sample_dir") or "")
+            manifest_row = manifest_index.get(sample_dir) or manifest_index.get(str(row.get("sample_id") or ""))
+            records.append(merge_manifest_row(row, manifest_row))
+
+    if not records and split_root:
+        for split in ("train", "validation", "test"):
+            for row in read_csv(split_root / f"{split}_manifest.csv"):
+                merged = dict(row)
+                merged.setdefault("split", split)
+                records.append(merged)
+
+    if not records:
+        validation = read_json(root / "artifact_validation.json")
+        if isinstance(validation, dict):
+            for snapshot in validation.get("snapshots") or []:
+                if not isinstance(snapshot, dict):
+                    continue
+                records.append(
+                    {
+                        "sample_dir": snapshot.get("snapshot_dir"),
+                        "split": snapshot.get("split"),
+                        "system_label": snapshot.get("system_label"),
+                    }
+                )
+
+    return records
+
+
+def load_split_summary(dataset_root: Path, split_root: Path | None) -> dict[str, Any]:
+    candidates: list[Path] = []
+    if split_root is not None:
+        candidates.append(split_root / "split_summary.json")
+    candidates.append(Path(dataset_root) / "splits" / "split_summary.json")
+    for path in candidates:
+        payload = read_json(path)
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def scalar_value_from_metadata(metadata: dict[str, Any]) -> tuple[str, float] | None:
+    for key in TEMPORAL_SCALAR_KEYS:
+        value = finite_number(metadata.get(key))
+        if value is not None:
+            return key, value
+    return None
+
+
+def read_metadata_scalar(sample_dir: Path) -> tuple[str, float] | None:
+    metadata_path = sample_dir / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    payload = read_json(metadata_path)
+    if not isinstance(payload, dict):
+        return None
+    return scalar_value_from_metadata(payload)
+
+
+def autocorrelation_function(values: list[float], max_lag: int | None = None) -> list[float]:
+    n = len(values)
+    if n < 2:
+        return [1.0] if n == 1 else []
+    mean_value = sum(values) / n
+    variance = sum((value - mean_value) ** 2 for value in values) / n
+    if variance <= 0:
+        return [1.0] + [0.0] * (max_lag or 0)
+    lag_limit = max_lag if max_lag is not None else min(n - 1, max(20, n // 4), MAX_AUTOCORR_LAG_CAP)
+    lag_limit = max(0, min(lag_limit, n - 1))
+    acf: list[float] = []
+    for lag in range(lag_limit + 1):
+        if lag == 0:
+            acf.append(1.0)
+            continue
+        cov = sum(
+            (values[index] - mean_value) * (values[index + lag] - mean_value)
+            for index in range(n - lag)
+        ) / (n - lag)
+        acf.append(cov / variance)
+    return acf
+
+
+def integrated_autocorrelation_time(acf: list[float]) -> float | None:
+    if not acf:
+        return None
+    tau = 1.0
+    for lag in range(1, len(acf)):
+        rho = acf[lag]
+        if rho <= 0:
+            break
+        tau += 2.0 * rho
+    return max(tau, 1.0)
+
+
+def effective_sample_size(n: int, tau_int: float) -> float | None:
+    if n <= 0 or not math.isfinite(tau_int) or tau_int <= 0:
+        return None
+    return n / (2.0 * tau_int)
+
+
+def compute_scalar_autocorrelation_diagnostics(
+    values: list[float],
+    *,
+    max_lag: int | None = None,
+) -> dict[str, Any]:
+    clean = [float(value) for value in values if finite_number(value) is not None]
+    n = len(clean)
+    if n < 3:
+        return {
+            "n": n,
+            "status": "insufficient_samples",
+            "autocorrelation_available": False,
+        }
+    acf = autocorrelation_function(clean, max_lag=max_lag)
+    tau_int = integrated_autocorrelation_time(acf)
+    n_eff = effective_sample_size(n, tau_int) if tau_int is not None else None
+    return {
+        "n": n,
+        "status": "ok",
+        "autocorrelation_available": True,
+        "acf": acf[: min(len(acf), 25)],
+        "tau_int": tau_int,
+        "n_eff": n_eff,
+    }
+
+
+def scalar_series_for_records(
+    records: list[dict[str, Any]],
+    *,
+    split: str | None = None,
+) -> tuple[str, list[float], list[dict[str, Any]]] | None:
+    selected = records
+    if split is not None:
+        selected = [row for row in records if split_name_normalized(row.get("split")) == split]
+    if len(selected) < 3:
+        return None
+
+    blocks: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in selected:
+        block_key = (
+            first_non_empty_text(record, *BLOCK_ID_KEYS)
+            or first_non_empty_text(record, "temperature_K")
+            or first_non_empty_text(record, *TRAJECTORY_ID_KEYS)
+            or "default"
+        )
+        blocks[str(block_key)].append(record)
+
+    ordered_records: list[dict[str, Any]] = []
+    for block_key in sorted(blocks.keys()):
+        block_items = sorted(
+            blocks[block_key],
+            key=lambda row: (
+                temporal_index_value(row) if temporal_index_value(row) is not None else 10**12,
+                str(row.get("sample_dir") or row.get("sample_id") or ""),
+            ),
+        )
+        ordered_records.extend(block_items)
+
+    if len(ordered_records) > MAX_METADATA_SCALAR_READS:
+        ordered_records = ordered_records[:MAX_METADATA_SCALAR_READS]
+
+    series_key: str | None = None
+    values: list[float] = []
+    used_records: list[dict[str, Any]] = []
+    for record in ordered_records:
+        sample_dir_text = str(record.get("sample_dir") or record.get("snapshot_dir") or "").strip()
+        if not sample_dir_text:
+            continue
+        sample_dir = Path(sample_dir_text)
+        scalar = read_metadata_scalar(sample_dir)
+        if scalar is None:
+            for key in TEMPORAL_SCALAR_KEYS:
+                value = finite_number(record.get(key))
+                if value is not None:
+                    scalar = (key, value)
+                    break
+        if scalar is None:
+            continue
+        key, value = scalar
+        if series_key is None:
+            series_key = key
+        elif key != series_key:
+            continue
+        values.append(value)
+        used_records.append(record)
+
+    if series_key is None or len(values) < 3:
+        return None
+    return series_key, values, used_records
+
+
+def diagnose_dataset_temporal_metadata(
+    dataset_root: Path,
+    *,
+    dataset_id: str = "",
+) -> dict[str, Any]:
+    root = Path(dataset_root)
+    warnings: list[str] = []
+    records = load_temporal_sample_records(root)
+    frozen = read_json(root / "frozen_split_manifest.json")
+    split_root = resolve_split_root(root, frozen if isinstance(frozen, dict) else None)
+    split_summary = load_split_summary(root, split_root)
+
+    strategy = str(split_summary.get("strategy") or "").strip().lower()
+    if not strategy:
+        for record in records:
+            strategy = str(record.get("split_strategy") or "").strip().lower()
+            if strategy:
+                break
+
+    temporal_gap = int_number(split_summary.get("temporal_gap"))
+    if temporal_gap is None:
+        for record in records:
+            temporal_gap = int_number(record.get("temporal_gap"))
+            if temporal_gap is not None:
+                break
+
+    blocked_split = strategy in BLOCKED_SPLIT_STRATEGIES or "blocked" in strategy
+    temporal_order_detected = any(temporal_index_value(record) is not None for record in records)
+
+    blocks: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        block_key = (
+            first_non_empty_text(record, *BLOCK_ID_KEYS)
+            or first_non_empty_text(record, "temperature_K")
+            or first_non_empty_text(record, *TRAJECTORY_ID_KEYS)
+            or "unknown"
+        )
+        blocks[str(block_key)].append(record)
+
+    block_sizes = {block_id: len(items) for block_id, items in sorted(blocks.items())}
+    split_counts = defaultdict(int)
+    for record in records:
+        split_counts[split_name_normalized(record.get("split"))] += 1
+
+    if not records:
+        warnings.append("temporal_metadata_missing_no_sample_records")
+    if not temporal_order_detected:
+        warnings.append("temporal_order_not_detected")
+    if temporal_gap is None:
+        warnings.append("temporal_gap_unknown")
+    elif temporal_gap <= 1:
+        warnings.append("temporal_gap_le_1_adjacent_frames_may_leak")
+
+    train_count = split_counts.get("train", 0)
+    nominal_n_train = train_count or split_counts_from_dataset_root(root).get("train")
+    if nominal_n_train is None:
+        nominal_n_train = split_counts_from_dataset_root(root).get("training")
+
+    scalar_series = scalar_series_for_records(records, split="train")
+    autocorrelation: dict[str, Any] = {
+        "available": False,
+        "scalar_series_key": None,
+        "train": {"status": "no_scalar_series"},
+    }
+    estimated_n_eff_train: float | None = None
+
+    if scalar_series is None:
+        warnings.append("autocorrelation_unavailable_no_cheap_scalar_series")
+    else:
+        series_key, values, used_records = scalar_series
+        autocorr = compute_scalar_autocorrelation_diagnostics(values)
+        per_block: dict[str, Any] = {}
+        for block_id, block_records in sorted(blocks.items()):
+            block_series = scalar_series_for_records(block_records, split="train")
+            if block_series is None:
+                continue
+            block_key, block_values, _ = block_series
+            if block_key != series_key:
+                continue
+            block_diag = compute_scalar_autocorrelation_diagnostics(block_values)
+            if block_diag.get("status") == "ok":
+                per_block[block_id] = {
+                    "n": block_diag.get("n"),
+                    "tau_int": block_diag.get("tau_int"),
+                    "n_eff": block_diag.get("n_eff"),
+                }
+
+        autocorrelation = {
+            "available": bool(autocorr.get("autocorrelation_available")),
+            "scalar_series_key": series_key,
+            "train": {
+                **autocorr,
+                "records_used": len(used_records),
+            },
+            "by_block": per_block,
+        }
+        estimated_n_eff_train = finite_number(autocorr.get("n_eff"))
+
+    return {
+        "dataset_id": dataset_id or root.name,
+        "dataset_root": str(root.resolve()),
+        "dataset_size": len(records),
+        "split_counts": dict(split_counts),
+        "split_strategy": strategy or None,
+        "blocked_split": blocked_split,
+        "temporal_gap": temporal_gap,
+        "temporal_order_detected": temporal_order_detected,
+        "n_temporal_blocks": len(blocks),
+        "block_sizes": block_sizes,
+        "block_ids": sorted(blocks.keys()),
+        "nominal_n_train": nominal_n_train,
+        "estimated_n_eff_train": estimated_n_eff_train,
+        "autocorrelation_available": bool(autocorrelation.get("available")),
+        "autocorrelation": autocorrelation,
+        "warnings": warnings,
+    }
+
+
+def collect_dataset_roots_for_diagnostics(
+    normalized_rows: list[dict[str, Any]],
+    run_roots: list[Path],
+) -> list[tuple[str, Path]]:
+    discovered: dict[str, Path] = {}
+    for row in normalized_rows:
+        root_text = str(row.get("dataset_root") or "").strip()
+        dataset_id = str(row.get("dataset_id") or "").strip()
+        if root_text:
+            root = Path(root_text).resolve()
+            key = str(root)
+            discovered[key] = (dataset_id or root.name, root)
+
+    for run_root in run_roots:
+        candidates = [
+            run_root,
+            run_root / "dataset",
+            run_root.parent / "dataset",
+        ]
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            if (candidate / "frozen_split_manifest.json").exists() or (candidate / "artifact_validation.json").exists():
+                key = str(candidate.resolve())
+                discovered.setdefault(key, (candidate.name, candidate.resolve()))
+
+    return list(discovered.values())
+
+
+def summarize_temporal_diagnostics(
+    normalized_rows: list[dict[str, Any]],
+    *,
+    run_roots: list[Path],
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    datasets: list[dict[str, Any]] = []
+    for dataset_id, dataset_root in collect_dataset_roots_for_diagnostics(normalized_rows, run_roots):
+        try:
+            datasets.append(
+                diagnose_dataset_temporal_metadata(dataset_root, dataset_id=dataset_id)
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never abort analysis.
+            warnings.append(f"temporal_diagnostics_failed:{dataset_root}:{exc}")
+            datasets.append(
+                {
+                    "dataset_id": dataset_id or dataset_root.name,
+                    "dataset_root": str(dataset_root),
+                    "dataset_size": 0,
+                    "warnings": [f"temporal_diagnostics_failed:{exc}"],
+                    "autocorrelation_available": False,
+                }
+            )
+
+    if not datasets:
+        warnings.append("temporal_diagnostics_no_dataset_roots_detected")
+
+    nominal_values = [
+        int_number(item.get("nominal_n_train"))
+        for item in datasets
+        if int_number(item.get("nominal_n_train")) is not None
+    ]
+    nominal_n_train = max(nominal_values) if nominal_values else None
+
+    n_eff_values = [
+        finite_number(item.get("estimated_n_eff_train"))
+        for item in datasets
+        if finite_number(item.get("estimated_n_eff_train")) is not None
+    ]
+    estimated_n_eff_train: float | dict[str, float] | None
+    if not n_eff_values:
+        estimated_n_eff_train = None
+    elif len(n_eff_values) == 1:
+        estimated_n_eff_train = n_eff_values[0]
+    else:
+        estimated_n_eff_train = {
+            "min": min(n_eff_values),
+            "median": statistics.median(n_eff_values),
+            "max": max(n_eff_values),
+        }
+
+    autocorrelation_available = any(bool(item.get("autocorrelation_available")) for item in datasets)
+    for item in datasets:
+        warnings.extend(item.get("warnings") or [])
+
+    status_message = (
+        f"Estimated N_eff range: {json.dumps(estimated_n_eff_train, ensure_ascii=False)}"
+        if estimated_n_eff_train is not None
+        else "N is nominal; N_eff not estimated"
+    )
+
+    return {
+        "datasets": datasets,
+        "nominal_n_train": nominal_n_train,
+        "estimated_n_eff_train": estimated_n_eff_train,
+        "autocorrelation_available": autocorrelation_available,
+        "status_message": status_message,
+        "warnings": sorted(set(warnings)),
+    }
+
+
 def build_report(
     *,
     output_dir: Path,
@@ -1461,6 +2088,7 @@ def build_report(
     primary_metric: str,
     threshold_mev: float,
     x_axis: str,
+    temporal_diagnostics: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Dataset Size Minimum Analysis\n")
@@ -1508,6 +2136,30 @@ def build_report(
                     coeffs=json.dumps(fit.get("coefficients") or [], ensure_ascii=False),
                 )
             )
+    lines.append("\n## Temporal diagnostics (MD snapshot independence)\n")
+    temporal = temporal_diagnostics or {}
+    lines.append(
+        f"- Status: {temporal.get('status_message') or 'N is nominal; N_eff not estimated'}"
+    )
+    lines.append(f"- Nominal N_train (metadata): {format_optional(temporal.get('nominal_n_train'), precision=0)}")
+    estimated = temporal.get("estimated_n_eff_train")
+    if estimated is None:
+        lines.append("- Estimated N_eff_train: not available")
+    else:
+        lines.append(f"- Estimated N_eff_train: `{json.dumps(estimated, ensure_ascii=False)}`")
+    lines.append(
+        f"- Autocorrelation diagnostic available: {bool(temporal.get('autocorrelation_available'))}"
+    )
+    for item in temporal.get("datasets") or []:
+        lines.append(
+            f"- Dataset `{item.get('dataset_id')}`: blocks={item.get('n_temporal_blocks')}, "
+            f"strategy={item.get('split_strategy') or '-'}, temporal_gap={item.get('temporal_gap')}, "
+            f"blocked_split={item.get('blocked_split')}"
+        )
+    lines.append(
+        "\nN_min fits in this report still use nominal N. Treat N_min with caution when "
+        "MD snapshots are autocorrelated and N_eff is much smaller than N.\n"
+    )
     lines.append("\n## Warnings / blockers\n")
     if warnings:
         for warning in sorted(set(warnings)):
@@ -1530,16 +2182,283 @@ def format_optional(value: Any, precision: int = 3) -> str:
     return f"{number:.{precision}f}"
 
 
+def parse_bootstrap_replicates(value: Any) -> int:
+    count = int(value or 0)
+    if count < 0:
+        raise SystemExit("bootstrap_replicates must be >= 0")
+    return count
+
+
+def parse_bootstrap_seed(value: Any) -> int:
+    return int(value if value is not None else DEFAULT_BOOTSTRAP_SEED)
+
+
+def parse_ci_level(value: Any) -> float:
+    level = float(value if value is not None else DEFAULT_CI_LEVEL)
+    if not 0.0 < level < 1.0:
+        raise SystemExit("ci_level must be in (0, 1)")
+    return level
+
+
+def summary_normalized_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compact replicate-level rows for UI raw-point overlays."""
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        metric = row_primary_metric_mev(row)
+        size = int_number(row.get("dataset_size_x"))
+        if metric is None or size is None:
+            continue
+        out.append(
+            {
+                "method": row.get("method"),
+                "dataset_size_x": size,
+                "dataset_size_total": row.get("dataset_size_total"),
+                "dataset_size_train": row.get("dataset_size_train"),
+                "primary_metric_mev": metric,
+                "primary_metric_mev_mean": metric,
+                "config_id": row.get("config_id"),
+                "seed": row.get("seed"),
+                "source_run_root": row.get("source_run_root"),
+            }
+        )
+    return out
+
+
+def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float = DEFAULT_CI_LEVEL) -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "replicates_requested": replicates_requested,
+        "replicates_successful": 0,
+        "replicates_failed": 0,
+        "ci_level": ci_level if replicates_requested > 0 else None,
+        "seed": None,
+        "n_min_source": None,
+        "n_min_fit_model": None,
+        "by_method": {},
+        "failure_counts": {},
+        "failure_reasons": [],
+        "warnings": [],
+    }
+
+
+def group_normalized_rows_by_method_size(
+    rows: list[dict[str, Any]],
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        metric = row_primary_metric_mev(row)
+        size = int_number(row.get("dataset_size_x"))
+        if metric is None or size is None:
+            continue
+        grouped[(str(row["method"]), int(size))].append(row)
+    return grouped
+
+
+def bootstrap_resampling_has_variation(rows: list[dict[str, Any]]) -> bool:
+    grouped = group_normalized_rows_by_method_size(rows)
+    return any(len(items) > 1 for items in grouped.values())
+
+
+def bootstrap_resample_normalized_rows(
+    rows: list[dict[str, Any]],
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    grouped = group_normalized_rows_by_method_size(rows)
+    resampled: list[dict[str, Any]] = []
+    for key in sorted(grouped.keys()):
+        items = grouped[key]
+        sample_size = len(items)
+        for _ in range(sample_size):
+            resampled.append(dict(items[rng.randrange(sample_size)]))
+    return resampled
+
+
+def analysis_rows_from_normalized(
+    normalized_rows: list[dict[str, Any]],
+    *,
+    aggregation_mode: str,
+) -> list[dict[str, Any]]:
+    if aggregation_mode == "mean_replicates":
+        return aggregate_rows_mean_replicates(normalized_rows)
+    grouped = group_config_rows(normalized_rows)
+    return best_by_method_size(grouped)
+
+
+def quantile_value(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return float(values[0])
+    position = (len(values) - 1) * q
+    low = int(math.floor(position))
+    high = int(math.ceil(position))
+    if low == high:
+        return float(values[low])
+    weight = position - low
+    return float(values[low] * (1.0 - weight) + values[high] * weight)
+
+
+def bootstrap_ci_from_samples(
+    values: list[int],
+    *,
+    ci_level: float,
+    n_requested: int,
+) -> dict[str, Any]:
+    clean = sorted(int(value) for value in values)
+    n_success = len(clean)
+    result: dict[str, Any] = {
+        "median": None,
+        "lower": None,
+        "upper": None,
+        "ci_level": ci_level,
+        "n_bootstrap_requested": n_requested,
+        "n_bootstrap_successful": n_success,
+        "n_bootstrap_failed": max(0, n_requested - n_success),
+    }
+    if not clean:
+        result["reason"] = "no_successful_bootstrap_values"
+        return result
+    result["median"] = quantile_value([float(value) for value in clean], 0.5)
+    if n_success < MIN_BOOTSTRAP_SUCCESS_FOR_CI:
+        result["reason"] = "too_few_successful_bootstrap_replicates"
+        return result
+    alpha = (1.0 - ci_level) / 2.0
+    floats = [float(value) for value in clean]
+    result["lower"] = quantile_value(floats, alpha)
+    result["upper"] = quantile_value(floats, 1.0 - alpha)
+    return result
+
+
+def compute_bootstrap_n_min(
+    normalized_rows: list[dict[str, Any]],
+    *,
+    methods: list[str],
+    n_replicates: int,
+    seed: int,
+    ci_level: float,
+    aggregation_mode: str,
+    threshold_mev: float,
+    relative_tolerance: float,
+    plateau_gain: float,
+    n_min_source: str,
+    n_min_fit_model: str,
+    moving_average_window: int,
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    if not bootstrap_resampling_has_variation(normalized_rows):
+        warnings.append("bootstrap_unavailable_no_replicates")
+        return {
+            "enabled": True,
+            "replicates_requested": n_replicates,
+            "replicates_successful": 0,
+            "replicates_failed": n_replicates,
+            "ci_level": ci_level,
+            "seed": seed,
+            "n_min_source": n_min_source,
+            "n_min_fit_model": n_min_fit_model if n_min_source == "fit" else None,
+            "by_method": {},
+            "failure_counts": {},
+            "failure_reasons": [],
+            "warnings": warnings,
+        }
+
+    rng = random.Random(seed)
+    samples: dict[str, dict[str, list[int]]] = {
+        method: {criterion: [] for criterion in BOOTSTRAP_N_MIN_CRITERIA}
+        for method in methods
+    }
+    failure_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    failure_reasons: set[str] = set()
+    replicate_successes = 0
+    replicate_failures = 0
+
+    for _replicate in range(n_replicates):
+        resampled = bootstrap_resample_normalized_rows(normalized_rows, rng)
+        agg_rows = analysis_rows_from_normalized(resampled, aggregation_mode=aggregation_mode)
+        fit_details: dict[str, dict[str, Any]] = {}
+
+        if n_min_source == "fit":
+            thresholds, fit_details, _fit_warnings = thresholds_by_method_from_fit(
+                agg_rows,
+                threshold_mev=threshold_mev,
+                relative_tolerance=relative_tolerance,
+                plateau_gain=plateau_gain,
+                fit_model=n_min_fit_model,
+                moving_average_window=moving_average_window,
+            )
+        else:
+            thresholds = thresholds_by_method(
+                agg_rows,
+                threshold_mev=threshold_mev,
+                relative_tolerance=relative_tolerance,
+                plateau_gain=plateau_gain,
+            )
+
+        replicate_recorded = False
+        for method in methods:
+            method_thresholds = thresholds.get(method)
+            if not method_thresholds:
+                status = str((fit_details.get(method) or {}).get("status") or "missing_threshold")
+                failure_counts[method]["fit_failed" if n_min_source == "fit" else "missing_threshold"] += 1
+                failure_reasons.add(f"{method}:{status}")
+                continue
+            for criterion in BOOTSTRAP_N_MIN_CRITERIA:
+                value = method_thresholds.get(criterion)
+                if value is None:
+                    failure_counts[method][f"{criterion}_missing"] += 1
+                    failure_reasons.add(f"{method}:{criterion}_missing")
+                    continue
+                samples[method][criterion].append(int(value))
+                replicate_recorded = True
+
+        if replicate_recorded:
+            replicate_successes += 1
+        else:
+            replicate_failures += 1
+
+    by_method: dict[str, dict[str, Any]] = {}
+    for method in methods:
+        by_method[method] = {
+            criterion: bootstrap_ci_from_samples(
+                samples[method][criterion],
+                ci_level=ci_level,
+                n_requested=n_replicates,
+            )
+            for criterion in BOOTSTRAP_N_MIN_CRITERIA
+        }
+
+    if replicate_successes < MIN_BOOTSTRAP_SUCCESS_FOR_CI:
+        warnings.append("bootstrap_too_few_successful_replicates")
+
+    return {
+        "enabled": True,
+        "replicates_requested": n_replicates,
+        "replicates_successful": replicate_successes,
+        "replicates_failed": replicate_failures,
+        "ci_level": ci_level,
+        "seed": seed,
+        "n_min_source": n_min_source,
+        "n_min_fit_model": n_min_fit_model if n_min_source == "fit" else None,
+        "by_method": by_method,
+        "failure_counts": {method: dict(counts) for method, counts in failure_counts.items()},
+        "failure_reasons": sorted(failure_reasons),
+        "warnings": warnings,
+    }
+
+
 def analyze(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     run_roots = [Path(item).resolve() for item in args.run_root]
     fit_models = parse_fit_models(args.fit_models)
-    moving_average_window = max(1, int(args.moving_average_window or 3))
+    moving_average_window = max(1, int(getattr(args, "moving_average_window", None) or 3))
+    aggregation_mode = resolve_aggregation_mode(
+        getattr(args, "aggregation_mode", None),
+        run_root_count=len(run_roots),
+    )
     warnings: list[str] = []
     sources: list[str] = []
-    grouped_rows: list[dict[str, Any]] = []
-    per_root_best: list[dict[str, Any]] = []
+    all_normalized_rows: list[dict[str, Any]] = []
     for root in run_roots:
         loaded, root_sources, root_warnings = load_run_root_rows(root)
         normalized_rows, normalize_warnings = normalize_rows(
@@ -1547,23 +2466,27 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             primary_metric=args.primary_metric,
             x_axis=args.x_axis,
         )
-        root_grouped = group_config_rows(normalized_rows)
-        grouped_rows.extend(root_grouped)
-        root_best = best_by_method_size(root_grouped)
         root_key = str(root.resolve())
-        for row in root_best:
+        for row in normalized_rows:
             enriched = dict(row)
-            enriched["source_run_root"] = root_key
-            per_root_best.append(enriched)
+            enriched["source_run_root"] = enriched.get("source_run_root") or root_key
+            all_normalized_rows.append(enriched)
         sources.extend(root_sources)
         warnings.extend(root_warnings + normalize_warnings)
 
-    aggregated = len(run_roots) > 1
-    if aggregated:
-        best_rows = mean_by_method_size(per_root_best)
-        warnings.append(f"aggregated_mean_across_{len(run_roots)}_run_roots")
+    grouped_rows = group_config_rows(all_normalized_rows)
+    raw_rows_count = len(all_normalized_rows)
+
+    if aggregation_mode == "mean_replicates":
+        best_rows = aggregate_rows_mean_replicates(all_normalized_rows)
+        if len(run_roots) > 1:
+            warnings.append(f"aggregated_mean_replicates_across_{len(run_roots)}_run_roots")
     else:
-        best_rows = per_root_best
+        best_rows = best_by_method_size(grouped_rows)
+
+    aggregated = aggregation_mode == "mean_replicates" and (
+        len(run_roots) > 1 or any(int(row.get("replicate_count") or 1) > 1 for row in best_rows)
+    )
 
     observed_thresholds = thresholds_by_method(
     best_rows,
@@ -1575,23 +2498,48 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     fit_thresholds: dict[str, dict[str, Any]] = {}
     fit_threshold_details: dict[str, dict[str, Any]] = {}
 
-    if args.n_min_source == "fit":
+    n_min_source = str(getattr(args, "n_min_source", None) or "observed")
+    n_min_fit_model = str(getattr(args, "n_min_fit_model", None) or "power_law")
+
+    if n_min_source == "fit":
         fit_thresholds, fit_threshold_details, fit_threshold_warnings = thresholds_by_method_from_fit(
         best_rows,
         threshold_mev=float(args.threshold_mev),
         relative_tolerance=float(args.relative_tolerance),
         plateau_gain=float(args.plateau_gain),
-        fit_model=args.n_min_fit_model,
+        fit_model=n_min_fit_model,
         moving_average_window=moving_average_window,
         )
         warnings.extend(fit_threshold_warnings)
 
-    thresholds = fit_thresholds if args.n_min_source == "fit" and fit_thresholds else observed_thresholds
+    thresholds = fit_thresholds if n_min_source == "fit" and fit_thresholds else observed_thresholds
 
-    if args.n_min_source == "fit" and not fit_thresholds:
+    if n_min_source == "fit" and not fit_thresholds:
         warnings.append("fit_thresholds_empty; falling back to observed thresholds")
         thresholds = observed_thresholds
 
+    bootstrap_replicates = parse_bootstrap_replicates(getattr(args, "bootstrap_replicates", 0))
+    bootstrap_seed = parse_bootstrap_seed(getattr(args, "bootstrap_seed", None))
+    ci_level = parse_ci_level(getattr(args, "ci_level", None))
+    methods = sorted({str(row["method"]) for row in best_rows})
+    if bootstrap_replicates > 0:
+        bootstrap = compute_bootstrap_n_min(
+            all_normalized_rows,
+            methods=methods,
+            n_replicates=bootstrap_replicates,
+            seed=bootstrap_seed,
+            ci_level=ci_level,
+            aggregation_mode=aggregation_mode,
+            threshold_mev=float(args.threshold_mev),
+            relative_tolerance=float(args.relative_tolerance),
+            plateau_gain=float(args.plateau_gain),
+            n_min_source=n_min_source,
+            n_min_fit_model=n_min_fit_model,
+            moving_average_window=moving_average_window,
+        )
+        warnings.extend(bootstrap.get("warnings") or [])
+    else:
+        bootstrap = disabled_bootstrap_summary(ci_level=ci_level)
 
     fits = {
         method: fit_models_for_method(
@@ -1628,6 +2576,12 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - plots are derived, tables still useful.
         warnings.append(f"plot_generation_failed:{exc}")
 
+    temporal_diagnostics = summarize_temporal_diagnostics(
+        all_normalized_rows,
+        run_roots=run_roots,
+    )
+    warnings.extend(temporal_diagnostics.get("warnings") or [])
+
     report = build_report(
         output_dir=output_dir,
         run_roots=run_roots,
@@ -1639,6 +2593,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         primary_metric=args.primary_metric,
         threshold_mev=float(args.threshold_mev),
         x_axis=args.x_axis,
+        temporal_diagnostics=temporal_diagnostics,
     )
     report_path = output_dir / "dataset_size_minimum_report.md"
     report_path.write_text(report, encoding="utf-8")
@@ -1659,6 +2614,10 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "grouped_config_rows": len(grouped_rows),
         "best_by_size_rows": len(best_rows),
         "aggregated": aggregated,
+        "aggregation_mode": aggregation_mode,
+        "aggregated_rows": best_rows,
+        "raw_rows_count": raw_rows_count,
+        "normalized_rows": summary_normalized_rows(all_normalized_rows),
         "methods": sorted({str(row["method"]) for row in best_rows}),
         "dataset_sizes": sorted({int(row["dataset_size_x"]) for row in best_rows}),
         "thresholds": thresholds,
@@ -1667,12 +2626,20 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "warnings": sorted(set(warnings)),
         "status": "ok" if best_rows else "no_usable_metric_rows",
         "forbidden_compute_commands": FORBIDDEN_COMPUTE_COMMANDS,
-        "n_min_source": args.n_min_source,
-        "n_min_fit_model": args.n_min_fit_model,
+        "n_min_source": n_min_source,
+        "n_min_fit_model": n_min_fit_model,
         "observed_thresholds": observed_thresholds,
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
         "moving_average_window": moving_average_window,
+        "bootstrap_replicates": bootstrap_replicates,
+        "bootstrap_seed": bootstrap_seed if bootstrap_replicates > 0 else None,
+        "ci_level": ci_level,
+        "bootstrap": bootstrap,
+        "temporal_diagnostics": temporal_diagnostics,
+        "nominal_n_train": temporal_diagnostics.get("nominal_n_train"),
+        "estimated_n_eff_train": temporal_diagnostics.get("estimated_n_eff_train"),
+        "autocorrelation_available": temporal_diagnostics.get("autocorrelation_available", False),
     }
     summary_path = output_dir / "dataset_size_minimum_summary.json"
     write_json(summary_path, summary)
@@ -1708,6 +2675,33 @@ def build_parser() -> argparse.ArgumentParser:
     type=int,
     default=3,
     help="Window size in observed points for moving_average fit model.",
+    )
+    parser.add_argument(
+        "--aggregation-mode",
+        choices=list(AGGREGATION_MODES),
+        default=None,
+        help=(
+            "How to combine replicate rows per method and dataset size. "
+            "Default: best_config for one --run-root, mean_replicates for multiple."
+        ),
+    )
+    parser.add_argument(
+        "--bootstrap-replicates",
+        type=parse_bootstrap_replicates,
+        default=0,
+        help="Bootstrap replicates for N_min confidence intervals; 0 disables bootstrap.",
+    )
+    parser.add_argument(
+        "--bootstrap-seed",
+        type=parse_bootstrap_seed,
+        default=DEFAULT_BOOTSTRAP_SEED,
+        help="Random seed for bootstrap resampling.",
+    )
+    parser.add_argument(
+        "--ci-level",
+        type=parse_ci_level,
+        default=DEFAULT_CI_LEVEL,
+        help="Confidence level for bootstrap intervals, in (0, 1).",
     )
     return parser
 

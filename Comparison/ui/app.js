@@ -2543,6 +2543,7 @@ function renderDatasetMinimumRunSources(payload = {}) {
     checkbox.addEventListener("change", () => {
       syncDatasetMinimumRunRootSelectionFromDom();
       state.datasetMinimumPreviewCache = null;
+      datasetMinimumInvalidatePreferredOutputIfStale();
       refreshDatasetMinimumView();
     });
     const meta = document.createElement("div");
@@ -2594,6 +2595,10 @@ async function runDatasetMinimumAnalysis() {
         : "fit",
         n_min_fit_model: datasetMinimumBackendFitModel(selectedFit),
         moving_average_window: datasetMinimumSelectedMovingAverageWindow(),
+        aggregation_mode: datasetMinimumSelectedAggregationMode(),
+        bootstrap_replicates: datasetMinimumSelectedBootstrapReplicates(),
+        bootstrap_seed: 12345,
+        ci_level: datasetMinimumSelectedCiLevel(),
     };
     
     const response = await request("/api/g2m-deeph/dataset-size-minimum/analyze", {
@@ -2714,6 +2719,119 @@ function datasetMinimumSelectedNMinSource() {
   return datasetMinimumControlValue("dataset-minimum-nmin-source", "fit");
 }
 
+function datasetMinimumSelectedAggregationMode() {
+  return datasetMinimumControlValue("dataset-minimum-aggregation-mode", "mean_replicates");
+}
+
+function datasetMinimumAggregationModeLabel(mode) {
+  if (mode === "best_config") return "Best config — diagnostic";
+  return "Mean replicates — recommended";
+}
+
+function datasetMinimumSelectedBootstrapReplicates() {
+  const value = finiteNumber(datasetMinimumControlValue("dataset-minimum-bootstrap-replicates", "0"));
+  return value == null ? 0 : Math.max(0, Math.round(value));
+}
+
+function datasetMinimumSelectedCiLevel() {
+  const value = finiteNumber(datasetMinimumControlValue("dataset-minimum-ci-level", "0.95"));
+  return value == null ? 0.95 : value;
+}
+
+function datasetMinimumShowRawReplicates() {
+  return Boolean(document.getElementById("dataset-minimum-show-raw-replicates")?.checked);
+}
+
+function datasetMinimumOutputBootstrapReplicates(output = {}) {
+  const value = finiteNumber(output.bootstrap_replicates);
+  return value == null ? 0 : Math.round(value);
+}
+
+function datasetMinimumOutputCiLevel(output = {}) {
+  const value = finiteNumber(output.ci_level);
+  return value == null ? 0.95 : value;
+}
+
+function datasetMinimumEffectiveAggregationMode(output = {}) {
+  if (output.aggregation_mode) return String(output.aggregation_mode);
+  const roots = datasetMinimumNormalizeRoots(output.run_roots || []);
+  return roots.length > 1 ? "mean_replicates" : "best_config";
+}
+
+function datasetMinimumOutputNMinFitModel(output = {}) {
+  return String(output.n_min_fit_model || "power_law");
+}
+
+function datasetMinimumOutputMovingAverageWindow(output = {}) {
+  const value = finiteNumber(output.moving_average_window);
+  return value == null ? 3 : Math.max(1, Math.round(value));
+}
+
+function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
+  if (output.primary_metric !== datasetMinimumSelectedMetric()) return false;
+  if ((output.x_axis || "n_train") !== datasetMinimumSelectedXAxis()) return false;
+
+  const threshold = datasetMinimumSelectedThreshold();
+  const outThreshold = finiteNumber(output.threshold_mev);
+  if (
+    threshold == null
+    || outThreshold == null
+    || Math.abs(threshold - outThreshold) >= 1e-9
+  ) {
+    return false;
+  }
+
+  const nMinSource = String(output.n_min_source || "observed");
+  if (nMinSource !== datasetMinimumSelectedNMinSource()) return false;
+
+  const selectedFit = datasetMinimumBackendFitModel(datasetMinimumSelectedFit());
+  if (datasetMinimumOutputNMinFitModel(output) !== selectedFit) return false;
+
+  if (
+    datasetMinimumEffectiveAggregationMode(output)
+    !== datasetMinimumSelectedAggregationMode()
+  ) {
+    return false;
+  }
+
+  if (selectedFit === "moving_average") {
+    if (
+      datasetMinimumOutputMovingAverageWindow(output)
+      !== datasetMinimumSelectedMovingAverageWindow()
+    ) {
+      return false;
+    }
+  }
+
+  if (
+    datasetMinimumOutputBootstrapReplicates(output)
+    !== datasetMinimumSelectedBootstrapReplicates()
+  ) {
+    return false;
+  }
+
+  if (
+    Math.abs(datasetMinimumOutputCiLevel(output) - datasetMinimumSelectedCiLevel()) > 1e-9
+  ) {
+    return false;
+  }
+
+  return datasetMinimumOutputMatchesSelection(output);
+}
+
+function datasetMinimumInvalidatePreferredOutputIfStale() {
+  const preferred = datasetMinimumNormalizePath(state.datasetMinimumPreferredOutputDir || "");
+  if (!preferred) return;
+
+  const payload = state.datasetMinimumPayload || {};
+  const output = (payload.outputs || []).find(
+    (item) => datasetMinimumNormalizePath(item.output_dir) === preferred,
+  );
+  if (!output || !datasetMinimumOutputMatchesCurrentSelection(output)) {
+    state.datasetMinimumPreferredOutputDir = null;
+  }
+}
+
 function datasetMinimumNormalizeRoots(roots = []) {
   return Array.from(
     new Set(
@@ -2748,48 +2866,30 @@ function datasetMinimumNormalizePath(value) {
 }
 
 function datasetMinimumFindOutput(payload = {}) {
-  const metric = datasetMinimumSelectedMetric();
-  const threshold = datasetMinimumSelectedThreshold();
   const preferredOutputDir = datasetMinimumNormalizePath(
     state.datasetMinimumPreferredOutputDir || "",
   );
 
-  const outputs = (payload.outputs || [])
+  const compatible = (payload.outputs || [])
     .filter((output) => ["ok", "no_usable_metric_rows"].includes(String(output.status || "")))
-    .filter((output) => output.primary_metric === metric);
+    .filter(datasetMinimumOutputMatchesCurrentSelection);
 
-  if (!outputs.length) return null;
-
-  const thresholdMatches = (output) => {
-    const outThreshold = finiteNumber(output.threshold_mev);
-    return threshold != null && outThreshold != null && Math.abs(outThreshold - threshold) < 1e-9;
-  };
+  if (!compatible.length) return null;
 
   // 1. Prioridad maxima: el output recien generado por Run analysis.
   if (preferredOutputDir) {
-    const preferred = outputs.find(
-      (output) =>
-        datasetMinimumNormalizePath(output.output_dir) === preferredOutputDir &&
-        thresholdMatches(output),
+    const preferred = compatible.find(
+      (output) => datasetMinimumNormalizePath(output.output_dir) === preferredOutputDir,
     );
     if (preferred) return preferred;
   }
 
-  // 2. Coincidencia exacta por sweeps fuente seleccionados.
-  const selectedMatches = outputs
-    .filter(thresholdMatches)
-    .filter(datasetMinimumOutputMatchesSelection);
-
-  if (selectedMatches.length) {
-    return selectedMatches.sort((left, right) => {
-      const leftTime = finiteNumber(left.modified_at) ?? 0;
-      const rightTime = finiteNumber(right.modified_at) ?? 0;
-      return rightTime - leftTime;
-    })[0];
-  }
-
-  // 3. Fallback: no pintar un output de otra seleccion.
-  return null;
+  // 2. Coincidencia exacta mas reciente para la seleccion actual.
+  return compatible.sort((left, right) => {
+    const leftTime = finiteNumber(left.modified_at) ?? 0;
+    const rightTime = finiteNumber(right.modified_at) ?? 0;
+    return rightTime - leftTime;
+  })[0];
 }
 
 function datasetMinimumAxisField(axis) {
@@ -2829,6 +2929,191 @@ function datasetMinimumFormatMeV(value) {
   return number == null ? "-" : `${number.toFixed(3)} meV`;
 }
 
+function datasetMinimumRowErrorBarDelta(row = {}) {
+  const sem = finiteNumber(row.primary_metric_mev_sem);
+  if (sem != null && sem > 0) return sem;
+  const std = finiteNumber(row.primary_metric_mev_std);
+  if (std != null && std > 0) return std;
+  return null;
+}
+
+function datasetMinimumListField(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join(", ") || "-";
+  return value == null || value === "" ? "-" : String(value);
+}
+
+function datasetMinimumAggregatedRowHover(row = {}, axis = "n_train") {
+  const lines = [
+    `method: ${row.method || "-"}`,
+    `${axis === "n_total" ? "N_total" : "N_train"}: ${row.x_value ?? "-"}`,
+    `mean: ${row.y_value == null ? "-" : `${row.y_value.toFixed(3)} meV`}`,
+  ];
+  const std = finiteNumber(row.primary_metric_mev_std);
+  const sem = finiteNumber(row.primary_metric_mev_sem);
+  if (std != null) lines.push(`std: ${std.toFixed(3)} meV`);
+  if (sem != null) lines.push(`sem: ${sem.toFixed(3)} meV`);
+  if (sem == null && std != null) lines.push("error bar uses std (sem unavailable)");
+  const replicateCount = row.replicate_count || row.row_count || row.source_count;
+  if (replicateCount) lines.push(`replicate_count: ${replicateCount}`);
+  lines.push(`seeds: ${datasetMinimumListField(row.seeds || row.seed)}`);
+  lines.push(`config_ids: ${datasetMinimumListField(row.config_ids || row.config_id)}`);
+  lines.push(`source_run_roots: ${datasetMinimumListField(row.source_run_roots || row.source_run_root)}`);
+  if (row.y_min != null && row.y_max != null) {
+    lines.push(`y_range: [${Number(row.y_min).toFixed(3)}, ${Number(row.y_max).toFixed(3)}] meV`);
+  }
+  return lines.join("<br>");
+}
+
+function datasetMinimumFormatNMinWithCi(output, method, criterion, axis) {
+  const point = datasetMinimumDisplayN(
+    output,
+    method,
+    output?.thresholds?.[method]?.[criterion],
+    axis,
+  );
+  const bootstrap = output?.bootstrap;
+  const ci = bootstrap?.enabled ? bootstrap?.by_method?.[method]?.[criterion] : null;
+  const hasInterval = ci
+    && ci.median != null
+    && ci.lower != null
+    && ci.upper != null
+    && ci.n_bootstrap_successful >= 2;
+
+  if (hasInterval) {
+    const median = datasetMinimumFormatN(
+      datasetMinimumDisplayN(output, method, ci.median, axis),
+    );
+    const lower = datasetMinimumFormatN(
+      datasetMinimumDisplayN(output, method, ci.lower, axis),
+    );
+    const upper = datasetMinimumFormatN(
+      datasetMinimumDisplayN(output, method, ci.upper, axis),
+    );
+    return `${median} [${lower}, ${upper}]`;
+  }
+
+  if (point != null) {
+    return `${datasetMinimumFormatN(point)} <span class="muted-text">(no bootstrap CI)</span>`;
+  }
+  return "-";
+}
+
+function datasetMinimumRawReplicateTraces(output, axis) {
+  if (!datasetMinimumShowRawReplicates() || output?.is_preview) return [];
+  const rawRows = output?.normalized_rows || [];
+  if (!rawRows.length) return [];
+
+  const traces = [];
+  const methods = Array.from(new Set(rawRows.map((row) => String(row.method || "unknown")))).sort();
+  methods.forEach((method, index) => {
+    const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
+    const methodRows = rawRows
+      .filter((row) => String(row.method || "") === method)
+      .map((row) => ({
+        x: datasetMinimumRowX(row, axis),
+        y: finiteNumber(row.primary_metric_mev_mean ?? row.primary_metric_mev),
+      }))
+      .filter((row) => row.x != null && row.y != null);
+    if (!methodRows.length) return;
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      x: methodRows.map((row) => row.x),
+      y: methodRows.map((row) => row.y),
+      marker: {
+        symbol: g2mDeephMarkerSymbol(method),
+        size: 6,
+        color,
+        opacity: 0.28,
+        line: { width: 0 },
+      },
+      name: `${methodDisplayLabel(method)} raw replicates`,
+      hovertemplate: `${axis === "n_total" ? "N_total" : "N_train"}: %{x}<br>Error: %{y:.3f} meV<extra>raw replicate</extra>`,
+      showlegend: false,
+    });
+  });
+  return traces;
+}
+
+function datasetMinimumBootstrapNMinOverlays(output, axis) {
+  const shapes = [];
+  const annotations = [];
+  if (!output?.bootstrap?.enabled) return { shapes, annotations };
+
+  const thresholds = output.thresholds || {};
+  Object.keys(thresholds).sort().forEach((method, methodIndex) => {
+    const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(methodIndex);
+    for (const criterionKey of ["N_min_abs", "N_min_rel95", "N_min_plateau"]) {
+      if (!datasetMinimumCriteriaToPlot().includes(criterionKey)) continue;
+      const ci = output.bootstrap?.by_method?.[method]?.[criterionKey];
+      if (!ci || ci.lower == null || ci.upper == null) continue;
+
+      const lower = finiteNumber(datasetMinimumDisplayN(output, method, ci.lower, axis));
+      const upper = finiteNumber(datasetMinimumDisplayN(output, method, ci.upper, axis));
+      const median = finiteNumber(datasetMinimumDisplayN(output, method, ci.median, axis));
+      if (lower == null || upper == null) continue;
+
+      const x0 = Math.min(lower, upper);
+      const x1 = Math.max(lower, upper);
+      shapes.push({
+        type: "rect",
+        xref: "x",
+        yref: "paper",
+        x0,
+        x1,
+        y0: 0,
+        y1: 1,
+        fillcolor: color,
+        opacity: 0.08,
+        line: { width: 0 },
+      });
+      shapes.push({
+        type: "line",
+        xref: "x",
+        x0: x0,
+        x1: x0,
+        yref: "paper",
+        y0: 0,
+        y1: 1,
+        line: { color, width: 1, dash: "dot" },
+      });
+      shapes.push({
+        type: "line",
+        xref: "x",
+        x0: x1,
+        x1: x1,
+        yref: "paper",
+        y0: 0,
+        y1: 1,
+        line: { color, width: 1, dash: "dot" },
+      });
+      if (median != null) {
+        shapes.push({
+          type: "line",
+          xref: "x",
+          x0: median,
+          x1: median,
+          yref: "paper",
+          y0: 0,
+          y1: 1,
+          line: { color, width: 2.2, dash: "solid" },
+        });
+        annotations.push({
+          text: `${methodDisplayLabel(method)} ${criterionKey} bootstrap ${Math.round(median)} [${Math.round(x0)}, ${Math.round(x1)}]`,
+          xref: "x",
+          x: median,
+          yref: "paper",
+          y: 1.04 + methodIndex * 0.04,
+          showarrow: false,
+          font: { size: 10, color },
+          bgcolor: "rgba(255,255,255,0.82)",
+        });
+      }
+    }
+  });
+  return { shapes, annotations };
+}
+
 function renderDatasetMinimumTable(output, axis) {
   const container = document.getElementById("dataset-minimum-table");
   if (!container) return;
@@ -2865,10 +3150,10 @@ function renderDatasetMinimumTable(output, axis) {
       <td>${threshold == null ? "-" : `${formatCompactNumber(threshold)} meV`}</td>
       <td>${escapeHtml(methodDisplayLabel(method))}</td>
       <td>${datasetMinimumFormatMeV(row.best_observed_mev)}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_abs, axis))}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_rel95, axis))}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_plateau, axis))}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))}</td>
+      <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_abs", axis)}</td>
+      <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_rel95", axis)}</td>
+      <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_plateau", axis)}</td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(no bootstrap CI)</span></td>
     `;
     body.appendChild(tr);
   }
@@ -3181,7 +3466,7 @@ function datasetMinimumFitLabel(fitKind) {
   if (fitKind === "monotone_lowess_logx") return "monotone LOWESS log-N";
   if (fitKind === "cumulative_best") return "cumulative best";
   if (fitKind === "power_law_floor") return "power law + floor";
-  if (fitKind === "power_law") return "power law";
+  if (fitKind === "power_law") return "power law + floor";
   if (fitKind === "none") return "no fit";
   return fitKindLabel(fitKind);
 }
@@ -3191,6 +3476,7 @@ function datasetMinimumPreviewCacheKey() {
     datasetMinimumRootKey(datasetMinimumSelectedRunRoots()),
     datasetMinimumSelectedMetric(),
     datasetMinimumSelectedXAxis(),
+    datasetMinimumSelectedAggregationMode(),
   ].join("|");
 }
 
@@ -3266,26 +3552,40 @@ function datasetMinimumAggregateRowsByMethod(rows = [], axis = "n_train") {
     .sort((left, right) => left.x_value - right.x_value || String(left.method).localeCompare(String(right.method)));
 }
 
+function datasetMinimumPlotRowsFromOutput(output = {}) {
+  if (!output) return [];
+  if (Array.isArray(output.aggregated_rows) && output.aggregated_rows.length) {
+    return output.aggregated_rows;
+  }
+  return output.best_rows || [];
+}
+
 function datasetMinimumResolvePlotOutput(output, preview) {
+  const exactMatch = output && datasetMinimumOutputMatchesCurrentSelection(output);
+  if (exactMatch) {
+    const plotRows = datasetMinimumPlotRowsFromOutput(output);
+    return {
+      ...output,
+      best_rows: plotRows,
+      aggregated_rows: plotRows,
+      aggregated: output.aggregation_mode === "mean_replicates" || Boolean(output.aggregated),
+      is_preview: false,
+    };
+  }
+
   const previewRows = preview?.best_rows || [];
   if (!previewRows.length) return output || preview || null;
 
-  const exactMatch = output && datasetMinimumOutputMatchesSelection(output);
   return {
     ...(preview || {}),
-    ...(exactMatch
-      ? {
-          thresholds: output.thresholds || {},
-          threshold_mev: output.threshold_mev,
-        }
-      : {
-          thresholds: {},
-          threshold_mev: datasetMinimumSelectedThreshold(),
-        }),
+    thresholds: {},
+    threshold_mev: datasetMinimumSelectedThreshold(),
     primary_metric: datasetMinimumSelectedMetric(),
     x_axis: datasetMinimumSelectedXAxis(),
+    aggregation_mode: datasetMinimumSelectedAggregationMode(),
     best_rows: previewRows,
-    is_preview: !exactMatch,
+    aggregated_rows: preview?.aggregated_rows || previewRows,
+    is_preview: true,
   };
 }
 
@@ -3304,7 +3604,9 @@ async function refreshDatasetMinimumView() {
   datasetMinimumViewRefreshPromise = (async () => {
     let plotOutput = output;
 
-    if (selectedRoots.length) {
+    if (output && datasetMinimumOutputMatchesCurrentSelection(output)) {
+      plotOutput = datasetMinimumResolvePlotOutput(output, null);
+    } else if (selectedRoots.length) {
       const cacheKey = datasetMinimumPreviewCacheKey();
       let preview = state.datasetMinimumPreviewCache?.key === cacheKey
         ? state.datasetMinimumPreviewCache.data
@@ -3320,6 +3622,7 @@ async function refreshDatasetMinimumView() {
               run_roots: selectedRoots,
               primary_metric: datasetMinimumSelectedMetric(),
               x_axis: datasetMinimumSelectedXAxis(),
+              aggregation_mode: datasetMinimumSelectedAggregationMode(),
             }),
           });
           state.datasetMinimumPreviewCache = { key: cacheKey, data: preview };
@@ -3351,7 +3654,54 @@ function renderDatasetMinimumControls() {
   const payload = state.datasetMinimumPayload || {};
   populateDatasetMinimumThresholdPresets(payload);
   updateDatasetMinimumMovingAverageVisibility();
+  datasetMinimumInvalidatePreferredOutputIfStale();
   refreshDatasetMinimumView();
+}
+
+function datasetMinimumBackendFitLine(method, output, selectedFit) {
+  const backendFit = output?.fits?.[method]?.[datasetMinimumBackendFitModel(selectedFit)];
+  if (!backendFit || backendFit.status !== "ok") return [];
+
+  const curvePoints = backendFit.curve_points || [];
+  if (curvePoints.length > 1) {
+    return curvePoints
+      .map((point) => ({
+        x: finiteNumber(point.x),
+        y: finiteNumber(point.y),
+      }))
+      .filter((point) => point.x != null && point.y != null);
+  }
+
+  const coefficients = backendFit.coefficients || [];
+  if (!coefficients.length) return [];
+
+  const rows = datasetMinimumPlotRowsFromOutput(output)
+    .filter((row) => String(row.method || "") === String(method || ""));
+  const xValues = rows
+    .map((row) => finiteNumber(row.dataset_size_x))
+    .filter((value) => value != null && value > 0)
+    .sort((a, b) => a - b);
+  if (xValues.length < 2) return [];
+
+  const minX = xValues[0];
+  const maxX = xValues[xValues.length - 1];
+  const grid = minX === maxX
+    ? [minX]
+    : Array.from({ length: 100 }, (_, index) => minX + ((maxX - minX) * index) / 99);
+
+  if (selectedFit === "power_law" && coefficients.length >= 3) {
+    const [eInf, amplitude, alpha] = coefficients;
+    return grid.map((x) => ({ x, y: eInf + amplitude * (x ** (-alpha)) }));
+  }
+
+  return datasetMinimumFitLinePoints(
+    rows.map((row) => ({
+      x: finiteNumber(row.dataset_size_x),
+      y: finiteNumber(row.primary_metric_mev_mean),
+    })).filter((point) => point.x != null && point.y != null),
+    selectedFit,
+    { movingAverageWindow: datasetMinimumOutputMovingAverageWindow(output) },
+  );
 }
 
 function renderDatasetMinimumPlot(output, axis) {
@@ -3361,7 +3711,8 @@ function renderDatasetMinimumPlot(output, axis) {
     card.textContent = "Plotly no esta cargado.";
     return;
   }
-  const rows = (output?.best_rows || [])
+  const sourceRows = datasetMinimumPlotRowsFromOutput(output);
+  const rows = sourceRows
     .map((row) => ({
       ...row,
       x_value: datasetMinimumRowX(row, axis),
@@ -3377,11 +3728,25 @@ function renderDatasetMinimumPlot(output, axis) {
     return;
   }
   const selectedFit = datasetMinimumSelectedFit();
-  const traces = [];
+  const backendFitModel = datasetMinimumBackendFitModel(selectedFit);
+  const traces = [...datasetMinimumRawReplicateTraces(output, axis)];
+  const aggregationMode = output?.aggregation_mode
+    || (output?.is_preview ? datasetMinimumSelectedAggregationMode() : "mean_replicates");
   const selectedRootCount = datasetMinimumSelectedRunRoots().length;
-  const aggregated = Boolean(output?.aggregated)
+  const useBackendAggregation = !output?.is_preview && (
+    aggregationMode === "mean_replicates"
+    || rows.some((row) => row.is_aggregated_mean || (row.replicate_count || 0) > 1)
+  );
+  const aggregated = aggregationMode === "mean_replicates"
+    || useBackendAggregation
+    || Boolean(output?.aggregated)
     || datasetMinimumShouldAggregateRows(rows, selectedRootCount);
-  const plotRows = aggregated ? datasetMinimumAggregateRowsByMethod(rows, axis) : rows;
+  const plotRows = useBackendAggregation || aggregationMode === "mean_replicates" || !output?.is_preview
+    ? rows
+    : aggregated
+      ? datasetMinimumAggregateRowsByMethod(rows, axis)
+      : rows;
+
   const sweepLabels = new Set(
     plotRows.map((row) => String(row.sweep_label || row.source_run_root || "").trim()).filter(Boolean),
   );
@@ -3396,7 +3761,11 @@ function renderDatasetMinimumPlot(output, axis) {
     const sample = group[0] || {};
     const method = String(sample.method || "unknown");
     const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
-    const seriesLabel = datasetMinimumPlotSeriesLabel(sample, multiSweep, aggregated);
+    const seriesLabel = aggregated
+      ? `${methodDisplayLabel(method)} ${aggregationMode === "best_config" ? "best config" : "mean"}`
+      : datasetMinimumPlotSeriesLabel(sample, multiSweep, aggregated);
+    const errorValues = group.map((row) => datasetMinimumRowErrorBarDelta(row));
+    const hasErrorBars = errorValues.some((value) => value != null && value > 0);
     traces.push({
       type: "scatter",
       mode: "lines+markers",
@@ -3405,19 +3774,27 @@ function renderDatasetMinimumPlot(output, axis) {
       marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8, color },
       line: { color, width: 2 },
       name: seriesLabel,
-      text: group.map((row) => {
-        if (aggregated && (row.source_count || 0) > 1) {
-          const sources = (row.aggregated_sources || row.sweep_labels || []).join(", ") || `${row.source_count} sources`;
-          return `mean of ${row.source_count} · ${sources}`;
+      text: group.map((row) => datasetMinimumAggregatedRowHover(row, axis)),
+      hovertemplate: "%{text}<extra>%{fullData.name}</extra>",
+      error_y: hasErrorBars
+        ? {
+          type: "data",
+          array: errorValues.map((value) => value || 0),
+          visible: true,
+          color,
+          thickness: 1.2,
+          width: 4,
         }
-        return `${row.config_id || "-"} · ${row.epoch_label || "-"} · total ${row.dataset_size_total || "-"}`;
-      }),
-      hovertemplate: `${axis === "n_total" ? "N_total" : "N_train"}: %{x}<br>Error: %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>`,
+        : undefined,
     });
     const fitPoints = group.map((row) => ({ x: row.x_value, y: row.y_value }));
-    const fitLine = datasetMinimumFitLinePoints(fitPoints, selectedFit, {
-      movingAverageWindow: datasetMinimumSelectedMovingAverageWindow(),
-    });
+    const fitLine = !output?.is_preview && output?.fits?.[method]?.[backendFitModel]?.status === "ok"
+      ? datasetMinimumBackendFitLine(method, output, selectedFit)
+      : datasetMinimumFitLinePoints(fitPoints, selectedFit, {
+        movingAverageWindow: output?.is_preview
+          ? datasetMinimumSelectedMovingAverageWindow()
+          : datasetMinimumOutputMovingAverageWindow(output),
+      });
     if (fitLine.length > 1) {
       traces.push({
         type: "scatter",
@@ -3458,8 +3835,12 @@ function renderDatasetMinimumPlot(output, axis) {
       bgcolor: "rgba(255,255,255,0.82)",
     });
   }
+  const bootstrapOverlays = datasetMinimumBootstrapNMinOverlays(output, axis);
+  shapes.push(...bootstrapOverlays.shapes);
+  annotations.push(...bootstrapOverlays.annotations);
+
   const thresholds = output.thresholds || {};
-  let annotationOffset = 0;
+  let annotationOffset = bootstrapOverlays.annotations.length;
   Object.keys(thresholds).sort().forEach((method, index) => {
     const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
     for (const criterionKey of datasetMinimumCriteriaToPlot()) {
@@ -3467,16 +3848,22 @@ function renderDatasetMinimumPlot(output, axis) {
       if (!criterion) continue;
       const nValue = finiteNumber(datasetMinimumDisplayN(output, method, thresholds[method]?.[criterionKey], axis));
       if (nValue == null) continue;
-      shapes.push({
-        type: "line",
-        xref: "x",
-        x0: nValue,
-        x1: nValue,
-        yref: "paper",
-        y0: 0,
-        y1: 1,
-        line: { color, width: criterion.width, dash: criterion.dash },
-      });
+      const hasBootstrapBand = Boolean(
+        output?.bootstrap?.enabled
+        && output.bootstrap?.by_method?.[method]?.[criterionKey]?.lower != null,
+      );
+      if (!hasBootstrapBand) {
+        shapes.push({
+          type: "line",
+          xref: "x",
+          x0: nValue,
+          x1: nValue,
+          yref: "paper",
+          y0: 0,
+          y1: 1,
+          line: { color, width: criterion.width, dash: criterion.dash },
+        });
+      }
       annotations.push({
         text: `${methodDisplayLabel(method)} ${criterion.label}=${Math.round(nValue)}`,
         xref: "x",
@@ -3491,7 +3878,10 @@ function renderDatasetMinimumPlot(output, axis) {
     }
   });
   const yValues = plotRows.map((row) => row.y_value).concat(threshold == null ? [] : [threshold]);
-  const title = `Dataset size minimum · ${DATASET_MINIMUM_METRIC_LABELS[output.primary_metric] || output.primary_metric || "metric"}`;
+  const modeLabel = datasetMinimumAggregationModeLabel(
+    output?.aggregation_mode || datasetMinimumSelectedAggregationMode(),
+  );
+  const title = `Dataset size minimum · ${DATASET_MINIMUM_METRIC_LABELS[output.primary_metric] || output.primary_metric || "metric"} · ${modeLabel}`;
   const layout = plotLayout(title, "Error (meV)", {
     shapes,
     annotations,
@@ -3536,28 +3926,17 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
 
     if (previewRows.length && selectedRunRoots.length) {
       status.textContent =
-        `Vista previa desde ${selectedRunRoots.length} sweep(s) seleccionado(s) ` +
-        `para ${DATASET_MINIMUM_METRIC_LABELS[metric] || metric}. ` +
-        `Ejecuta Run analysis para calcular N_min con threshold ${threshold ?? "-"} meV.`;
+        `Preview from ${selectedRunRoots.length} sweep(s) for ${DATASET_MINIMUM_METRIC_LABELS[metric] || metric}. ` +
+        `Run analysis required for this exact selection (aggregation, bootstrap, fit, threshold).`;
       return;
     }
 
     status.classList.add("invalid");
-
-    const combinations = (payload?.available_combinations || [])
-      .filter((item) => item.primary_metric === metric)
-      .map((item) => `${item.threshold_mev ?? "?"} meV`)
-      .join(", ");
-
-    const selectionNote = selectedRunRoots.length
-      ? ` Sweeps seleccionados: ${selectedRunRoots.length}. Ejecuta Run analysis para esta seleccion exacta.`
-      : " Selecciona al menos un sweep terminado.";
-
     status.textContent =
-      `No hay output para ${DATASET_MINIMUM_METRIC_LABELS[metric] || metric} ` +
-      `con threshold ${threshold ?? "-"} meV y la seleccion actual.` +
-      `${combinations ? ` Disponibles para esa metrica: ${combinations}.` : ""}` +
-      selectionNote;
+      `Run analysis required for this exact selection. ` +
+      `No stored output matches metric=${DATASET_MINIMUM_METRIC_LABELS[metric] || metric}, ` +
+      `threshold=${threshold ?? "-"} meV, aggregation=${datasetMinimumAggregationModeLabel(datasetMinimumSelectedAggregationMode())}, ` +
+      `bootstrap=${datasetMinimumSelectedBootstrapReplicates()}, ci=${datasetMinimumSelectedCiLevel()}.`;
 
     return;
   }
@@ -3583,28 +3962,54 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const outputRunRoots = datasetMinimumNormalizeRoots(output.run_roots || []);
   const exactRootMatch =
     datasetMinimumRootKey(outputRunRoots) === datasetMinimumRootKey(selectedRunRoots);
+  const aggregationMode = datasetMinimumEffectiveAggregationMode(output);
+  const aggregationNote = ` Aggregation: ${datasetMinimumAggregationModeLabel(aggregationMode)}.`;
+  const bestConfigWarning = aggregationMode === "best_config"
+    ? " Warning: best_config is diagnostic only, not recommended for paper-level reporting."
+    : "";
+  const nMinSourceNote = ` N_min source: ${output.n_min_source || "observed"}.`;
+  const fitNote = ` Fit: ${datasetMinimumFitLabel(datasetMinimumSelectedFit())} (backend: ${datasetMinimumOutputNMinFitModel(output)}).`;
+  const windowNote = datasetMinimumOutputNMinFitModel(output) === "moving_average"
+    ? ` Moving-average window: ${datasetMinimumOutputMovingAverageWindow(output)}.`
+    : "";
+  const bootstrap = output.bootstrap || {};
+  const bootstrapNote = bootstrap.enabled
+    ? ` Bootstrap: enabled (${bootstrap.replicates_requested ?? output.bootstrap_replicates ?? 0} replicates, CI ${output.ci_level ?? datasetMinimumOutputCiLevel(output)}, successful ${bootstrap.replicates_successful ?? 0}).`
+    : " Bootstrap: disabled.";
 
-  const selectionNote = selectedRunRoots.length
-    ? ` Sweeps seleccionados: ${selectedRunRoots.length}. Pulsa Run analysis para recalcular con esa seleccion.`
-    : " Selecciona al menos un sweep terminado.";
+  const temporal = output.temporal_diagnostics || {};
+  let temporalNote = "";
+  if (temporal.status_message) {
+    temporalNote = ` ${temporal.status_message}.`;
+  } else if (output.estimated_n_eff_train != null) {
+    temporalNote = ` Estimated N_eff range: ${JSON.stringify(output.estimated_n_eff_train)}.`;
+  } else {
+    temporalNote = " N is nominal; N_eff not estimated.";
+  }
+  if (output.autocorrelation_available === false && (temporal.warnings || []).length) {
+    const temporalWarnings = (temporal.warnings || []).filter((item) =>
+      String(item).includes("autocorrelation") || String(item).includes("temporal"),
+    );
+    if (temporalWarnings.length) {
+      temporalNote += ` Temporal warnings: ${temporalWarnings.slice(0, 3).join("; ")}.`;
+    }
+  }
 
   const outputNote = outputRunRoots.length
-    ? ` Output actual generado con ${outputRunRoots.length} sweep(s)${
+    ? ` Output from ${outputRunRoots.length} sweep(s)${
         selectedRunRoots.length
           ? exactRootMatch
-            ? " seleccionados."
-            : " distinto(s) de la seleccion."
+            ? " matching selection."
+            : " different from current selection."
           : "."
       }`
     : "";
 
   status.textContent =
-    `${payload.diagnostic_warning || "Dataset-size-minimum output diagnostico."}` +
-    `${thresholdNote}` +
-    `${outputNote}` +
-    `${selectionNote}` +
-    `${axisNote}` +
-    `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}`;
+    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${fitNote}${windowNote}${bootstrapNote}${temporalNote}` +
+    `${thresholdNote}${outputNote}${axisNote}` +
+    `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}` +
+    `${payload.diagnostic_warning ? ` ${payload.diagnostic_warning}` : ""}`;
 }
 
 
@@ -10238,18 +10643,25 @@ function setupEvents() {
       "dataset-minimum-fit",
       "dataset-minimum-moving-average-window",
       "dataset-minimum-nmin-source",
+      "dataset-minimum-aggregation-mode",
+      "dataset-minimum-bootstrap-replicates",
+      "dataset-minimum-ci-level",
+      "dataset-minimum-show-raw-replicates",
       "dataset-minimum-criterion",
     ].forEach((id) => {
     const node = document.getElementById(id);
     node?.addEventListener("change", () => {
       if (id === "dataset-minimum-threshold-preset") syncDatasetMinimumThresholdFromPreset();
       if (id === "dataset-minimum-threshold") syncDatasetMinimumThresholdPresetFromInput();
+      if (id === "dataset-minimum-fit") updateDatasetMinimumMovingAverageVisibility();
       state.datasetMinimumPreviewCache = null;
+      datasetMinimumInvalidatePreferredOutputIfStale();
       renderDatasetMinimumControls();
     });
     node?.addEventListener("input", () => {
       if (id === "dataset-minimum-threshold") syncDatasetMinimumThresholdPresetFromInput();
       state.datasetMinimumPreviewCache = null;
+      datasetMinimumInvalidatePreferredOutputIfStale();
       renderDatasetMinimumControls();
     });
   });

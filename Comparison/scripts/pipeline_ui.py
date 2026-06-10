@@ -77,15 +77,17 @@ from material_presets import (  # noqa: E402
     resolve_material_bundle,
 )
 from g2m_deeph_dataset_size_minimum import (
+    AGGREGATION_MODES,
+    aggregate_rows_mean_replicates as dataset_minimum_aggregate_rows_mean_replicates,
     best_by_method_size as dataset_minimum_best_by_method_size,
     discover_metric_files as discover_dataset_minimum_metric_files,
     group_config_rows as dataset_minimum_group_config_rows,
     load_json_metric_rows as load_dataset_minimum_json_metric_rows,
     load_run_root_rows as dataset_minimum_load_run_root_rows,
-    mean_by_method_size as dataset_minimum_mean_by_method_size,
     normalize_rows as dataset_minimum_normalize_rows,
     pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
     read_csv as read_dataset_minimum_csv,
+    resolve_aggregation_mode as resolve_dataset_minimum_aggregation_mode,
 )
 LOG_HEARTBEAT_SECONDS = 30.0
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
@@ -6033,6 +6035,79 @@ def resolve_dataset_size_minimum_run_roots(run_roots_raw: list[Any]) -> list[Pat
     return run_roots
 
 
+def dataset_size_minimum_output_matches_controls(
+    output: dict[str, Any],
+    controls: dict[str, Any],
+) -> bool:
+    """Mirror of frontend output-selection compatibility checks."""
+    if output.get("primary_metric") != controls.get("primary_metric"):
+        return False
+    if (output.get("x_axis") or "n_train") != (controls.get("x_axis") or "n_train"):
+        return False
+
+    threshold = float(controls.get("threshold_mev") or 0.0)
+    out_threshold = output.get("threshold_mev")
+    if out_threshold is None or abs(float(out_threshold) - threshold) >= 1e-9:
+        return False
+
+    if str(output.get("n_min_source") or "observed") != str(controls.get("n_min_source") or "observed"):
+        return False
+
+    if str(output.get("n_min_fit_model") or "power_law") != str(
+        controls.get("n_min_fit_model") or "power_law"
+    ):
+        return False
+
+    out_mode = output.get("aggregation_mode")
+    if not out_mode:
+        roots = output.get("run_roots") or []
+        out_mode = "mean_replicates" if len(roots) > 1 else "best_config"
+    if str(out_mode) != str(controls.get("aggregation_mode") or "mean_replicates"):
+        return False
+
+    selected_fit = str(controls.get("n_min_fit_model") or "power_law")
+    if selected_fit == "moving_average":
+        if int(output.get("moving_average_window") or 3) != int(
+            controls.get("moving_average_window") or 3
+        ):
+            return False
+
+    if int(output.get("bootstrap_replicates") or 0) != int(controls.get("bootstrap_replicates") or 0):
+        return False
+
+    out_ci = float(output.get("ci_level") or 0.95)
+    ctrl_ci = float(controls.get("ci_level") or 0.95)
+    if abs(out_ci - ctrl_ci) >= 1e-9:
+        return False
+
+    selected_roots = sorted(
+        {str(Path(item).resolve()) for item in (controls.get("run_roots") or []) if item}
+    )
+    output_roots = sorted(
+        {str(Path(item).resolve()) for item in (output.get("run_roots") or []) if item}
+    )
+    if selected_roots and output_roots != selected_roots:
+        return False
+    return True
+
+
+def parse_dataset_size_minimum_aggregation_mode(
+    payload: dict[str, Any],
+    *,
+    run_root_count: int,
+) -> str:
+    value = payload.get("aggregation_mode")
+    if value is not None and str(value).strip():
+        mode = str(value).strip()
+        if mode not in AGGREGATION_MODES:
+            raise RuntimeError(
+                "aggregation_mode debe ser uno de: "
+                + ", ".join(AGGREGATION_MODES)
+            )
+        return mode
+    return resolve_dataset_minimum_aggregation_mode(None, run_root_count=run_root_count)
+
+
 def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
     """Build plot-ready best_rows from completed sweeps without writing artifacts."""
     run_roots = resolve_dataset_size_minimum_run_roots(payload.get("run_roots") or [])
@@ -6046,7 +6121,11 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
         str(item.get("run_root") or ""): item for item in discover_dataset_size_minimum_run_roots()
     }
 
-    best_rows: list[dict[str, Any]] = []
+    aggregation_mode = parse_dataset_size_minimum_aggregation_mode(
+        payload,
+        run_root_count=len(run_roots),
+    )
+    all_normalized: list[dict[str, Any]] = []
     warnings: list[str] = []
     resolved_roots: list[str] = []
 
@@ -6063,22 +6142,39 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
             primary_metric=primary_metric,
             x_axis=x_axis,
         )
-        grouped = dataset_minimum_group_config_rows(normalized)
-        preview_best = dataset_minimum_best_by_method_size(grouped)
         sweep_label = str(source_meta.get("label") or run_root.name)
-        for row in preview_best:
+        for row in normalized:
             enriched = dict(row)
             enriched["sweep_label"] = sweep_label
-            enriched["source_run_root"] = key
-            best_rows.append(enriched)
+            enriched["source_run_root"] = enriched.get("source_run_root") or key
+            all_normalized.append(enriched)
         warnings.extend(root_warnings + normalize_warnings)
-        if preview_best:
+        if normalized:
             resolved_roots.append(key)
 
-    aggregated = len(run_roots) > 1
-    if aggregated and best_rows:
-        best_rows = dataset_minimum_mean_by_method_size(best_rows)
-        warnings.append(f"aggregated_mean_across_{len(run_roots)}_run_roots")
+    grouped = dataset_minimum_group_config_rows(all_normalized)
+    if aggregation_mode == "mean_replicates":
+        best_rows = dataset_minimum_aggregate_rows_mean_replicates(all_normalized)
+        if len(run_roots) > 1:
+            warnings.append(f"aggregated_mean_replicates_across_{len(run_roots)}_run_roots")
+    else:
+        best_rows = dataset_minimum_best_by_method_size(grouped)
+
+    for row in best_rows:
+        if row.get("sweep_label"):
+            continue
+        method = row.get("method")
+        size = row.get("dataset_size_x")
+        for source_row in all_normalized:
+            if source_row.get("method") == method and source_row.get("dataset_size_x") == size:
+                row.setdefault("sweep_label", source_row.get("sweep_label"))
+                row.setdefault("source_run_root", source_row.get("source_run_root"))
+                break
+
+    aggregated = aggregation_mode == "mean_replicates" and (
+        len(run_roots) > 1
+        or any(int(row.get("replicate_count") or 1) > 1 for row in best_rows)
+    )
 
     status = "ok" if best_rows else "no_usable_metric_rows"
     return {
@@ -6087,9 +6183,11 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
         "x_axis": x_axis,
         "run_roots": resolved_roots,
         "best_rows": best_rows,
+        "aggregated_rows": best_rows,
         "warnings": warnings,
         "is_preview": True,
         "aggregated": aggregated,
+        "aggregation_mode": aggregation_mode,
     }
 
 
@@ -6123,7 +6221,19 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     if moving_average_window <= 0:
         raise RuntimeError("moving_average_window debe ser un entero positivo.")
 
+    bootstrap_replicates = int(payload.get("bootstrap_replicates") or 0)
+    if bootstrap_replicates < 0:
+        raise RuntimeError("bootstrap_replicates debe ser >= 0.")
+    bootstrap_seed = int(payload.get("bootstrap_seed") or 12345)
+    ci_level = float(payload.get("ci_level") or 0.95)
+    if not 0.0 < ci_level < 1.0:
+        raise RuntimeError("ci_level debe estar en (0, 1).")
+
     run_roots = resolve_dataset_size_minimum_run_roots(payload.get("run_roots") or [])
+    aggregation_mode = parse_dataset_size_minimum_aggregation_mode(
+        payload,
+        run_root_count=len(run_roots),
+    )
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = (
@@ -6154,6 +6264,14 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         n_min_fit_model,
         "--moving-average-window",
         str(moving_average_window),
+        "--aggregation-mode",
+        aggregation_mode,
+        "--bootstrap-replicates",
+        str(bootstrap_replicates),
+        "--bootstrap-seed",
+        str(bootstrap_seed),
+        "--ci-level",
+        str(ci_level),
     ]
 
     for path in run_roots:
@@ -6224,7 +6342,16 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
             continue
         output_dir = summary_path.parent
         best_rows = read_csv_rows(output_dir / "dataset_size_minimum_best_by_size.csv")
+        aggregated_rows = summary.get("aggregated_rows")
+        if not isinstance(aggregated_rows, list):
+            aggregated_rows = best_rows
         result_rows = read_csv_rows(output_dir / "dataset_size_minimum_results.csv")
+        summary_run_roots = summary.get("run_roots") or []
+        aggregation_mode = summary.get("aggregation_mode")
+        if not aggregation_mode:
+            aggregation_mode = (
+                "mean_replicates" if len(summary_run_roots) > 1 else "best_config"
+            )
         outputs.append(
             {
                 "status": summary.get("status") or "unknown",
@@ -6240,14 +6367,25 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "methods": summary.get("methods") or sorted((summary.get("thresholds") or {}).keys()),
                 "warnings": summary.get("warnings") or [],
                 "best_rows": best_rows,
+                "aggregated_rows": aggregated_rows,
                 "result_rows_count": len(result_rows),
-                "run_roots": summary.get("run_roots") or [],
+                "raw_rows_count": summary.get("raw_rows_count"),
+                "run_roots": summary_run_roots,
                 "modified_at": summary_path.stat().st_mtime,
                 "moving_average_window": summary.get("moving_average_window"),
                 "n_min_source": summary.get("n_min_source"),
                 "n_min_fit_model": summary.get("n_min_fit_model"),
-                "moving_average_window": summary.get("moving_average_window")
-
+                "aggregation_mode": aggregation_mode,
+                "aggregated": summary.get("aggregated"),
+                "bootstrap": summary.get("bootstrap") or {},
+                "bootstrap_replicates": summary.get("bootstrap_replicates"),
+                "bootstrap_seed": summary.get("bootstrap_seed"),
+                "ci_level": summary.get("ci_level"),
+                "normalized_rows": summary.get("normalized_rows") or [],
+                "temporal_diagnostics": summary.get("temporal_diagnostics") or {},
+                "nominal_n_train": summary.get("nominal_n_train"),
+                "estimated_n_eff_train": summary.get("estimated_n_eff_train"),
+                "autocorrelation_available": summary.get("autocorrelation_available"),
             }
         )
     run_root_sources = discover_dataset_size_minimum_run_roots()

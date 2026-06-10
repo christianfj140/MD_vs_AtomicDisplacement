@@ -1,10 +1,14 @@
+import argparse
 import csv
 import importlib
 import json
+import math
+import random
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +17,116 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 minimum = importlib.import_module("g2m_deeph_dataset_size_minimum")
+
+
+def make_analyze_args(**overrides: object) -> argparse.Namespace:
+    defaults: dict[str, object] = {
+        "run_root": [],
+        "output_dir": "",
+        "primary_metric": "h_mae_eV_mean",
+        "threshold_mev": 10.0,
+        "relative_tolerance": 0.05,
+        "plateau_gain": 0.05,
+        "x_axis": "n_total",
+        "fit_models": "linear,inverse,power_law",
+        "n_min_source": "observed",
+        "n_min_fit_model": "linear",
+        "moving_average_window": 3,
+        "aggregation_mode": None,
+        "bootstrap_replicates": 0,
+        "bootstrap_seed": 12345,
+        "ci_level": 0.95,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def make_normalized_replicate_row(
+    *,
+    method: str,
+    size: int,
+    mev: float,
+    seed: str,
+    config_id: str = "cfg",
+) -> dict:
+    return {
+        "method": method,
+        "dataset_size_x": size,
+        "dataset_size_total": size,
+        "dataset_size_train": size,
+        "config_id": config_id,
+        "seed": seed,
+        "primary_metric": "h_mae_eV_mean",
+        "primary_metric_mev": mev,
+        "primary_metric_mev_mean": mev,
+    }
+
+
+def write_synthetic_temporal_dataset(
+    root: Path,
+    *,
+    n_train: int = 8,
+    strategy: str = "blocked_with_gap",
+    temporal_gap: int = 2,
+    scalar_key: str = "total_energy_eV",
+    scalar_builder=None,
+) -> Path:
+    split_root = root / "splits"
+    train_dir = split_root / "train"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    manifest_rows: list[dict[str, str]] = []
+    frozen_rows: list[dict] = []
+
+    for index in range(n_train):
+        sample_dir = train_dir / str(index)
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        value = scalar_builder(index) if scalar_builder is not None else float(index)
+        metadata = {
+            "frame_index": str(index),
+            "source_frame_index": str(index),
+            "block_id": "block_a",
+            "temperature_K": "300",
+            scalar_key: value,
+        }
+        (sample_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        manifest_rows.append(
+            {
+                "sample_id": f"md_{index}",
+                "sample_dir": str(sample_dir),
+                "split": "train",
+                "split_strategy": strategy,
+                "temporal_gap": str(temporal_gap),
+                "source_frame_index": str(index),
+                "block_id": "block_a",
+                "temperature_K": "300",
+            }
+        )
+        frozen_rows.append(
+            {
+                "sample_id": f"md_{index}",
+                "sample_dir": str(sample_dir),
+                "split": "train",
+            }
+        )
+
+    write_csv(split_root / "train_manifest.csv", manifest_rows)
+    split_summary = {
+        "strategy": strategy,
+        "temporal_gap": temporal_gap,
+        "counts": {"train": n_train},
+        "warnings": [],
+        "scientific_status": "temporal_gap_split",
+    }
+    (split_root / "split_summary.json").write_text(json.dumps(split_summary), encoding="utf-8")
+    frozen = {
+        "schema": "joint_graph2mat_deeph_frozen_split_manifest_v1",
+        "dataset_root": str(root),
+        "split_root": str(split_root),
+        "split_counts": {"train": n_train},
+        "rows": frozen_rows,
+    }
+    (root / "frozen_split_manifest.json").write_text(json.dumps(frozen), encoding="utf-8")
+    return root
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -29,6 +143,136 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 class DatasetSizeMinimumTests(unittest.TestCase):
+    def test_mean_replicates_averages_same_method_and_size(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 10.0,
+                "config_id": "cfg_a",
+                "seed": "1",
+                "source_run_root": "/run_a",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 14.0,
+                "config_id": "cfg_b",
+                "seed": "2",
+                "source_run_root": "/run_b",
+            },
+        ]
+
+        aggregated = minimum.aggregate_rows_mean_replicates(rows)
+
+        self.assertEqual(len(aggregated), 1)
+        row = aggregated[0]
+        self.assertAlmostEqual(row["primary_metric_mev_mean"], 12.0)
+        self.assertEqual(row["replicate_count"], 2)
+        self.assertAlmostEqual(row["y_min"], 10.0)
+        self.assertAlmostEqual(row["y_max"], 14.0)
+
+    def test_best_config_picks_lowest_metric_for_same_method_and_size(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev_mean": 10.0,
+                "config_id": "cfg_a",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev_mean": 14.0,
+                "config_id": "cfg_b",
+            },
+        ]
+
+        best = minimum.best_by_method_size(rows)
+
+        self.assertEqual(len(best), 1)
+        self.assertAlmostEqual(best[0]["primary_metric_mev_mean"], 10.0)
+        self.assertEqual(best[0]["config_id"], "cfg_a")
+
+    def test_mean_replicates_does_not_pick_best_value(self) -> None:
+        rows = [
+            {"method": "deeph", "dataset_size_x": 5, "primary_metric_mev": 10.0},
+            {"method": "deeph", "dataset_size_x": 5, "primary_metric_mev": 14.0},
+        ]
+
+        aggregated = minimum.aggregate_rows_mean_replicates(rows)
+
+        self.assertAlmostEqual(aggregated[0]["primary_metric_mev_mean"], 12.0)
+
+    def test_observed_n_min_uses_aggregated_rows(self) -> None:
+        aggregated = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 20.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 8.0},
+        ]
+        raw_best = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 10.0},
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 30.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 8.0},
+        ]
+
+        self.assertEqual(minimum.n_min_abs(aggregated, 12.0), 20)
+        self.assertEqual(minimum.n_min_abs(raw_best, 12.0), 10)
+
+    def test_fit_based_n_min_uses_aggregated_rows(self) -> None:
+        aggregated = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 20.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 8.0},
+        ]
+        best_rows = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 10.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 8.0},
+        ]
+
+        agg_thresholds, _, _ = minimum.thresholds_by_method_from_fit(
+            aggregated,
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="linear",
+        )
+        best_thresholds, _, _ = minimum.thresholds_by_method_from_fit(
+            best_rows,
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="linear",
+        )
+
+        self.assertEqual(agg_thresholds["graph2mat"]["N_min_abs"], 17)
+        self.assertEqual(best_thresholds["graph2mat"]["N_min_abs"], 10)
+
+    def test_invalid_aggregation_mode_rejected_by_argparse(self) -> None:
+        with self.assertRaises(SystemExit):
+            minimum.build_parser().parse_args(
+                [
+                    "--run-root",
+                    "/tmp/run",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--threshold-mev",
+                    "10",
+                    "--aggregation-mode",
+                    "median",
+                ]
+            )
+
+    def test_default_aggregation_mode_is_best_config_for_single_root(self) -> None:
+        self.assertEqual(
+            minimum.resolve_aggregation_mode(None, run_root_count=1),
+            "best_config",
+        )
+
+    def test_default_aggregation_mode_is_mean_replicates_for_multiple_roots(self) -> None:
+        self.assertEqual(
+            minimum.resolve_aggregation_mode(None, run_root_count=2),
+            "mean_replicates",
+        )
+
     def test_mean_by_method_size_averages_same_x_across_sources(self) -> None:
         rows = [
             {
@@ -156,28 +400,335 @@ class DatasetSizeMinimumTests(unittest.TestCase):
                 encoding="utf-8",
             )
             output_dir = base / "out"
-            args = type(
-                "Args",
-                (),
-                {
-                    "run_root": [str(root)],
-                    "output_dir": str(output_dir),
-                    "primary_metric": "h_mae_eV_mean",
-                    "threshold_mev": 10.0,
-                    "relative_tolerance": 0.05,
-                    "plateau_gain": 0.05,
-                    "x_axis": "n_total",
-                    "fit_models": "linear,inverse,power_law",
-                },
-            )()
+            args = make_analyze_args(
+                run_root=[str(root)],
+                output_dir=str(output_dir),
+                aggregation_mode="best_config",
+            )
 
             summary = minimum.analyze(args)
 
             self.assertEqual(summary["status"], "ok")
+            self.assertEqual(summary["aggregation_mode"], "best_config")
             self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_abs"], 20)
             self.assertTrue((output_dir / "dataset_size_minimum_results.csv").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_summary.json").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_report.md").exists())
+
+    def test_analyze_mean_replicates_across_duplicate_configs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "good",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                    },
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "bad",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.030,
+                    },
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 20,
+                        "config_id": "good",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.005,
+                    },
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            output_dir = base / "out"
+            args = make_analyze_args(
+                run_root=[str(root)],
+                output_dir=str(output_dir),
+                aggregation_mode="mean_replicates",
+            )
+
+            summary = minimum.analyze(args)
+
+            self.assertEqual(summary["status"], "ok")
+            self.assertEqual(summary["aggregation_mode"], "mean_replicates")
+            self.assertEqual(summary["raw_rows_count"], 3)
+            self.assertEqual(len(summary["aggregated_rows"]), 2)
+            by_size = {int(row["dataset_size_x"]): row for row in summary["aggregated_rows"]}
+            self.assertAlmostEqual(by_size[10]["primary_metric_mev_mean"], 20.0)
+            self.assertEqual(by_size[10]["replicate_count"], 2)
+            self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_abs"], 20)
+
+    def test_analyze_without_aggregation_mode_defaults_to_best_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "good",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                    },
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "bad",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.030,
+                    },
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            output_dir = base / "out"
+            args = make_analyze_args(
+                run_root=[str(root)],
+                output_dir=str(output_dir),
+            )
+
+            summary = minimum.analyze(args)
+
+            self.assertEqual(summary["aggregation_mode"], "best_config")
+            self.assertEqual(len(summary["aggregated_rows"]), 1)
+            self.assertAlmostEqual(summary["aggregated_rows"][0]["primary_metric_mev_mean"], 10.0)
+
+    def test_bootstrap_disabled_leaves_enabled_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "g10",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.020,
+                    },
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            summary = minimum.analyze(
+                make_analyze_args(
+                    run_root=[str(root)],
+                    output_dir=str(base / "out"),
+                    aggregation_mode="best_config",
+                    bootstrap_replicates=0,
+                )
+            )
+
+            self.assertFalse(summary["bootstrap"]["enabled"])
+            self.assertEqual(summary["bootstrap_replicates"], 0)
+
+    def test_bootstrap_is_deterministic_for_fixed_seed(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=25.0, seed="a1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=15.0, seed="a2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.0, seed="b1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=12.0, seed="b2"),
+        ]
+        kwargs = {
+            "methods": ["graph2mat"],
+            "n_replicates": 80,
+            "seed": 4242,
+            "ci_level": 0.95,
+            "aggregation_mode": "mean_replicates",
+            "threshold_mev": 10.0,
+            "relative_tolerance": 0.05,
+            "plateau_gain": 0.05,
+            "n_min_source": "observed",
+            "n_min_fit_model": "linear",
+            "moving_average_window": 3,
+        }
+        first = minimum.compute_bootstrap_n_min(rows, **kwargs)
+        second = minimum.compute_bootstrap_n_min(rows, **kwargs)
+
+        self.assertEqual(
+            first["by_method"]["graph2mat"]["N_min_abs"],
+            second["by_method"]["graph2mat"]["N_min_abs"],
+        )
+
+    def test_observed_bootstrap_produces_n_min_abs_ci(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=25.0, seed="a1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=15.0, seed="a2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.0, seed="b1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=12.0, seed="b2"),
+        ]
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=120,
+            seed=7,
+            ci_level=0.95,
+            aggregation_mode="mean_replicates",
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="observed",
+            n_min_fit_model="linear",
+            moving_average_window=3,
+        )
+
+        ci = result["by_method"]["graph2mat"]["N_min_abs"]
+        self.assertTrue(result["enabled"])
+        self.assertGreater(ci["n_bootstrap_successful"], 0)
+        self.assertIsNotNone(ci["median"])
+        self.assertIsNotNone(ci["lower"])
+        self.assertIsNotNone(ci["upper"])
+
+    def test_fit_bootstrap_produces_ci_for_linear_fit(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=30.0, seed="a1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=20.0, seed="a2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=14.0, seed="b1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=10.0, seed="b2"),
+            make_normalized_replicate_row(method="graph2mat", size=40, mev=6.0, seed="c1"),
+            make_normalized_replicate_row(method="graph2mat", size=40, mev=8.0, seed="c2"),
+        ]
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=60,
+            seed=99,
+            ci_level=0.95,
+            aggregation_mode="mean_replicates",
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="fit",
+            n_min_fit_model="linear",
+            moving_average_window=3,
+        )
+
+        ci = result["by_method"]["graph2mat"]["N_min_abs"]
+        self.assertGreater(result["replicates_successful"], 0)
+        self.assertIsNotNone(ci["median"])
+
+    def test_bootstrap_too_few_replicates_warns_without_crashing(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=20.0, seed="only"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.0, seed="only2"),
+        ]
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=50,
+            seed=1,
+            ci_level=0.95,
+            aggregation_mode="mean_replicates",
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="observed",
+            n_min_fit_model="linear",
+            moving_average_window=3,
+        )
+
+        self.assertIn("bootstrap_unavailable_no_replicates", result["warnings"])
+        self.assertEqual(result["by_method"], {})
+
+    def test_fit_bootstrap_counts_failures(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=30.0, seed="a1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=20.0, seed="a2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=12.0, seed="b1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=10.0, seed="b2"),
+        ]
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=20,
+            seed=3,
+            ci_level=0.95,
+            aggregation_mode="mean_replicates",
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="fit",
+            n_min_fit_model="quadratic",
+            moving_average_window=3,
+        )
+
+        self.assertGreater(result["replicates_failed"], 0)
+        self.assertTrue(result["failure_counts"])
+        self.assertTrue(result["failure_reasons"])
+
+    def test_invalid_bootstrap_args_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            minimum.build_parser().parse_args(
+                [
+                    "--run-root",
+                    "/tmp/run",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--threshold-mev",
+                    "10",
+                    "--bootstrap-replicates",
+                    "-1",
+                ]
+            )
+        with self.assertRaises(SystemExit):
+            minimum.build_parser().parse_args(
+                [
+                    "--run-root",
+                    "/tmp/run",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--threshold-mev",
+                    "10",
+                    "--ci-level",
+                    "1.0",
+                ]
+            )
+
+    def test_bootstrap_summary_is_json_serializable(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=25.0, seed="a1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=15.0, seed="a2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.0, seed="b1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=12.0, seed="b2"),
+        ]
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=30,
+            seed=11,
+            ci_level=0.95,
+            aggregation_mode="mean_replicates",
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="observed",
+            n_min_fit_model="linear",
+            moving_average_window=3,
+        )
+        serialized = json.dumps(minimum.json_safe(result))
+        self.assertIn("N_min_abs", serialized)
 
     def test_script_does_not_import_subprocess_or_build_compute_commands(self) -> None:
         source = (SCRIPTS_DIR / "g2m_deeph_dataset_size_minimum.py").read_text(encoding="utf-8")
@@ -370,8 +921,408 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 self.pipeline_ui.RESULTS_ROOT = original_results_root
 
             self.assertTrue(preview.get("aggregated"))
+            self.assertEqual(preview["aggregation_mode"], "mean_replicates")
             self.assertEqual(len(preview["best_rows"]), 1)
             self.assertAlmostEqual(preview["best_rows"][0]["primary_metric_mev_mean"], 30.0)
+
+    def _write_minimum_run_root(self, base: Path, name: str = "finished_sweep") -> Path:
+        run_root = base / name
+        metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+        metrics_path.parent.mkdir(parents=True)
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "metric_scaling_rows": [
+                        {
+                            "method": "graph2mat",
+                            "dataset_size": 10,
+                            "metric_key": "h_mae_eV_mean",
+                            "metric_value": 0.02,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return run_root
+
+    def test_run_analysis_command_includes_aggregation_mode_and_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_minimum_run_root(base)
+
+            def fake_run(command, **kwargs):
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "dataset_size_minimum_summary.json").write_text(
+                    json.dumps({"status": "ok"}),
+                    encoding="utf-8",
+                )
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            captured_command: list[str] = []
+
+            def recording_run(command, **kwargs):
+                captured_command[:] = list(command)
+                return fake_run(command, **kwargs)
+
+            with patch.object(self.pipeline_ui.subprocess, "run", side_effect=recording_run):
+                self.pipeline_ui.run_dataset_size_minimum_analysis(
+                    {
+                        "run_roots": [str(run_root)],
+                        "threshold_mev": 10.0,
+                        "aggregation_mode": "mean_replicates",
+                        "moving_average_window": 5,
+                        "n_min_source": "fit",
+                        "n_min_fit_model": "linear",
+                    }
+                )
+
+            command = captured_command
+            self.assertIn("--aggregation-mode", command)
+            self.assertEqual(command[command.index("--aggregation-mode") + 1], "mean_replicates")
+            self.assertIn("--moving-average-window", command)
+            self.assertEqual(command[command.index("--moving-average-window") + 1], "5")
+            self.assertIn("--run-root", command)
+            self.assertIn(str(run_root.resolve()), command)
+
+    def test_invalid_aggregation_mode_rejected_by_run_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_minimum_run_root(base)
+            with self.assertRaises(RuntimeError):
+                self.pipeline_ui.run_dataset_size_minimum_analysis(
+                    {
+                        "run_roots": [str(run_root)],
+                        "threshold_mev": 10.0,
+                        "aggregation_mode": "median",
+                    }
+                )
+
+    def test_dataset_size_minimum_payload_exposes_aggregation_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            output_dir = base / "dataset_size_minimum_ui_test" / "threshold_10meV"
+            output_dir.mkdir(parents=True)
+            summary = {
+                "status": "ok",
+                "primary_metric": "h_mae_eV_mean",
+                "threshold_mev": 10.0,
+                "x_axis": "n_train",
+                "run_roots": [str(base / "run_a")],
+                "aggregation_mode": "mean_replicates",
+                "moving_average_window": 5,
+                "n_min_source": "fit",
+                "n_min_fit_model": "linear",
+                "aggregated_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size_x": 10,
+                        "primary_metric_mev_mean": 20.0,
+                    }
+                ],
+                "thresholds": {},
+                "fits": {},
+            }
+            summary_path = output_dir / "dataset_size_minimum_summary.json"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            (output_dir / "dataset_size_minimum_best_by_size.csv").write_text(
+                "method,dataset_size_x,primary_metric_mev_mean\ngraph2mat,10,20.0\n",
+                encoding="utf-8",
+            )
+            (output_dir / "dataset_size_minimum_results.csv").write_text("method\n", encoding="utf-8")
+
+            original_paths = self.pipeline_ui._dataset_size_minimum_summary_paths
+            try:
+                self.pipeline_ui._dataset_size_minimum_summary_paths = lambda: [summary_path]
+                payload = self.pipeline_ui.dataset_size_minimum_payload()
+            finally:
+                self.pipeline_ui._dataset_size_minimum_summary_paths = original_paths
+
+            self.assertTrue(payload["outputs"])
+            item = payload["outputs"][0]
+            self.assertEqual(item["aggregation_mode"], "mean_replicates")
+            self.assertEqual(item["moving_average_window"], 5)
+            self.assertEqual(item["x_axis"], "n_train")
+            self.assertEqual(item["n_min_source"], "fit")
+            self.assertEqual(item["n_min_fit_model"], "linear")
+            self.assertEqual(item["run_roots"], [str(base / "run_a")])
+            self.assertEqual(len(item["aggregated_rows"]), 1)
+            self.assertIn("bootstrap", item)
+            self.assertEqual(item["bootstrap_replicates"], summary.get("bootstrap_replicates"))
+
+    def test_payload_exposes_normalized_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            output_dir = base / "dataset_size_minimum_ui_test" / "threshold_10meV"
+            output_dir.mkdir(parents=True)
+            summary = {
+                "status": "ok",
+                "primary_metric": "h_mae_eV_mean",
+                "threshold_mev": 10.0,
+                "x_axis": "n_train",
+                "run_roots": [str(base / "run_a")],
+                "aggregation_mode": "mean_replicates",
+                "normalized_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size_x": 10,
+                        "primary_metric_mev": 20.0,
+                        "seed": "1",
+                    }
+                ],
+                "aggregated_rows": [],
+                "thresholds": {},
+                "fits": {},
+                "bootstrap": {"enabled": False},
+                "bootstrap_replicates": 0,
+                "ci_level": 0.95,
+            }
+            summary_path = output_dir / "dataset_size_minimum_summary.json"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            (output_dir / "dataset_size_minimum_best_by_size.csv").write_text("method\n", encoding="utf-8")
+            (output_dir / "dataset_size_minimum_results.csv").write_text("method\n", encoding="utf-8")
+
+            original_paths = self.pipeline_ui._dataset_size_minimum_summary_paths
+            try:
+                self.pipeline_ui._dataset_size_minimum_summary_paths = lambda: [summary_path]
+                payload = self.pipeline_ui.dataset_size_minimum_payload()
+            finally:
+                self.pipeline_ui._dataset_size_minimum_summary_paths = original_paths
+
+            item = payload["outputs"][0]
+            self.assertEqual(len(item["normalized_rows"]), 1)
+            self.assertEqual(item["normalized_rows"][0]["method"], "graph2mat")
+
+    def test_output_matching_rejects_aggregation_mode_mismatch(self) -> None:
+        output = {
+            "primary_metric": "h_mae_eV_mean",
+            "threshold_mev": 10.0,
+            "x_axis": "n_train",
+            "n_min_source": "observed",
+            "n_min_fit_model": "linear",
+            "aggregation_mode": "best_config",
+            "bootstrap_replicates": 0,
+            "ci_level": 0.95,
+            "run_roots": ["/tmp/run_a"],
+        }
+        controls = {
+            "primary_metric": "h_mae_eV_mean",
+            "threshold_mev": 10.0,
+            "x_axis": "n_train",
+            "n_min_source": "observed",
+            "n_min_fit_model": "linear",
+            "aggregation_mode": "mean_replicates",
+            "bootstrap_replicates": 0,
+            "ci_level": 0.95,
+            "run_roots": ["/tmp/run_a"],
+        }
+        self.assertFalse(
+            self.pipeline_ui.dataset_size_minimum_output_matches_controls(output, controls)
+        )
+
+    def test_output_matching_rejects_bootstrap_replicates_mismatch(self) -> None:
+        base = {
+            "primary_metric": "h_mae_eV_mean",
+            "threshold_mev": 10.0,
+            "x_axis": "n_train",
+            "n_min_source": "observed",
+            "n_min_fit_model": "linear",
+            "aggregation_mode": "mean_replicates",
+            "ci_level": 0.95,
+            "run_roots": [],
+        }
+        output = {**base, "bootstrap_replicates": 100}
+        controls = {**base, "bootstrap_replicates": 0}
+        self.assertFalse(
+            self.pipeline_ui.dataset_size_minimum_output_matches_controls(output, controls)
+        )
+
+    def test_output_matching_rejects_ci_level_mismatch(self) -> None:
+        base = {
+            "primary_metric": "h_mae_eV_mean",
+            "threshold_mev": 10.0,
+            "x_axis": "n_train",
+            "n_min_source": "observed",
+            "n_min_fit_model": "linear",
+            "aggregation_mode": "mean_replicates",
+            "bootstrap_replicates": 50,
+            "run_roots": [],
+        }
+        output = {**base, "ci_level": 0.95}
+        controls = {**base, "ci_level": 0.90}
+        self.assertFalse(
+            self.pipeline_ui.dataset_size_minimum_output_matches_controls(output, controls)
+        )
+
+    def test_analyze_summary_includes_normalized_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                        "seed": "1",
+                    },
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "b",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.030,
+                        "seed": "2",
+                    },
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            summary = minimum.analyze(
+                make_analyze_args(
+                    run_root=[str(root)],
+                    output_dir=str(base / "out"),
+                    aggregation_mode="mean_replicates",
+                    bootstrap_replicates=20,
+                )
+            )
+            self.assertEqual(len(summary["normalized_rows"]), 2)
+            self.assertTrue(summary["bootstrap"]["enabled"])
+
+    def test_temporal_diagnostics_missing_metadata_warns_without_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                        "seed": "1",
+                    }
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            summary = minimum.analyze(
+                make_analyze_args(run_root=[str(root)], output_dir=str(base / "out"))
+            )
+            temporal = summary["temporal_diagnostics"]
+            self.assertFalse(summary["autocorrelation_available"])
+            self.assertIsNone(summary["estimated_n_eff_train"])
+            self.assertIn("N is nominal; N_eff not estimated", temporal["status_message"])
+            joined = " | ".join(temporal["warnings"])
+            self.assertTrue(
+                "temporal_diagnostics_no_dataset_roots_detected" in joined
+                or "temporal_metadata_missing" in joined
+            )
+
+    def test_temporal_diagnostics_detects_blocks_and_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_synthetic_temporal_dataset(Path(tmp) / "dataset", n_train=6)
+            diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+            self.assertEqual(diag["n_temporal_blocks"], 1)
+            self.assertEqual(diag["block_sizes"]["block_a"], 6)
+            self.assertTrue(diag["blocked_split"])
+            self.assertTrue(diag["temporal_order_detected"])
+            self.assertEqual(diag["nominal_n_train"], 6)
+
+    def test_temporal_gap_one_emits_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_synthetic_temporal_dataset(
+                Path(tmp) / "dataset",
+                temporal_gap=1,
+            )
+            diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+            self.assertTrue(
+                any("temporal_gap_le_1" in warning for warning in diag["warnings"])
+            )
+
+    def test_autocorrelated_scalar_series_yields_n_eff_below_n(self) -> None:
+        rho = 0.95
+        noise = math.sqrt(1.0 - rho * rho)
+        ar1_values = [0.0]
+        for index in range(1, 80):
+            ar1_values.append(rho * ar1_values[-1] + noise * math.sin(index))
+
+        def builder(index: int) -> float:
+            return ar1_values[index]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_synthetic_temporal_dataset(
+                Path(tmp) / "dataset",
+                n_train=80,
+                scalar_builder=builder,
+            )
+            diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+            self.assertTrue(diag["autocorrelation_available"])
+            n_eff = diag["estimated_n_eff_train"]
+            self.assertIsNotNone(n_eff)
+            self.assertLess(float(n_eff), 80 * 0.75)
+
+    def test_iid_scalar_series_yields_n_eff_near_nominal(self) -> None:
+        rng = random.Random(123)
+
+        def iid_builder(_index: int) -> float:
+            return rng.gauss(0.0, 1.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_synthetic_temporal_dataset(
+                Path(tmp) / "dataset",
+                n_train=200,
+                scalar_builder=iid_builder,
+            )
+            diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+            self.assertTrue(diag["autocorrelation_available"])
+            n_eff = diag["estimated_n_eff_train"]
+            self.assertIsNotNone(n_eff)
+            self.assertGreater(float(n_eff), 200 * 0.2)
+
+    def test_analyze_includes_temporal_diagnostics_with_dataset_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dataset_root = write_synthetic_temporal_dataset(base / "dataset", n_train=10)
+            run_root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "dataset_root": str(dataset_root),
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                        "seed": "1",
+                    }
+                ]
+            }
+            (run_root / "summary" / "ranking").mkdir(parents=True)
+            (run_root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            summary = minimum.analyze(
+                make_analyze_args(run_root=[str(run_root)], output_dir=str(base / "out"))
+            )
+            self.assertEqual(summary["nominal_n_train"], 10)
+            self.assertIn("datasets", summary["temporal_diagnostics"])
+            self.assertEqual(len(summary["temporal_diagnostics"]["datasets"]), 1)
 
 
 if __name__ == "__main__":

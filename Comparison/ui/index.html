@@ -1145,6 +1145,36 @@
                 </select>
               </label>
               <label class="field">
+                <span>Aggregation</span>
+                <select id="dataset-minimum-aggregation-mode">
+                  <option value="mean_replicates" selected>Mean replicates — recommended</option>
+                  <option value="best_config">Best config — diagnostic</option>
+                </select>
+                <small>Mean replicates promedia replicas; best config es solo diagnostico (no paper-level).</small>
+              </label>
+              <label class="field">
+                <span>Bootstrap replicates</span>
+                <input
+                  id="dataset-minimum-bootstrap-replicates"
+                  type="number"
+                  min="0"
+                  step="1"
+                  value="0"
+                />
+                <small>0 desactiva intervalos bootstrap para N_min.</small>
+              </label>
+              <label class="field">
+                <span>CI level</span>
+                <input
+                  id="dataset-minimum-ci-level"
+                  type="number"
+                  min="0.01"
+                  max="0.99"
+                  step="0.01"
+                  value="0.95"
+                />
+              </label>
+              <label class="field">
                 <span>Threshold meV</span>
                 <select id="dataset-minimum-threshold-preset">
                   <option value="20" selected>20 meV</option>
@@ -1166,7 +1196,7 @@
                   <option value="lowess_logx">LOWESS log-N</option>
                   <option value="monotone_lowess_logx">monotone LOWESS log-N</option>
                   <option value="cumulative_best">cumulative best envelope</option>
-                  <option value="power_law">power law</option>
+                  <option value="power_law">power law + floor</option>
                   <option value="inverse">1/x</option>
                   <option value="inverse_square">1/x^2</option>
                   <option value="quadratic">quadratic</option>
@@ -1175,7 +1205,7 @@
                   <option value="none">none</option>
                 </select>
               </label>
-              <label class="field">
+              <label class="field" hidden>
                 <span>Moving average window</span>
                 <input
                   id="dataset-minimum-moving-average-window"
@@ -1183,11 +1213,20 @@
                   min="1"
                   step="1"
                   value="3"
+                  disabled
                 />
                 <small>Ventana en número de puntos observados. Solo afecta a moving average.</small>
               </label>
             </div>
             <div class="grid two split-grid">
+              <label class="field checkbox-field">
+                <span>Raw replicate points</span>
+                <label class="inline-checkbox">
+                  <input id="dataset-minimum-show-raw-replicates" type="checkbox" />
+                  Show raw replicate points
+                </label>
+                <small>Puntos crudos con opacidad baja; el fit usa puntos agregados.</small>
+              </label>
               <label class="field">
                 <span>N_min en grafico</span>
                 <select id="dataset-minimum-criterion">
