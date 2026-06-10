@@ -536,6 +536,69 @@ def best_by_method_size(grouped_rows: list[dict[str, Any]]) -> list[dict[str, An
     return best
 
 
+def mean_by_method_size(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Average rows across sources for each (method, dataset_size_x)."""
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        value = finite_number(row.get("primary_metric_mev_mean"))
+        if value is None:
+            continue
+        grouped[(str(row["method"]), int(row["dataset_size_x"]))].append(row)
+    out: list[dict[str, Any]] = []
+    for (method, size), items in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        metric_values = [
+            value
+            for item in items
+            if (value := finite_number(item.get("primary_metric_mev_mean"))) is not None
+        ]
+        costs = [
+            value
+            for item in items
+            if (value := finite_number(item.get("gpu_hours_total_mean"))) is not None
+        ]
+        first = items[0]
+        source_roots = sorted(
+            {
+                str(item.get("source_run_root") or "")
+                for item in items
+                if item.get("source_run_root")
+            }
+        )
+        sweep_labels = sorted(
+            {
+                str(item.get("sweep_label") or "")
+                for item in items
+                if item.get("sweep_label")
+            }
+        )
+        out.append(
+            {
+                "method": method,
+                "dataset_size_x": size,
+                "dataset_size_total": first.get("dataset_size_total"),
+                "dataset_size_train": first.get("dataset_size_train"),
+                "config_id": "aggregated_mean",
+                "epoch_label": f"mean of {len(items)} source(s)",
+                "primary_metric": first.get("primary_metric"),
+                "primary_metric_unit": first.get("primary_metric_unit"),
+                "primary_metric_mev_mean": mean(metric_values),
+                "primary_metric_mev_std": std(metric_values),
+                "gpu_hours_total_mean": mean(costs),
+                "source_count": len(items),
+                "source_run_roots": source_roots,
+                "sweep_labels": sweep_labels,
+                "sweep_label": (
+                    f"mean ({len(sweep_labels)} sweeps)"
+                    if sweep_labels
+                    else f"mean ({len(items)} sources)"
+                ),
+                "source_run_root": source_roots[0] if len(source_roots) == 1 else None,
+                "is_aggregated_mean": True,
+            }
+        )
+    return out
+
+
 def n_min_abs(best_rows: list[dict[str, Any]], threshold_mev: float) -> int | None:
     candidates = [
         int(row["dataset_size_x"])
@@ -1475,21 +1538,32 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     moving_average_window = max(1, int(args.moving_average_window or 3))
     warnings: list[str] = []
     sources: list[str] = []
-    raw_rows: list[dict[str, Any]] = []
+    grouped_rows: list[dict[str, Any]] = []
+    per_root_best: list[dict[str, Any]] = []
     for root in run_roots:
         loaded, root_sources, root_warnings = load_run_root_rows(root)
-        raw_rows.extend(loaded)
+        normalized_rows, normalize_warnings = normalize_rows(
+            loaded,
+            primary_metric=args.primary_metric,
+            x_axis=args.x_axis,
+        )
+        root_grouped = group_config_rows(normalized_rows)
+        grouped_rows.extend(root_grouped)
+        root_best = best_by_method_size(root_grouped)
+        root_key = str(root.resolve())
+        for row in root_best:
+            enriched = dict(row)
+            enriched["source_run_root"] = root_key
+            per_root_best.append(enriched)
         sources.extend(root_sources)
-        warnings.extend(root_warnings)
+        warnings.extend(root_warnings + normalize_warnings)
 
-    normalized_rows, normalize_warnings = normalize_rows(
-        raw_rows,
-        primary_metric=args.primary_metric,
-        x_axis=args.x_axis,
-    )
-    warnings.extend(normalize_warnings)
-    grouped_rows = group_config_rows(normalized_rows)
-    best_rows = best_by_method_size(grouped_rows)
+    aggregated = len(run_roots) > 1
+    if aggregated:
+        best_rows = mean_by_method_size(per_root_best)
+        warnings.append(f"aggregated_mean_across_{len(run_roots)}_run_roots")
+    else:
+        best_rows = per_root_best
 
     observed_thresholds = thresholds_by_method(
     best_rows,
@@ -1582,10 +1656,9 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "plateau_gain": float(args.plateau_gain),
         "x_axis": args.x_axis,
         "fit_models": fit_models,
-        "raw_rows": len(raw_rows),
-        "normalized_rows": len(normalized_rows),
         "grouped_config_rows": len(grouped_rows),
         "best_by_size_rows": len(best_rows),
+        "aggregated": aggregated,
         "methods": sorted({str(row["method"]) for row in best_rows}),
         "dataset_sizes": sorted({int(row["dataset_size_x"]) for row in best_rows}),
         "thresholds": thresholds,

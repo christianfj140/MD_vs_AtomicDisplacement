@@ -82,6 +82,7 @@ from g2m_deeph_dataset_size_minimum import (
     group_config_rows as dataset_minimum_group_config_rows,
     load_json_metric_rows as load_dataset_minimum_json_metric_rows,
     load_run_root_rows as dataset_minimum_load_run_root_rows,
+    mean_by_method_size as dataset_minimum_mean_by_method_size,
     normalize_rows as dataset_minimum_normalize_rows,
     pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
     read_csv as read_dataset_minimum_csv,
@@ -6074,6 +6075,11 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
         if preview_best:
             resolved_roots.append(key)
 
+    aggregated = len(run_roots) > 1
+    if aggregated and best_rows:
+        best_rows = dataset_minimum_mean_by_method_size(best_rows)
+        warnings.append(f"aggregated_mean_across_{len(run_roots)}_run_roots")
+
     status = "ok" if best_rows else "no_usable_metric_rows"
     return {
         "status": status,
@@ -6083,6 +6089,7 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
         "best_rows": best_rows,
         "warnings": warnings,
         "is_preview": True,
+        "aggregated": aggregated,
     }
 
 

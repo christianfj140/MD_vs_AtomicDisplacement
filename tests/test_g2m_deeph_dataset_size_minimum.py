@@ -29,6 +29,39 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 class DatasetSizeMinimumTests(unittest.TestCase):
+    def test_mean_by_method_size_averages_same_x_across_sources(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev_mean": 20.0,
+                "source_run_root": "/sweep_a",
+                "sweep_label": "sweep_a",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev_mean": 30.0,
+                "source_run_root": "/sweep_b",
+                "sweep_label": "sweep_b",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 20,
+                "primary_metric_mev_mean": 12.0,
+                "source_run_root": "/sweep_a",
+                "sweep_label": "sweep_a",
+            },
+        ]
+
+        aggregated = minimum.mean_by_method_size(rows)
+
+        self.assertEqual(len(aggregated), 2)
+        by_size = {int(row["dataset_size_x"]): row for row in aggregated}
+        self.assertAlmostEqual(by_size[10]["primary_metric_mev_mean"], 25.0)
+        self.assertAlmostEqual(by_size[20]["primary_metric_mev_mean"], 12.0)
+        self.assertTrue(by_size[10]["is_aggregated_mean"])
+
     def test_n_min_abs_with_synthetic_rows(self) -> None:
         rows = [
             {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 25.0},
@@ -295,6 +328,50 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 ["deeph", "graph2mat"],
             )
             self.assertTrue(all(row.get("sweep_label") for row in preview["best_rows"]))
+
+    def test_preview_aggregates_multiple_run_roots_by_mean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            def write_sweep(name: str, graph2mat_value: float) -> Path:
+                run_root = base / name
+                metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+                metrics_path.parent.mkdir(parents=True)
+                metrics_path.write_text(
+                    json.dumps(
+                        {
+                            "metric_scaling_rows": [
+                                {
+                                    "method": "graph2mat",
+                                    "dataset_size": 10,
+                                    "metric_key": "h_mae_eV_mean",
+                                    "metric_value": graph2mat_value,
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return run_root
+
+            sweep_a = write_sweep("sweep_a", 0.020)
+            sweep_b = write_sweep("sweep_b", 0.040)
+            original_results_root = self.pipeline_ui.RESULTS_ROOT
+            try:
+                self.pipeline_ui.RESULTS_ROOT = base
+                preview = self.pipeline_ui.dataset_size_minimum_preview(
+                    {
+                        "run_roots": [str(sweep_a), str(sweep_b)],
+                        "primary_metric": "h_mae_eV_mean",
+                        "x_axis": "n_train",
+                    }
+                )
+            finally:
+                self.pipeline_ui.RESULTS_ROOT = original_results_root
+
+            self.assertTrue(preview.get("aggregated"))
+            self.assertEqual(len(preview["best_rows"]), 1)
+            self.assertAlmostEqual(preview["best_rows"][0]["primary_metric_mev_mean"], 30.0)
 
 
 if __name__ == "__main__":

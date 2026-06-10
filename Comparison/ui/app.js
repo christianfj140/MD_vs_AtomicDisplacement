@@ -3210,11 +3210,60 @@ function datasetMinimumPlotSeriesKey(row = {}, multiSweep = false) {
   return sweep ? `${sweep}::${method}` : method;
 }
 
-function datasetMinimumPlotSeriesLabel(row = {}, multiSweep = false) {
+function datasetMinimumPlotSeriesLabel(row = {}, multiSweep = false, aggregated = false) {
   const method = methodDisplayLabel(row.method);
+  if (aggregated) return `${method} mean`;
   if (!multiSweep) return `${method} best observed`;
   const sweep = String(row.sweep_label || datasetMinimumSourceLabel(row.source_run_root) || "sweep");
   return `${sweep} · ${method} best observed`;
+}
+
+function datasetMinimumShouldAggregateRows(rows = [], selectedRootCount = 0) {
+  if (selectedRootCount > 1) return true;
+  const sourceRoots = new Set(
+    rows.map((row) => String(row.source_run_root || "").trim()).filter(Boolean),
+  );
+  if (sourceRoots.size > 1) return true;
+  const sweepLabels = new Set(
+    rows
+      .map((row) => String(row.sweep_label || "").trim())
+      .filter((label) => label && !label.startsWith("mean (")),
+  );
+  return sweepLabels.size > 1;
+}
+
+function datasetMinimumAggregateRowsByMethod(rows = [], axis = "n_train") {
+  const buckets = new Map();
+  for (const row of rows) {
+    const method = String(row.method || "unknown");
+    const xValue = row.x_value != null ? finiteNumber(row.x_value) : datasetMinimumRowX(row, axis);
+    const yValue = row.y_value != null ? finiteNumber(row.y_value) : finiteNumber(row.primary_metric_mev_mean);
+    if (xValue == null || yValue == null) continue;
+    const key = `${method}\u0000${xValue}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, { method, xValue, yValues: [], sources: [], sample: row });
+    }
+    const bucket = buckets.get(key);
+    bucket.yValues.push(yValue);
+    const source = String(row.sweep_label || row.source_run_root || "").trim();
+    if (source && !source.startsWith("mean (")) bucket.sources.push(source);
+  }
+  return Array.from(buckets.values())
+    .map((bucket) => {
+      const yMean = bucket.yValues.reduce((sum, value) => sum + value, 0) / bucket.yValues.length;
+      const uniqueSources = Array.from(new Set(bucket.sources));
+      return {
+        ...bucket.sample,
+        method: bucket.method,
+        x_value: bucket.xValue,
+        y_value: yMean,
+        primary_metric_mev_mean: yMean,
+        source_count: bucket.yValues.length,
+        aggregated_sources: uniqueSources,
+        config_id: bucket.yValues.length > 1 ? "aggregated_mean" : (bucket.sample.config_id || "-"),
+      };
+    })
+    .sort((left, right) => left.x_value - right.x_value || String(left.method).localeCompare(String(right.method)));
 }
 
 function datasetMinimumResolvePlotOutput(output, preview) {
@@ -3329,19 +3378,25 @@ function renderDatasetMinimumPlot(output, axis) {
   }
   const selectedFit = datasetMinimumSelectedFit();
   const traces = [];
+  const selectedRootCount = datasetMinimumSelectedRunRoots().length;
+  const aggregated = Boolean(output?.aggregated)
+    || datasetMinimumShouldAggregateRows(rows, selectedRootCount);
+  const plotRows = aggregated ? datasetMinimumAggregateRowsByMethod(rows, axis) : rows;
   const sweepLabels = new Set(
-    rows.map((row) => String(row.sweep_label || row.source_run_root || "").trim()).filter(Boolean),
+    plotRows.map((row) => String(row.sweep_label || row.source_run_root || "").trim()).filter(Boolean),
   );
-  const multiSweep = sweepLabels.size > 1;
-  const seriesKeys = Array.from(
-    new Set(rows.map((row) => datasetMinimumPlotSeriesKey(row, multiSweep))),
-  ).sort();
+  const multiSweep = !aggregated && sweepLabels.size > 1;
+  const seriesKeys = aggregated
+    ? Array.from(new Set(plotRows.map((row) => String(row.method || "unknown")))).sort()
+    : Array.from(new Set(plotRows.map((row) => datasetMinimumPlotSeriesKey(row, multiSweep)))).sort();
   seriesKeys.forEach((seriesKey, index) => {
-    const group = rows.filter((row) => datasetMinimumPlotSeriesKey(row, multiSweep) === seriesKey);
+    const group = aggregated
+      ? plotRows.filter((row) => String(row.method || "unknown") === seriesKey)
+      : plotRows.filter((row) => datasetMinimumPlotSeriesKey(row, multiSweep) === seriesKey);
     const sample = group[0] || {};
     const method = String(sample.method || "unknown");
     const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
-    const seriesLabel = datasetMinimumPlotSeriesLabel(sample, multiSweep);
+    const seriesLabel = datasetMinimumPlotSeriesLabel(sample, multiSweep, aggregated);
     traces.push({
       type: "scatter",
       mode: "lines+markers",
@@ -3350,7 +3405,13 @@ function renderDatasetMinimumPlot(output, axis) {
       marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8, color },
       line: { color, width: 2 },
       name: seriesLabel,
-      text: group.map((row) => `${row.config_id || "-"} · ${row.epoch_label || "-"} · total ${row.dataset_size_total || "-"}`),
+      text: group.map((row) => {
+        if (aggregated && (row.source_count || 0) > 1) {
+          const sources = (row.aggregated_sources || row.sweep_labels || []).join(", ") || `${row.source_count} sources`;
+          return `mean of ${row.source_count} · ${sources}`;
+        }
+        return `${row.config_id || "-"} · ${row.epoch_label || "-"} · total ${row.dataset_size_total || "-"}`;
+      }),
       hovertemplate: `${axis === "n_total" ? "N_total" : "N_train"}: %{x}<br>Error: %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>`,
     });
     const fitPoints = group.map((row) => ({ x: row.x_value, y: row.y_value }));
@@ -3429,7 +3490,7 @@ function renderDatasetMinimumPlot(output, axis) {
       annotationOffset += 1;
     }
   });
-  const yValues = rows.map((row) => row.y_value).concat(threshold == null ? [] : [threshold]);
+  const yValues = plotRows.map((row) => row.y_value).concat(threshold == null ? [] : [threshold]);
   const title = `Dataset size minimum · ${DATASET_MINIMUM_METRIC_LABELS[output.primary_metric] || output.primary_metric || "metric"}`;
   const layout = plotLayout(title, "Error (meV)", {
     shapes,
@@ -3438,7 +3499,7 @@ function renderDatasetMinimumPlot(output, axis) {
       title: datasetMinimumAxisLabel(axis),
       gridcolor: "#edf1f4",
       zeroline: false,
-      range: paddedLinearRange(rows.map((row) => row.x_value), { forceZeroMin: true }),
+      range: paddedLinearRange(plotRows.map((row) => row.x_value), { forceZeroMin: true }),
     },
     yaxis: {
       title: "Error (meV)",
