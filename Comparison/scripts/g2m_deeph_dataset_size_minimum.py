@@ -53,6 +53,7 @@ DEFAULT_CI_LEVEL = 0.95
 BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", "N_min_rel95", "N_min_plateau")
 MIN_BOOTSTRAP_SUCCESS_FOR_CI = 2
 ENERGY_METRICS_WITHOUT_EV = {"dos_mae_500_fermi_window"}
+_REFERENCED_METRIC_CACHE: dict[tuple[str, str], float | None] = {}
 
 FORBIDDEN_COMPUTE_COMMANDS = (
     "deeph-train",
@@ -236,8 +237,81 @@ def metric_value(row: dict[str, Any], metric: str) -> float | None:
             if value is not None:
                 return value
     if metric == "low_energy_rmse_eV":
-        return finite_number(row.get("final_test_metric_value"))
+        value = finite_number(row.get("final_test_metric_value"))
+        if value is not None:
+            return value
+    return referenced_metric_value(row, metric)
+
+
+def metric_summary_value(payload: Any, metric: str) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return None
+    for group in ("kpoint_matrix", "matrix", "sparse", "kpoint_spectral", "spectral", "kpoint_dos", "dos"):
+        group_payload = summary.get(group)
+        if not isinstance(group_payload, dict):
+            continue
+        for key in metric_aliases(metric):
+            value_payload = group_payload.get(key)
+            if isinstance(value_payload, dict):
+                value = finite_number(value_payload.get("mean"))
+            else:
+                value = finite_number(value_payload)
+            if value is not None:
+                return value
     return None
+
+
+def mean_metric_from_csv(path: Path, metric: str) -> float | None:
+    rows = read_csv(path)
+    values: list[float] = []
+    for row in rows:
+        for key in metric_aliases(metric):
+            value = finite_number(row.get(key))
+            if value is not None:
+                values.append(value)
+                break
+    return mean(values)
+
+
+def referenced_metric_value(row: dict[str, Any], metric: str) -> float | None:
+    raw_path = row.get("validation_metrics_path") or row.get("metrics_path") or row.get("metric_manifest_path")
+    if not raw_path:
+        return None
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    cache_key = (str(path), metric)
+    if cache_key in _REFERENCED_METRIC_CACHE:
+        return _REFERENCED_METRIC_CACHE[cache_key]
+
+    value: float | None = None
+    payload = read_json(path)
+    if isinstance(payload, dict):
+        value = metric_summary_value(payload, metric)
+
+    metrics_dir = path.parent if path.name == "manifest.json" else path
+    if value is None and metrics_dir.exists():
+        csv_candidates = (
+            metrics_dir / "kpoint_matrix_metrics.csv",
+            metrics_dir / "matrix_metrics.csv",
+            metrics_dir / "sparse_metrics.csv",
+            metrics_dir / "kpoint_spectral_metrics.csv",
+            metrics_dir / "spectral_metrics.csv",
+            metrics_dir / "kpoint_dos_metrics.csv",
+            metrics_dir / "dos_metrics.csv",
+        )
+        for candidate in csv_candidates:
+            if not candidate.exists():
+                continue
+            value = mean_metric_from_csv(candidate, metric)
+            if value is not None:
+                break
+
+    _REFERENCED_METRIC_CACHE[cache_key] = value
+    return value
 
 
 def cost_value(row: dict[str, Any]) -> float | None:

@@ -86,6 +86,10 @@ AtomDisplacement/training/lightning_logs/
 Comparison/results/
 Comparison/workspaces/
 Comparison/generated_dataset_cleanup_manifest.json
+Comparison/results_archived/**/*.csv
+Comparison/results_archived/**/*.json
+Comparison/results_archived/**/*.tar.zst
+Comparison/results_archived/**/*.yaml
 
 # Common model/checkpoint artifacts
 *.ckpt

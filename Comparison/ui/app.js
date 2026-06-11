@@ -3626,9 +3626,11 @@ function datasetMinimumResolvePlotOutput(output, preview) {
 }
 
 let datasetMinimumViewRefreshPromise = null;
+let datasetMinimumViewRefreshPending = false;
 
 async function refreshDatasetMinimumView() {
   if (datasetMinimumViewRefreshPromise) {
+    datasetMinimumViewRefreshPending = true;
     return datasetMinimumViewRefreshPromise;
   }
 
@@ -3681,6 +3683,10 @@ async function refreshDatasetMinimumView() {
     renderDatasetMinimumSelectedOutput(payload, { output, plotOutput });
   })().finally(() => {
     datasetMinimumViewRefreshPromise = null;
+    if (datasetMinimumViewRefreshPending) {
+      datasetMinimumViewRefreshPending = false;
+      refreshDatasetMinimumView().catch((error) => showToast(error.message));
+    }
   });
 
   return datasetMinimumViewRefreshPromise;

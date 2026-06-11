@@ -528,6 +528,55 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertTrue(any("missing_primary_metric:h_mae_eV_mean:deeph:cfg" in item for item in warnings))
 
+    def test_normalize_reads_referenced_metric_manifest_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics_path = Path(tmp) / "metrics" / "manifest.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(
+                json.dumps({"summary": {"kpoint_matrix": {"h_mae_eV": {"mean": 0.021}}}}),
+                encoding="utf-8",
+            )
+            raw = [
+                {
+                    "model": "graph2mat",
+                    "dataset_size": 10,
+                    "config_id": "cfg",
+                    "validation_metrics_path": str(metrics_path),
+                }
+            ]
+
+            rows, warnings = minimum.normalize_rows(raw, primary_metric="h_mae_eV_mean", x_axis="n_total")
+
+            self.assertEqual(warnings, [])
+            self.assertEqual(len(rows), 1)
+            self.assertAlmostEqual(rows[0]["primary_metric_mev"], 21.0)
+
+    def test_normalize_reads_referenced_kpoint_matrix_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics_path = Path(tmp) / "metrics" / "manifest.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps({"stage": "metrics"}), encoding="utf-8")
+            (metrics_path.parent / "kpoint_matrix_metrics.csv").write_text(
+                "sample,h_mae_eV,h_rmse_eV\n"
+                "a,0.010,0.020\n"
+                "b,0.014,0.030\n",
+                encoding="utf-8",
+            )
+            raw = [
+                {
+                    "model": "deeph",
+                    "dataset_size": 10,
+                    "config_id": "cfg",
+                    "validation_metrics_path": str(metrics_path),
+                }
+            ]
+
+            rows, warnings = minimum.normalize_rows(raw, primary_metric="h_mae_eV_mean", x_axis="n_total")
+
+            self.assertEqual(warnings, [])
+            self.assertEqual(len(rows), 1)
+            self.assertAlmostEqual(rows[0]["primary_metric_mev"], 12.0)
+
     def test_analyze_reads_metric_scaling_rows_and_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
