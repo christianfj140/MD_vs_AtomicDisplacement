@@ -47,7 +47,7 @@ computes:
 - `N_eff = N / statistical_inefficiency`.
 
 **Important:** `N_eff` is reported for transparency. The main `N_min` curves and
-replicate resampling CIs still use nominal `N` until a future protocol explicitly
+replicate-resampling CIs still use nominal `N` until a future protocol explicitly
 switches to effective sizes.
 
 The report/UI therefore uses this warning verbatim:
@@ -70,13 +70,13 @@ Backward-compatible aliases currently remain in JSON:
 - `N_min_eff_diagnostic` with
   `N_min_eff_diagnostic_deprecated_alias_for = "effective_samples_at_nominal_N_min_diagnostic"`
 
-## Replicate resampling CI
+## Replicate-resampling CI
 
 The canonical summary object is `replicate_bootstrap`. The legacy `bootstrap`
 key is retained as a deprecated compatibility alias for existing UI/API
 consumers.
 
-The display label is **replicate resampling CI**. It resamples replicate rows
+The display label is **replicate-resampling CI**. It resamples replicate rows
 within each `(method, dataset_size_x)` group. This is useful for seed/replicate
 variation, but it is **not** a temporal/block bootstrap and does not capture:
 
@@ -91,14 +91,42 @@ and `limitations`.
 ## Fit policy
 
 `power_law_floor` is the only fit marked `paper_candidate`, and only when the
-constrained nonnegative fit succeeds with enough points. `power_law` remains a
-legacy alias for that same constrained model.
+constrained nonnegative fit succeeds and there are at least 5 observed dataset
+sizes for that method. The fit can still run with fewer points for diagnostic
+use; the paper-candidate gate is stricter than the mathematical minimum needed
+to execute the fit. `power_law` remains a legacy alias for that same
+constrained model.
 
 The following fits are `diagnostic_only`: `linear`, `quadratic`, `inverse`,
 `inverse_square`, `moving_average`, LOWESS variants, `cumulative_best`, and
 `none`. If an unconstrained fit predicts negative error inside the fit domain,
 it is marked invalid for N_min thresholding and the affected N_min values fall
 back to observed points with an explicit warning.
+
+## Leave-one-size-out fit stability
+
+When `n_min_source=fit`, the summary also records
+`fit_predictive_stability_by_left_out_N`. For each method and each observed
+dataset size, the diagnostic removes that size, refits with the same
+`n_min_fit_model`, and recomputes fitted `N_min_abs`, `N_min_rel_tol`, and
+`N_min_plateau` where possible.
+
+The summary reports:
+
+- `n_leave_one_out_trials`
+- `n_successful`
+- `n_failed`
+- `max_abs_delta_N_min`
+- `max_relative_delta_N_min`
+- `unstable_criteria`
+
+For paper-level gating, the current conservative default is:
+
+- block if any paper-relevant fitted criterion changes by more than one
+  observed size step;
+- block if too many leave-one-out fits fail.
+
+Observed-only mode marks this diagnostic as not applicable.
 
 ### How to read warnings
 
@@ -123,6 +151,15 @@ python Comparison/scripts/g2m_deeph_dataset_size_minimum.py \
 
 Outputs include `dataset_size_minimum_summary.json` with `temporal_diagnostics`.
 
+`N_min_cost_eff` also records the selected `cost_basis`:
+
+- `per_seed_mean` — mean GPU-hours per valid seed/replicate row; preserves historical behavior.
+- `protocol_total` — summed GPU-hours across the valid rows required by the aggregated protocol.
+
+Aggregated rows expose `gpu_hours_per_seed_mean`, `gpu_hours_protocol_total`,
+and `gpu_hours_protocol_sem` when those values can be computed from the
+available per-run costs.
+
 ## N_min criteria names
 
 - `N_min_abs`: first dataset size crossing the absolute error threshold.
@@ -131,7 +168,7 @@ Outputs include `dataset_size_minimum_summary.json` with `temporal_diagnostics`.
 - `N_min_plateau`: first dataset size after which the remaining future gain is
   below the plateau threshold.
 - `N_min_cost_eff`: lowest-cost dataset size among points within relative
-  tolerance of the best observed value.
+  tolerance of the best observed value, using the selected `cost_basis`.
 
 `N_min_rel95` is a deprecated JSON compatibility alias for `N_min_rel_tol`.
 It is not a 95% confidence interval. The only 95% quantity in this analysis is

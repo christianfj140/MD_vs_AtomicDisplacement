@@ -38,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PRIMARY_METRIC = "h_mae_eV_mean"
 DEFAULT_FIT_MODELS = "linear,quadratic,inverse,inverse_square,power_law_floor"
 CANONICAL_POWER_LAW_MODEL = "power_law_floor"
+MIN_FIT_POINTS_FOR_PAPER_CANDIDATE = 5
 POWER_LAW_LEGACY_ALIASES = frozenset({"power_law"})
 UNCONSTRAINED_FIT_MODELS = {"linear", "quadratic", "inverse", "inverse_square"}
 DIAGNOSTIC_ONLY_FIT_MODELS = {
@@ -64,6 +65,10 @@ AGGREGATION_MODES = (
     "mean_seeds_per_config",
     "best_config_mean",
 )
+COST_BASES = (
+    "per_seed_mean",
+    "protocol_total",
+)
 BASE_CONFIG_SEED_SUFFIX = re.compile(r"-seed\d+$", re.IGNORECASE)
 EXPLICIT_BASE_CONFIG_ID_FIELDS = (
     "base_config_id",
@@ -78,7 +83,7 @@ LEGACY_N_MIN_REL95_KEY = "N_min_rel95"
 LEGACY_THRESHOLD_ALIASES = {LEGACY_N_MIN_REL95_KEY: N_MIN_REL_TOL_KEY}
 BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau")
 MIN_BOOTSTRAP_SUCCESS_FOR_CI = 2
-REPLICATE_BOOTSTRAP_LABEL = "replicate resampling CI"
+REPLICATE_BOOTSTRAP_LABEL = "replicate-resampling CI"
 ENERGY_METRICS_WITHOUT_EV = {"dos_mae_500_fermi_window"}
 _REFERENCED_METRIC_CACHE: dict[tuple[str, str], float | None] = {}
 
@@ -652,6 +657,9 @@ def group_config_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "primary_metric_mev_std": std(metric_values),
                 "gpu_hours_total_mean": mean(costs),
                 "gpu_hours_total_sum": sum(costs) if costs else None,
+                "gpu_hours_per_seed_mean": mean(costs),
+                "gpu_hours_protocol_total": sum(costs) if costs else None,
+                "gpu_hours_protocol_sem": sem(costs),
                 "elapsed_seconds_mean": mean(elapsed),
                 "row_count": len(items),
                 "seed_count": len({str(item.get("seed") or "") for item in items}),
@@ -748,6 +756,9 @@ def aggregate_rows_mean_replicates(rows: list[dict[str, Any]]) -> list[dict[str,
                 "seeds": seeds,
                 "source_run_roots": source_roots,
                 "gpu_hours_total_mean": mean(costs),
+                "gpu_hours_per_seed_mean": mean(costs),
+                "gpu_hours_protocol_total": sum(costs) if costs else None,
+                "gpu_hours_protocol_sem": sem(costs),
                 "elapsed_seconds_mean": mean(elapsed),
                 "is_aggregated_mean": True,
                 "aggregation_mode": "mean_replicates",
@@ -815,6 +826,9 @@ def aggregate_rows_mean_seeds_per_config(rows: list[dict[str, Any]]) -> list[dic
                 "y_max": max(metric_values) if metric_values else None,
                 "source_run_roots": source_roots,
                 "gpu_hours_total_mean": mean(costs),
+                "gpu_hours_per_seed_mean": mean(costs),
+                "gpu_hours_protocol_total": sum(costs) if costs else None,
+                "gpu_hours_protocol_sem": sem(costs),
                 "elapsed_seconds_mean": mean(elapsed),
                 "is_aggregated_mean": True,
                 "aggregation_mode": "mean_seeds_per_config",
@@ -1007,12 +1021,17 @@ def n_min_plateau(best_rows: list[dict[str, Any]], plateau_gain: float) -> int |
     return values[-1][0]
 
 
-def n_min_cost_eff(best_rows: list[dict[str, Any]], relative_tolerance: float) -> int | None:
+def n_min_cost_eff(
+    best_rows: list[dict[str, Any]],
+    relative_tolerance: float,
+    *,
+    cost_basis: str = "per_seed_mean",
+) -> int | None:
     values = [
         row
         for row in best_rows
         if finite_number(row.get("primary_metric_mev_mean")) is not None
-        and finite_number(row.get("gpu_hours_total_mean")) is not None
+        and row_cost_for_basis(row, cost_basis) is not None
     ]
     if not values:
         return None
@@ -1024,7 +1043,9 @@ def n_min_cost_eff(best_rows: list[dict[str, Any]], relative_tolerance: float) -
     chosen = min(
         passing,
         key=lambda row: (
-            finite_number(row.get("gpu_hours_total_mean")) or math.inf,
+            row_cost_for_basis(row, cost_basis)
+            if row_cost_for_basis(row, cost_basis) is not None
+            else math.inf,
             int(row["dataset_size_x"]),
             finite_number(row.get("primary_metric_mev_mean")) or math.inf,
         ),
@@ -1038,6 +1059,7 @@ def thresholds_by_method(
     threshold_mev: float,
     relative_tolerance: float,
     plateau_gain: float,
+    cost_basis: str = "per_seed_mean",
 ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for method in sorted({str(row["method"]) for row in best_rows}):
@@ -1050,7 +1072,9 @@ def thresholds_by_method(
             "N_min_abs": n_min_abs(rows, threshold_mev),
             N_MIN_REL_TOL_KEY: n_min_rel_tol(rows, relative_tolerance),
             "N_min_plateau": n_min_plateau(rows, plateau_gain),
-            "N_min_cost_eff": n_min_cost_eff(rows, relative_tolerance),
+            "N_min_cost_eff": n_min_cost_eff(rows, relative_tolerance, cost_basis=cost_basis),
+            "N_min_cost_eff_basis": cost_basis,
+            "N_min_cost_eff_basis_label": cost_basis_label(cost_basis),
         })
     return out
 
@@ -1062,6 +1086,7 @@ def thresholds_by_method_from_fit(
     plateau_gain: float,
     fit_model: str,
     moving_average_window: int = 3,
+    cost_basis: str = "per_seed_mean",
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     out: dict[str, dict[str, Any]] = {}
     fit_details: dict[str, dict[str, Any]] = {}
@@ -1095,6 +1120,8 @@ def thresholds_by_method_from_fit(
                     f"{LEGACY_N_MIN_REL95_KEY}_source": "deprecated_alias",
                     "N_min_plateau_source": "observed_no_fit",
                     "N_min_cost_eff_source": "observed_cost",
+                    "N_min_cost_eff_basis": cost_basis,
+                    "N_min_cost_eff_basis_label": cost_basis_label(cost_basis),
                 }
             continue
 
@@ -1132,6 +1159,8 @@ def thresholds_by_method_from_fit(
                         f"{LEGACY_N_MIN_REL95_KEY}_source": "deprecated_alias",
                         "N_min_plateau_source": "observed_invalid_fit",
                         "N_min_cost_eff_source": "observed_cost",
+                        "N_min_cost_eff_basis": cost_basis,
+                        "N_min_cost_eff_basis_label": cost_basis_label(cost_basis),
                     }
             continue
 
@@ -1162,16 +1191,198 @@ def thresholds_by_method_from_fit(
 
             # Cost_eff necesita costes reales. No tiene sentido deducirlo
             # solo desde una curva de error si no ajustas tambien coste(N).
-            "N_min_cost_eff": n_min_cost_eff(observed_rows, relative_tolerance),
+            "N_min_cost_eff": n_min_cost_eff(observed_rows, relative_tolerance, cost_basis=cost_basis),
 
             "N_min_abs_source": "fit",
             f"{N_MIN_REL_TOL_KEY}_source": "fit",
             f"{LEGACY_N_MIN_REL95_KEY}_source": "deprecated_alias",
             "N_min_plateau_source": "fit",
             "N_min_cost_eff_source": "observed_cost",
+            "N_min_cost_eff_basis": cost_basis,
+            "N_min_cost_eff_basis_label": cost_basis_label(cost_basis),
         })
 
     return out, fit_details, warnings
+
+
+def fit_predictive_stability_by_left_out_N(
+    best_rows: list[dict[str, Any]],
+    *,
+    threshold_mev: float,
+    relative_tolerance: float,
+    plateau_gain: float,
+    fit_model: str,
+    moving_average_window: int = 3,
+    cost_basis: str = "per_seed_mean",
+    n_min_source: str = "fit",
+    baseline_thresholds: dict[str, dict[str, Any]] | None = None,
+    baseline_fit_details: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    canonical_model = canonical_fit_model(fit_model)
+    if n_min_source != "fit":
+        return {
+            "status": "not_applicable",
+            "reason": "observed_only_mode",
+            "fit_model": canonical_model,
+            "methods": {},
+        }
+    if canonical_model == "none":
+        return {
+            "status": "not_applicable",
+            "reason": "no_curve_fit_requested",
+            "fit_model": canonical_model,
+            "methods": {},
+        }
+
+    if baseline_thresholds is None or baseline_fit_details is None:
+        baseline_thresholds, baseline_fit_details, _ = thresholds_by_method_from_fit(
+            best_rows,
+            threshold_mev=threshold_mev,
+            relative_tolerance=relative_tolerance,
+            plateau_gain=plateau_gain,
+            fit_model=fit_model,
+            moving_average_window=moving_average_window,
+            cost_basis=cost_basis,
+        )
+
+    methods_out: dict[str, dict[str, Any]] = {}
+    global_blockers: list[str] = []
+
+    for method in sorted({str(row["method"]) for row in best_rows}):
+        observed_rows = sorted(
+            [row for row in best_rows if str(row["method"]) == method],
+            key=lambda row: int(row["dataset_size_x"]),
+        )
+        observed_sizes = [int(row["dataset_size_x"]) for row in observed_rows]
+        unique_sizes = sorted(dict.fromkeys(observed_sizes))
+        min_observed_size = unique_sizes[0] if unique_sizes else None
+        max_observed_size = unique_sizes[-1] if unique_sizes else None
+        step_sizes = [
+            right - left
+            for left, right in zip(unique_sizes, unique_sizes[1:])
+            if right > left
+        ]
+        one_size_step = min(step_sizes) if step_sizes else None
+        baseline_method_thresholds = dict(baseline_thresholds.get(method) or {})
+        baseline_fit = dict(baseline_fit_details.get(method) or {})
+
+        trials: list[dict[str, Any]] = []
+        for omitted_size in unique_sizes:
+            reduced_rows = [row for row in observed_rows if int(row["dataset_size_x"]) != omitted_size]
+            trial_thresholds, trial_details, trial_warnings = thresholds_by_method_from_fit(
+                reduced_rows,
+                threshold_mev=threshold_mev,
+                relative_tolerance=relative_tolerance,
+                plateau_gain=plateau_gain,
+                fit_model=fit_model,
+                moving_average_window=moving_average_window,
+                cost_basis=cost_basis,
+            )
+            trial_fit = dict(trial_details.get(method) or {})
+            trial_threshold = dict(trial_thresholds.get(method) or {})
+            fit_status = str(trial_fit.get("status") or "missing_fit_status")
+            successful = fit_status == "ok" and bool(trial_threshold)
+            trials.append(
+                {
+                    "omitted_N": omitted_size,
+                    "fit_status": fit_status,
+                    "successful": successful,
+                    "thresholds": {
+                        criterion: trial_threshold.get(criterion)
+                        for criterion in PAPER_RELEVANT_STABILITY_CRITERIA
+                    },
+                    "failure_reason": None if successful else (trial_fit.get("error") or fit_status),
+                    "warnings": trial_warnings,
+                }
+            )
+
+        max_abs_delta: dict[str, float | None] = {}
+        max_relative_delta: dict[str, float | None] = {}
+        unstable_criteria: list[str] = []
+        for criterion in PAPER_RELEVANT_STABILITY_CRITERIA:
+            baseline_value = finite_number(baseline_method_thresholds.get(criterion))
+            deltas: list[float] = []
+            rel_deltas: list[float] = []
+            step_deltas: list[int] = []
+            for trial in trials:
+                trial_value = finite_number((trial.get("thresholds") or {}).get(criterion))
+                if baseline_value is None or trial_value is None:
+                    continue
+                if (
+                    min_observed_size is not None
+                    and max_observed_size is not None
+                    and (
+                        baseline_value < min_observed_size
+                        or baseline_value > max_observed_size
+                        or trial_value < min_observed_size
+                        or trial_value > max_observed_size
+                    )
+                ):
+                    continue
+                delta = abs(float(trial_value) - float(baseline_value))
+                deltas.append(delta)
+                if baseline_value != 0.0:
+                    rel_deltas.append(delta / abs(float(baseline_value)))
+                if unique_sizes:
+                    baseline_index = min(
+                        range(len(unique_sizes)),
+                        key=lambda idx: abs(float(unique_sizes[idx]) - float(baseline_value)),
+                    )
+                    trial_index = min(
+                        range(len(unique_sizes)),
+                        key=lambda idx: abs(float(unique_sizes[idx]) - float(trial_value)),
+                    )
+                    step_deltas.append(abs(trial_index - baseline_index))
+            max_abs_delta[criterion] = max(deltas) if deltas else None
+            max_relative_delta[criterion] = max(rel_deltas) if rel_deltas else None
+            if step_deltas and max(step_deltas) > 1:
+                unstable_criteria.append(criterion)
+
+        n_trials = len(trials)
+        n_successful = sum(1 for trial in trials if trial["successful"])
+        n_failed = n_trials - n_successful
+        failure_threshold = max(1, n_trials // 4) if n_trials else 0
+        unstable_due_to_failures = n_failed > failure_threshold if n_trials else False
+        method_blockers: list[str] = []
+        if unstable_criteria:
+            method_blockers.append(
+                f"paper_blocked_if_fit_predictive_stability_unstable:{method}:{','.join(sorted(unstable_criteria))}"
+            )
+        if unstable_due_to_failures:
+            method_blockers.append(
+                f"paper_blocked_if_fit_predictive_stability_leave_one_out_failures:{method}"
+            )
+        global_blockers.extend(method_blockers)
+
+        methods_out[method] = {
+            "status": "ok",
+            "fit_model": canonical_model,
+            "baseline_fit_status": baseline_fit.get("status"),
+            "baseline_thresholds": {
+                criterion: baseline_method_thresholds.get(criterion)
+                for criterion in PAPER_RELEVANT_STABILITY_CRITERIA
+            },
+            "observed_sizes": unique_sizes,
+            "one_observed_size_step": one_size_step,
+            "n_leave_one_out_trials": n_trials,
+            "n_successful": n_successful,
+            "n_failed": n_failed,
+            "max_abs_delta_N_min": max_abs_delta,
+            "max_relative_delta_N_min": max_relative_delta,
+            "unstable_criteria": sorted(set(unstable_criteria)),
+            "unstable_due_to_failures": unstable_due_to_failures,
+            "paper_level_blockers": method_blockers,
+            "failure_threshold": failure_threshold,
+            "trials": trials,
+        }
+
+    return {
+        "status": "ok",
+        "fit_model": canonical_model,
+        "n_min_source": n_min_source,
+        "paper_level_blockers": sorted(set(global_blockers)),
+        "methods": methods_out,
+    }
 
 
     
@@ -1241,11 +1452,24 @@ def fit_linear_model(model: str, n_values: list[float], y_values: list[float]) -
 
 def fit_policy_metadata(model: str, *, status: str = "ok", n_points: int | None = None) -> dict[str, Any]:
     canonical = canonical_fit_model(model)
-    enough_points = n_points is None or n_points >= required_fit_points(canonical)
-    paper_candidate = canonical == CANONICAL_POWER_LAW_MODEL and status == "ok" and enough_points
+    enough_fit_points = n_points is None or n_points >= required_fit_points(canonical)
+    enough_points_for_paper_candidate = (
+        n_points is None or n_points >= MIN_FIT_POINTS_FOR_PAPER_CANDIDATE
+    )
+    paper_candidate = (
+        canonical == CANONICAL_POWER_LAW_MODEL
+        and status == "ok"
+        and enough_fit_points
+        and enough_points_for_paper_candidate
+    )
     if canonical == CANONICAL_POWER_LAW_MODEL:
         classification = "paper_candidate" if paper_candidate else "diagnostic_only"
-        reason = "constrained nonnegative power law + floor" if paper_candidate else "power_law_floor_not_valid_for_paper_candidate"
+        if paper_candidate:
+            reason = "constrained nonnegative power law + floor"
+        elif status == "ok" and not enough_points_for_paper_candidate:
+            reason = f"power_law_floor_points_lt_{MIN_FIT_POINTS_FOR_PAPER_CANDIDATE}"
+        else:
+            reason = "power_law_floor_not_valid_for_paper_candidate"
     else:
         classification = "diagnostic_only"
         reason = "diagnostic_fit_model_not_mechanistic_primary_law"
@@ -1254,6 +1478,12 @@ def fit_policy_metadata(model: str, *, status: str = "ok", n_points: int | None 
         "diagnostic_only": not paper_candidate,
         "fit_policy": classification,
         "fit_policy_reason": reason,
+        "minimum_fit_points_for_paper_candidate": (
+            MIN_FIT_POINTS_FOR_PAPER_CANDIDATE if canonical == CANONICAL_POWER_LAW_MODEL else None
+        ),
+        "enough_points_for_paper_candidate": (
+            enough_points_for_paper_candidate if canonical == CANONICAL_POWER_LAW_MODEL else False
+        ),
     }
 
 
@@ -2087,11 +2317,18 @@ def plot_metric_vs_size(
     return outputs
 
 
-def plot_cost_efficiency(best_rows: list[dict[str, Any]], output_dir: Path, *, x_axis: str, primary_metric: str) -> list[str]:
+def plot_cost_efficiency(
+    best_rows: list[dict[str, Any]],
+    output_dir: Path,
+    *,
+    x_axis: str,
+    primary_metric: str,
+    cost_basis: str,
+) -> list[str]:
     rows = [
         row
         for row in best_rows
-        if finite_number(row.get("gpu_hours_total_mean")) is not None
+        if row_cost_for_basis(row, cost_basis) is not None
         and finite_number(row.get("primary_metric_mev_mean")) is not None
     ]
     if not rows:
@@ -2102,16 +2339,16 @@ def plot_cost_efficiency(best_rows: list[dict[str, Any]], output_dir: Path, *, x
         method_rows = sorted([row for row in rows if row["method"] == method], key=lambda row: int(row["dataset_size_x"]))
         color = METHOD_COLORS.get(method, "#555555")
         sizes = [int(row["dataset_size_x"]) for row in method_rows]
-        costs = [float(row["gpu_hours_total_mean"]) for row in method_rows]
+        costs = [float(row_cost_for_basis(row, cost_basis) or 0.0) for row in method_rows]
         metrics = [float(row["primary_metric_mev_mean"]) for row in method_rows]
         axes[0].plot(sizes, costs, marker="o", color=color, linewidth=2.0, label=method)
         axes[1].scatter(costs, metrics, color=color, s=60, label=method)
         for row, cost, metric in zip(method_rows, costs, metrics):
             axes[1].annotate(str(row["dataset_size_x"]), (cost, metric), fontsize=8)
     axes[0].set_xlabel("Training snapshots" if x_axis == "n_train" else "Total snapshots")
-    axes[0].set_ylabel("GPU-hours mean")
+    axes[0].set_ylabel(f"GPU-hours ({cost_basis_label(cost_basis)})")
     axes[0].set_title("Cost vs dataset size")
-    axes[1].set_xlabel("GPU-hours mean")
+    axes[1].set_xlabel(f"GPU-hours ({cost_basis_label(cost_basis)})")
     axes[1].set_ylabel(f"{primary_metric} (meV)")
     axes[1].set_title("Accuracy/cost Pareto")
     for ax in axes:
@@ -2159,6 +2396,35 @@ N_MIN_NOMINAL_WARNING = (
     "can be lower. Check N_eff before using this as a paper-level claim."
 )
 N_MIN_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau", "N_min_cost_eff")
+PAPER_RELEVANT_STABILITY_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau")
+
+
+def parse_cost_basis(value: str | None) -> str:
+    if value is None or not str(value).strip():
+        return COST_BASES[0]
+    basis = str(value).strip()
+    if basis not in COST_BASES:
+        raise SystemExit(f"Unknown cost_basis: {basis}")
+    return basis
+
+
+def cost_basis_label(cost_basis: str) -> str:
+    if cost_basis == "protocol_total":
+        return "protocol total GPU-hours across required seeds/replicates"
+    return "per-seed mean GPU-hours"
+
+
+def row_cost_for_basis(row: dict[str, Any], cost_basis: str) -> float | None:
+    keys = (
+        ("gpu_hours_protocol_total", "gpu_hours_total_sum", "gpu_hours_total_mean", "gpu_hours_total")
+        if cost_basis == "protocol_total"
+        else ("gpu_hours_per_seed_mean", "gpu_hours_total_mean", "gpu_hours_total", "gpu_hours_protocol_total")
+    )
+    for key in keys:
+        value = finite_number(row.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def first_non_empty_text(record: dict[str, Any], *keys: str) -> str | None:
@@ -2755,6 +3021,7 @@ def scientific_claim_status_payload(
     requested_fit_model: str,
     actual_fit_model: str | None,
     fit_threshold_details: dict[str, dict[str, Any]],
+    fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
     fallback_used: bool,
     fallback_reason: str | None,
 ) -> dict[str, Any]:
@@ -2779,6 +3046,7 @@ def scientific_claim_status_payload(
         "methods_evaluated": threshold_methods,
     }
     n_min_fit_policy_by_method: dict[str, dict[str, Any]] = {}
+    stability_by_method = ((fit_predictive_stability_by_left_out_N or {}).get("methods") or {})
 
     if not autocorrelation_available:
         blockers.append("paper_blocked_if_autocorrelation_unavailable")
@@ -2810,6 +3078,9 @@ def scientific_claim_status_payload(
             "paper_candidate": paper_candidate,
             "fit_model": fit_detail.get("fit_model") or fit_detail.get("model"),
             "status": fit_detail.get("status"),
+            "fit_policy_reason": fit_detail.get("fit_policy_reason"),
+            "minimum_fit_points_for_paper_candidate": fit_detail.get("minimum_fit_points_for_paper_candidate"),
+            "enough_points_for_paper_candidate": fit_detail.get("enough_points_for_paper_candidate"),
         }
         if fit_policy is None:
             blockers.append(f"paper_blocked_if_fit_policy_missing:{method}")
@@ -2822,6 +3093,16 @@ def scientific_claim_status_payload(
                 or "unknown"
             )
             blockers.append(f"paper_blocked_if_n_min_fit_policy_diagnostic_only:{model_name}")
+        if (
+            canonical_fit_model(fit_detail.get("fit_model") or fit_detail.get("model")) == CANONICAL_POWER_LAW_MODEL
+            and not bool(fit_detail.get("enough_points_for_paper_candidate"))
+        ):
+            blockers.append(
+                f"paper_blocked_if_power_law_floor_points_lt_{MIN_FIT_POINTS_FOR_PAPER_CANDIDATE}:{method}"
+            )
+        method_stability = stability_by_method.get(method)
+        if isinstance(method_stability, dict):
+            blockers.extend(str(item) for item in (method_stability.get("paper_level_blockers") or []))
 
     status = "diagnostic_only" if blockers else "paper_candidate_nominal_with_n_eff_diagnostic"
     n_min_nominal = nominal_n_min_map(thresholds)
@@ -2841,6 +3122,11 @@ def scientific_claim_status_payload(
         "n_min_protocol": n_min_protocol,
         "n_min_fit_policy": "paper_candidate" if status == "paper_candidate_nominal_with_n_eff_diagnostic" else "diagnostic_only",
         "n_min_fit_policy_by_method": n_min_fit_policy_by_method,
+        "fit_predictive_stability_by_left_out_N": fit_predictive_stability_by_left_out_N or {
+            "status": "not_applicable",
+            "reason": "missing_diagnostic",
+            "methods": {},
+        },
         "n_eff_diagnostic_note": (
             "Effective-N values are diagnostics only. They do not replace nominal N_min "
             "or constitute validated paper-level replacements without a stronger protocol."
@@ -2863,6 +3149,8 @@ def build_report(
     temporal_diagnostics: dict[str, Any] | None = None,
     scientific_status: dict[str, Any] | None = None,
     replicate_bootstrap: dict[str, Any] | None = None,
+    cost_basis: str = "per_seed_mean",
+    fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Dataset Size Minimum Analysis\n")
@@ -2874,6 +3162,10 @@ def build_report(
     lines.append(f"- Primary metric: `{primary_metric}` convertido a meV")
     lines.append(f"- Threshold absoluto: `{threshold_mev:g}` meV")
     lines.append(f"- Eje x: `{x_axis}`")
+    lines.append(f"- Cost basis for `N_min_cost_eff`: `{cost_basis}` ({cost_basis_label(cost_basis)})")
+    lines.append(
+        f"- Power-law paper-candidate gate: at least `{MIN_FIT_POINTS_FOR_PAPER_CANDIDATE}` observed dataset sizes per method."
+    )
     lines.append("\n## Cobertura\n")
     lines.append(f"- Grupos config agregados: {len(grouped_rows)}")
     lines.append(f"- Mejores metodo/tamano: {len(best_rows)}")
@@ -2911,7 +3203,7 @@ def build_report(
                     coeffs=json.dumps(fit.get("coefficients") or [], ensure_ascii=False),
                 )
             )
-    lines.append("\n## Replicate bootstrap\n")
+    lines.append("\n## Replicate-resampling CI\n")
     boot = replicate_bootstrap or disabled_bootstrap_summary()
     lines.append(f"- Label: {boot.get('display_label') or REPLICATE_BOOTSTRAP_LABEL}")
     lines.append(f"- Enabled: {bool(boot.get('enabled'))}")
@@ -2919,8 +3211,27 @@ def build_report(
         "- Scope: row-level replicate/seed resampling within `(method, dataset_size_x)`; "
         "not temporal/block bootstrap and not full scientific uncertainty."
     )
+    lines.append("- Limitations:")
+    lines.append("  - does not model temporal autocorrelation")
+    lines.append("  - does not model model-selection uncertainty")
+    lines.append("  - does not model hyperparameter-selection uncertainty")
+    lines.append("  - does not model dependence between dataset sizes")
     if boot.get("warnings"):
         lines.append(f"- Replicate resampling warnings: `{json.dumps(boot.get('warnings'), ensure_ascii=False)}`")
+    lines.append("\n## Fit stability (leave-one-size-out)\n")
+    stability = fit_predictive_stability_by_left_out_N or {}
+    lines.append(f"- Status: `{stability.get('status') or 'not_applicable'}`")
+    if stability.get("reason"):
+        lines.append(f"- Reason: `{stability.get('reason')}`")
+    for method, method_stability in sorted((stability.get("methods") or {}).items()):
+        lines.append(
+            f"- Method `{method}`: trials={method_stability.get('n_leave_one_out_trials')}, "
+            f"successful={method_stability.get('n_successful')}, failed={method_stability.get('n_failed')}, "
+            f"unstable_criteria=`{json.dumps(method_stability.get('unstable_criteria') or [], ensure_ascii=False)}`"
+        )
+        blockers = method_stability.get("paper_level_blockers") or []
+        if blockers:
+            lines.append(f"  blockers: `{json.dumps(blockers, ensure_ascii=False)}`")
     lines.append("\n## Temporal diagnostics (MD snapshot independence)\n")
     temporal = temporal_diagnostics or {}
     lines.append(
@@ -3182,6 +3493,7 @@ def compute_bootstrap_n_min(
     n_min_source: str,
     n_min_fit_model: str,
     moving_average_window: int,
+    cost_basis: str = "per_seed_mean",
 ) -> dict[str, Any]:
     warnings: list[str] = replicate_bootstrap_scope_warnings(
         normalized_rows,
@@ -3198,6 +3510,7 @@ def compute_bootstrap_n_min(
             "replicates_failed": n_replicates,
             "ci_level": ci_level,
             "seed": seed,
+            "cost_basis": cost_basis,
             "n_min_source": n_min_source,
             "n_min_fit_model": n_min_fit_model if n_min_source == "fit" else None,
             "by_method": {},
@@ -3239,6 +3552,7 @@ def compute_bootstrap_n_min(
                 plateau_gain=plateau_gain,
                 fit_model=n_min_fit_model,
                 moving_average_window=moving_average_window,
+                cost_basis=cost_basis,
             )
         else:
             thresholds = thresholds_by_method(
@@ -3246,6 +3560,7 @@ def compute_bootstrap_n_min(
                 threshold_mev=threshold_mev,
                 relative_tolerance=relative_tolerance,
                 plateau_gain=plateau_gain,
+                cost_basis=cost_basis,
             )
 
         replicate_recorded = False
@@ -3298,6 +3613,7 @@ def compute_bootstrap_n_min(
         "replicates_failed": replicate_failures,
         "ci_level": ci_level,
         "seed": seed,
+        "cost_basis": cost_basis,
         "n_min_source": n_min_source,
         "n_min_fit_model": n_min_fit_model if n_min_source == "fit" else None,
         "by_method": by_method,
@@ -3323,6 +3639,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     run_roots = [Path(item).resolve() for item in args.run_root]
     fit_models = parse_fit_models(args.fit_models)
     moving_average_window = max(1, int(getattr(args, "moving_average_window", None) or 3))
+    cost_basis = parse_cost_basis(getattr(args, "cost_basis", None))
     aggregation_mode = resolve_aggregation_mode(
         getattr(args, "aggregation_mode", None),
         run_root_count=len(run_roots),
@@ -3362,10 +3679,11 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     observed_thresholds = thresholds_by_method(
-    best_rows,
-    threshold_mev=float(args.threshold_mev),
-    relative_tolerance=float(args.relative_tolerance),
-    plateau_gain=float(args.plateau_gain),
+        best_rows,
+        threshold_mev=float(args.threshold_mev),
+        relative_tolerance=float(args.relative_tolerance),
+        plateau_gain=float(args.plateau_gain),
+        cost_basis=cost_basis,
     )
 
     fit_thresholds: dict[str, dict[str, Any]] = {}
@@ -3381,12 +3699,13 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
 
     if requested_n_min_source == "fit":
         fit_thresholds, fit_threshold_details, fit_threshold_warnings = thresholds_by_method_from_fit(
-        best_rows,
-        threshold_mev=float(args.threshold_mev),
-        relative_tolerance=float(args.relative_tolerance),
-        plateau_gain=float(args.plateau_gain),
-        fit_model=requested_fit_model,
-        moving_average_window=moving_average_window,
+            best_rows,
+            threshold_mev=float(args.threshold_mev),
+            relative_tolerance=float(args.relative_tolerance),
+            plateau_gain=float(args.plateau_gain),
+            fit_model=requested_fit_model,
+            moving_average_window=moving_average_window,
+            cost_basis=cost_basis,
         )
         warnings.extend(fit_threshold_warnings)
         if canonical_fit == "none":
@@ -3422,6 +3741,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             threshold_mev=float(args.threshold_mev),
             relative_tolerance=float(args.relative_tolerance),
             plateau_gain=float(args.plateau_gain),
+            cost_basis=cost_basis,
             n_min_source=actual_n_min_source,
             n_min_fit_model=canonical_fit if requested_n_min_source == "fit" else requested_fit_model,
             moving_average_window=moving_average_window,
@@ -3438,6 +3758,20 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         )
         for method in sorted({str(row["method"]) for row in best_rows})
     }
+    fit_stability = fit_predictive_stability_by_left_out_N(
+        best_rows,
+        threshold_mev=float(args.threshold_mev),
+        relative_tolerance=float(args.relative_tolerance),
+        plateau_gain=float(args.plateau_gain),
+        fit_model=requested_fit_model,
+        moving_average_window=moving_average_window,
+        cost_basis=cost_basis,
+        n_min_source=actual_n_min_source,
+        baseline_thresholds=fit_thresholds if requested_n_min_source == "fit" else thresholds,
+        baseline_fit_details=fit_threshold_details,
+    )
+    if aggregation_mode in {"mean_seeds_per_config", "best_config_mean"} and cost_basis == "per_seed_mean":
+        warnings.append("paper_level_cost_basis_per_seed_mean_may_underestimate_protocol_cost")
 
     outputs: list[str] = []
     write_csv(output_dir / "dataset_size_minimum_results.csv", grouped_rows)
@@ -3461,7 +3795,15 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
                 primary_metric=args.primary_metric,
             )
         )
-        outputs.extend(plot_cost_efficiency(best_rows, output_dir, x_axis=args.x_axis, primary_metric=args.primary_metric))
+        outputs.extend(
+            plot_cost_efficiency(
+                best_rows,
+                output_dir,
+                x_axis=args.x_axis,
+                primary_metric=args.primary_metric,
+                cost_basis=cost_basis,
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - plots are derived, tables still useful.
         warnings.append(f"plot_generation_failed:{exc}")
 
@@ -3479,6 +3821,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         requested_fit_model=requested_fit_model,
         actual_fit_model=actual_fit_model,
         fit_threshold_details=fit_threshold_details,
+        fit_predictive_stability_by_left_out_N=fit_stability,
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
     )
@@ -3498,6 +3841,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         temporal_diagnostics=temporal_diagnostics,
         scientific_status=scientific_status,
         replicate_bootstrap=replicate_bootstrap,
+        cost_basis=cost_basis,
+        fit_predictive_stability_by_left_out_N=fit_stability,
     )
     report_path = output_dir / "dataset_size_minimum_report.md"
     report_path.write_text(report, encoding="utf-8")
@@ -3513,6 +3858,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "threshold_mev": float(args.threshold_mev),
         "relative_tolerance": float(args.relative_tolerance),
         "plateau_gain": float(args.plateau_gain),
+        "cost_basis": cost_basis,
         "x_axis": args.x_axis,
         "fit_models": fit_models,
         "grouped_config_rows": len(grouped_rows),
@@ -3542,6 +3888,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "observed_thresholds": observed_thresholds,
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
+        "fit_predictive_stability_by_left_out_N": fit_stability,
         "deprecated_threshold_aliases": dict(LEGACY_THRESHOLD_ALIASES),
         "moving_average_window": moving_average_window,
         "bootstrap_replicates": bootstrap_replicates,
@@ -3604,6 +3951,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Paper-level: mean_seeds_per_config, best_config_mean. "
             "Diagnostic: mean_replicates, best_config. "
             "Default: best_config for one --run-root, mean_replicates for multiple."
+        ),
+    )
+    parser.add_argument(
+        "--cost-basis",
+        choices=list(COST_BASES),
+        default=COST_BASES[0],
+        help=(
+            "Cost basis used for N_min_cost_eff. "
+            "per_seed_mean preserves historical behavior; protocol_total sums protocol seeds/replicates."
         ),
     )
     parser.add_argument(

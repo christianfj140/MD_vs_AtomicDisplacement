@@ -1193,6 +1193,14 @@
                 </select>
               </label>
               <label class="field">
+                <span>Cost basis</span>
+                <select id="dataset-minimum-cost-basis">
+                  <option value="per_seed_mean" selected>per-seed mean GPU-hours</option>
+                  <option value="protocol_total">protocol total GPU-hours</option>
+                </select>
+                <small>Para modos paper-level, protocol total representa mejor el coste de repetir seeds/replicas.</small>
+              </label>
+              <label class="field">
                 <span>Fit</span>
                 <select id="dataset-minimum-fit">
                   <option value="power_law_floor" selected>power law + floor (constrained)</option>

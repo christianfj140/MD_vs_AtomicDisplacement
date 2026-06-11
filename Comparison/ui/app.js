@@ -2614,12 +2614,13 @@ async function runDatasetMinimumAnalysis() {
       n_min_source: datasetMinimumSelectedNMinSource
         ? datasetMinimumSelectedNMinSource()
         : "fit",
-        n_min_fit_model: datasetMinimumBackendFitModel(selectedFit),
-        moving_average_window: datasetMinimumSelectedMovingAverageWindow(),
-        aggregation_mode: datasetMinimumSelectedAggregationMode(),
-        bootstrap_replicates: datasetMinimumSelectedBootstrapReplicates(),
-        bootstrap_seed: 12345,
-        ci_level: datasetMinimumSelectedCiLevel(),
+      n_min_fit_model: datasetMinimumBackendFitModel(selectedFit),
+      moving_average_window: datasetMinimumSelectedMovingAverageWindow(),
+      aggregation_mode: datasetMinimumSelectedAggregationMode(),
+      cost_basis: datasetMinimumSelectedCostBasis(),
+      bootstrap_replicates: datasetMinimumSelectedBootstrapReplicates(),
+      bootstrap_seed: 12345,
+      ci_level: datasetMinimumSelectedCiLevel(),
     };
     
     const response = await request("/api/g2m-deeph/dataset-size-minimum/analyze", {
@@ -2724,6 +2725,10 @@ function datasetMinimumSelectedXAxis() {
   return datasetMinimumControlValue("dataset-minimum-x-axis", "n_train");
 }
 
+function datasetMinimumSelectedCostBasis() {
+  return datasetMinimumControlValue("dataset-minimum-cost-basis", "per_seed_mean");
+}
+
 function datasetMinimumSelectedFit() {
   return datasetMinimumControlValue("dataset-minimum-fit", "power_law_floor");
 }
@@ -2819,6 +2824,10 @@ function datasetMinimumOutputMovingAverageWindow(output = {}) {
   return value == null ? 3 : Math.max(1, Math.round(value));
 }
 
+function datasetMinimumOutputCostBasis(output = {}) {
+  return String(output.cost_basis || "per_seed_mean");
+}
+
 function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
   if (output.primary_metric !== datasetMinimumSelectedMetric()) return false;
   if ((output.x_axis || "n_train") !== datasetMinimumSelectedXAxis()) return false;
@@ -2846,6 +2855,10 @@ function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
     datasetMinimumEffectiveAggregationMode(output)
     !== datasetMinimumSelectedAggregationMode()
   ) {
+    return false;
+  }
+
+  if (datasetMinimumOutputCostBasis(output) !== datasetMinimumSelectedCostBasis()) {
     return false;
   }
 
@@ -3050,7 +3063,7 @@ function datasetMinimumFormatNMinWithCi(output, method, criterion, axis) {
   }
 
   if (point != null) {
-    return `${datasetMinimumFormatN(point)} <span class="muted-text">(no replicate resampling CI)</span>`;
+    return `${datasetMinimumFormatN(point)} <span class="muted-text">(no replicate-resampling CI)</span>`;
   }
   return "-";
 }
@@ -3211,7 +3224,7 @@ function renderDatasetMinimumTable(output, axis) {
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_abs", axis)}</td>
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_rel_tol", axis)}</td>
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_plateau", axis)}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(no replicate resampling CI)</span></td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(no replicate-resampling CI)</span></td>
     `;
     body.appendChild(tr);
   }
@@ -4052,6 +4065,8 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const nMinSourceNote = output.fallback_used
     ? ` N_min source: requested=${requestedSource}, actual=${actualSource} (FIT FAILED; explicit observed fallback).`
     : ` N_min source: ${actualSource}.`;
+  const costBasis = datasetMinimumOutputCostBasis(output);
+  const costBasisNote = ` Cost basis: ${costBasis === "protocol_total" ? "protocol total GPU-hours" : "per-seed mean GPU-hours"}.`;
   const fitNote = ` Fit: ${datasetMinimumFitLabel(datasetMinimumSelectedFit())} (canonical: ${output.canonical_fit_model || datasetMinimumOutputNMinFitModel(output)}).`;
   const fallbackNote = output.fallback_used
     ? ` WARNING: canonical fit failed (${output.fallback_reason || "unknown"}); thresholds use observed points.`
@@ -4061,10 +4076,10 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : "";
   const bootstrap = datasetMinimumReplicateBootstrap(output);
   const bootstrapNote = bootstrap.enabled
-    ? ` Replicate resampling CI: enabled (${bootstrap.replicates_requested ?? output.bootstrap_replicates ?? 0} resamples, CI ${output.ci_level ?? datasetMinimumOutputCiLevel(output)}, successful ${bootstrap.replicates_successful ?? 0}; row-level only, no temporal/block bootstrap).`
-    : " Replicate resampling CI: disabled.";
+    ? ` Replicate-resampling CI: enabled (${bootstrap.replicates_requested ?? output.bootstrap_replicates ?? 0} resamples, CI ${output.ci_level ?? datasetMinimumOutputCiLevel(output)}, successful ${bootstrap.replicates_successful ?? 0}; row-level only, not temporal/block bootstrap; does not model temporal autocorrelation, model-selection uncertainty, hyperparameter-selection uncertainty, or dependence between dataset sizes).`
+    : " Replicate-resampling CI: disabled.";
   const bootstrapWarningNote = Array.isArray(bootstrap.warnings) && bootstrap.warnings.length
-    ? ` Replicate bootstrap warnings: ${bootstrap.warnings.slice(0, 4).join("; ")}.`
+    ? ` Replicate-resampling CI warnings: ${bootstrap.warnings.slice(0, 4).join("; ")}.`
     : "";
 
   const temporal = output.temporal_diagnostics || {};
@@ -4114,7 +4129,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : "";
 
   status.textContent =
-    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${temporalNote}` +
+    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${costBasisNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${temporalNote}` +
     `${thresholdNote}${outputNote}${axisNote}` +
     `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}` +
     `${payload.diagnostic_warning ? ` ${payload.diagnostic_warning}` : ""}`;
@@ -10748,6 +10763,7 @@ function setupEvents() {
       "dataset-minimum-threshold",
       "dataset-minimum-threshold-preset",
       "dataset-minimum-x-axis",
+      "dataset-minimum-cost-basis",
       "dataset-minimum-fit",
       "dataset-minimum-moving-average-window",
       "dataset-minimum-nmin-source",

@@ -79,6 +79,7 @@ from material_presets import (  # noqa: E402
 from g2m_deeph_dataset_size_minimum import (
     AGGREGATION_MODES,
     CANONICAL_POWER_LAW_MODEL,
+    COST_BASES,
     analysis_rows_for_aggregation_mode as dataset_minimum_analysis_rows_for_aggregation_mode,
     canonical_fit_model as dataset_minimum_canonical_fit_model,
     discover_metric_files as discover_dataset_minimum_metric_files,
@@ -88,6 +89,7 @@ from g2m_deeph_dataset_size_minimum import (
     load_run_root_rows as dataset_minimum_load_run_root_rows,
     normalize_rows as dataset_minimum_normalize_rows,
     pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
+    parse_cost_basis as dataset_minimum_parse_cost_basis,
     parse_single_fit_model as dataset_minimum_parse_single_fit_model,
     read_csv as read_dataset_minimum_csv,
     resolve_aggregation_mode as resolve_dataset_minimum_aggregation_mode,
@@ -6222,6 +6224,12 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
 
     if x_axis not in {"n_total", "n_train"}:
         raise RuntimeError("x_axis debe ser n_total o n_train.")
+    try:
+        cost_basis = dataset_minimum_parse_cost_basis(
+            str(payload.get("cost_basis") or COST_BASES[0])
+        )
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from None
 
     relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
     plateau_gain = float(payload.get("plateau_gain") or 0.05)
@@ -6281,6 +6289,8 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         str(moving_average_window),
         "--aggregation-mode",
         aggregation_mode,
+        "--cost-basis",
+        cost_basis,
         "--bootstrap-replicates",
         str(bootstrap_replicates),
         "--bootstrap-seed",
@@ -6388,6 +6398,7 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "run_roots": summary_run_roots,
                 "modified_at": summary_path.stat().st_mtime,
                 "moving_average_window": summary.get("moving_average_window"),
+                "cost_basis": summary.get("cost_basis") or COST_BASES[0],
                 "n_min_source": summary.get("n_min_source"),
                 "n_min_fit_model": summary.get("n_min_fit_model"),
                 "requested_n_min_source": summary.get("requested_n_min_source"),
@@ -6422,6 +6433,7 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "n_min_protocol": summary.get("n_min_protocol") or {},
                 "n_min_fit_policy": summary.get("n_min_fit_policy"),
                 "n_min_fit_policy_by_method": summary.get("n_min_fit_policy_by_method") or {},
+                "fit_predictive_stability_by_left_out_N": summary.get("fit_predictive_stability_by_left_out_N") or {},
                 "n_eff_diagnostic_note": summary.get("n_eff_diagnostic_note"),
             }
         )

@@ -34,6 +34,7 @@ def make_analyze_args(**overrides: object) -> argparse.Namespace:
         "n_min_fit_model": "linear",
         "moving_average_window": 3,
         "aggregation_mode": None,
+        "cost_basis": "per_seed_mean",
         "bootstrap_replicates": 0,
         "bootstrap_seed": 12345,
         "ci_level": 0.95,
@@ -49,6 +50,7 @@ def make_normalized_replicate_row(
     mev: float,
     seed: str,
     config_id: str = "cfg",
+    gpu_hours_total: float | None = None,
 ) -> dict:
     return {
         "method": method,
@@ -60,6 +62,7 @@ def make_normalized_replicate_row(
         "primary_metric": "h_mae_eV_mean",
         "primary_metric_mev": mev,
         "primary_metric_mev_mean": mev,
+        "gpu_hours_total": gpu_hours_total,
     }
 
 
@@ -333,6 +336,100 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             self.assertEqual(summary["canonical_fit_model"], "power_law_floor")
             self.assertIn("n_min_explicit_fallback_to_observed", " | ".join(summary["warnings"]))
 
+    def test_fit_predictive_stability_stable_curve_has_no_blocker(self) -> None:
+        rows = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 30.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 18.0},
+            {"method": "graph2mat", "dataset_size_x": 40, "primary_metric_mev_mean": 12.0},
+            {"method": "graph2mat", "dataset_size_x": 80, "primary_metric_mev_mean": 9.0},
+            {"method": "graph2mat", "dataset_size_x": 160, "primary_metric_mev_mean": 7.0},
+        ]
+
+        stability = minimum.fit_predictive_stability_by_left_out_N(
+            rows,
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="power_law_floor",
+            n_min_source="fit",
+        )
+
+        self.assertEqual(stability["status"], "ok")
+        self.assertFalse(stability["paper_level_blockers"])
+        method = stability["methods"]["graph2mat"]
+        self.assertEqual(method["n_leave_one_out_trials"], 5)
+        self.assertEqual(method["n_failed"], 0)
+        self.assertFalse(method["unstable_criteria"])
+        self.assertFalse(method["paper_level_blockers"])
+
+    def test_fit_predictive_stability_unstable_curve_adds_blocker(self) -> None:
+        rows = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 16.545017356857308},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 13.623105278162555},
+            {"method": "graph2mat", "dataset_size_x": 40, "primary_metric_mev_mean": 12.762055068426607},
+            {"method": "graph2mat", "dataset_size_x": 80, "primary_metric_mev_mean": 10.556738620339626},
+            {"method": "graph2mat", "dataset_size_x": 160, "primary_metric_mev_mean": 8.10421667427013},
+        ]
+
+        stability = minimum.fit_predictive_stability_by_left_out_N(
+            rows,
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="power_law_floor",
+            n_min_source="fit",
+        )
+
+        self.assertEqual(stability["status"], "ok")
+        method = stability["methods"]["graph2mat"]
+        self.assertTrue(method["paper_level_blockers"])
+        self.assertIn(
+            "paper_blocked_if_fit_predictive_stability_unstable:graph2mat",
+            " ".join(method["paper_level_blockers"]),
+        )
+
+    def test_fit_predictive_stability_records_leave_one_out_failures(self) -> None:
+        rows = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 30.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 20.0},
+            {"method": "graph2mat", "dataset_size_x": 40, "primary_metric_mev_mean": 12.0},
+        ]
+
+        stability = minimum.fit_predictive_stability_by_left_out_N(
+            rows,
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="quadratic",
+            n_min_source="fit",
+        )
+
+        method = stability["methods"]["graph2mat"]
+        self.assertEqual(method["n_leave_one_out_trials"], 3)
+        self.assertGreater(method["n_failed"], 0)
+        self.assertTrue(
+            any(str(trial["fit_status"]).startswith("skipped_") for trial in method["trials"])
+        )
+
+    def test_fit_predictive_stability_not_applicable_for_observed_mode(self) -> None:
+        rows = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 30.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 20.0},
+            {"method": "graph2mat", "dataset_size_x": 40, "primary_metric_mev_mean": 12.0},
+        ]
+
+        stability = minimum.fit_predictive_stability_by_left_out_N(
+            rows,
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="power_law_floor",
+            n_min_source="observed",
+        )
+
+        self.assertEqual(stability["status"], "not_applicable")
+        self.assertEqual(stability["reason"], "observed_only_mode")
+
     def test_mean_replicates_averages_same_method_and_size(self) -> None:
         rows = [
             {
@@ -489,6 +586,34 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertEqual(aggregated[0]["base_config_id"], "policy_a")
         self.assertAlmostEqual(aggregated[0]["primary_metric_mev_mean"], 12.0)
 
+    def test_mean_seeds_per_config_exposes_protocol_cost_fields(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 10.0,
+                "config_id": "policy_a-seed1",
+                "seed": "1",
+                "gpu_hours_total": 2.0,
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 14.0,
+                "config_id": "policy_a-seed2",
+                "seed": "2",
+                "gpu_hours_total": 6.0,
+            },
+        ]
+
+        aggregated = minimum.aggregate_rows_mean_seeds_per_config(rows)
+
+        self.assertEqual(len(aggregated), 1)
+        row = aggregated[0]
+        self.assertAlmostEqual(row["gpu_hours_per_seed_mean"], 4.0)
+        self.assertAlmostEqual(row["gpu_hours_protocol_total"], 8.0)
+        self.assertAlmostEqual(row["gpu_hours_protocol_sem"], 2.0)
+
     def test_mean_seeds_per_config_does_not_mix_distinct_configs(self) -> None:
         rows = [
             {
@@ -576,6 +701,54 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         aggregated = minimum.aggregate_rows_mean_replicates(rows)
 
         self.assertAlmostEqual(aggregated[0]["primary_metric_mev_mean"], 12.0)
+
+    def test_n_min_cost_eff_differs_by_cost_basis(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev_mean": 10.0,
+                "gpu_hours_per_seed_mean": 3.0,
+                "gpu_hours_protocol_total": 12.0,
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 20,
+                "primary_metric_mev_mean": 10.4,
+                "gpu_hours_per_seed_mean": 4.0,
+                "gpu_hours_protocol_total": 8.0,
+            },
+        ]
+
+        self.assertEqual(
+            minimum.n_min_cost_eff(rows, 0.05, cost_basis="per_seed_mean"),
+            10,
+        )
+        self.assertEqual(
+            minimum.n_min_cost_eff(rows, 0.05, cost_basis="protocol_total"),
+            20,
+        )
+
+    def test_n_min_cost_eff_cost_basis_falls_back_safely_for_legacy_rows(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev_mean": 10.0,
+                "gpu_hours_total_mean": 3.0,
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 20,
+                "primary_metric_mev_mean": 10.4,
+                "gpu_hours_total_mean": 4.0,
+            },
+        ]
+
+        self.assertEqual(
+            minimum.n_min_cost_eff(rows, 0.05, cost_basis="protocol_total"),
+            10,
+        )
 
     def test_observed_n_min_uses_aggregated_rows(self) -> None:
         aggregated = [
@@ -1027,8 +1200,16 @@ class DatasetSizeMinimumTests(unittest.TestCase):
 
             self.assertFalse(summary["bootstrap"]["enabled"])
             self.assertFalse(summary["replicate_bootstrap"]["enabled"])
+            self.assertEqual(summary["replicate_bootstrap"]["display_label"], "replicate-resampling CI")
             self.assertEqual(summary["bootstrap"]["deprecated_alias_for"], "replicate_bootstrap")
             self.assertEqual(summary["bootstrap_replicates"], 0)
+
+    def test_disabled_bootstrap_summary_uses_replicate_resampling_label(self) -> None:
+        summary = minimum.disabled_bootstrap_summary()
+
+        self.assertEqual(summary["bootstrap_type"], "replicate_resampling")
+        self.assertEqual(summary["display_label"], "replicate-resampling CI")
+        self.assertIn("does_not_model_temporal_autocorrelation", summary["limitations"])
 
     def test_bootstrap_is_deterministic_for_fixed_seed(self) -> None:
         rows = [
@@ -1121,6 +1302,8 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         ci = result["by_method"]["graph2mat"]["N_min_abs"]
         self.assertGreater(result["replicates_successful"], 0)
         self.assertIsNotNone(ci["median"])
+        self.assertEqual(result["display_label"], "replicate-resampling CI")
+        self.assertIn("does_not_model_temporal_autocorrelation", result["limitations"])
 
     def test_bootstrap_too_few_replicates_warns_without_crashing(self) -> None:
         rows = [
@@ -1194,12 +1377,28 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         none = minimum.no_fit_summary(len(n_values))
         lowess = minimum.fit_lowess_model("monotone_lowess_logx", n_values, y_values)
 
-        self.assertTrue(power["paper_candidate"])
-        self.assertFalse(power["diagnostic_only"])
+        self.assertFalse(power["paper_candidate"])
+        self.assertTrue(power["diagnostic_only"])
+        self.assertEqual(power["fit_policy"], "diagnostic_only")
+        self.assertEqual(
+            power["fit_policy_reason"],
+            f"power_law_floor_points_lt_{minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE}",
+        )
         self.assertFalse(linear["paper_candidate"])
         self.assertTrue(linear["diagnostic_only"])
         self.assertTrue(none["diagnostic_only"])
         self.assertTrue(lowess["diagnostic_only"])
+
+    def test_power_law_floor_with_five_points_can_be_paper_candidate(self) -> None:
+        n_values = [10.0, 20.0, 40.0, 80.0, 160.0]
+        y_values = [30.0, 18.0, 12.0, 9.0, 7.5]
+
+        power = minimum.fit_power_law_floor(n_values, y_values)
+
+        self.assertEqual(power["status"], "ok")
+        self.assertTrue(power["paper_candidate"])
+        self.assertFalse(power["diagnostic_only"])
+        self.assertEqual(power["fit_policy"], "paper_candidate")
 
     def test_negative_unconstrained_fit_predictions_fall_back_to_observed_thresholds(self) -> None:
         rows = [
@@ -1270,6 +1469,36 @@ class DatasetSizeMinimumTests(unittest.TestCase):
                 ]
             )
 
+    def test_build_parser_accepts_cost_basis(self) -> None:
+        args = minimum.build_parser().parse_args(
+            [
+                "--run-root",
+                "/tmp/run",
+                "--output-dir",
+                "/tmp/out",
+                "--threshold-mev",
+                "10",
+                "--cost-basis",
+                "protocol_total",
+            ]
+        )
+        self.assertEqual(args.cost_basis, "protocol_total")
+
+    def test_build_parser_rejects_invalid_cost_basis(self) -> None:
+        with self.assertRaises(SystemExit):
+            minimum.build_parser().parse_args(
+                [
+                    "--run-root",
+                    "/tmp/run",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--threshold-mev",
+                    "10",
+                    "--cost-basis",
+                    "average_total",
+                ]
+            )
+
     def test_bootstrap_summary_is_json_serializable(self) -> None:
         rows = [
             make_normalized_replicate_row(method="graph2mat", size=10, mev=25.0, seed="a1"),
@@ -1317,7 +1546,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         rows: list[dict[str, object]] = []
-        for dataset_size, metric_value in ((10, 0.030), (20, 0.018), (40, 0.011), (80, 0.008)):
+        for dataset_size, metric_value in ((10, 0.030), (20, 0.018), (40, 0.011), (80, 0.008), (160, 0.006)):
             rows.append(
                 {
                     "method": "graph2mat",
@@ -1601,6 +1830,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                         "threshold_mev": 10.0,
                         "aggregation_mode": "mean_replicates",
                         "moving_average_window": 5,
+                        "cost_basis": "protocol_total",
                         "n_min_source": "fit",
                         "n_min_fit_model": "linear",
                     }
@@ -1611,6 +1841,8 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertEqual(command[command.index("--aggregation-mode") + 1], "mean_replicates")
             self.assertIn("--moving-average-window", command)
             self.assertEqual(command[command.index("--moving-average-window") + 1], "5")
+            self.assertIn("--cost-basis", command)
+            self.assertEqual(command[command.index("--cost-basis") + 1], "protocol_total")
             self.assertIn("--run-root", command)
             self.assertIn(str(run_root.resolve()), command)
 
@@ -1642,6 +1874,22 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                         }
                     )
             self.assertIn("exactly one fit model", str(exc.exception))
+            mocked_run.assert_not_called()
+
+    def test_invalid_cost_basis_rejected_by_run_analysis_before_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_minimum_run_root(base)
+            with patch.object(self.pipeline_ui.subprocess, "run") as mocked_run:
+                with self.assertRaises(RuntimeError) as exc:
+                    self.pipeline_ui.run_dataset_size_minimum_analysis(
+                        {
+                            "run_roots": [str(run_root)],
+                            "threshold_mev": 10.0,
+                            "cost_basis": "bad_basis",
+                        }
+                    )
+            self.assertIn("Unknown cost_basis", str(exc.exception))
             mocked_run.assert_not_called()
 
     def test_visible_html_fit_options_are_accepted_by_server_side_helper(self) -> None:
@@ -1691,6 +1939,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     "n_min_source": "fit",
                     "n_min_fit_model": "power_law_floor",
                     "aggregation_mode": "mean_seeds_per_config",
+                    "cost_basis": "protocol_total",
                     "bootstrap_replicates": 0,
                 }
             )
@@ -1703,6 +1952,8 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertIn("scientific_claim_status", summary)
             self.assertIn("paper_level_blockers", summary)
             self.assertEqual(summary["n_min_basis"], "nominal")
+            self.assertEqual(summary["cost_basis"], "protocol_total")
+            self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_cost_eff_basis"], "protocol_total")
             report_path = next(Path(path) for path in summary["outputs"] if str(path).endswith("_report.md"))
             report_text = report_path.read_text(encoding="utf-8")
             self.assertIn("N_min uses nominal N.", report_text)
@@ -2229,6 +2480,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     "paper_candidate": True,
                     "fit_model": "power_law_floor",
                     "status": "ok",
+                    "enough_points_for_paper_candidate": True,
                 }
             },
             fallback_used=False,
@@ -2241,6 +2493,82 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         )
         self.assertEqual(status["n_min_fit_policy"], "paper_candidate")
         self.assertFalse(status["paper_level_blockers"])
+
+    def test_scientific_status_blocks_power_law_floor_with_lt_five_points(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "diagnostic_only",
+                    "paper_candidate": False,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "enough_points_for_paper_candidate": False,
+                }
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            f"paper_blocked_if_power_law_floor_points_lt_{minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE}:graph2mat",
+            status["paper_level_blockers"],
+        )
+
+    def test_scientific_status_includes_fit_stability_blocker(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fit_predictive_stability_by_left_out_N={
+                "status": "ok",
+                "methods": {
+                    "graph2mat": {
+                        "paper_level_blockers": [
+                            "paper_blocked_if_fit_predictive_stability_unstable:graph2mat:N_min_plateau"
+                        ]
+                    }
+                },
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            "paper_blocked_if_fit_predictive_stability_unstable:graph2mat:N_min_plateau",
+            status["paper_level_blockers"],
+        )
 
     def test_scientific_status_blocks_linear_fit_even_if_temporal_policy_allows(self) -> None:
         status = minimum.scientific_claim_status_payload(
@@ -2448,9 +2776,10 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             },
             replicate_bootstrap={
                 "enabled": True,
-                "display_label": "replicate resampling CI",
+                "display_label": "replicate-resampling CI",
                 "warnings": ["replicate_bootstrap_no_temporal_or_block_bootstrap"],
             },
+            cost_basis="protocol_total",
         )
 
         self.assertIn(
@@ -2458,16 +2787,32 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             report,
         )
         self.assertIn("Scientific claim status", report)
-        self.assertIn("replicate resampling CI", report)
+        self.assertIn("replicate-resampling CI", report)
+        self.assertIn("Fit stability (leave-one-size-out)", report)
         self.assertIn("not temporal/block bootstrap", report)
+        self.assertIn("does not model temporal autocorrelation", report)
+        self.assertIn("does not model model-selection uncertainty", report)
+        self.assertIn("does not model hyperparameter-selection uncertainty", report)
+        self.assertIn("does not model dependence between dataset sizes", report)
         self.assertIn("true effective-N thresholding is not implemented", report)
         self.assertNotIn("N_min_eff_diagnostic", report)
+        self.assertIn("Cost basis for `N_min_cost_eff`: `protocol_total`", report)
 
     def test_documentation_clarifies_effective_samples_at_nominal_n_min(self) -> None:
         doc = (REPO_ROOT / "Comparison" / "scripts" / "DATASET_SIZE_MINIMUM.md").read_text(encoding="utf-8")
         self.assertIn("effective_samples_at_nominal_N_min_diagnostic", doc)
         self.assertIn("effective-N threshold is not implemented", doc)
         self.assertIn("N_min_eff_diagnostic_deprecated_alias_for", doc)
+
+    def test_documentation_and_ui_use_replicate_resampling_ci_wording(self) -> None:
+        doc = (REPO_ROOT / "Comparison" / "scripts" / "DATASET_SIZE_MINIMUM.md").read_text(encoding="utf-8")
+        ui_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("replicate-resampling CI", doc)
+        self.assertIn("not** a temporal/block bootstrap", doc)
+        self.assertIn("replicate-resampling CI", ui_js)
+        self.assertIn("not temporal/block bootstrap", ui_js)
+        self.assertNotIn("Bootstrap CI", ui_js)
 
     def test_summarize_temporal_diagnostics_includes_convention(self) -> None:
         summary = minimum.summarize_temporal_diagnostics([], run_roots=[])
