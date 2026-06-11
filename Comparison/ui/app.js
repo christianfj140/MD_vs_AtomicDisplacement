@@ -3800,6 +3800,7 @@ function renderDatasetMinimumPlot(output, axis) {
     card.textContent = "Plotly no esta cargado.";
     return;
   }
+  const bootstrap = datasetMinimumReplicateBootstrap(output);
   const sourceRows = datasetMinimumPlotRowsFromOutput(output);
   const rows = sourceRows
     .map((row) => ({

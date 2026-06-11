@@ -17,6 +17,7 @@ ase
 sisl[viz]>=0.15.0
 PyYAML
 pandas
+matplotlib
 plotly
 kaleido
 h5py

@@ -67,6 +67,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 COMPARISON_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = COMPARISON_ROOT / "results"
+DEFAULT_VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+
+
+def postprocess_python_executable() -> str:
+    """Prefer the repo venv so postprocess scripts can import matplotlib and peers."""
+    if DEFAULT_VENV_PYTHON.exists():
+        return str(DEFAULT_VENV_PYTHON)
+    return sys.executable
 WORKSPACES_ROOT = COMPARISON_ROOT / "workspaces"
 SHARED_DIR = REPO_ROOT / "shared"
 if str(SHARED_DIR) not in sys.path:
@@ -6265,7 +6273,7 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     command = [
-        sys.executable,
+        postprocess_python_executable(),
         str(DATASET_SIZE_MINIMUM_SCRIPT),
         "--output-dir",
         str(output_dir),
