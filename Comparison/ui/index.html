@@ -1118,8 +1118,9 @@
                 <h3>Minimum snapshots for target precision</h3>
                 <p class="field-help">
                   Postproceso read-only sobre sweeps terminados. Calcula <code>N_min_abs</code>,
-                  <code>N_min_rel95</code>, <code>N_min_plateau</code> y <code>N_min_cost_eff</code>
-                  sin tocar entrenamientos ni sweeps en curso.
+                  <code>N_min_rel_tol</code>, <code>N_min_plateau</code> y <code>N_min_cost_eff</code>
+                  sin tocar entrenamientos ni sweeps en curso. <code>N_min</code> usa N nominal;
+                  revisa <code>N_eff</code> antes de usarlo como claim paper-level.
                 </p>
               </div>
               <div class="button-row">
@@ -1155,7 +1156,7 @@
                 <small>Paper-level modes average seeds within each config; diagnostic modes mix configs or pick single runs.</small>
               </label>
               <label class="field">
-                <span>Bootstrap replicates</span>
+                <span>Replicate resampling CI</span>
                 <input
                   id="dataset-minimum-bootstrap-replicates"
                   type="number"
@@ -1163,7 +1164,7 @@
                   step="1"
                   value="0"
                 />
-                <small>0 desactiva intervalos bootstrap para N_min.</small>
+                <small>0 desactiva el CI por remuestreo de replicas; no es bootstrap temporal/bloque.</small>
               </label>
               <label class="field">
                 <span>CI level</span>
@@ -1198,14 +1199,14 @@
                   <option value="lowess_logx_robust">robust LOWESS log-N (diagnostic)</option>
                   <option value="lowess_logx">LOWESS log-N (diagnostic)</option>
                   <option value="monotone_lowess_logx">monotone LOWESS log-N (diagnostic)</option>
-                  <option value="cumulative_best">cumulative best envelope</option>
+                  <option value="cumulative_best">cumulative best envelope (diagnostic)</option>
                   <option value="power_law">power law + floor (legacy alias)</option>
-                  <option value="inverse">1/x</option>
-                  <option value="inverse_square">1/x^2</option>
-                  <option value="quadratic">quadratic</option>
-                  <option value="linear">linear</option>
+                  <option value="inverse">1/x (diagnostic)</option>
+                  <option value="inverse_square">1/x^2 (diagnostic)</option>
+                  <option value="quadratic">quadratic (diagnostic)</option>
+                  <option value="linear">linear (diagnostic)</option>
                   <option value="moving_average">moving average (diagnostic)</option>
-                  <option value="none">none</option>
+                  <option value="none">none (observed diagnostic)</option>
                 </select>
               </label>
               <label class="field" hidden>
@@ -1233,9 +1234,9 @@
               <label class="field">
                 <span>N_min en grafico</span>
                 <select id="dataset-minimum-criterion">
-                  <option value="all" selected>Todos (abs, rel95, plateau, cost_eff)</option>
+                  <option value="all" selected>Todos (abs, rel_tol, plateau, cost_eff)</option>
                   <option value="N_min_abs">N_min_abs</option>
-                  <option value="N_min_rel95">N_min_rel95</option>
+                  <option value="N_min_rel_tol">N_min_rel_tol</option>
                   <option value="N_min_plateau">N_min_plateau</option>
                   <option value="N_min_cost_eff">N_min_cost_eff</option>
                 </select>

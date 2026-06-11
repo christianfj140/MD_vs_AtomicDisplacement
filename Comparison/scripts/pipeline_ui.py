@@ -5732,9 +5732,9 @@ DATASET_SIZE_MINIMUM_CRITERIA: list[dict[str, Any]] = [
         "plot_dash": "dash",
     },
     {
-        "id": "N_min_rel95",
-        "label": "N_min_rel95",
-        "description": "Primer N dentro de la tolerancia relativa respecto al mejor observado.",
+        "id": "N_min_rel_tol",
+        "label": "N_min_rel_tol",
+        "description": "Primer N dentro de la tolerancia relativa respecto al mejor valor observado/ajustado.",
         "requires_threshold": False,
         "plot_dash": "dot",
     },
@@ -6224,7 +6224,8 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     fit_models = str(
         payload.get("fit_models")
         or "linear,quadratic,inverse,inverse_square,power_law_floor,power_law,"
-        "lowess_logx,lowess_logx_robust,monotone_lowess_logx,moving_average"
+        "lowess_logx,lowess_logx_robust,monotone_lowess_logx,moving_average,"
+        "cumulative_best,none"
     )
 
     moving_average_window = int(payload.get("moving_average_window") or 3)
@@ -6394,7 +6395,9 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "fallback_reason": summary.get("fallback_reason"),
                 "aggregation_mode": aggregation_mode,
                 "aggregated": summary.get("aggregated"),
+                "replicate_bootstrap": summary.get("replicate_bootstrap") or summary.get("bootstrap") or {},
                 "bootstrap": summary.get("bootstrap") or {},
+                "bootstrap_deprecated_alias_for": summary.get("bootstrap_deprecated_alias_for"),
                 "bootstrap_replicates": summary.get("bootstrap_replicates"),
                 "bootstrap_seed": summary.get("bootstrap_seed"),
                 "ci_level": summary.get("ci_level"),
@@ -6403,6 +6406,16 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "nominal_n_train": summary.get("nominal_n_train"),
                 "estimated_n_eff_train": summary.get("estimated_n_eff_train"),
                 "autocorrelation_available": summary.get("autocorrelation_available"),
+                "n_min_basis": summary.get("n_min_basis"),
+                "N_min_nominal": summary.get("N_min_nominal") or {},
+                "N_eff_diagnostic_available": summary.get("N_eff_diagnostic_available"),
+                "N_eff_over_N_nominal": summary.get("N_eff_over_N_nominal"),
+                "effective_samples_at_N_min_nominal": summary.get("effective_samples_at_N_min_nominal") or {},
+                "N_min_eff_diagnostic": summary.get("N_min_eff_diagnostic") or {},
+                "scientific_claim_status": summary.get("scientific_claim_status"),
+                "paper_level_blockers": summary.get("paper_level_blockers") or [],
+                "paper_level_warnings": summary.get("paper_level_warnings") or [],
+                "n_eff_diagnostic_note": summary.get("n_eff_diagnostic_note"),
             }
         )
     run_root_sources = discover_dataset_size_minimum_run_roots()

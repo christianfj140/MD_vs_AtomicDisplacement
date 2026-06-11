@@ -4,6 +4,7 @@ import importlib
 import json
 import math
 import random
+import re
 import sys
 import tempfile
 import unittest
@@ -148,6 +149,24 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertEqual(minimum.canonical_fit_model("power_law_floor"), "power_law_floor")
         self.assertTrue(minimum.fit_models_equivalent("power_law", "power_law_floor"))
 
+    def test_parse_fit_models_accepts_visible_ui_fit_options(self) -> None:
+        html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        match = re.search(
+            r'<select id="dataset-minimum-fit">(.*?)</select>',
+            html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        visible = re.findall(r'<option value="([^"]+)"', match.group(1))
+
+        parsed = minimum.parse_fit_models(",".join(visible))
+
+        self.assertEqual(parsed, visible)
+
+    def test_invalid_fit_models_are_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            minimum.parse_fit_models("linear,definitely_not_a_fit")
+
     def test_power_law_floor_fit_has_valid_constraints(self) -> None:
         n_values = [10.0, 20.0, 40.0, 80.0]
         y_values = [30.0, 22.0, 18.0, 15.0]
@@ -167,6 +186,91 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         floor = minimum.fit_power_law_floor(n_values, y_values)
         legacy = minimum.fit_power_law(n_values, y_values)
         self.assertEqual(floor["coefficients"], legacy["coefficients"])
+
+    def test_none_n_min_fit_model_uses_observed_thresholds_without_failed_fit_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 10,
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.030,
+                        "seed": "1",
+                    },
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 20,
+                        "config_id": "b",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.008,
+                        "seed": "1",
+                    },
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            summary = minimum.analyze(
+                make_analyze_args(
+                    run_root=[str(root)],
+                    output_dir=str(base / "out"),
+                    fit_models="none,cumulative_best,power_law",
+                    n_min_source="fit",
+                    n_min_fit_model="none",
+                    threshold_mev=10.0,
+                )
+            )
+
+            warnings = " | ".join(summary["warnings"])
+            self.assertFalse(summary["fallback_used"])
+            self.assertEqual(summary["requested_n_min_source"], "fit")
+            self.assertEqual(summary["actual_n_min_source"], "observed")
+            self.assertEqual(summary["n_min_source"], "observed")
+            self.assertEqual(summary["requested_fit_model"], "none")
+            self.assertEqual(summary["actual_fit_model"], "none")
+            self.assertEqual(summary["canonical_fit_model"], "none")
+            self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_abs"], 20)
+            self.assertEqual(summary["fit_threshold_details"]["graph2mat"]["status"], "not_used")
+            self.assertNotIn("fit_thresholds_unavailable", warnings)
+            self.assertNotIn("n_min_explicit_fallback_to_observed", warnings)
+
+    def test_cumulative_best_fit_is_monotone_observed_only_and_drives_thresholds(self) -> None:
+        rows = [
+            {"method": "graph2mat", "dataset_size_x": 10, "primary_metric_mev_mean": 30.0},
+            {"method": "graph2mat", "dataset_size_x": 20, "primary_metric_mev_mean": 35.0},
+            {"method": "graph2mat", "dataset_size_x": 40, "primary_metric_mev_mean": 15.0},
+            {"method": "graph2mat", "dataset_size_x": 80, "primary_metric_mev_mean": 18.0},
+        ]
+
+        curve_rows, fit = minimum.fitted_curve_rows(rows, fit_model="cumulative_best")
+        thresholds, details, warnings = minimum.thresholds_by_method_from_fit(
+            rows,
+            threshold_mev=20.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="cumulative_best",
+        )
+
+        y_values = [row["primary_metric_mev_mean"] for row in curve_rows]
+        x_values = [int(row["dataset_size_x"]) for row in curve_rows]
+        self.assertEqual(fit["status"], "ok")
+        self.assertTrue(fit["diagnostic_only"])
+        self.assertEqual(x_values, [10, 20, 40, 80])
+        self.assertEqual(y_values, [30.0, 30.0, 15.0, 15.0])
+        self.assertTrue(all(left >= right for left, right in zip(y_values, y_values[1:])))
+        self.assertEqual(thresholds["graph2mat"]["N_min_abs"], 40)
+        self.assertEqual(thresholds["graph2mat"]["fit_model"], "cumulative_best")
+        self.assertEqual(details["graph2mat"]["status"], "ok")
+        self.assertEqual(warnings, [])
 
     def test_fit_failure_sets_explicit_observed_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,7 +362,32 @@ class DatasetSizeMinimumTests(unittest.TestCase):
     def test_extract_base_config_id_strips_seed_suffix(self) -> None:
         self.assertEqual(minimum.extract_base_config_id("policy_a-seed1"), "policy_a")
         self.assertEqual(minimum.extract_base_config_id("policy_a-seed4"), "policy_a")
+        self.assertEqual(minimum.extract_base_config_id("policy_a-seed42"), "policy_a")
+        self.assertEqual(minimum.extract_base_config_id("policy_a-seed123"), "policy_a")
+        self.assertEqual(minimum.extract_base_config_id("policy-seed-study-seed42"), "policy-seed-study")
+        self.assertEqual(minimum.extract_base_config_id("policy-seed-study"), "policy-seed-study")
         self.assertEqual(minimum.extract_base_config_id("policy_a"), "policy_a")
+
+    def test_extract_base_config_id_prefers_explicit_fields(self) -> None:
+        self.assertEqual(
+            minimum.extract_base_config_id(
+                {
+                    "base_config_id": "explicit_base",
+                    "config_family_id": "family",
+                    "config_id": "policy_a-seed42",
+                }
+            ),
+            "explicit_base",
+        )
+        self.assertEqual(
+            minimum.extract_base_config_id(
+                {
+                    "config_family_id": "family_base",
+                    "config_id": "policy_a-seed42",
+                }
+            ),
+            "family_base",
+        )
 
     def test_mean_seeds_per_config_averages_seeds_within_config(self) -> None:
         rows = [
@@ -276,14 +405,64 @@ class DatasetSizeMinimumTests(unittest.TestCase):
                 "config_id": "policy_a-seed2",
                 "seed": "2",
             },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 16.0,
+                "config_id": "policy_a-seed42",
+                "seed": "42",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 20.0,
+                "config_id": "policy_a-seed123",
+                "seed": "123",
+            },
         ]
         aggregated = minimum.aggregate_rows_mean_seeds_per_config(rows)
         self.assertEqual(len(aggregated), 1)
         row = aggregated[0]
-        self.assertAlmostEqual(row["primary_metric_mev_mean"], 12.0)
+        self.assertAlmostEqual(row["primary_metric_mev_mean"], 15.0)
         self.assertEqual(row["base_config_id"], "policy_a")
-        self.assertEqual(row["seed_count"], 2)
+        self.assertEqual(row["seed_count"], 4)
+        self.assertEqual(row["seeds"], ["1", "123", "2", "42"])
+        self.assertEqual(
+            row["config_ids"],
+            [
+                "policy_a-seed1",
+                "policy_a-seed123",
+                "policy_a-seed2",
+                "policy_a-seed42",
+            ],
+        )
         self.assertEqual(row["aggregation_mode"], "mean_seeds_per_config")
+
+    def test_mean_seeds_per_config_prefers_explicit_base_config_id(self) -> None:
+        rows = [
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 10.0,
+                "config_id": "policy_a_variant-seed42",
+                "base_config_id": "policy_a",
+                "seed": "42",
+            },
+            {
+                "method": "graph2mat",
+                "dataset_size_x": 10,
+                "primary_metric_mev": 14.0,
+                "config_id": "policy_a_other_name-seed123",
+                "base_config_id": "policy_a",
+                "seed": "123",
+            },
+        ]
+
+        aggregated = minimum.aggregate_rows_mean_seeds_per_config(rows)
+
+        self.assertEqual(len(aggregated), 1)
+        self.assertEqual(aggregated[0]["base_config_id"], "policy_a")
+        self.assertAlmostEqual(aggregated[0]["primary_metric_mev_mean"], 12.0)
 
     def test_mean_seeds_per_config_does_not_mix_distinct_configs(self) -> None:
         rows = [
@@ -335,8 +514,8 @@ class DatasetSizeMinimumTests(unittest.TestCase):
                 "method": "graph2mat",
                 "dataset_size_x": 10,
                 "primary_metric_mev": 15.0,
-                "config_id": "policy_a-seed2",
-                "seed": "2",
+                "config_id": "policy_a-seed42",
+                "seed": "42",
             },
             {
                 "method": "graph2mat",
@@ -349,8 +528,8 @@ class DatasetSizeMinimumTests(unittest.TestCase):
                 "method": "graph2mat",
                 "dataset_size_x": 10,
                 "primary_metric_mev": 20.0,
-                "config_id": "policy_b-seed2",
-                "seed": "2",
+                "config_id": "policy_b-seed123",
+                "seed": "123",
             },
         ]
         best = minimum.aggregate_rows_best_config_mean(rows)
@@ -484,14 +663,67 @@ class DatasetSizeMinimumTests(unittest.TestCase):
 
         self.assertEqual(minimum.n_min_abs(rows, 10.0), 40)
 
-    def test_n_min_rel95_uses_best_observed_with_tolerance(self) -> None:
+    def test_n_min_rel_tol_matches_legacy_rel95_alias(self) -> None:
         rows = [
             {"method": "deeph", "dataset_size_x": 10, "primary_metric_mev_mean": 20.0},
             {"method": "deeph", "dataset_size_x": 30, "primary_metric_mev_mean": 10.4},
             {"method": "deeph", "dataset_size_x": 50, "primary_metric_mev_mean": 10.0},
         ]
 
+        self.assertEqual(minimum.n_min_rel_tol(rows, 0.05), 30)
         self.assertEqual(minimum.n_min_rel95(rows, 0.05), 30)
+
+    def test_thresholds_include_canonical_rel_tol_and_deprecated_alias(self) -> None:
+        rows = [
+            {"method": "deeph", "dataset_size_x": 10, "primary_metric_mev_mean": 20.0},
+            {"method": "deeph", "dataset_size_x": 30, "primary_metric_mev_mean": 10.4},
+            {"method": "deeph", "dataset_size_x": 50, "primary_metric_mev_mean": 10.0},
+        ]
+
+        thresholds = minimum.thresholds_by_method(
+            rows,
+            threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+        )
+        row = thresholds["deeph"]
+
+        self.assertEqual(row["N_min_rel_tol"], 30)
+        self.assertEqual(row["N_min_rel95"], 30)
+        self.assertEqual(row["N_min_rel95_deprecated_alias_for"], "N_min_rel_tol")
+
+    def test_primary_ui_and_report_labels_use_rel_tol_not_rel95(self) -> None:
+        html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("N_min_rel_tol", html)
+        self.assertNotIn("rel95", html)
+
+        spec = importlib.util.spec_from_file_location(
+            "pipeline_ui_rel_tol_labels_test",
+            SCRIPTS_DIR / "pipeline_ui.py",
+        )
+        assert spec and spec.loader
+        pipeline_ui = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = pipeline_ui
+        spec.loader.exec_module(pipeline_ui)
+        criteria = {item["id"]: item["label"] for item in pipeline_ui.DATASET_SIZE_MINIMUM_CRITERIA}
+        self.assertIn("N_min_rel_tol", criteria)
+        self.assertNotIn("N_min_rel95", criteria)
+
+        report = minimum.build_report(
+            output_dir=Path("/tmp/out"),
+            run_roots=[],
+            grouped_rows=[],
+            best_rows=[],
+            thresholds={"deeph": {"N_min_rel_tol": 30}},
+            fits={},
+            warnings=[],
+            primary_metric="h_mae_eV_mean",
+            threshold_mev=10.0,
+            x_axis="n_train",
+            temporal_diagnostics={},
+        )
+        self.assertIn("N_min_rel_tol", report)
+        self.assertNotIn("N_min_rel95", report)
 
     def test_plateau_gain_uses_future_gain_fraction(self) -> None:
         rows = [
@@ -687,6 +919,15 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             self.assertAlmostEqual(by_size[10]["primary_metric_mev_mean"], 20.0)
             self.assertEqual(by_size[10]["replicate_count"], 2)
             self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_abs"], 20)
+            self.assertIn("N_min_rel_tol", summary["thresholds"]["graph2mat"])
+            self.assertEqual(
+                summary["thresholds"]["graph2mat"]["N_min_rel95_deprecated_alias_for"],
+                "N_min_rel_tol",
+            )
+            self.assertEqual(
+                summary["deprecated_threshold_aliases"],
+                {"N_min_rel95": "N_min_rel_tol"},
+            )
 
     def test_analyze_without_aggregation_mode_defaults_to_best_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -760,6 +1001,8 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             )
 
             self.assertFalse(summary["bootstrap"]["enabled"])
+            self.assertFalse(summary["replicate_bootstrap"]["enabled"])
+            self.assertEqual(summary["bootstrap"]["deprecated_alias_for"], "replicate_bootstrap")
             self.assertEqual(summary["bootstrap_replicates"], 0)
 
     def test_bootstrap_is_deterministic_for_fixed_seed(self) -> None:
@@ -818,6 +1061,13 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertIsNotNone(ci["median"])
         self.assertIsNotNone(ci["lower"])
         self.assertIsNotNone(ci["upper"])
+        self.assertIn("N_min_rel_tol", result["criteria"])
+        self.assertNotIn("N_min_rel95", result["criteria"])
+        self.assertIn("N_min_rel_tol", result["by_method"]["graph2mat"])
+        self.assertEqual(
+            result["by_method"]["graph2mat"]["N_min_rel95"]["deprecated_alias_for"],
+            "N_min_rel_tol",
+        )
 
     def test_fit_bootstrap_produces_ci_for_linear_fit(self) -> None:
         rows = [
@@ -868,7 +1118,21 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         )
 
         self.assertIn("bootstrap_unavailable_no_replicates", result["warnings"])
+        self.assertIn("replicate_bootstrap_no_multiple_seeds_or_replicates", result["warnings"])
+        self.assertIn("replicate_bootstrap_no_temporal_or_block_bootstrap", result["warnings"])
         self.assertEqual(result["by_method"], {})
+
+    def test_replicate_bootstrap_scope_warnings_for_diagnostic_aggregation(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=20.0, seed="a1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=18.0, seed="a2"),
+        ]
+        warnings = minimum.replicate_bootstrap_scope_warnings(rows, aggregation_mode="mean_replicates")
+
+        self.assertIn("replicate_bootstrap_row_level_replicates_only", warnings)
+        self.assertIn("replicate_bootstrap_no_temporal_or_block_bootstrap", warnings)
+        self.assertIn("replicate_bootstrap_does_not_capture_model_selection_uncertainty", warnings)
+        self.assertIn("replicate_bootstrap_selected_aggregation_is_diagnostic:mean_replicates", warnings)
 
     def test_fit_bootstrap_counts_failures(self) -> None:
         rows = [
@@ -895,6 +1159,48 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertGreater(result["replicates_failed"], 0)
         self.assertTrue(result["failure_counts"])
         self.assertTrue(result["failure_reasons"])
+
+    def test_fit_policy_classification_metadata(self) -> None:
+        n_values = [10.0, 20.0, 40.0]
+        y_values = [30.0, 18.0, 12.0]
+
+        power = minimum.fit_power_law_floor(n_values, y_values)
+        linear = minimum.fit_linear_model("linear", n_values, y_values)
+        none = minimum.no_fit_summary(len(n_values))
+        lowess = minimum.fit_lowess_model("monotone_lowess_logx", n_values, y_values)
+
+        self.assertTrue(power["paper_candidate"])
+        self.assertFalse(power["diagnostic_only"])
+        self.assertFalse(linear["paper_candidate"])
+        self.assertTrue(linear["diagnostic_only"])
+        self.assertTrue(none["diagnostic_only"])
+        self.assertTrue(lowess["diagnostic_only"])
+
+    def test_negative_unconstrained_fit_predictions_fall_back_to_observed_thresholds(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=0.1, seed="1", config_id="a"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=0.1, seed="1", config_id="b"),
+            make_normalized_replicate_row(method="graph2mat", size=30, mev=0.1, seed="1", config_id="c"),
+            make_normalized_replicate_row(method="graph2mat", size=40, mev=1.0, seed="1", config_id="d"),
+        ]
+
+        curve_rows, fit = minimum.fitted_curve_rows(rows, fit_model="quadratic")
+        self.assertEqual(curve_rows, [])
+        self.assertEqual(fit["status"], "invalid_negative_predictions")
+        self.assertTrue(fit["invalid_for_n_min_thresholding"])
+
+        thresholds, fit_details, warnings = minimum.thresholds_by_method_from_fit(
+            rows,
+            threshold_mev=0.5,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            fit_model="quadratic",
+        )
+
+        self.assertEqual(fit_details["graph2mat"]["status"], "invalid_negative_predictions")
+        self.assertEqual(thresholds["graph2mat"]["N_min_abs"], 10)
+        self.assertEqual(thresholds["graph2mat"]["N_min_abs_source"], "observed_invalid_fit")
+        self.assertIn("fit_negative_predictions_observed_fallback:graph2mat:quadratic", warnings)
 
     def test_invalid_bootstrap_args_rejected(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1267,6 +1573,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertEqual(item["run_roots"], [str(base / "run_a")])
             self.assertEqual(len(item["aggregated_rows"]), 1)
             self.assertIn("bootstrap", item)
+            self.assertIn("replicate_bootstrap", item)
             self.assertEqual(item["bootstrap_replicates"], summary.get("bootstrap_replicates"))
 
     def test_payload_exposes_normalized_rows(self) -> None:
@@ -1444,6 +1751,19 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertFalse(summary["autocorrelation_available"])
             self.assertIsNone(summary["estimated_n_eff_train"])
             self.assertIn("N is nominal; N_eff not estimated", temporal["status_message"])
+            self.assertEqual(summary["n_min_basis"], "nominal")
+            self.assertIn("graph2mat", summary["N_min_nominal"])
+            self.assertFalse(summary["N_eff_diagnostic_available"])
+            self.assertIsNone(summary["N_eff_over_N_nominal"])
+            self.assertEqual(summary["scientific_claim_status"], "diagnostic_only")
+            self.assertIn(
+                "paper_blocked_if_autocorrelation_unavailable",
+                summary["paper_level_blockers"],
+            )
+            self.assertIn(
+                "N_min uses nominal N. If MD snapshots are autocorrelated",
+                " ".join(summary["paper_level_warnings"]),
+            )
             joined = " | ".join(temporal["warnings"])
             self.assertTrue(
                 "temporal_diagnostics_no_dataset_roots_detected" in joined
@@ -1514,6 +1834,55 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertIsNotNone(n_eff)
             self.assertLess(float(n_eff), 80 * 0.5)
 
+    def test_analyze_blocks_paper_claim_when_n_eff_much_smaller_than_nominal(self) -> None:
+        def smooth_builder(index: int) -> float:
+            return math.sin(index / 30.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dataset_root = write_synthetic_temporal_dataset(
+                base / "dataset",
+                n_train=120,
+                scalar_builder=smooth_builder,
+            )
+            run_root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 120,
+                        "dataset_root": str(dataset_root),
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                        "seed": "1",
+                    }
+                ]
+            }
+            (run_root / "summary" / "ranking").mkdir(parents=True)
+            (run_root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            summary = minimum.analyze(
+                make_analyze_args(run_root=[str(run_root)], output_dir=str(base / "out"))
+            )
+
+            self.assertTrue(summary["N_eff_diagnostic_available"])
+            self.assertIsNotNone(summary["N_eff_over_N_nominal"])
+            self.assertLess(summary["N_eff_over_N_nominal"], minimum.N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO)
+            self.assertEqual(summary["scientific_claim_status"], "diagnostic_only")
+            self.assertIn(
+                "paper_blocked_if_n_eff_much_smaller_than_nominal",
+                summary["paper_level_blockers"],
+            )
+            self.assertIn("graph2mat", summary["effective_samples_at_N_min_nominal"])
+            self.assertIsNotNone(
+                summary["effective_samples_at_N_min_nominal"]["graph2mat"]["N_min_abs"]
+            )
+
     def test_iid_scalar_series_yields_n_eff_near_nominal(self) -> None:
         rng = random.Random(123)
 
@@ -1531,6 +1900,57 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             n_eff = diag["estimated_n_eff_train"]
             self.assertIsNotNone(n_eff)
             self.assertGreater(float(n_eff), 200 * 0.5)
+
+    def test_available_autocorrelation_with_acceptable_ratio_does_not_block_for_missing_acf(self) -> None:
+        def alternating_builder(index: int) -> float:
+            return 1.0 if index % 2 else -1.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dataset_root = write_synthetic_temporal_dataset(
+                base / "dataset",
+                n_train=40,
+                scalar_builder=alternating_builder,
+            )
+            run_root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "dataset_size": 40,
+                        "dataset_root": str(dataset_root),
+                        "config_id": "a",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": 0.010,
+                        "seed": "1",
+                    }
+                ]
+            }
+            (run_root / "summary" / "ranking").mkdir(parents=True)
+            (run_root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            summary = minimum.analyze(
+                make_analyze_args(run_root=[str(run_root)], output_dir=str(base / "out"))
+            )
+
+            self.assertTrue(summary["autocorrelation_available"])
+            self.assertTrue(summary["N_eff_diagnostic_available"])
+            self.assertGreaterEqual(
+                summary["N_eff_over_N_nominal"],
+                minimum.N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO,
+            )
+            self.assertNotIn(
+                "paper_blocked_if_autocorrelation_unavailable",
+                summary["paper_level_blockers"],
+            )
+            self.assertNotIn(
+                "paper_blocked_if_n_eff_much_smaller_than_nominal",
+                summary["paper_level_blockers"],
+            )
 
     def test_analyze_includes_temporal_diagnostics_with_dataset_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1560,8 +1980,45 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 make_analyze_args(run_root=[str(run_root)], output_dir=str(base / "out"))
             )
             self.assertEqual(summary["nominal_n_train"], 10)
+            self.assertIn("N_min_nominal", summary)
+            self.assertIn("effective_samples_at_N_min_nominal", summary)
+            self.assertIn("scientific_claim_status", summary)
             self.assertIn("datasets", summary["temporal_diagnostics"])
             self.assertEqual(len(summary["temporal_diagnostics"]["datasets"]), 1)
+
+    def test_report_includes_nominal_vs_effective_warning(self) -> None:
+        report = minimum.build_report(
+            output_dir=Path("/tmp/out"),
+            run_roots=[Path("/tmp/run")],
+            grouped_rows=[],
+            best_rows=[],
+            thresholds={"graph2mat": {"N_min_abs": 10}},
+            fits={},
+            warnings=[],
+            primary_metric="h_mae_eV_mean",
+            threshold_mev=10.0,
+            x_axis="n_train",
+            temporal_diagnostics={"autocorrelation_available": False},
+            scientific_status={
+                "n_min_basis": "nominal",
+                "scientific_claim_status": "diagnostic_only",
+                "paper_level_blockers": ["paper_blocked_if_autocorrelation_unavailable"],
+                "N_eff_over_N_nominal": None,
+            },
+            replicate_bootstrap={
+                "enabled": True,
+                "display_label": "replicate resampling CI",
+                "warnings": ["replicate_bootstrap_no_temporal_or_block_bootstrap"],
+            },
+        )
+
+        self.assertIn(
+            "N_min uses nominal N. If MD snapshots are autocorrelated, independent sample count can be lower.",
+            report,
+        )
+        self.assertIn("Scientific claim status", report)
+        self.assertIn("replicate resampling CI", report)
+        self.assertIn("not temporal/block bootstrap", report)
 
     def test_summarize_temporal_diagnostics_includes_convention(self) -> None:
         summary = minimum.summarize_temporal_diagnostics([], run_roots=[])

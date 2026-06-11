@@ -2413,10 +2413,27 @@ function renderG2MDeepHPlotsPayload(payload) {
 
 const DATASET_MINIMUM_CRITERIA = {
   N_min_abs: { label: "N_min_abs", dash: "dash", width: 1.8 },
-  N_min_rel95: { label: "N_min_rel95", dash: "dot", width: 1.2 },
+  N_min_rel_tol: { label: "N_min_rel_tol", dash: "dot", width: 1.2 },
   N_min_plateau: { label: "N_min_plateau", dash: "dashdot", width: 1.2 },
   N_min_cost_eff: { label: "N_min_cost_eff", dash: "longdash", width: 1.2 },
 };
+
+const DATASET_MINIMUM_LEGACY_CRITERIA = {
+  N_min_rel95: "N_min_rel_tol",
+};
+
+function datasetMinimumCanonicalCriterion(criterion) {
+  return DATASET_MINIMUM_LEGACY_CRITERIA[criterion] || criterion;
+}
+
+function datasetMinimumCriterionValue(container, criterion) {
+  const canonical = datasetMinimumCanonicalCriterion(criterion);
+  if (!container) return undefined;
+  if (container[canonical] !== undefined) return container[canonical];
+  const legacy = Object.entries(DATASET_MINIMUM_LEGACY_CRITERIA)
+    .find(([_legacy, target]) => target === canonical)?.[0];
+  return legacy ? container[legacy] : undefined;
+}
 
 function datasetMinimumSelectedCriterion() {
   return datasetMinimumControlValue("dataset-minimum-criterion", "all");
@@ -2425,7 +2442,8 @@ function datasetMinimumSelectedCriterion() {
 function datasetMinimumCriteriaToPlot() {
   const selected = datasetMinimumSelectedCriterion();
   if (selected === "all") return Object.keys(DATASET_MINIMUM_CRITERIA);
-  return DATASET_MINIMUM_CRITERIA[selected] ? [selected] : Object.keys(DATASET_MINIMUM_CRITERIA);
+  const canonical = datasetMinimumCanonicalCriterion(selected);
+  return DATASET_MINIMUM_CRITERIA[canonical] ? [canonical] : Object.keys(DATASET_MINIMUM_CRITERIA);
 }
 
 function datasetMinimumSelectedRunRoots() {
@@ -2590,6 +2608,8 @@ async function runDatasetMinimumAnalysis() {
         "lowess_logx_robust",
         "monotone_lowess_logx",
         "moving_average",
+        "cumulative_best",
+        "none",
       ].join(","),
       n_min_source: datasetMinimumSelectedNMinSource
         ? datasetMinimumSelectedNMinSource()
@@ -2663,13 +2683,14 @@ function datasetMinimumBackendFitModel(fitKind) {
     "lowess_logx_robust",
     "monotone_lowess_logx",
     "moving_average",
+    "cumulative_best",
+    "none",
   ]);
 
   if (allowed.has(fitKind)) {
     return datasetMinimumCanonicalFitModel(fitKind);
   }
 
-  // cumulative_best y none son visuales/frontend, no modelos backend para N_min.
   return "power_law_floor";
 }
 
@@ -3002,11 +3023,13 @@ function datasetMinimumFormatNMinWithCi(output, method, criterion, axis) {
   const point = datasetMinimumDisplayN(
     output,
     method,
-    output?.thresholds?.[method]?.[criterion],
+    datasetMinimumCriterionValue(output?.thresholds?.[method], criterion),
     axis,
   );
-  const bootstrap = output?.bootstrap;
-  const ci = bootstrap?.enabled ? bootstrap?.by_method?.[method]?.[criterion] : null;
+  const bootstrap = datasetMinimumReplicateBootstrap(output);
+  const ci = bootstrap?.enabled
+    ? datasetMinimumCriterionValue(bootstrap?.by_method?.[method], criterion)
+    : null;
   const hasInterval = ci
     && ci.median != null
     && ci.lower != null
@@ -3027,7 +3050,7 @@ function datasetMinimumFormatNMinWithCi(output, method, criterion, axis) {
   }
 
   if (point != null) {
-    return `${datasetMinimumFormatN(point)} <span class="muted-text">(no bootstrap CI)</span>`;
+    return `${datasetMinimumFormatN(point)} <span class="muted-text">(no replicate resampling CI)</span>`;
   }
   return "-";
 }
@@ -3072,14 +3095,15 @@ function datasetMinimumRawReplicateTraces(output, axis) {
 function datasetMinimumBootstrapNMinOverlays(output, axis) {
   const shapes = [];
   const annotations = [];
-  if (!output?.bootstrap?.enabled) return { shapes, annotations };
+  const bootstrap = datasetMinimumReplicateBootstrap(output);
+  if (!bootstrap?.enabled) return { shapes, annotations };
 
   const thresholds = output.thresholds || {};
   Object.keys(thresholds).sort().forEach((method, methodIndex) => {
     const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(methodIndex);
-    for (const criterionKey of ["N_min_abs", "N_min_rel95", "N_min_plateau"]) {
+    for (const criterionKey of ["N_min_abs", "N_min_rel_tol", "N_min_plateau"]) {
       if (!datasetMinimumCriteriaToPlot().includes(criterionKey)) continue;
-      const ci = output.bootstrap?.by_method?.[method]?.[criterionKey];
+      const ci = datasetMinimumCriterionValue(bootstrap?.by_method?.[method], criterionKey);
       if (!ci || ci.lower == null || ci.upper == null) continue;
 
       const lower = finiteNumber(datasetMinimumDisplayN(output, method, ci.lower, axis));
@@ -3133,7 +3157,7 @@ function datasetMinimumBootstrapNMinOverlays(output, axis) {
           line: { color, width: 2.2, dash: "solid" },
         });
         annotations.push({
-          text: `${methodDisplayLabel(method)} ${criterionKey} bootstrap ${Math.round(median)} [${Math.round(x0)}, ${Math.round(x1)}]`,
+          text: `${methodDisplayLabel(method)} ${criterionKey} replicate CI ${Math.round(median)} [${Math.round(x0)}, ${Math.round(x1)}]`,
           xref: "x",
           x: median,
           yref: "paper",
@@ -3168,7 +3192,7 @@ function renderDatasetMinimumTable(output, axis) {
         <th>Method</th>
         <th>Best observed</th>
         <th>N_min_abs (${axisLabel})</th>
-        <th>N_min_rel95 (${axisLabel})</th>
+        <th>N_min_rel_tol (${axisLabel})</th>
         <th>N_min_plateau (${axisLabel})</th>
         <th>N_min_cost_eff (${axisLabel})</th>
       </tr>
@@ -3185,9 +3209,9 @@ function renderDatasetMinimumTable(output, axis) {
       <td>${escapeHtml(methodDisplayLabel(method))}</td>
       <td>${datasetMinimumFormatMeV(row.best_observed_mev)}</td>
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_abs", axis)}</td>
-      <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_rel95", axis)}</td>
+      <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_rel_tol", axis)}</td>
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_plateau", axis)}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(no bootstrap CI)</span></td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(no replicate resampling CI)</span></td>
     `;
     body.appendChild(tr);
   }
@@ -3499,11 +3523,18 @@ function datasetMinimumFitLabel(fitKind) {
   if (fitKind === "lowess_logx_robust") return "robust LOWESS log-N (diagnostic)";
   if (fitKind === "monotone_lowess_logx") return "monotone LOWESS log-N (diagnostic)";
   if (fitKind === "moving_average") return "moving average (diagnostic)";
-  if (fitKind === "cumulative_best") return "cumulative best";
-  if (fitKind === "power_law_floor") return "power law + floor (constrained)";
-  if (fitKind === "power_law") return "power law + floor (constrained)";
-  if (fitKind === "none") return "no fit";
-  return fitKindLabel(fitKind);
+  if (fitKind === "cumulative_best") return "cumulative best (diagnostic)";
+  if (fitKind === "power_law_floor") return "power law + floor (paper candidate if fit valid)";
+  if (fitKind === "power_law") return "power law + floor (legacy alias; paper candidate if fit valid)";
+  if (fitKind === "none") return "no fit (diagnostic observed thresholds)";
+  if (["linear", "quadratic", "inverse", "inverse_square"].includes(fitKind)) {
+    return `${fitKindLabel(fitKind)} (diagnostic)`;
+  }
+  return `${fitKindLabel(fitKind)} (diagnostic)`;
+}
+
+function datasetMinimumReplicateBootstrap(output = {}) {
+  return output.replicate_bootstrap || output.bootstrap || {};
 }
 
 function datasetMinimumPreviewCacheKey() {
@@ -3893,11 +3924,11 @@ function renderDatasetMinimumPlot(output, axis) {
     for (const criterionKey of datasetMinimumCriteriaToPlot()) {
       const criterion = DATASET_MINIMUM_CRITERIA[criterionKey];
       if (!criterion) continue;
-      const nValue = finiteNumber(datasetMinimumDisplayN(output, method, thresholds[method]?.[criterionKey], axis));
+      const nValue = finiteNumber(datasetMinimumDisplayN(output, method, datasetMinimumCriterionValue(thresholds[method], criterionKey), axis));
       if (nValue == null) continue;
       const hasBootstrapBand = Boolean(
-        output?.bootstrap?.enabled
-        && output.bootstrap?.by_method?.[method]?.[criterionKey]?.lower != null,
+        bootstrap?.enabled
+        && datasetMinimumCriterionValue(bootstrap?.by_method?.[method], criterionKey)?.lower != null,
       );
       if (!hasBootstrapBand) {
         shapes.push({
@@ -4028,13 +4059,18 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const windowNote = datasetMinimumOutputNMinFitModel(output) === "moving_average"
     ? ` Moving-average window: ${datasetMinimumOutputMovingAverageWindow(output)}.`
     : "";
-  const bootstrap = output.bootstrap || {};
+  const bootstrap = datasetMinimumReplicateBootstrap(output);
   const bootstrapNote = bootstrap.enabled
-    ? ` Bootstrap: enabled (${bootstrap.replicates_requested ?? output.bootstrap_replicates ?? 0} replicates, CI ${output.ci_level ?? datasetMinimumOutputCiLevel(output)}, successful ${bootstrap.replicates_successful ?? 0}).`
-    : " Bootstrap: disabled.";
+    ? ` Replicate resampling CI: enabled (${bootstrap.replicates_requested ?? output.bootstrap_replicates ?? 0} resamples, CI ${output.ci_level ?? datasetMinimumOutputCiLevel(output)}, successful ${bootstrap.replicates_successful ?? 0}; row-level only, no temporal/block bootstrap).`
+    : " Replicate resampling CI: disabled.";
+  const bootstrapWarningNote = Array.isArray(bootstrap.warnings) && bootstrap.warnings.length
+    ? ` Replicate bootstrap warnings: ${bootstrap.warnings.slice(0, 4).join("; ")}.`
+    : "";
 
   const temporal = output.temporal_diagnostics || {};
   let temporalNote = "";
+  const nMinNominalWarning =
+    " N_min uses nominal N. If MD snapshots are autocorrelated, independent sample count can be lower. Check N_eff before using this as a paper-level claim.";
   if (temporal.status_message) {
     temporalNote = ` ${temporal.status_message}.`;
   } else if (output.estimated_n_eff_train != null) {
@@ -4042,7 +4078,16 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   } else {
     temporalNote = " N is nominal; N_eff not estimated.";
   }
-  temporalNote += " N_min thresholds use nominal N_train, not N_eff.";
+  temporalNote += nMinNominalWarning;
+  if (output.scientific_claim_status) {
+    temporalNote += ` Scientific claim status: ${output.scientific_claim_status}.`;
+  }
+  if (Array.isArray(output.paper_level_blockers) && output.paper_level_blockers.length) {
+    temporalNote += ` Paper-level blockers: ${output.paper_level_blockers.slice(0, 4).join("; ")}.`;
+  }
+  if (output.N_eff_over_N_nominal != null) {
+    temporalNote += ` N_eff/N_nominal: ${formatCompactNumber(output.N_eff_over_N_nominal)}.`;
+  }
   if (temporal.n_eff_convention) {
     temporalNote += ` Convention: ${temporal.n_eff_convention}.`;
   }
@@ -4069,7 +4114,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : "";
 
   status.textContent =
-    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${temporalNote}` +
+    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${temporalNote}` +
     `${thresholdNote}${outputNote}${axisNote}` +
     `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}` +
     `${payload.diagnostic_warning ? ` ${payload.diagnostic_warning}` : ""}`;

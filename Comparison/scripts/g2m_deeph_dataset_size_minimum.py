@@ -39,6 +39,23 @@ DEFAULT_PRIMARY_METRIC = "h_mae_eV_mean"
 DEFAULT_FIT_MODELS = "linear,quadratic,inverse,inverse_square,power_law_floor"
 CANONICAL_POWER_LAW_MODEL = "power_law_floor"
 POWER_LAW_LEGACY_ALIASES = frozenset({"power_law"})
+UNCONSTRAINED_FIT_MODELS = {"linear", "quadratic", "inverse", "inverse_square"}
+DIAGNOSTIC_ONLY_FIT_MODELS = {
+    *UNCONSTRAINED_FIT_MODELS,
+    "moving_average",
+    "lowess_logx",
+    "lowess_logx_robust",
+    "monotone_lowess_logx",
+    "cumulative_best",
+    "none",
+}
+CURVE_POINT_FIT_MODELS = {
+    "lowess_logx",
+    "lowess_logx_robust",
+    "monotone_lowess_logx",
+    "moving_average",
+    "cumulative_best",
+}
 NONNEG_PREDICTION_TOL = 1e-9
 DEFAULT_AGGREGATION_MODE = "mean_replicates"
 AGGREGATION_MODES = (
@@ -47,11 +64,21 @@ AGGREGATION_MODES = (
     "mean_seeds_per_config",
     "best_config_mean",
 )
-BASE_CONFIG_SEED_SUFFIX = re.compile(r"-seed[1-4]$", re.IGNORECASE)
+BASE_CONFIG_SEED_SUFFIX = re.compile(r"-seed\d+$", re.IGNORECASE)
+EXPLICIT_BASE_CONFIG_ID_FIELDS = (
+    "base_config_id",
+    "config_family_id",
+    "parent_config_id",
+)
+BASE_CONFIG_ID_FIELDS = (*EXPLICIT_BASE_CONFIG_ID_FIELDS, "selected_config_id")
 DEFAULT_BOOTSTRAP_SEED = 12345
 DEFAULT_CI_LEVEL = 0.95
-BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", "N_min_rel95", "N_min_plateau")
+N_MIN_REL_TOL_KEY = "N_min_rel_tol"
+LEGACY_N_MIN_REL95_KEY = "N_min_rel95"
+LEGACY_THRESHOLD_ALIASES = {LEGACY_N_MIN_REL95_KEY: N_MIN_REL_TOL_KEY}
+BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau")
 MIN_BOOTSTRAP_SUCCESS_FOR_CI = 2
+REPLICATE_BOOTSTRAP_LABEL = "replicate resampling CI"
 ENERGY_METRICS_WITHOUT_EV = {"dos_mae_500_fermi_window"}
 _REFERENCED_METRIC_CACHE: dict[tuple[str, str], float | None] = {}
 
@@ -463,6 +490,9 @@ def pivot_metric_scaling_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         "config_id",
         "config_hash",
         "selected_config_id",
+        "base_config_id",
+        "config_family_id",
+        "parent_config_id",
         "seed",
         "epochs",
         "epoch_label",
@@ -578,6 +608,10 @@ def normalize_rows(
                 "dataset_size_x": int(x_value),
                 "x_axis": x_axis,
                 "config_id": config_id,
+                "base_config_id": row.get("base_config_id") or "",
+                "config_family_id": row.get("config_family_id") or "",
+                "parent_config_id": row.get("parent_config_id") or "",
+                "selected_config_id": row.get("selected_config_id") or "",
                 "config_hash": row.get("config_hash") or "",
                 "seed": row.get("seed") or "unknown",
                 "epochs": row.get("epochs") or "",
@@ -627,7 +661,16 @@ def group_config_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def extract_base_config_id(config_id: Any) -> str:
+def extract_base_config_id(row_or_config_id: Any) -> str:
+    if isinstance(row_or_config_id, dict):
+        for key in EXPLICIT_BASE_CONFIG_ID_FIELDS:
+            value = str(row_or_config_id.get(key) or "").strip()
+            if value:
+                return value
+        config_id = row_or_config_id.get("selected_config_id") or row_or_config_id.get("config_id")
+    else:
+        config_id = row_or_config_id
+
     text = str(config_id or "").strip() or "unknown"
     stripped = BASE_CONFIG_SEED_SUFFIX.sub("", text)
     return stripped or text
@@ -721,7 +764,7 @@ def aggregate_rows_mean_seeds_per_config(rows: list[dict[str, Any]]) -> list[dic
         size = int_number(row.get("dataset_size_x"))
         if metric is None or size is None:
             continue
-        base_config_id = extract_base_config_id(row.get("config_id"))
+        base_config_id = extract_base_config_id(row)
         grouped[(str(row["method"]), int(size), base_config_id)].append(row)
 
     out: list[dict[str, Any]] = []
@@ -914,7 +957,8 @@ def n_min_abs(best_rows: list[dict[str, Any]], threshold_mev: float) -> int | No
     return min(candidates) if candidates else None
 
 
-def n_min_rel95(best_rows: list[dict[str, Any]], relative_tolerance: float) -> int | None:
+def n_min_rel_tol(best_rows: list[dict[str, Any]], relative_tolerance: float) -> int | None:
+    """First N within relative tolerance of the best observed/fitted value."""
     values = [
         (int(row["dataset_size_x"]), float(row["primary_metric_mev_mean"]))
         for row in best_rows
@@ -926,6 +970,19 @@ def n_min_rel95(best_rows: list[dict[str, Any]], relative_tolerance: float) -> i
     cutoff = best_observed * (1.0 + relative_tolerance)
     candidates = [size for size, value in values if value <= cutoff]
     return min(candidates) if candidates else None
+
+
+def n_min_rel95(best_rows: list[dict[str, Any]], relative_tolerance: float) -> int | None:
+    """Deprecated alias for n_min_rel_tol; not a 95% confidence quantity."""
+    return n_min_rel_tol(best_rows, relative_tolerance)
+
+
+def with_legacy_threshold_aliases(thresholds: dict[str, Any]) -> dict[str, Any]:
+    out = dict(thresholds)
+    if N_MIN_REL_TOL_KEY in out:
+        out[LEGACY_N_MIN_REL95_KEY] = out[N_MIN_REL_TOL_KEY]
+        out[f"{LEGACY_N_MIN_REL95_KEY}_deprecated_alias_for"] = N_MIN_REL_TOL_KEY
+    return out
 
 
 def n_min_plateau(best_rows: list[dict[str, Any]], plateau_gain: float) -> int | None:
@@ -987,14 +1044,14 @@ def thresholds_by_method(
         rows = sorted([row for row in best_rows if row["method"] == method], key=lambda row: int(row["dataset_size_x"]))
         values = [finite_number(row.get("primary_metric_mev_mean")) for row in rows]
         clean_values = [value for value in values if value is not None]
-        out[method] = {
+        out[method] = with_legacy_threshold_aliases({
             "available_sizes": [int(row["dataset_size_x"]) for row in rows],
             "best_observed_mev": min(clean_values) if clean_values else None,
             "N_min_abs": n_min_abs(rows, threshold_mev),
-            "N_min_rel95": n_min_rel95(rows, relative_tolerance),
+            N_MIN_REL_TOL_KEY: n_min_rel_tol(rows, relative_tolerance),
             "N_min_plateau": n_min_plateau(rows, plateau_gain),
             "N_min_cost_eff": n_min_cost_eff(rows, relative_tolerance),
-        }
+        })
     return out
 
 def thresholds_by_method_from_fit(
@@ -1017,6 +1074,30 @@ def thresholds_by_method_from_fit(
         )
 
         canonical_model = canonical_fit_model(fit_model)
+        if canonical_model == "none":
+            fit_details[method] = no_fit_summary(len(observed_rows))
+            observed = thresholds_by_method(
+                observed_rows,
+                threshold_mev=threshold_mev,
+                relative_tolerance=relative_tolerance,
+                plateau_gain=plateau_gain,
+            ).get(method)
+            if observed:
+                out[method] = {
+                    **observed,
+                    "fit_model": "none",
+                    "requested_fit_model": fit_model,
+                    "canonical_fit_model": "none",
+                    "fit_domain": {},
+                    "best_fit_mev": None,
+                    "N_min_abs_source": "observed_no_fit",
+                    f"{N_MIN_REL_TOL_KEY}_source": "observed_no_fit",
+                    f"{LEGACY_N_MIN_REL95_KEY}_source": "deprecated_alias",
+                    "N_min_plateau_source": "observed_no_fit",
+                    "N_min_cost_eff_source": "observed_cost",
+                }
+            continue
+
         curve_rows, fit = fitted_curve_rows(
             observed_rows,
             fit_model=canonical_model,
@@ -1028,6 +1109,30 @@ def thresholds_by_method_from_fit(
             warnings.append(
                 f"fit_thresholds_unavailable:{method}:{canonical_model}:{fit.get('status')}"
             )
+            if fit.get("status") == "invalid_negative_predictions":
+                warnings.append(f"fit_negative_predictions_observed_fallback:{method}:{canonical_model}")
+                observed = thresholds_by_method(
+                    observed_rows,
+                    threshold_mev=threshold_mev,
+                    relative_tolerance=relative_tolerance,
+                    plateau_gain=plateau_gain,
+                ).get(method)
+                if observed:
+                    out[method] = {
+                        **observed,
+                        "fit_model": canonical_model,
+                        "requested_fit_model": fit_model,
+                        "canonical_fit_model": canonical_model,
+                        "fit_domain": fit.get("fit_domain") or {},
+                        "best_fit_mev": None,
+                        "fit_invalid_for_n_min_thresholding": True,
+                        "fit_invalid_reason": "negative_predictions_inside_fit_domain",
+                        "N_min_abs_source": "observed_invalid_fit",
+                        f"{N_MIN_REL_TOL_KEY}_source": "observed_invalid_fit",
+                        f"{LEGACY_N_MIN_REL95_KEY}_source": "deprecated_alias",
+                        "N_min_plateau_source": "observed_invalid_fit",
+                        "N_min_cost_eff_source": "observed_cost",
+                    }
             continue
 
         values = [
@@ -1036,7 +1141,7 @@ def thresholds_by_method_from_fit(
         ]
         clean_values = [value for value in values if value is not None]
 
-        out[method] = {
+        out[method] = with_legacy_threshold_aliases({
             "available_sizes": [
                 int(round(float(row["dataset_size_x"])))
                 for row in observed_rows
@@ -1052,7 +1157,7 @@ def thresholds_by_method_from_fit(
             ),
             "best_fit_mev": min(clean_values) if clean_values else None,
             "N_min_abs": n_min_abs(curve_rows, threshold_mev),
-            "N_min_rel95": n_min_rel95(curve_rows, relative_tolerance),
+            N_MIN_REL_TOL_KEY: n_min_rel_tol(curve_rows, relative_tolerance),
             "N_min_plateau": n_min_plateau(curve_rows, plateau_gain),
 
             # Cost_eff necesita costes reales. No tiene sentido deducirlo
@@ -1060,10 +1165,11 @@ def thresholds_by_method_from_fit(
             "N_min_cost_eff": n_min_cost_eff(observed_rows, relative_tolerance),
 
             "N_min_abs_source": "fit",
-            "N_min_rel95_source": "fit",
+            f"{N_MIN_REL_TOL_KEY}_source": "fit",
+            f"{LEGACY_N_MIN_REL95_KEY}_source": "deprecated_alias",
             "N_min_plateau_source": "fit",
             "N_min_cost_eff_source": "observed_cost",
-        }
+        })
 
     return out, fit_details, warnings
 
@@ -1131,6 +1237,24 @@ def fit_linear_model(model: str, n_values: list[float], y_values: list[float]) -
     coefficients = least_squares_coefficients(design, y_values)
     predicted = [sum(coef * item for coef, item in zip(coefficients, row)) for row in design]
     return fit_summary(model, n_values, y_values, predicted, coefficients)
+
+
+def fit_policy_metadata(model: str, *, status: str = "ok", n_points: int | None = None) -> dict[str, Any]:
+    canonical = canonical_fit_model(model)
+    enough_points = n_points is None or n_points >= required_fit_points(canonical)
+    paper_candidate = canonical == CANONICAL_POWER_LAW_MODEL and status == "ok" and enough_points
+    if canonical == CANONICAL_POWER_LAW_MODEL:
+        classification = "paper_candidate" if paper_candidate else "diagnostic_only"
+        reason = "constrained nonnegative power law + floor" if paper_candidate else "power_law_floor_not_valid_for_paper_candidate"
+    else:
+        classification = "diagnostic_only"
+        reason = "diagnostic_fit_model_not_mechanistic_primary_law"
+    return {
+        "paper_candidate": paper_candidate,
+        "diagnostic_only": not paper_candidate,
+        "fit_policy": classification,
+        "fit_policy_reason": reason,
+    }
 
 
 def canonical_fit_model(model: str) -> str:
@@ -1205,6 +1329,7 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
             "status": "skipped_insufficient_points",
             "n_points": len(n_values),
             "formula": "y = E_inf + A N^-alpha",
+            **fit_policy_metadata(CANONICAL_POWER_LAW_MODEL, status="skipped_insufficient_points", n_points=len(n_values)),
         }
 
     n_min = min(n_values)
@@ -1215,6 +1340,7 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
             "status": "failed_invalid_domain",
             "n_points": len(n_values),
             "formula": "y = E_inf + A N^-alpha",
+            **fit_policy_metadata(CANONICAL_POWER_LAW_MODEL, status="failed_invalid_domain", n_points=len(n_values)),
         }
 
     best: dict[str, Any] | None = None
@@ -1245,6 +1371,7 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
             "status": "failed_constraint_violation",
             "n_points": len(n_values),
             "formula": "y = E_inf + A N^-alpha",
+            **fit_policy_metadata(CANONICAL_POWER_LAW_MODEL, status="failed_constraint_violation", n_points=len(n_values)),
         }
 
     summary = fit_summary(
@@ -1256,6 +1383,7 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
     )
     summary["status"] = "ok"
     summary["formula"] = "y = E_inf + A N^-alpha"
+    summary.update(fit_policy_metadata(CANONICAL_POWER_LAW_MODEL, status="ok", n_points=len(n_values)))
     summary["constraints"] = {
         "e_inf_nonnegative": best["coefficients"][0] >= 0,
         "amplitude_nonnegative": best["coefficients"][1] >= 0,
@@ -1477,6 +1605,7 @@ def fit_lowess_model(model: str, n_values: list[float], y_values: list[float]) -
         "lowess_logx_robust": "robust LOWESS over log(N)",
         "monotone_lowess_logx": "robust LOWESS over log(N), monotone non-increasing",
     }[model]
+    summary["diagnostic_only"] = True
     summary["curve_points"] = [
         {"x": float(n), "y": float(y)}
         for n, y in zip(grid, curve_y)
@@ -1539,6 +1668,7 @@ def fit_moving_average_model(
     summary = fit_summary("moving_average", sorted_n, sorted_y, smoothed_values, [])
     summary["status"] = "ok"
     summary["formula"] = f"centered moving average over observed N, window={window}"
+    summary["diagnostic_only"] = True
     summary["curve_points"] = curve_points
     summary["moving_average_window"] = window
     summary["fit_domain"] = {
@@ -1548,12 +1678,69 @@ def fit_moving_average_model(
     return summary
 
 
+def fit_cumulative_best_model(n_values: list[float], y_values: list[float]) -> dict[str, Any]:
+    clean = sorted(
+        [
+            (float(n), float(y))
+            for n, y in zip(n_values, y_values)
+            if n > 0 and math.isfinite(float(y))
+        ],
+        key=lambda item: item[0],
+    )
+
+    if not clean:
+        return {
+            "model": "cumulative_best",
+            "fit_model": "cumulative_best",
+            "status": "failed",
+            "error": "No finite points for cumulative best envelope.",
+            "n_points": 0,
+            "diagnostic_only": True,
+            "description": "Monotone non-increasing envelope over observed N only.",
+        }
+
+    curve_points: list[dict[str, Any]] = []
+    envelope_values: list[float] = []
+    best_so_far = math.inf
+    for n_value, y_value in clean:
+        best_so_far = min(best_so_far, y_value)
+        envelope_values.append(float(best_so_far))
+        curve_points.append({"x": float(n_value), "y": float(best_so_far)})
+
+    sorted_n = [item[0] for item in clean]
+    sorted_y = [item[1] for item in clean]
+    summary = fit_summary("cumulative_best", sorted_n, sorted_y, envelope_values, [])
+    summary["status"] = "ok"
+    summary["fit_model"] = "cumulative_best"
+    summary["formula"] = "y_hat(N_i) = min_{j<=i} y(N_j)"
+    summary["description"] = "Monotone non-increasing envelope over observed aggregated points sorted by dataset_size_x; no extrapolation."
+    summary["diagnostic_only"] = True
+    summary["curve_points"] = curve_points
+    summary["fit_domain"] = {
+        "min_n": min(sorted_n),
+        "max_n": max(sorted_n),
+    }
+    return summary
+
+
+def no_fit_summary(n_points: int) -> dict[str, Any]:
+    return {
+        "model": "none",
+        "fit_model": "none",
+        "status": "not_used",
+        "n_points": n_points,
+        "description": "No curve fit was used; thresholds are computed from observed aggregated points.",
+        "formula": None,
+        **fit_policy_metadata("none", status="not_used", n_points=n_points),
+    }
+
+
 
 def predict_fit(model: str, coefficients: list[float], n_values: list[float]) -> list[float]:
-    if model in LOWESS_FIT_MODELS or model == "moving_average":
+    if model in CURVE_POINT_FIT_MODELS:
         raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
-    if model in LOWESS_FIT_MODELS:
-        raise ValueError(f"{model} stores explicit curve_points; use curve_points instead of predict_fit.")
+    if model == "none":
+        raise ValueError("none does not fit a curve; use observed rows instead.")
     if is_power_law_fit_model(model):
         return power_law_floor_predictions([float(item) for item in coefficients], n_values)
     predictions = []
@@ -1601,11 +1788,15 @@ def fitted_curve_rows(
         key=lambda row: int(row["dataset_size_x"]),
     )
 
+    if fit_model == "none":
+        return [], no_fit_summary(len(clean_rows))
+
     if len(clean_rows) < required_fit_points(fit_model):
         return [], {
             "status": "skipped_insufficient_points",
             "fit_model": fit_model,
             "n_points": len(clean_rows),
+            **fit_policy_metadata(fit_model, status="skipped_insufficient_points", n_points=len(clean_rows)),
         }
 
     n_values = [float(row["dataset_size_x"]) for row in clean_rows]
@@ -1621,13 +1812,15 @@ def fitted_curve_rows(
             y_values,
             window_size=moving_average_window,
         )
+    elif fit_model == "cumulative_best":
+        fit = fit_cumulative_best_model(n_values, y_values)
     else:
         fit = fit_linear_model(fit_model, n_values, y_values)
 
     if fit.get("status") not in {None, "ok"}:
         return [], fit
 
-    if fit_model in LOWESS_FIT_MODELS or fit_model == "moving_average":
+    if fit_model in CURVE_POINT_FIT_MODELS:
         curve_points = fit.get("curve_points") or []
         curve_rows = [
             {
@@ -1644,6 +1837,19 @@ def fitted_curve_rows(
     else:
         grid = dense_n_grid(clean_rows)
         y_grid = predict_fit(fit_model, [float(x) for x in fit["coefficients"]], grid)
+        negative_predictions = [float(value) for value in y_grid if math.isfinite(value) and value < -NONNEG_PREDICTION_TOL]
+        if fit_model in UNCONSTRAINED_FIT_MODELS and negative_predictions:
+            fit = dict(fit)
+            fit["status"] = "invalid_negative_predictions"
+            fit["invalid_for_n_min_thresholding"] = True
+            fit["negative_prediction_min_mev"] = min(negative_predictions)
+            fit["negative_prediction_count"] = len(negative_predictions)
+            fit["fit_model"] = fit_model
+            fit["fit_domain"] = fit.get("fit_domain") or {
+                "min_n": min(n_values),
+                "max_n": max(n_values),
+            }
+            return [], fit
         curve_rows = [
             {
                 "dataset_size_x": n_value,
@@ -1683,6 +1889,8 @@ def fit_summary(
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 1.0
     return {
         "model": model,
+        "fit_model": model,
+        "status": "ok",
         "n_points": len(n_values),
         "coefficients": coefficients,
         "mae_mev": mae,
@@ -1694,6 +1902,7 @@ def fit_summary(
             "inverse": "y = a + b/N",
             "inverse_square": "y = a + b/N^2",
         }.get(model, "y = E_inf + A N^-alpha"),
+        **fit_policy_metadata(model, status="ok", n_points=len(n_values)),
     }
 
 
@@ -1715,8 +1924,17 @@ def fit_models_for_method(
     y_values = [float(row["primary_metric_mev_mean"]) for row in rows]
     out: dict[str, dict[str, Any]] = {}
     for model in fit_models:
+        if model == "none":
+            out[model] = no_fit_summary(len(n_values))
+            continue
         if len(n_values) < required_fit_points(model):
-            out[model] = {"model": model, "status": "skipped_insufficient_points", "n_points": len(n_values)}
+            out[model] = {
+                "model": model,
+                "fit_model": model,
+                "status": "skipped_insufficient_points",
+                "n_points": len(n_values),
+                **fit_policy_metadata(model, status="skipped_insufficient_points", n_points=len(n_values)),
+            }
             continue
         try:
             if is_power_law_fit_model(model):
@@ -1729,16 +1947,27 @@ def fit_models_for_method(
                     y_values,
                     window_size=moving_average_window,
                 )
+            elif model == "cumulative_best":
+                out[model] = fit_cumulative_best_model(n_values, y_values)
             else:
                 out[model] = fit_linear_model(model, n_values, y_values)
-            out[model]["status"] = "ok"
+            status = str(out[model].get("status") or "ok")
+            out[model].update(fit_policy_metadata(model, status=status, n_points=len(n_values)))
         except Exception as exc:  # noqa: BLE001 - fail-safe postprocess.
-            out[model] = {"model": model, "status": "failed", "error": str(exc), "n_points": len(n_values)}
+            out[model] = {
+                "model": model,
+                "status": "failed",
+                "error": str(exc),
+                "n_points": len(n_values),
+                **fit_policy_metadata(model, status="failed", n_points=len(n_values)),
+            }
     return out
 
 
 def required_fit_points(model: str) -> int:
     return {
+        "none": 1,
+        "cumulative_best": 1,
         "moving_average": 1,
         "quadratic": 3,
         "power_law": 3,
@@ -1751,16 +1980,18 @@ def required_fit_points(model: str) -> int:
 
 def parse_fit_models(value: str) -> list[str]:
     allowed = {
-    "linear",
-    "quadratic",
-    "inverse",
-    "inverse_square",
-    "power_law",
-    "power_law_floor",
-    "lowess_logx",
-    "lowess_logx_robust",
-    "monotone_lowess_logx",
-    "moving_average",
+        "linear",
+        "quadratic",
+        "inverse",
+        "inverse_square",
+        "power_law",
+        "power_law_floor",
+        "lowess_logx",
+        "lowess_logx_robust",
+        "monotone_lowess_logx",
+        "moving_average",
+        "cumulative_best",
+        "none",
     }
     models = [item.strip() for item in value.split(",") if item.strip()]
     unknown = [model for model in models if model not in allowed]
@@ -1809,7 +2040,7 @@ def plot_metric_vs_size(
         color = METHOD_COLORS.get(method, "#555555")
         ax.plot(xs, ys, marker="o", linewidth=2.0, color=color, label=f"{method} best observed")
         if xs and method in thresholds:
-            for key, linestyle in [("N_min_abs", ":"), ("N_min_rel95", "--"), ("N_min_plateau", "-.")]:
+            for key, linestyle in [("N_min_abs", ":"), (N_MIN_REL_TOL_KEY, "--"), ("N_min_plateau", "-.")]:
                 n_value = thresholds[method].get(key)
                 if n_value is not None:
                     ax.axvline(float(n_value), color=color, linestyle=linestyle, alpha=0.28, linewidth=1.2)
@@ -1907,6 +2138,11 @@ AUTOCORRELATION_CONVENTION = "sokal_positive_lag_inefficiency_v1"
 TAU_INT_CONVENTION = "statistical_inefficiency = 1 + 2 * sum_{k>0} rho(k) for rho(k) > 0"
 N_EFF_CONVENTION = "N_eff = N / statistical_inefficiency"
 N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO = 0.25
+N_MIN_NOMINAL_WARNING = (
+    "N_min uses nominal N. If MD snapshots are autocorrelated, independent sample count "
+    "can be lower. Check N_eff before using this as a paper-level claim."
+)
+N_MIN_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau", "N_min_cost_eff")
 
 
 def first_non_empty_text(record: dict[str, Any], *keys: str) -> str | None:
@@ -2449,6 +2685,86 @@ def summarize_temporal_diagnostics(
     }
 
 
+def representative_n_eff_value(value: Any) -> float | None:
+    if isinstance(value, dict):
+        return finite_number(value.get("median")) or finite_number(value.get("min")) or finite_number(value.get("max"))
+    return finite_number(value)
+
+
+def n_eff_over_n_nominal(temporal_diagnostics: dict[str, Any]) -> float | None:
+    nominal = int_number(temporal_diagnostics.get("nominal_n_train"))
+    n_eff = representative_n_eff_value(temporal_diagnostics.get("estimated_n_eff_train"))
+    if nominal is None or nominal <= 0 or n_eff is None:
+        return None
+    return float(n_eff) / float(nominal)
+
+
+def nominal_n_min_map(thresholds: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for method, method_thresholds in thresholds.items():
+        out[method] = {
+            criterion: method_thresholds.get(criterion)
+            for criterion in N_MIN_CRITERIA
+            if criterion in method_thresholds
+        }
+    return out
+
+
+def effective_samples_at_nominal_n_min(
+    thresholds: dict[str, dict[str, Any]],
+    *,
+    n_eff_ratio: float | None,
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for method, method_thresholds in thresholds.items():
+        out[method] = {}
+        for criterion in N_MIN_CRITERIA:
+            value = finite_number(method_thresholds.get(criterion))
+            out[method][criterion] = float(value) * n_eff_ratio if value is not None and n_eff_ratio is not None else None
+    return out
+
+
+def scientific_claim_status_payload(
+    *,
+    temporal_diagnostics: dict[str, Any],
+    thresholds: dict[str, dict[str, Any]],
+    aggregation_mode: str,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = [N_MIN_NOMINAL_WARNING]
+    temporal_warnings = [str(item) for item in temporal_diagnostics.get("warnings") or []]
+    autocorrelation_available = bool(temporal_diagnostics.get("autocorrelation_available"))
+    ratio = n_eff_over_n_nominal(temporal_diagnostics)
+
+    if not autocorrelation_available:
+        blockers.append("paper_blocked_if_autocorrelation_unavailable")
+    if ratio is not None and ratio < N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO:
+        blockers.append("paper_blocked_if_n_eff_much_smaller_than_nominal")
+    if "n_eff_much_smaller_than_nominal" in temporal_warnings and "paper_blocked_if_n_eff_much_smaller_than_nominal" not in blockers:
+        blockers.append("paper_blocked_if_n_eff_much_smaller_than_nominal")
+    if aggregation_mode in {"best_config", "mean_replicates"}:
+        blockers.append(f"paper_blocked_if_aggregation_mode_{aggregation_mode}")
+
+    status = "diagnostic_only" if blockers else "paper_candidate_nominal_with_n_eff_diagnostic"
+    n_min_nominal = nominal_n_min_map(thresholds)
+    effective_at_nominal = effective_samples_at_nominal_n_min(thresholds, n_eff_ratio=ratio)
+    return {
+        "n_min_basis": "nominal",
+        "N_min_nominal": n_min_nominal,
+        "N_eff_diagnostic_available": ratio is not None,
+        "N_eff_over_N_nominal": ratio,
+        "effective_samples_at_N_min_nominal": effective_at_nominal,
+        "N_min_eff_diagnostic": effective_at_nominal,
+        "scientific_claim_status": status,
+        "paper_level_blockers": sorted(set(blockers)),
+        "paper_level_warnings": warnings,
+        "n_eff_diagnostic_note": (
+            "Effective-N values are diagnostics only. They do not replace nominal N_min "
+            "or constitute validated paper-level replacements without a stronger protocol."
+        ),
+    }
+
+
 def build_report(
     *,
     output_dir: Path,
@@ -2462,6 +2778,8 @@ def build_report(
     threshold_mev: float,
     x_axis: str,
     temporal_diagnostics: dict[str, Any] | None = None,
+    scientific_status: dict[str, Any] | None = None,
+    replicate_bootstrap: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Dataset Size Minimum Analysis\n")
@@ -2481,7 +2799,7 @@ def build_report(
         f"- Tamanos: {', '.join(str(size) for size in sorted({int(row['dataset_size_x']) for row in best_rows})) or 'ninguno'}"
     )
     lines.append("\n## N_min por metodo\n")
-    lines.append("| Metodo | Best observado meV | N_min_abs | N_min_rel95 | N_min_plateau | N_min_cost_eff |")
+    lines.append("| Metodo | Best observado meV | N_min_abs | N_min_rel_tol | N_min_plateau | N_min_cost_eff |")
     lines.append("|---|---:|---:|---:|---:|---:|")
     for method, summary in thresholds.items():
         lines.append(
@@ -2489,7 +2807,7 @@ def build_report(
                 method=method,
                 best=format_optional(summary.get("best_observed_mev")),
                 absn=format_optional(summary.get("N_min_abs"), precision=0),
-                rel=format_optional(summary.get("N_min_rel95"), precision=0),
+                rel=format_optional(summary.get(N_MIN_REL_TOL_KEY), precision=0),
                 plateau=format_optional(summary.get("N_min_plateau"), precision=0),
                 cost=format_optional(summary.get("N_min_cost_eff"), precision=0),
             )
@@ -2497,18 +2815,29 @@ def build_report(
     lines.append("\n## Fits\n")
     for method, method_fits in fits.items():
         lines.append(f"\n### {method}")
-        lines.append("| Modelo | Estado | RMSE meV | R2 | Coeficientes |")
-        lines.append("|---|---|---:|---:|---|")
+        lines.append("| Modelo | Estado | Politica | RMSE meV | R2 | Coeficientes |")
+        lines.append("|---|---|---|---:|---:|---|")
         for model, fit in method_fits.items():
             lines.append(
-                "| {model} | {status} | {rmse} | {r2} | `{coeffs}` |".format(
+                "| {model} | {status} | {policy} | {rmse} | {r2} | `{coeffs}` |".format(
                     model=model,
                     status=fit.get("status"),
+                    policy=fit.get("fit_policy") or ("paper_candidate" if fit.get("paper_candidate") else "diagnostic_only"),
                     rmse=format_optional(fit.get("rmse_mev")),
                     r2=format_optional(fit.get("r2")),
                     coeffs=json.dumps(fit.get("coefficients") or [], ensure_ascii=False),
                 )
             )
+    lines.append("\n## Replicate bootstrap\n")
+    boot = replicate_bootstrap or disabled_bootstrap_summary()
+    lines.append(f"- Label: {boot.get('display_label') or REPLICATE_BOOTSTRAP_LABEL}")
+    lines.append(f"- Enabled: {bool(boot.get('enabled'))}")
+    lines.append(
+        "- Scope: row-level replicate/seed resampling within `(method, dataset_size_x)`; "
+        "not temporal/block bootstrap and not full scientific uncertainty."
+    )
+    if boot.get("warnings"):
+        lines.append(f"- Replicate resampling warnings: `{json.dumps(boot.get('warnings'), ensure_ascii=False)}`")
     lines.append("\n## Temporal diagnostics (MD snapshot independence)\n")
     temporal = temporal_diagnostics or {}
     lines.append(
@@ -2523,6 +2852,18 @@ def build_report(
     lines.append(
         f"- Autocorrelation diagnostic available: {bool(temporal.get('autocorrelation_available'))}"
     )
+    status_payload = scientific_status or {}
+    lines.append(f"- N_min basis: `{status_payload.get('n_min_basis') or 'nominal'}`")
+    lines.append(
+        f"- Scientific claim status: `{status_payload.get('scientific_claim_status') or 'diagnostic_only'}`"
+    )
+    blockers = status_payload.get("paper_level_blockers") or []
+    if blockers:
+        lines.append(f"- Paper-level blockers: `{json.dumps(blockers, ensure_ascii=False)}`")
+    else:
+        lines.append("- Paper-level blockers: none from temporal diagnostics")
+    ratio = status_payload.get("N_eff_over_N_nominal")
+    lines.append(f"- N_eff / N_nominal: {format_optional(ratio)}")
     for item in temporal.get("datasets") or []:
         lines.append(
             f"- Dataset `{item.get('dataset_id')}`: blocks={item.get('n_temporal_blocks')}, "
@@ -2530,8 +2871,8 @@ def build_report(
             f"blocked_split={item.get('blocked_split')}"
         )
     lines.append(
-        "\nN_min fits in this report still use nominal N. Treat N_min with caution when "
-        "MD snapshots are autocorrelated and N_eff is much smaller than N.\n"
+        f"\n{N_MIN_NOMINAL_WARNING} Effective-N values are diagnostics only and do not "
+        "replace nominal N_min without a stronger validated protocol.\n"
     )
     lines.append("\n## Warnings / blockers\n")
     if warnings:
@@ -2600,6 +2941,8 @@ def summary_normalized_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float = DEFAULT_CI_LEVEL) -> dict[str, Any]:
     return {
         "enabled": False,
+        "bootstrap_type": "replicate_resampling",
+        "display_label": REPLICATE_BOOTSTRAP_LABEL,
         "replicates_requested": replicates_requested,
         "replicates_successful": 0,
         "replicates_failed": 0,
@@ -2608,9 +2951,19 @@ def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float
         "n_min_source": None,
         "n_min_fit_model": None,
         "by_method": {},
+        "criteria": list(BOOTSTRAP_N_MIN_CRITERIA),
+        "legacy_criterion_aliases": dict(LEGACY_THRESHOLD_ALIASES),
         "failure_counts": {},
         "failure_reasons": [],
         "warnings": [],
+        "limitations": [
+            "replicate_row_resampling_only",
+            "does_not_model_temporal_autocorrelation",
+            "does_not_model_model_selection_uncertainty",
+            "does_not_model_hyperparameter_selection_uncertainty",
+            "does_not_model_dependence_between_dataset_sizes",
+            "not_a_temporal_or_block_bootstrap",
+        ],
     }
 
 
@@ -2630,6 +2983,21 @@ def group_normalized_rows_by_method_size(
 def bootstrap_resampling_has_variation(rows: list[dict[str, Any]]) -> bool:
     grouped = group_normalized_rows_by_method_size(rows)
     return any(len(items) > 1 for items in grouped.values())
+
+
+def replicate_bootstrap_scope_warnings(rows: list[dict[str, Any]], *, aggregation_mode: str) -> list[str]:
+    warnings = [
+        "replicate_bootstrap_row_level_replicates_only",
+        "replicate_bootstrap_no_temporal_or_block_bootstrap",
+        "replicate_bootstrap_does_not_capture_model_selection_uncertainty",
+        "replicate_bootstrap_does_not_capture_hyperparameter_selection_uncertainty",
+        "replicate_bootstrap_does_not_capture_dependence_between_dataset_sizes",
+    ]
+    if not bootstrap_resampling_has_variation(rows):
+        warnings.append("replicate_bootstrap_no_multiple_seeds_or_replicates")
+    if aggregation_mode in {"best_config", "mean_replicates"}:
+        warnings.append(f"replicate_bootstrap_selected_aggregation_is_diagnostic:{aggregation_mode}")
+    return warnings
 
 
 def bootstrap_resample_normalized_rows(
@@ -2721,11 +3089,16 @@ def compute_bootstrap_n_min(
     n_min_fit_model: str,
     moving_average_window: int,
 ) -> dict[str, Any]:
-    warnings: list[str] = []
+    warnings: list[str] = replicate_bootstrap_scope_warnings(
+        normalized_rows,
+        aggregation_mode=aggregation_mode,
+    )
     if not bootstrap_resampling_has_variation(normalized_rows):
         warnings.append("bootstrap_unavailable_no_replicates")
         return {
             "enabled": True,
+            "bootstrap_type": "replicate_resampling",
+            "display_label": REPLICATE_BOOTSTRAP_LABEL,
             "replicates_requested": n_replicates,
             "replicates_successful": 0,
             "replicates_failed": n_replicates,
@@ -2734,9 +3107,19 @@ def compute_bootstrap_n_min(
             "n_min_source": n_min_source,
             "n_min_fit_model": n_min_fit_model if n_min_source == "fit" else None,
             "by_method": {},
+            "criteria": list(BOOTSTRAP_N_MIN_CRITERIA),
+            "legacy_criterion_aliases": dict(LEGACY_THRESHOLD_ALIASES),
             "failure_counts": {},
             "failure_reasons": [],
             "warnings": warnings,
+            "limitations": [
+                "replicate_row_resampling_only",
+                "does_not_model_temporal_autocorrelation",
+                "does_not_model_model_selection_uncertainty",
+                "does_not_model_hyperparameter_selection_uncertainty",
+                "does_not_model_dependence_between_dataset_sizes",
+                "not_a_temporal_or_block_bootstrap",
+            ],
         }
 
     rng = random.Random(seed)
@@ -2803,12 +3186,19 @@ def compute_bootstrap_n_min(
             )
             for criterion in BOOTSTRAP_N_MIN_CRITERIA
         }
+        if N_MIN_REL_TOL_KEY in by_method[method]:
+            by_method[method][LEGACY_N_MIN_REL95_KEY] = {
+                **by_method[method][N_MIN_REL_TOL_KEY],
+                "deprecated_alias_for": N_MIN_REL_TOL_KEY,
+            }
 
     if replicate_successes < MIN_BOOTSTRAP_SUCCESS_FOR_CI:
         warnings.append("bootstrap_too_few_successful_replicates")
 
     return {
         "enabled": True,
+        "bootstrap_type": "replicate_resampling",
+        "display_label": REPLICATE_BOOTSTRAP_LABEL,
         "replicates_requested": n_replicates,
         "replicates_successful": replicate_successes,
         "replicates_failed": replicate_failures,
@@ -2817,9 +3207,19 @@ def compute_bootstrap_n_min(
         "n_min_source": n_min_source,
         "n_min_fit_model": n_min_fit_model if n_min_source == "fit" else None,
         "by_method": by_method,
+        "criteria": list(BOOTSTRAP_N_MIN_CRITERIA),
+        "legacy_criterion_aliases": dict(LEGACY_THRESHOLD_ALIASES),
         "failure_counts": {method: dict(counts) for method, counts in failure_counts.items()},
         "failure_reasons": sorted(failure_reasons),
         "warnings": warnings,
+        "limitations": [
+            "replicate_row_resampling_only",
+            "does_not_model_temporal_autocorrelation",
+            "does_not_model_model_selection_uncertainty",
+            "does_not_model_hyperparameter_selection_uncertainty",
+            "does_not_model_dependence_between_dataset_sizes",
+            "not_a_temporal_or_block_bootstrap",
+        ],
     }
 
 
@@ -2895,7 +3295,11 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         moving_average_window=moving_average_window,
         )
         warnings.extend(fit_threshold_warnings)
-        if fit_thresholds:
+        if canonical_fit == "none":
+            actual_n_min_source = "observed"
+            actual_fit_model = "none"
+            thresholds = fit_thresholds or observed_thresholds
+        elif fit_thresholds:
             thresholds = fit_thresholds
         else:
             fallback_used = True
@@ -2914,7 +3318,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     ci_level = parse_ci_level(getattr(args, "ci_level", None))
     methods = sorted({str(row["method"]) for row in best_rows})
     if bootstrap_replicates > 0:
-        bootstrap = compute_bootstrap_n_min(
+        replicate_bootstrap = compute_bootstrap_n_min(
             all_normalized_rows,
             methods=methods,
             n_replicates=bootstrap_replicates,
@@ -2928,9 +3332,9 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             n_min_fit_model=canonical_fit if requested_n_min_source == "fit" else requested_fit_model,
             moving_average_window=moving_average_window,
         )
-        warnings.extend(bootstrap.get("warnings") or [])
+        warnings.extend(replicate_bootstrap.get("warnings") or [])
     else:
-        bootstrap = disabled_bootstrap_summary(ci_level=ci_level)
+        replicate_bootstrap = disabled_bootstrap_summary(ci_level=ci_level)
 
     fits = {
         method: fit_models_for_method(
@@ -2972,6 +3376,12 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         run_roots=run_roots,
     )
     warnings.extend(temporal_diagnostics.get("warnings") or [])
+    scientific_status = scientific_claim_status_payload(
+        temporal_diagnostics=temporal_diagnostics,
+        thresholds=thresholds,
+        aggregation_mode=aggregation_mode,
+    )
+    warnings.extend(scientific_status.get("paper_level_blockers") or [])
 
     report = build_report(
         output_dir=output_dir,
@@ -2985,6 +3395,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         threshold_mev=float(args.threshold_mev),
         x_axis=args.x_axis,
         temporal_diagnostics=temporal_diagnostics,
+        scientific_status=scientific_status,
+        replicate_bootstrap=replicate_bootstrap,
     )
     report_path = output_dir / "dataset_size_minimum_report.md"
     report_path.write_text(report, encoding="utf-8")
@@ -3029,15 +3441,22 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "observed_thresholds": observed_thresholds,
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
+        "deprecated_threshold_aliases": dict(LEGACY_THRESHOLD_ALIASES),
         "moving_average_window": moving_average_window,
         "bootstrap_replicates": bootstrap_replicates,
         "bootstrap_seed": bootstrap_seed if bootstrap_replicates > 0 else None,
         "ci_level": ci_level,
-        "bootstrap": bootstrap,
+        "replicate_bootstrap": replicate_bootstrap,
+        "bootstrap": {
+            **replicate_bootstrap,
+            "deprecated_alias_for": "replicate_bootstrap",
+        },
+        "bootstrap_deprecated_alias_for": "replicate_bootstrap",
         "temporal_diagnostics": temporal_diagnostics,
         "nominal_n_train": temporal_diagnostics.get("nominal_n_train"),
         "estimated_n_eff_train": temporal_diagnostics.get("estimated_n_eff_train"),
         "autocorrelation_available": temporal_diagnostics.get("autocorrelation_available", False),
+        **scientific_status,
     }
     summary_path = output_dir / "dataset_size_minimum_summary.json"
     write_json(summary_path, summary)
