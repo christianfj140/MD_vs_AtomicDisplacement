@@ -88,6 +88,7 @@ from g2m_deeph_dataset_size_minimum import (
     load_run_root_rows as dataset_minimum_load_run_root_rows,
     normalize_rows as dataset_minimum_normalize_rows,
     pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
+    parse_single_fit_model as dataset_minimum_parse_single_fit_model,
     read_csv as read_dataset_minimum_csv,
     resolve_aggregation_mode as resolve_dataset_minimum_aggregation_mode,
 )
@@ -6205,9 +6206,12 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         raise RuntimeError(f"No se encontro el script de postproceso: {DATASET_SIZE_MINIMUM_SCRIPT}")
 
     n_min_source = str(payload.get("n_min_source") or "observed").strip()
-    n_min_fit_model = str(
-        payload.get("n_min_fit_model") or payload.get("fit_model") or CANONICAL_POWER_LAW_MODEL
-    ).strip()
+    try:
+        n_min_fit_model = dataset_minimum_parse_single_fit_model(
+            str(payload.get("n_min_fit_model") or payload.get("fit_model") or CANONICAL_POWER_LAW_MODEL)
+        )
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from None
 
     if n_min_source not in {"observed", "fit"}:
         raise RuntimeError("n_min_source debe ser 'observed' o 'fit'.")
@@ -6415,6 +6419,9 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "scientific_claim_status": summary.get("scientific_claim_status"),
                 "paper_level_blockers": summary.get("paper_level_blockers") or [],
                 "paper_level_warnings": summary.get("paper_level_warnings") or [],
+                "n_min_protocol": summary.get("n_min_protocol") or {},
+                "n_min_fit_policy": summary.get("n_min_fit_policy"),
+                "n_min_fit_policy_by_method": summary.get("n_min_fit_policy_by_method") or {},
                 "n_eff_diagnostic_note": summary.get("n_eff_diagnostic_note"),
             }
         )

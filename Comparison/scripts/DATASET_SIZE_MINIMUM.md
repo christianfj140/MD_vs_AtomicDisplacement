@@ -34,7 +34,7 @@ analysis adds `temporal_diagnostics` to the summary:
 | `N_min_nominal` | Per-method nominal threshold map copied from the canonical criteria |
 | `N_eff_diagnostic_available` | Whether `N_eff_over_N_nominal` could be estimated |
 | `N_eff_over_N_nominal` | Diagnostic ratio used to contextualize nominal thresholds |
-| `effective_samples_at_N_min_nominal` | Diagnostic `N_min_nominal * N_eff/N`; not a replacement threshold |
+| `effective_samples_at_nominal_N_min_diagnostic` | Estimated effective sample count at the nominal `N_min`; diagnostic only; not an alternative threshold |
 | `scientific_claim_status` | `diagnostic_only` when temporal evidence blocks paper-level claims |
 | `paper_level_blockers` | Machine-readable blockers such as missing autocorrelation or very low N_eff |
 
@@ -59,7 +59,16 @@ If autocorrelation is unavailable, `scientific_claim_status` is
 `paper_blocked_if_autocorrelation_unavailable`. If `N_eff/N_nominal` is below
 the configured diagnostic threshold, the status is also diagnostic-only with
 `paper_blocked_if_n_eff_much_smaller_than_nominal`. Effective-N fields are
-diagnostic context, not validated paper-level replacement thresholds.
+diagnostic context, not validated paper-level replacement thresholds. In
+particular, `effective_samples_at_nominal_N_min_diagnostic` is the estimated
+effective sample count corresponding to the nominal `N_min`; a true
+effective-N threshold is not implemented in this analysis.
+
+Backward-compatible aliases currently remain in JSON:
+
+- `effective_samples_at_N_min_nominal`
+- `N_min_eff_diagnostic` with
+  `N_min_eff_diagnostic_deprecated_alias_for = "effective_samples_at_nominal_N_min_diagnostic"`
 
 ## Replicate resampling CI
 

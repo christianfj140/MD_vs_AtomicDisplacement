@@ -1978,26 +1978,42 @@ def required_fit_points(model: str) -> int:
     }.get(model, 2)
 
 
+ALLOWED_FIT_MODELS = (
+    "linear",
+    "quadratic",
+    "inverse",
+    "inverse_square",
+    "power_law",
+    "power_law_floor",
+    "lowess_logx",
+    "lowess_logx_robust",
+    "monotone_lowess_logx",
+    "moving_average",
+    "cumulative_best",
+    "none",
+)
+
+
 def parse_fit_models(value: str) -> list[str]:
-    allowed = {
-        "linear",
-        "quadratic",
-        "inverse",
-        "inverse_square",
-        "power_law",
-        "power_law_floor",
-        "lowess_logx",
-        "lowess_logx_robust",
-        "monotone_lowess_logx",
-        "moving_average",
-        "cumulative_best",
-        "none",
-    }
     models = [item.strip() for item in value.split(",") if item.strip()]
-    unknown = [model for model in models if model not in allowed]
+    unknown = [model for model in models if model not in ALLOWED_FIT_MODELS]
     if unknown:
         raise SystemExit(f"Unknown fit model(s): {', '.join(unknown)}")
     return models or ["linear"]
+
+
+def parse_single_fit_model(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise SystemExit("n_min_fit_model must be a single non-empty fit model.")
+    if "," in text:
+        raise SystemExit(
+            "n_min_fit_model must contain exactly one fit model, not a comma-separated list."
+        )
+    models = parse_fit_models(text)
+    if len(models) != 1:
+        raise SystemExit("n_min_fit_model must contain exactly one fit model.")
+    return models[0]
 
 def import_matplotlib():
     import matplotlib
@@ -2724,17 +2740,45 @@ def effective_samples_at_nominal_n_min(
     return out
 
 
+CANONICAL_EFFECTIVE_SAMPLES_AT_NOMINAL_N_MIN_KEY = "effective_samples_at_nominal_N_min_diagnostic"
+LEGACY_EFFECTIVE_SAMPLES_AT_N_MIN_NOMINAL_KEY = "effective_samples_at_N_min_nominal"
+LEGACY_N_MIN_EFF_DIAGNOSTIC_KEY = "N_min_eff_diagnostic"
+
+
 def scientific_claim_status_payload(
     *,
     temporal_diagnostics: dict[str, Any],
     thresholds: dict[str, dict[str, Any]],
     aggregation_mode: str,
+    requested_n_min_source: str,
+    actual_n_min_source: str,
+    requested_fit_model: str,
+    actual_fit_model: str | None,
+    fit_threshold_details: dict[str, dict[str, Any]],
+    fallback_used: bool,
+    fallback_reason: str | None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = [N_MIN_NOMINAL_WARNING]
     temporal_warnings = [str(item) for item in temporal_diagnostics.get("warnings") or []]
     autocorrelation_available = bool(temporal_diagnostics.get("autocorrelation_available"))
     ratio = n_eff_over_n_nominal(temporal_diagnostics)
+    threshold_methods = sorted(str(method) for method in thresholds.keys())
+    requested_fit_canonical = canonical_fit_model(requested_fit_model)
+    actual_fit_canonical = canonical_fit_model(actual_fit_model) if actual_fit_model else None
+    n_min_protocol = {
+        "aggregation_mode": aggregation_mode,
+        "requested_n_min_source": requested_n_min_source,
+        "actual_n_min_source": actual_n_min_source,
+        "requested_fit_model": requested_fit_model,
+        "requested_fit_model_canonical": requested_fit_canonical,
+        "actual_fit_model": actual_fit_model,
+        "actual_fit_model_canonical": actual_fit_canonical,
+        "fallback_used": bool(fallback_used),
+        "fallback_reason": fallback_reason,
+        "methods_evaluated": threshold_methods,
+    }
+    n_min_fit_policy_by_method: dict[str, dict[str, Any]] = {}
 
     if not autocorrelation_available:
         blockers.append("paper_blocked_if_autocorrelation_unavailable")
@@ -2744,6 +2788,40 @@ def scientific_claim_status_payload(
         blockers.append("paper_blocked_if_n_eff_much_smaller_than_nominal")
     if aggregation_mode in {"best_config", "mean_replicates"}:
         blockers.append(f"paper_blocked_if_aggregation_mode_{aggregation_mode}")
+    if requested_n_min_source != "fit" or actual_n_min_source != "fit":
+        blockers.append("paper_blocked_if_n_min_source_observed_without_locked_protocol")
+    if fallback_used:
+        blockers.append("paper_blocked_if_fit_failed_or_fallback_used")
+    if actual_fit_canonical is None:
+        blockers.append("paper_blocked_if_actual_fit_model_missing")
+    elif actual_fit_canonical != CANONICAL_POWER_LAW_MODEL:
+        blockers.append(f"paper_blocked_if_n_min_fit_policy_diagnostic_only:{actual_fit_canonical}")
+
+    for method in threshold_methods:
+        fit_detail = fit_threshold_details.get(method)
+        if not isinstance(fit_detail, dict):
+            blockers.append(f"paper_blocked_if_fit_policy_missing:{method}")
+            n_min_fit_policy_by_method[method] = {"fit_policy": None, "paper_candidate": False}
+            continue
+        fit_policy = str(fit_detail.get("fit_policy") or "").strip() or None
+        paper_candidate = bool(fit_detail.get("paper_candidate"))
+        n_min_fit_policy_by_method[method] = {
+            "fit_policy": fit_policy,
+            "paper_candidate": paper_candidate,
+            "fit_model": fit_detail.get("fit_model") or fit_detail.get("model"),
+            "status": fit_detail.get("status"),
+        }
+        if fit_policy is None:
+            blockers.append(f"paper_blocked_if_fit_policy_missing:{method}")
+            continue
+        if fit_policy != "paper_candidate" or not paper_candidate:
+            model_name = str(
+                fit_detail.get("fit_model")
+                or fit_detail.get("model")
+                or actual_fit_canonical
+                or "unknown"
+            )
+            blockers.append(f"paper_blocked_if_n_min_fit_policy_diagnostic_only:{model_name}")
 
     status = "diagnostic_only" if blockers else "paper_candidate_nominal_with_n_eff_diagnostic"
     n_min_nominal = nominal_n_min_map(thresholds)
@@ -2753,11 +2831,16 @@ def scientific_claim_status_payload(
         "N_min_nominal": n_min_nominal,
         "N_eff_diagnostic_available": ratio is not None,
         "N_eff_over_N_nominal": ratio,
-        "effective_samples_at_N_min_nominal": effective_at_nominal,
-        "N_min_eff_diagnostic": effective_at_nominal,
+        CANONICAL_EFFECTIVE_SAMPLES_AT_NOMINAL_N_MIN_KEY: effective_at_nominal,
+        LEGACY_EFFECTIVE_SAMPLES_AT_N_MIN_NOMINAL_KEY: effective_at_nominal,
+        LEGACY_N_MIN_EFF_DIAGNOSTIC_KEY: effective_at_nominal,
+        f"{LEGACY_N_MIN_EFF_DIAGNOSTIC_KEY}_deprecated_alias_for": CANONICAL_EFFECTIVE_SAMPLES_AT_NOMINAL_N_MIN_KEY,
         "scientific_claim_status": status,
         "paper_level_blockers": sorted(set(blockers)),
         "paper_level_warnings": warnings,
+        "n_min_protocol": n_min_protocol,
+        "n_min_fit_policy": "paper_candidate" if status == "paper_candidate_nominal_with_n_eff_diagnostic" else "diagnostic_only",
+        "n_min_fit_policy_by_method": n_min_fit_policy_by_method,
         "n_eff_diagnostic_note": (
             "Effective-N values are diagnostics only. They do not replace nominal N_min "
             "or constitute validated paper-level replacements without a stronger protocol."
@@ -2857,6 +2940,14 @@ def build_report(
     lines.append(
         f"- Scientific claim status: `{status_payload.get('scientific_claim_status') or 'diagnostic_only'}`"
     )
+    protocol = status_payload.get("n_min_protocol") or {}
+    if protocol:
+        lines.append(
+            f"- N_min protocol: source `{protocol.get('requested_n_min_source')}` -> `{protocol.get('actual_n_min_source')}`, "
+            f"fit `{protocol.get('requested_fit_model')}` -> `{protocol.get('actual_fit_model')}`"
+        )
+    if status_payload.get("n_min_fit_policy"):
+        lines.append(f"- N_min fit policy: `{status_payload.get('n_min_fit_policy')}`")
     blockers = status_payload.get("paper_level_blockers") or []
     if blockers:
         lines.append(f"- Paper-level blockers: `{json.dumps(blockers, ensure_ascii=False)}`")
@@ -2864,6 +2955,9 @@ def build_report(
         lines.append("- Paper-level blockers: none from temporal diagnostics")
     ratio = status_payload.get("N_eff_over_N_nominal")
     lines.append(f"- N_eff / N_nominal: {format_optional(ratio)}")
+    lines.append(
+        "- Effective samples at nominal N_min are diagnostic only; true effective-N thresholding is not implemented."
+    )
     for item in temporal.get("datasets") or []:
         lines.append(
             f"- Dataset `{item.get('dataset_id')}`: blocks={item.get('n_temporal_blocks')}, "
@@ -3380,6 +3474,13 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         temporal_diagnostics=temporal_diagnostics,
         thresholds=thresholds,
         aggregation_mode=aggregation_mode,
+        requested_n_min_source=requested_n_min_source,
+        actual_n_min_source=actual_n_min_source,
+        requested_fit_model=requested_fit_model,
+        actual_fit_model=actual_fit_model,
+        fit_threshold_details=fit_threshold_details,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
     )
     warnings.extend(scientific_status.get("paper_level_blockers") or [])
 
@@ -3484,6 +3585,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--n-min-fit-model",
+        type=parse_single_fit_model,
         default=CANONICAL_POWER_LAW_MODEL,
         help="Fit model used when --n-min-source=fit (power_law is a legacy alias).",
     )

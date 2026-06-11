@@ -143,6 +143,17 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def dataset_minimum_visible_fit_options() -> list[str]:
+    html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+    match = re.search(
+        r'<select id="dataset-minimum-fit">(.*?)</select>',
+        html,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return re.findall(r'<option value="([^"]+)"', match.group(1))
+
+
 class DatasetSizeMinimumTests(unittest.TestCase):
     def test_canonical_fit_model_maps_power_law_to_power_law_floor(self) -> None:
         self.assertEqual(minimum.canonical_fit_model("power_law"), "power_law_floor")
@@ -150,14 +161,7 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertTrue(minimum.fit_models_equivalent("power_law", "power_law_floor"))
 
     def test_parse_fit_models_accepts_visible_ui_fit_options(self) -> None:
-        html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
-        match = re.search(
-            r'<select id="dataset-minimum-fit">(.*?)</select>',
-            html,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        visible = re.findall(r'<option value="([^"]+)"', match.group(1))
+        visible = dataset_minimum_visible_fit_options()
 
         parsed = minimum.parse_fit_models(",".join(visible))
 
@@ -166,6 +170,27 @@ class DatasetSizeMinimumTests(unittest.TestCase):
     def test_invalid_fit_models_are_rejected(self) -> None:
         with self.assertRaises(SystemExit):
             minimum.parse_fit_models("linear,definitely_not_a_fit")
+
+    def test_parse_single_fit_model_accepts_power_law_floor(self) -> None:
+        self.assertEqual(minimum.parse_single_fit_model("power_law_floor"), "power_law_floor")
+
+    def test_parse_single_fit_model_accepts_power_law_alias(self) -> None:
+        parsed = minimum.parse_single_fit_model("power_law")
+        self.assertEqual(parsed, "power_law")
+        self.assertEqual(minimum.canonical_fit_model(parsed), "power_law_floor")
+
+    def test_parse_single_fit_model_accepts_none(self) -> None:
+        self.assertEqual(minimum.parse_single_fit_model("none"), "none")
+
+    def test_parse_single_fit_model_rejects_multiple_models(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            minimum.parse_single_fit_model("linear,inverse")
+        self.assertIn("exactly one fit model", str(exc.exception))
+
+    def test_parse_single_fit_model_rejects_unknown_model(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            minimum.parse_single_fit_model("not_a_model")
+        self.assertIn("Unknown fit model", str(exc.exception))
 
     def test_power_law_floor_fit_has_valid_constraints(self) -> None:
         n_values = [10.0, 20.0, 40.0, 80.0]
@@ -1216,6 +1241,21 @@ class DatasetSizeMinimumTests(unittest.TestCase):
                     "-1",
                 ]
             )
+
+    def test_build_parser_rejects_invalid_n_min_fit_model(self) -> None:
+        with self.assertRaises(SystemExit):
+            minimum.build_parser().parse_args(
+                [
+                    "--run-root",
+                    "/tmp/run",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--threshold-mev",
+                    "10",
+                    "--n-min-fit-model",
+                    "not_a_model",
+                ]
+            )
         with self.assertRaises(SystemExit):
             minimum.build_parser().parse_args(
                 [
@@ -1264,6 +1304,70 @@ class DatasetSizeMinimumTests(unittest.TestCase):
 
 
 class DatasetSizeMinimumUiApiTests(unittest.TestCase):
+    _analysis_counter = 0
+
+    def _write_smoke_run_root(
+        self,
+        base: Path,
+        *,
+        dataset_root: Path | None = None,
+        config_prefix: str = "policy_a",
+    ) -> Path:
+        run_root = base / "smoke_sweep"
+        metrics_path = run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        rows: list[dict[str, object]] = []
+        for dataset_size, metric_value in ((10, 0.030), (20, 0.018), (40, 0.011), (80, 0.008)):
+            rows.append(
+                {
+                    "method": "graph2mat",
+                    "dataset_size": dataset_size,
+                    "dataset_size_train": dataset_size,
+                    "dataset_size_total": dataset_size,
+                    "dataset_root": str(dataset_root) if dataset_root is not None else "",
+                    "config_id": f"{config_prefix}-N{dataset_size}-seed1",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": metric_value,
+                    "seed": "1",
+                }
+            )
+        metrics_path.write_text(json.dumps({"metric_scaling_rows": rows}), encoding="utf-8")
+        return run_root
+
+    def _run_analysis_via_helper(
+        self,
+        *,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        def recording_run(command, **kwargs):
+            self.assertEqual(Path(command[1]).resolve(), self.pipeline_ui.DATASET_SIZE_MINIMUM_SCRIPT.resolve())
+            joined = " ".join(command)
+            for forbidden in ("siesta", "deeph-train", "deeph-preprocess", "deeph-inference", "gnubands"):
+                self.assertNotIn(forbidden, joined)
+            output_dir = Path(command[command.index("--output-dir") + 1])
+            args = minimum.build_parser().parse_args(command[2:])
+            summary = minimum.analyze(args)
+            self.assertEqual(Path(summary["outputs"][-1]), output_dir / "dataset_size_minimum_summary.json")
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps({"status": summary["status"], "output_dir": str(output_dir)}),
+                stderr="",
+            )
+
+        type(self)._analysis_counter += 1
+        analysis_root = (
+            Path(payload["run_roots"][0]).resolve().parent
+            / f"dataset_size_minimum_helper_results_{type(self)._analysis_counter:04d}"
+        )
+        original_results_root = self.pipeline_ui.RESULTS_ROOT
+        try:
+            self.pipeline_ui.RESULTS_ROOT = analysis_root
+            with patch.object(self.pipeline_ui.subprocess, "run", side_effect=recording_run):
+                return self.pipeline_ui.run_dataset_size_minimum_analysis(payload)
+        finally:
+            self.pipeline_ui.RESULTS_ROOT = original_results_root
+
     def test_iter_metrics_paths_avoids_recursive_results_scan(self) -> None:
         import importlib.util
         import time
@@ -1522,6 +1626,143 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                         "aggregation_mode": "median",
                     }
                 )
+
+    def test_invalid_n_min_fit_model_rejected_by_run_analysis_before_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_minimum_run_root(base)
+            with patch.object(self.pipeline_ui.subprocess, "run") as mocked_run:
+                with self.assertRaises(RuntimeError) as exc:
+                    self.pipeline_ui.run_dataset_size_minimum_analysis(
+                        {
+                            "run_roots": [str(run_root)],
+                            "threshold_mev": 10.0,
+                            "n_min_source": "fit",
+                            "n_min_fit_model": "linear,inverse",
+                        }
+                    )
+            self.assertIn("exactly one fit model", str(exc.exception))
+            mocked_run.assert_not_called()
+
+    def test_visible_html_fit_options_are_accepted_by_server_side_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_minimum_run_root(base)
+            visible = dataset_minimum_visible_fit_options()
+
+            def fake_run(command, **kwargs):
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "dataset_size_minimum_summary.json").write_text(
+                    json.dumps({"status": "ok", "outputs": [str(output_dir / "dataset_size_minimum_summary.json")]}),
+                    encoding="utf-8",
+                )
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            for fit_model in visible:
+                with patch.object(self.pipeline_ui.subprocess, "run", side_effect=fake_run) as mocked_run:
+                    self.pipeline_ui.run_dataset_size_minimum_analysis(
+                        {
+                            "run_roots": [str(run_root)],
+                            "threshold_mev": 10.0,
+                            "n_min_source": "fit",
+                            "n_min_fit_model": fit_model,
+                        }
+                    )
+                    command = mocked_run.call_args.args[0]
+                    self.assertEqual(command[command.index("--n-min-fit-model") + 1], fit_model)
+
+    def test_helper_smoke_summary_contains_core_contract_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dataset_root = write_synthetic_temporal_dataset(
+                base / "dataset",
+                n_train=80,
+                scalar_builder=lambda index: 1.0 if index % 2 else -1.0,
+            )
+            run_root = self._write_smoke_run_root(base, dataset_root=dataset_root)
+
+            response = self._run_analysis_via_helper(
+                payload={
+                    "run_roots": [str(run_root)],
+                    "threshold_mev": 20.0,
+                    "primary_metric": "h_mae_eV_mean",
+                    "x_axis": "n_train",
+                    "n_min_source": "fit",
+                    "n_min_fit_model": "power_law_floor",
+                    "aggregation_mode": "mean_seeds_per_config",
+                    "bootstrap_replicates": 0,
+                }
+            )
+
+            summary = response["summary"]
+            self.assertEqual(summary["status"], "ok")
+            self.assertIn("graph2mat", summary["thresholds"])
+            self.assertIn("N_min_rel_tol", summary["thresholds"]["graph2mat"])
+            self.assertIn("replicate_bootstrap", summary)
+            self.assertIn("scientific_claim_status", summary)
+            self.assertIn("paper_level_blockers", summary)
+            self.assertEqual(summary["n_min_basis"], "nominal")
+            report_path = next(Path(path) for path in summary["outputs"] if str(path).endswith("_report.md"))
+            report_text = report_path.read_text(encoding="utf-8")
+            self.assertIn("N_min uses nominal N.", report_text)
+
+    def test_helper_smoke_scientific_status_by_fit_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dataset_root = write_synthetic_temporal_dataset(
+                base / "dataset",
+                n_train=80,
+                scalar_builder=lambda index: 1.0 if index % 2 else -1.0,
+            )
+            run_root = self._write_smoke_run_root(base, dataset_root=dataset_root)
+
+            expected = {
+                "linear": "diagnostic_only",
+                "none": "diagnostic_only",
+                "cumulative_best": "diagnostic_only",
+                "power_law_floor": "paper_candidate_nominal_with_n_eff_diagnostic",
+            }
+            for fit_model, expected_status in expected.items():
+                response = self._run_analysis_via_helper(
+                    payload={
+                        "run_roots": [str(run_root)],
+                        "threshold_mev": 20.0,
+                        "primary_metric": "h_mae_eV_mean",
+                        "x_axis": "n_train",
+                        "n_min_source": "fit",
+                        "n_min_fit_model": fit_model,
+                        "aggregation_mode": "mean_seeds_per_config",
+                        "bootstrap_replicates": 0,
+                    }
+                )
+                summary = response["summary"]
+                self.assertEqual(summary["scientific_claim_status"], expected_status)
+                if fit_model != "power_law_floor":
+                    self.assertIn("paper_level_blockers", summary)
+                    self.assertTrue(summary["paper_level_blockers"])
+
+    def test_helper_smoke_summary_exposes_forbidden_compute_commands_without_invoking_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_smoke_run_root(base)
+            response = self._run_analysis_via_helper(
+                payload={
+                    "run_roots": [str(run_root)],
+                    "threshold_mev": 20.0,
+                    "primary_metric": "h_mae_eV_mean",
+                    "x_axis": "n_train",
+                    "n_min_source": "fit",
+                    "n_min_fit_model": "none",
+                    "aggregation_mode": "mean_seeds_per_config",
+                }
+            )
+            forbidden = response["summary"]["forbidden_compute_commands"]
+            self.assertIn("siesta", forbidden)
+            self.assertIn("deeph-train", forbidden)
+            self.assertIn("deeph-preprocess", forbidden)
+            self.assertIn("deeph-inference", forbidden)
+            self.assertIn("gnubands", forbidden)
 
     def test_dataset_size_minimum_payload_exposes_aggregation_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1879,8 +2120,24 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 summary["paper_level_blockers"],
             )
             self.assertIn("graph2mat", summary["effective_samples_at_N_min_nominal"])
+            self.assertIn(
+                "graph2mat",
+                summary["effective_samples_at_nominal_N_min_diagnostic"],
+            )
             self.assertIsNotNone(
                 summary["effective_samples_at_N_min_nominal"]["graph2mat"]["N_min_abs"]
+            )
+            self.assertEqual(
+                summary["effective_samples_at_nominal_N_min_diagnostic"],
+                summary["effective_samples_at_N_min_nominal"],
+            )
+            self.assertEqual(
+                summary["N_min_eff_diagnostic"],
+                summary["effective_samples_at_nominal_N_min_diagnostic"],
+            )
+            self.assertEqual(
+                summary["N_min_eff_diagnostic_deprecated_alias_for"],
+                "effective_samples_at_nominal_N_min_diagnostic",
             )
 
     def test_iid_scalar_series_yields_n_eff_near_nominal(self) -> None:
@@ -1952,6 +2209,189 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 summary["paper_level_blockers"],
             )
 
+    def test_scientific_status_allows_power_law_fit_protocol_when_temporal_policy_allows(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                }
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(
+            status["scientific_claim_status"],
+            "paper_candidate_nominal_with_n_eff_diagnostic",
+        )
+        self.assertEqual(status["n_min_fit_policy"], "paper_candidate")
+        self.assertFalse(status["paper_level_blockers"])
+
+    def test_scientific_status_blocks_linear_fit_even_if_temporal_policy_allows(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="linear",
+            actual_fit_model="linear",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "diagnostic_only",
+                    "paper_candidate": False,
+                    "fit_model": "linear",
+                    "status": "ok",
+                }
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            "paper_blocked_if_n_min_fit_policy_diagnostic_only:linear",
+            status["paper_level_blockers"],
+        )
+
+    def test_scientific_status_blocks_cumulative_best_fit(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="best_config_mean",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="cumulative_best",
+            actual_fit_model="cumulative_best",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "diagnostic_only",
+                    "paper_candidate": False,
+                    "fit_model": "cumulative_best",
+                    "status": "ok",
+                }
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            "paper_blocked_if_n_min_fit_policy_diagnostic_only:cumulative_best",
+            status["paper_level_blockers"],
+        )
+
+    def test_scientific_status_blocks_observed_or_none_protocol(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="observed",
+            requested_fit_model="none",
+            actual_fit_model="none",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "diagnostic_only",
+                    "paper_candidate": False,
+                    "fit_model": "none",
+                    "status": "not_used",
+                }
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            "paper_blocked_if_n_min_source_observed_without_locked_protocol",
+            status["paper_level_blockers"],
+        )
+
+    def test_scientific_status_blocks_fit_fallback(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="observed",
+            requested_fit_model="quadratic",
+            actual_fit_model=None,
+            fit_threshold_details={},
+            fallback_used=True,
+            fallback_reason="canonical_fit_failed:quadratic",
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            "paper_blocked_if_fit_failed_or_fallback_used",
+            status["paper_level_blockers"],
+        )
+        self.assertIn(
+            "paper_blocked_if_actual_fit_model_missing",
+            status["paper_level_blockers"],
+        )
+
+    def test_scientific_status_blocks_missing_fit_policy_by_method(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20}},
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={},
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn(
+            "paper_blocked_if_fit_policy_missing:graph2mat",
+            status["paper_level_blockers"],
+        )
+
     def test_analyze_includes_temporal_diagnostics_with_dataset_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1982,6 +2422,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertEqual(summary["nominal_n_train"], 10)
             self.assertIn("N_min_nominal", summary)
             self.assertIn("effective_samples_at_N_min_nominal", summary)
+            self.assertIn("effective_samples_at_nominal_N_min_diagnostic", summary)
             self.assertIn("scientific_claim_status", summary)
             self.assertIn("datasets", summary["temporal_diagnostics"])
             self.assertEqual(len(summary["temporal_diagnostics"]["datasets"]), 1)
@@ -2019,6 +2460,14 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         self.assertIn("Scientific claim status", report)
         self.assertIn("replicate resampling CI", report)
         self.assertIn("not temporal/block bootstrap", report)
+        self.assertIn("true effective-N thresholding is not implemented", report)
+        self.assertNotIn("N_min_eff_diagnostic", report)
+
+    def test_documentation_clarifies_effective_samples_at_nominal_n_min(self) -> None:
+        doc = (REPO_ROOT / "Comparison" / "scripts" / "DATASET_SIZE_MINIMUM.md").read_text(encoding="utf-8")
+        self.assertIn("effective_samples_at_nominal_N_min_diagnostic", doc)
+        self.assertIn("effective-N threshold is not implemented", doc)
+        self.assertIn("N_min_eff_diagnostic_deprecated_alias_for", doc)
 
     def test_summarize_temporal_diagnostics_includes_convention(self) -> None:
         summary = minimum.summarize_temporal_diagnostics([], run_roots=[])
