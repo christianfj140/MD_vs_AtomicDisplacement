@@ -35,6 +35,72 @@ Important semantics:
   `diagnostic_only` or add a paper blocker unless a stronger threshold protocol
   is supplied separately
 
+## Threshold publication protocol
+
+The repository now supports an explicit threshold publication protocol through
+`--threshold-protocol-file <path.json>`.
+
+This is the only supported path that can set:
+
+- `threshold_basis = explicit_threshold_publication_protocol`
+- `threshold_paper_justified = true`
+
+Nothing is paper-justified by default. Built-in presets remain exploratory on
+purpose.
+
+The JSON protocol should document:
+
+- `metric`
+- `threshold_mev`
+- `physical_rationale`
+- `reference`
+- `applies_to_metrics`
+- `recommended_sensitivity_thresholds_mev`
+- `sensitivity_recommendation`
+
+Example:
+
+```json
+{
+  "metric": "h_mae_eV_mean",
+  "threshold_mev": 10.0,
+  "physical_rationale": "Documented internal publication threshold for Hamiltonian MAE under the locked benchmark protocol.",
+  "reference": "internal_protocol_v1",
+  "applies_to_metrics": ["h_mae_eV_mean"],
+  "recommended_sensitivity_thresholds_mev": [8.0, 10.0, 12.0],
+  "sensitivity_recommendation": "Audit nearby thresholds before paper-level use."
+}
+```
+
+The resulting summary records:
+
+- `threshold_protocol_file`
+- `threshold_protocol_metric`
+- `threshold_protocol_threshold_mev`
+- `threshold_protocol_physical_rationale`
+- `threshold_protocol_reference`
+- `threshold_protocol_applies_to_metrics`
+- `threshold_protocol_sensitivity_recommendation`
+- `threshold_protocol_sensitivity_thresholds_mev`
+
+Manual thresholds remain `user_defined_exploratory` unless an explicit protocol
+file is supplied and validated.
+
+## Threshold sensitivity
+
+For paper-candidate use, threshold justification is not enough by itself. The
+analysis now records `threshold_sensitivity`, which reruns `N_min` over the
+documented threshold range and reports how much `N_min_abs` moves for each
+method.
+
+This is diagnostic unless the user supplies an explicit threshold publication
+protocol. If the sensitivity span exceeds one observed dataset-size step, the
+analysis adds a blocker such as:
+
+- `paper_blocked_if_threshold_sensitivity_unstable:<method>`
+
+This prevents fragile threshold choices from silently appearing paper-ready.
+
 ## Aggregation mode
 
 Aggregation mode is part of the reproducibility contract for Dataset Size

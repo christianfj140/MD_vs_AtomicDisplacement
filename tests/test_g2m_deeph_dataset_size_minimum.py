@@ -247,6 +247,36 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
         self.assertTrue(metadata["threshold_is_user_defined"])
         self.assertEqual(metadata["threshold_preset_key"], minimum.THRESHOLD_MANUAL_PRESET_KEY)
 
+    def test_threshold_metadata_for_explicit_protocol_can_be_paper_justified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol = Path(tmp) / "threshold_protocol.json"
+            protocol.write_text(
+                json.dumps(
+                    {
+                        "metric": "h_mae_eV_mean",
+                        "threshold_mev": 10.0,
+                        "physical_rationale": "Test-only documented H-MAE publication threshold.",
+                        "reference": "internal_protocol_v1",
+                        "applies_to_metrics": ["h_mae_eV_mean"],
+                        "recommended_sensitivity_thresholds_mev": [8.0, 10.0, 12.0],
+                        "sensitivity_recommendation": "Audit nearby thresholds before paper-level use.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metadata = minimum.resolve_threshold_metadata(
+                primary_metric="h_mae_eV_mean",
+                threshold_mev=10.0,
+                threshold_preset_key="h_mae_relaxed_10",
+                threshold_is_user_defined=False,
+                threshold_protocol_file=str(protocol),
+            )
+
+        self.assertEqual(metadata["threshold_basis"], minimum.THRESHOLD_BASIS_EXPLICIT_PROTOCOL)
+        self.assertTrue(metadata["threshold_paper_justified"])
+        self.assertEqual(metadata["threshold_protocol_reference"], "internal_protocol_v1")
+        self.assertEqual(metadata["threshold_protocol_sensitivity_thresholds_mev"], [8.0, 10.0, 12.0])
+
     def test_scientific_status_blocks_exploratory_threshold_basis(self) -> None:
         status = minimum.scientific_claim_status_payload(
             temporal_diagnostics={
@@ -284,6 +314,29 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
 
         self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
         self.assertIn("paper_blocked_if_threshold_basis_not_paper_justified", status["paper_level_blockers"])
+
+    def test_threshold_sensitivity_marks_unstable_threshold_protocol(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=50.0, seed="1", config_id="a"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=18.0, seed="1", config_id="b"),
+            make_normalized_replicate_row(method="graph2mat", size=30, mev=9.0, seed="1", config_id="c"),
+        ]
+        sensitivity = minimum.threshold_sensitivity_summary(
+            rows,
+            threshold_values_mev=[10.0, 60.0],
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            cost_basis="per_seed_mean",
+            n_min_source="observed",
+            fit_model="power_law_floor",
+            moving_average_window=3,
+        )
+        self.assertTrue(sensitivity["enabled"])
+        self.assertTrue(sensitivity["by_method"]["graph2mat"]["unstable"])
+        self.assertIn(
+            "paper_blocked_if_threshold_sensitivity_unstable:graph2mat",
+            sensitivity["paper_level_blockers"],
+        )
 
 
 class DatasetSizeMinimumTests(unittest.TestCase):
@@ -1301,6 +1354,8 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             self.assertEqual(summary["status"], "ok")
             self.assertEqual(summary["aggregation_mode"], "best_config")
             self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_abs"], 20)
+            self.assertIn("threshold_sensitivity", summary)
+            self.assertEqual(summary["threshold_sensitivity"]["status"], "ok")
             self.assertTrue((output_dir / "dataset_size_minimum_results.csv").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_summary.json").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_report.md").exists())
@@ -2736,11 +2791,14 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                             "run_roots": [str(run_root)],
                             "primary_metric": "h_mae_eV_mean",
                             "threshold_mev": 20.0,
+                            "threshold_preset_key": "h_mae_relaxed_20",
+                            "threshold_is_user_defined": False,
                             "x_axis": "n_train",
                             "n_min_source": "fit",
                             "n_min_fit_model": "power_law_floor",
                             "aggregation_mode": "mean_seeds_per_config",
                             "cost_basis": "protocol_total",
+                            "claim_mode": "paper_candidate",
                             "bootstrap_replicates": 8,
                             "ci_level": 0.9,
                         },
@@ -2750,9 +2808,12 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     command = recorded_commands[-1]
                     self.assertEqual(command[command.index("--primary-metric") + 1], "h_mae_eV_mean")
                     self.assertEqual(command[command.index("--threshold-mev") + 1], "20.0")
+                    self.assertEqual(command[command.index("--threshold-preset-key") + 1], "h_mae_relaxed_20")
+                    self.assertEqual(command[command.index("--threshold-is-user-defined") + 1], "false")
                     self.assertEqual(command[command.index("--x-axis") + 1], "n_train")
                     self.assertEqual(command[command.index("--n-min-fit-model") + 1], "power_law_floor")
                     self.assertEqual(command[command.index("--aggregation-mode") + 1], "mean_seeds_per_config")
+                    self.assertEqual(command[command.index("--claim-mode") + 1], "paper_candidate")
                     self.assertEqual(command[command.index("--bootstrap-replicates") + 1], "8")
                     self.assertEqual(command[command.index("--ci-level") + 1], "0.9")
                     self.assertEqual(command[command.index("--run-root") + 1], str(run_root.resolve()))
@@ -2765,10 +2826,19 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     after = http_json("/api/g2m-deeph/dataset-size-minimum")
                     self.assertTrue(after["available"])
                     self.assertTrue(after["outputs"])
-                    latest = after["outputs"][0]
+                    latest = next(
+                        item for item in after["outputs"]
+                        if Path(item["output_dir"]).resolve() == output_dir.resolve()
+                    )
                     self.assertIn("scientific_claim_status", latest)
                     self.assertIn("paper_level_blockers", latest)
                     self.assertIn("n_min_basis", latest)
+                    self.assertEqual(latest["threshold_preset_key"], "h_mae_relaxed_20")
+                    self.assertEqual(latest["claim_mode_requested"], "paper_candidate")
+                    self.assertIn(latest["claim_mode_actual"], {"diagnostic", "paper_candidate"})
+                    self.assertTrue(Path(latest["report_path"]).exists())
+                    self.assertTrue(latest["best_rows"])
+                    self.assertTrue(latest["aggregated_rows"])
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -4252,6 +4322,61 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         self.assertIn("SSE", report)
         self.assertIn("coarse_grid_plus_golden_section", report)
 
+    def test_report_includes_threshold_protocol_and_sensitivity(self) -> None:
+        report = minimum.build_report(
+            output_dir=Path("/tmp/out"),
+            run_roots=[Path("/tmp/run")],
+            grouped_rows=[],
+            best_rows=[],
+            thresholds={"graph2mat": {"N_min_abs": 10}},
+            fits={},
+            warnings=[],
+            primary_metric="h_mae_eV_mean",
+            threshold_mev=10.0,
+            x_axis="n_train",
+            temporal_diagnostics={"autocorrelation_available": False},
+            scientific_status={
+                "threshold_policy": {
+                    "threshold_basis": minimum.THRESHOLD_BASIS_EXPLICIT_PROTOCOL,
+                    "threshold_reference": "internal_protocol_v1",
+                    "threshold_metric_family": "hamiltonian_element_error_mev",
+                    "threshold_is_user_defined": False,
+                    "threshold_interpretation": "Protocol-backed threshold.",
+                    "threshold_protocol_file": "/tmp/threshold_protocol.json",
+                    "threshold_protocol_physical_rationale": "Test-only documented rationale.",
+                    "threshold_protocol_applies_to_metrics": ["h_mae_eV_mean"],
+                    "threshold_protocol_sensitivity_recommendation": "Audit nearby thresholds before paper-level use.",
+                },
+                "n_min_basis": "nominal",
+                "scientific_claim_status": "diagnostic_only",
+                "paper_level_blockers": ["paper_blocked_if_threshold_sensitivity_unstable:graph2mat"],
+                "N_eff_over_N_nominal": None,
+            },
+            replicate_bootstrap=minimum.disabled_bootstrap_summary(),
+            cost_basis="protocol_total",
+            threshold_sensitivity={
+                "status": "ok",
+                "thresholds_mev": [8.0, 10.0, 12.0],
+                "by_method": {
+                    "graph2mat": {
+                        "n_min_abs_span": 20,
+                        "allowed_n_min_abs_delta": 10,
+                        "unstable": True,
+                        "threshold_series": [
+                            {"threshold_mev": 8.0, "N_min_abs": 30},
+                            {"threshold_mev": 10.0, "N_min_abs": 20},
+                            {"threshold_mev": 12.0, "N_min_abs": 10},
+                        ],
+                        "paper_level_blockers": ["paper_blocked_if_threshold_sensitivity_unstable:graph2mat"],
+                    }
+                },
+            },
+        )
+        self.assertIn("Threshold protocol file", report)
+        self.assertIn("Threshold physical rationale", report)
+        self.assertIn("Threshold sensitivity", report)
+        self.assertIn("paper_blocked_if_threshold_sensitivity_unstable:graph2mat", report)
+
     def test_documentation_clarifies_effective_samples_at_nominal_n_min(self) -> None:
         doc = (REPO_ROOT / "Comparison" / "scripts" / "DATASET_SIZE_MINIMUM.md").read_text(encoding="utf-8")
         self.assertIn("effective_samples_at_nominal_N_min_diagnostic", doc)
@@ -4261,6 +4386,9 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         self.assertIn("golden-section refinement", doc)
         self.assertIn("hierarchical_uncertainty", doc)
         self.assertIn("paper_uncertainty_block_hierarchy_unavailable", doc)
+        self.assertIn("--threshold-protocol-file", doc)
+        self.assertIn("threshold_sensitivity", doc)
+        self.assertIn("paper_blocked_if_threshold_sensitivity_unstable", doc)
 
     def test_documentation_and_ui_use_replicate_resampling_ci_wording(self) -> None:
         doc = (REPO_ROOT / "Comparison" / "scripts" / "DATASET_SIZE_MINIMUM.md").read_text(encoding="utf-8")

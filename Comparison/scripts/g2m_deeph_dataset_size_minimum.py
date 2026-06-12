@@ -111,7 +111,9 @@ HIERARCHICAL_UNCERTAINTY_REPLICATES = 200
 DEFAULT_THRESHOLD_REFERENCE = "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets"
 THRESHOLD_BASIS_EXPLORATORY_PRESET = "metric_specific_exploratory_preset"
 THRESHOLD_BASIS_USER_DEFINED = "user_defined_exploratory"
+THRESHOLD_BASIS_EXPLICIT_PROTOCOL = "explicit_threshold_publication_protocol"
 THRESHOLD_MANUAL_PRESET_KEY = "manual"
+THRESHOLD_SENSITIVITY_MAX_STEP_MULTIPLIER = 1.0
 DATASET_MINIMUM_THRESHOLD_PRESETS: dict[str, list[dict[str, Any]]] = {
     "h_mae_eV_mean": [
         {
@@ -514,18 +516,119 @@ def threshold_preset_by_value(metric: str, threshold_mev: float) -> dict[str, An
     return None
 
 
+def load_threshold_protocol(path: Path) -> dict[str, Any]:
+    payload = read_json_required(path, context="threshold_protocol")
+    if not isinstance(payload, dict):
+        raise ValueError(f"threshold protocol must be a JSON object: {path}")
+    return payload
+
+
+def resolve_threshold_protocol(
+    *,
+    primary_metric: str,
+    threshold_mev: float,
+    threshold_protocol_file: str | None = None,
+) -> dict[str, Any] | None:
+    file_value = str(threshold_protocol_file or "").strip()
+    if not file_value:
+        return None
+    path = Path(file_value).expanduser().resolve()
+    payload = load_threshold_protocol(path)
+    protocol_metric = str(payload.get("metric") or "").strip()
+    if protocol_metric and protocol_metric != primary_metric:
+        raise ValueError(
+            f"threshold protocol metric mismatch: expected {primary_metric}, got {protocol_metric}"
+        )
+    protocol_threshold = finite_number(payload.get("threshold_mev"))
+    if protocol_threshold is None:
+        raise ValueError(f"threshold protocol missing numeric threshold_mev: {path}")
+    if abs(protocol_threshold - float(threshold_mev)) >= 1e-9:
+        raise ValueError(
+            f"threshold protocol threshold mismatch: expected {threshold_mev:g}, got {protocol_threshold:g}"
+        )
+    rationale = str(payload.get("physical_rationale") or payload.get("rationale") or "").strip()
+    if not rationale:
+        raise ValueError(f"threshold protocol missing physical_rationale: {path}")
+    reference = str(payload.get("reference") or "").strip()
+    if not reference:
+        raise ValueError(f"threshold protocol missing reference: {path}")
+    applicability = payload.get("applies_to_metrics")
+    if applicability is None:
+        applicability = [primary_metric]
+    elif isinstance(applicability, str):
+        applicability = [applicability]
+    elif isinstance(applicability, list):
+        applicability = [str(item).strip() for item in applicability if str(item).strip()]
+    else:
+        raise ValueError(f"threshold protocol applies_to_metrics must be a string or list: {path}")
+    if primary_metric not in applicability:
+        raise ValueError(
+            f"threshold protocol does not declare applicability to metric {primary_metric}: {path}"
+        )
+    sensitivity_values = payload.get("recommended_sensitivity_thresholds_mev")
+    thresholds_mev: list[float] = []
+    if sensitivity_values is None:
+        thresholds_mev = [float(protocol_threshold)]
+    elif isinstance(sensitivity_values, list):
+        for item in sensitivity_values:
+            value = finite_number(item)
+            if value is None:
+                raise ValueError(f"invalid sensitivity threshold in protocol: {item!r}")
+            thresholds_mev.append(float(value))
+    else:
+        raise ValueError(f"recommended_sensitivity_thresholds_mev must be a list: {path}")
+    thresholds_mev.append(float(protocol_threshold))
+    thresholds_mev = sorted({round(value, 12) for value in thresholds_mev})
+    sensitivity_recommendation = str(
+        payload.get("sensitivity_recommendation")
+        or "Check N_min sensitivity across the documented threshold range before paper-level use."
+    ).strip()
+    return {
+        "threshold_protocol_file": str(path),
+        "threshold_protocol_metric": primary_metric,
+        "threshold_protocol_threshold_mev": float(protocol_threshold),
+        "threshold_protocol_physical_rationale": rationale,
+        "threshold_protocol_reference": reference,
+        "threshold_protocol_applies_to_metrics": applicability,
+        "threshold_protocol_sensitivity_recommendation": sensitivity_recommendation,
+        "threshold_protocol_sensitivity_thresholds_mev": thresholds_mev,
+    }
+
+
 def resolve_threshold_metadata(
     *,
     primary_metric: str,
     threshold_mev: float,
     threshold_preset_key: str | None = None,
     threshold_is_user_defined: bool = False,
+    threshold_protocol_file: str | None = None,
 ) -> dict[str, Any]:
     metric_family = threshold_metric_family(primary_metric)
+    threshold_protocol = resolve_threshold_protocol(
+        primary_metric=primary_metric,
+        threshold_mev=threshold_mev,
+        threshold_protocol_file=threshold_protocol_file,
+    )
     preset = threshold_preset_by_key(primary_metric, threshold_preset_key) or threshold_preset_by_value(
         primary_metric,
         threshold_mev,
     )
+    if threshold_protocol is not None:
+        return {
+            "threshold_basis": THRESHOLD_BASIS_EXPLICIT_PROTOCOL,
+            "threshold_reference": str(threshold_protocol["threshold_protocol_reference"]),
+            "threshold_interpretation": (
+                "Explicit threshold publication protocol supplied by the user. "
+                "Paper-candidate use still depends on the recorded sensitivity audit."
+            ),
+            "threshold_metric_family": metric_family,
+            "threshold_is_user_defined": bool(threshold_is_user_defined),
+            "threshold_preset_key": (
+                THRESHOLD_MANUAL_PRESET_KEY if threshold_is_user_defined else str((preset or {}).get("key") or "")
+            ),
+            "threshold_paper_justified": True,
+            **threshold_protocol,
+        }
     if threshold_is_user_defined:
         return {
             "threshold_basis": THRESHOLD_BASIS_USER_DEFINED,
@@ -1614,6 +1717,104 @@ def thresholds_by_method_from_fit(
         })
 
     return out, fit_details, warnings
+
+
+def threshold_sensitivity_summary(
+    best_rows: list[dict[str, Any]],
+    *,
+    threshold_values_mev: list[float],
+    relative_tolerance: float,
+    plateau_gain: float,
+    cost_basis: str,
+    n_min_source: str,
+    fit_model: str,
+    moving_average_window: int,
+) -> dict[str, Any]:
+    unique_thresholds = sorted({round(float(value), 12) for value in threshold_values_mev if finite_number(value) is not None})
+    if not unique_thresholds:
+        return {
+            "enabled": False,
+            "status": "not_requested",
+            "thresholds_mev": [],
+            "by_method": {},
+            "paper_level_blockers": [],
+            "warnings": [],
+        }
+    by_method: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    methods = sorted({str(row["method"]) for row in best_rows})
+    per_threshold_results: dict[float, dict[str, dict[str, Any]]] = {}
+    for threshold_mev in unique_thresholds:
+        if n_min_source == "fit":
+            threshold_map, _fit_details, fit_warnings = thresholds_by_method_from_fit(
+                best_rows,
+                threshold_mev=threshold_mev,
+                relative_tolerance=relative_tolerance,
+                plateau_gain=plateau_gain,
+                fit_model=fit_model,
+                moving_average_window=moving_average_window,
+                cost_basis=cost_basis,
+            )
+            warnings.extend(fit_warnings)
+        else:
+            threshold_map = thresholds_by_method(
+                best_rows,
+                threshold_mev=threshold_mev,
+                relative_tolerance=relative_tolerance,
+                plateau_gain=plateau_gain,
+                cost_basis=cost_basis,
+            )
+        per_threshold_results[threshold_mev] = threshold_map
+    blockers: list[str] = []
+    for method in methods:
+        series: list[dict[str, Any]] = []
+        n_values: list[int] = []
+        available_sizes: list[int] = []
+        for threshold_mev in unique_thresholds:
+            method_thresholds = per_threshold_results.get(threshold_mev, {}).get(method) or {}
+            n_min_abs_value = int_number(method_thresholds.get("N_min_abs"))
+            if not available_sizes:
+                available_sizes = [
+                    int(size) for size in (method_thresholds.get("available_sizes") or []) if int_number(size) is not None
+                ]
+            series.append({
+                "threshold_mev": threshold_mev,
+                "N_min_abs": n_min_abs_value,
+                "source": method_thresholds.get("N_min_abs_source"),
+            })
+            if n_min_abs_value is not None:
+                n_values.append(n_min_abs_value)
+        observed_steps = sorted({
+            later - earlier
+            for earlier, later in zip(available_sizes, available_sizes[1:])
+            if later > earlier
+        })
+        allowed_delta = observed_steps[0] if observed_steps else None
+        span = (max(n_values) - min(n_values)) if n_values else None
+        unstable = (
+            allowed_delta is not None
+            and span is not None
+            and span > allowed_delta * THRESHOLD_SENSITIVITY_MAX_STEP_MULTIPLIER
+        )
+        method_blockers: list[str] = []
+        if unstable:
+            method_blockers.append(f"paper_blocked_if_threshold_sensitivity_unstable:{method}")
+            blockers.extend(method_blockers)
+        by_method[method] = {
+            "threshold_series": series,
+            "n_min_abs_span": span,
+            "allowed_n_min_abs_delta": allowed_delta,
+            "unstable": unstable,
+            "paper_level_blockers": method_blockers,
+        }
+    return {
+        "enabled": True,
+        "status": "ok",
+        "thresholds_mev": unique_thresholds,
+        "by_method": by_method,
+        "paper_level_blockers": sorted(set(blockers)),
+        "warnings": sorted(set(warnings)),
+    }
 
 
 def fit_predictive_stability_by_left_out_N(
@@ -4155,6 +4356,7 @@ def scientific_claim_status_payload(
     fit_threshold_details: dict[str, dict[str, Any]],
     fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
     hierarchical_uncertainty: dict[str, Any] | None = None,
+    threshold_sensitivity: dict[str, Any] | None = None,
     fallback_used: bool,
     fallback_reason: str | None,
 ) -> dict[str, Any]:
@@ -4287,6 +4489,8 @@ def scientific_claim_status_payload(
 
     if hierarchical_uncertainty:
         blockers.extend(str(item) for item in (hierarchical_uncertainty.get("paper_level_blockers") or []))
+    if threshold_sensitivity:
+        blockers.extend(str(item) for item in (threshold_sensitivity.get("paper_level_blockers") or []))
 
     if claim_mode_requested == "paper_candidate":
         if actual_aggregation_mode == "best_config_mean":
@@ -4336,6 +4540,13 @@ def scientific_claim_status_payload(
             "reason": "missing_diagnostic",
             "methods": {},
         },
+        "threshold_sensitivity": threshold_sensitivity or {
+            "enabled": False,
+            "status": "not_requested",
+            "thresholds_mev": [],
+            "by_method": {},
+            "paper_level_blockers": [],
+        },
         "hierarchical_uncertainty": hierarchical_uncertainty or {
             "enabled": False,
             "status": "not_available",
@@ -4367,6 +4578,7 @@ def build_report(
     hierarchical_uncertainty: dict[str, Any] | None = None,
     cost_basis: str = "per_seed_mean",
     fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
+    threshold_sensitivity: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Dataset Size Minimum Analysis\n")
@@ -4386,6 +4598,15 @@ def build_report(
             f"user_defined={bool(threshold_policy.get('threshold_is_user_defined'))}"
         )
         lines.append(f"- Threshold interpretation: {threshold_policy.get('threshold_interpretation')}")
+        if threshold_policy.get("threshold_protocol_file"):
+            lines.append(f"- Threshold protocol file: `{threshold_policy.get('threshold_protocol_file')}`")
+            lines.append(f"- Threshold physical rationale: {threshold_policy.get('threshold_protocol_physical_rationale')}")
+            lines.append(
+                f"- Threshold applicability: `{json.dumps(threshold_policy.get('threshold_protocol_applies_to_metrics') or [], ensure_ascii=False)}`"
+            )
+            lines.append(
+                f"- Threshold sensitivity recommendation: {threshold_policy.get('threshold_protocol_sensitivity_recommendation')}"
+            )
     lines.append("- 20 meV is not universal; threshold presets are metric-specific and exploratory unless explicitly justified.")
     lines.append(f"- Eje x: `{x_axis}`")
     lines.append(f"- Cost basis for `N_min_cost_eff`: `{cost_basis}` ({cost_basis_label(cost_basis)})")
@@ -4489,6 +4710,25 @@ def build_report(
         blockers = method_stability.get("paper_level_blockers") or []
         if blockers:
             lines.append(f"  blockers: `{json.dumps(blockers, ensure_ascii=False)}`")
+    lines.append("\n## Threshold sensitivity\n")
+    sensitivity = threshold_sensitivity or {}
+    lines.append(f"- Status: `{sensitivity.get('status') or 'not_requested'}`")
+    lines.append(
+        f"- Thresholds audited (meV): `{json.dumps(sensitivity.get('thresholds_mev') or [], ensure_ascii=False)}`"
+    )
+    for method, method_sensitivity in sorted((sensitivity.get("by_method") or {}).items()):
+        lines.append(
+            f"- Method `{method}`: span={format_optional(method_sensitivity.get('n_min_abs_span'), precision=0)}, "
+            f"allowed_delta={format_optional(method_sensitivity.get('allowed_n_min_abs_delta'), precision=0)}, "
+            f"unstable={bool(method_sensitivity.get('unstable'))}"
+        )
+        lines.append(
+            f"  series: `{json.dumps(method_sensitivity.get('threshold_series') or [], ensure_ascii=False)}`"
+        )
+        if method_sensitivity.get("paper_level_blockers"):
+            lines.append(
+                f"  blockers: `{json.dumps(method_sensitivity.get('paper_level_blockers') or [], ensure_ascii=False)}`"
+            )
     lines.append("\n## Temporal diagnostics (MD snapshot independence)\n")
     temporal = temporal_diagnostics or {}
     lines.append(
@@ -5467,6 +5707,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         threshold_mev=float(args.threshold_mev),
         threshold_preset_key=getattr(args, "threshold_preset_key", None),
         threshold_is_user_defined=parse_bool_text(getattr(args, "threshold_is_user_defined", False)),
+        threshold_protocol_file=getattr(args, "threshold_protocol_file", None),
     )
     actual_n_min_source = requested_n_min_source
     actual_fit_model = canonical_fit if requested_n_min_source == "fit" else None
@@ -5546,6 +5787,20 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         baseline_thresholds=fit_thresholds if requested_n_min_source == "fit" else thresholds,
         baseline_fit_details=fit_threshold_details,
     )
+    threshold_sensitivity = threshold_sensitivity_summary(
+        best_rows,
+        threshold_values_mev=list(
+            threshold_metadata.get("threshold_protocol_sensitivity_thresholds_mev")
+            or [float(args.threshold_mev)]
+        ),
+        relative_tolerance=float(args.relative_tolerance),
+        plateau_gain=float(args.plateau_gain),
+        cost_basis=cost_basis,
+        n_min_source=actual_n_min_source,
+        fit_model=requested_fit_model,
+        moving_average_window=moving_average_window,
+    )
+    warnings.extend(threshold_sensitivity.get("warnings") or [])
     if aggregation_mode in {"mean_seeds_per_config", "best_config_mean"} and cost_basis == "per_seed_mean":
         warnings.append("paper_level_cost_basis_per_seed_mean_may_underestimate_protocol_cost")
 
@@ -5615,6 +5870,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         actual_fit_model=actual_fit_model,
         fit_threshold_details=fit_threshold_details,
         fit_predictive_stability_by_left_out_N=fit_stability,
+        threshold_sensitivity=threshold_sensitivity,
         hierarchical_uncertainty=hierarchical_uncertainty,
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
@@ -5638,6 +5894,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         hierarchical_uncertainty=hierarchical_uncertainty,
         cost_basis=cost_basis,
         fit_predictive_stability_by_left_out_N=fit_stability,
+        threshold_sensitivity=threshold_sensitivity,
     )
     report_path = output_dir / "dataset_size_minimum_report.md"
     report_path.write_text(report, encoding="utf-8")
@@ -5682,12 +5939,14 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "requested_fit_model": requested_fit_model,
         "actual_fit_model": actual_fit_model,
         "canonical_fit_model": canonical_fit,
+        "threshold_protocol_file": threshold_metadata.get("threshold_protocol_file"),
         "fallback_used": fallback_used,
         "fallback_reason": fallback_reason,
         "observed_thresholds": observed_thresholds,
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
         "fit_predictive_stability_by_left_out_N": fit_stability,
+        "threshold_sensitivity": threshold_sensitivity,
         "deprecated_threshold_aliases": dict(LEGACY_THRESHOLD_ALIASES),
         "moving_average_window": moving_average_window,
         "bootstrap_replicates": bootstrap_replicates,
@@ -5734,6 +5993,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_bool_text,
         default=False,
         help="Whether the threshold was entered manually rather than selected from a documented metric-specific preset.",
+    )
+    parser.add_argument(
+        "--threshold-protocol-file",
+        default=None,
+        help=(
+            "Optional JSON file documenting an explicit threshold publication protocol. "
+            "This is the only supported path to threshold_paper_justified=True."
+        ),
     )
     parser.add_argument("--relative-tolerance", type=float, default=0.05)
     parser.add_argument("--plateau-gain", type=float, default=0.05)

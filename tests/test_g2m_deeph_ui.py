@@ -293,6 +293,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "renderDatasetMinimumStatus",
             "renderDatasetMinimumTable",
             "renderDatasetMinimumPlot",
+            'card.textContent = "Plotly no esta cargado."',
+            'card.textContent = "No plot available because dataset-size-minimum loading failed."',
             "renderDatasetMinimumSelectedOutput",
             "DATASET_MINIMUM_THRESHOLD_PRESETS",
             "datasetMinimumSelectedThresholdPresetKey",
