@@ -659,6 +659,8 @@ const state = {
   g2mDeephSelectedPlotRunIds: [],
   datasetMinimumPayload: null,
   datasetMinimumRunRootSelection: null,
+  datasetMinimumThresholdPresetKey: "h_mae_relaxed_10",
+  datasetMinimumThresholdUserDefined: false,
   datasetMinimumPreviewCache: null,
   datasetMinimumViewRequestId: 0,
   g2mDeephPlotsInFlight: false,
@@ -2479,35 +2481,55 @@ function syncDatasetMinimumRunRootSelectionFromDom() {
 function populateDatasetMinimumThresholdPresets(payload = {}) {
   const select = document.getElementById("dataset-minimum-threshold-preset");
   const input = document.getElementById("dataset-minimum-threshold");
+  const warning = document.getElementById("dataset-minimum-threshold-warning");
   if (!select) return;
   const currentMetric = datasetMinimumSelectedMetric();
   const currentThreshold = datasetMinimumSelectedThreshold();
-  const thresholds = Array.from(
-    new Set(
-      (payload.available_combinations || [])
-        .filter((item) => item.primary_metric === currentMetric && finiteNumber(item.threshold_mev) != null)
-        .map((item) => finiteNumber(item.threshold_mev)),
-    ),
-  ).sort((a, b) => a - b);
-  if (!thresholds.length && currentThreshold != null) thresholds.push(currentThreshold);
-  if (!thresholds.length) thresholds.push(20);
+  const presets = DATASET_MINIMUM_THRESHOLD_PRESETS[currentMetric] || [];
+  const activePreset = presets.find((item) => item.key === state.datasetMinimumThresholdPresetKey) || presets[0] || null;
   select.innerHTML = "";
-  for (const threshold of thresholds) {
+  for (const preset of presets) {
     const option = document.createElement("option");
-    option.value = String(threshold);
-    option.textContent = `${formatCompactNumber(threshold)} meV`;
-    if (currentThreshold != null && Math.abs(currentThreshold - threshold) < 1e-9) option.selected = true;
+    option.value = String(preset.key);
+    option.textContent = preset.label;
+    if (!state.datasetMinimumThresholdUserDefined && activePreset && preset.key === activePreset.key) {
+      option.selected = true;
+    }
     select.appendChild(option);
   }
-  if (input && finiteNumber(select.value) != null) input.value = String(select.value);
+  if (state.datasetMinimumThresholdUserDefined) {
+    const manual = document.createElement("option");
+    manual.value = DATASET_MINIMUM_THRESHOLD_MANUAL_KEY;
+    manual.textContent = "Manual exploratory threshold";
+    manual.selected = true;
+    select.appendChild(manual);
+  }
+  if (input) {
+    if (state.datasetMinimumThresholdUserDefined) {
+      if (currentThreshold == null && activePreset) input.value = String(activePreset.threshold_mev);
+    } else if (activePreset) {
+      input.value = String(activePreset.threshold_mev);
+      state.datasetMinimumThresholdPresetKey = activePreset.key;
+    }
+  }
+  if (warning) {
+    warning.textContent = state.datasetMinimumThresholdUserDefined
+      ? "Manual threshold: marked as user_defined_exploratory. Visible warning: this blocks paper-level use unless separately justified."
+      : `Preset threshold for ${DATASET_MINIMUM_METRIC_LABELS[currentMetric] || currentMetric}. 20 meV is not universal; presets are metric-specific and exploratory unless separately justified.`;
+  }
 }
 
 function syncDatasetMinimumThresholdFromPreset() {
   const select = document.getElementById("dataset-minimum-threshold-preset");
   const input = document.getElementById("dataset-minimum-threshold");
   if (!select || !input) return;
-  const value = finiteNumber(select.value);
-  if (value != null) input.value = String(value);
+  const currentMetric = datasetMinimumSelectedMetric();
+  const preset = (DATASET_MINIMUM_THRESHOLD_PRESETS[currentMetric] || []).find((item) => item.key === select.value);
+  if (!preset) return;
+  state.datasetMinimumThresholdUserDefined = false;
+  state.datasetMinimumThresholdPresetKey = preset.key;
+  input.value = String(preset.threshold_mev);
+  populateDatasetMinimumThresholdPresets();
 }
 
 function syncDatasetMinimumThresholdPresetFromInput() {
@@ -2516,11 +2538,9 @@ function syncDatasetMinimumThresholdPresetFromInput() {
   if (!select || !input) return;
   const value = finiteNumber(input.value);
   if (value == null) return;
-  const match = Array.from(select.options).find((option) => {
-    const optionValue = finiteNumber(option.value);
-    return optionValue != null && Math.abs(optionValue - value) < 1e-9;
-  });
-  if (match) select.value = match.value;
+  state.datasetMinimumThresholdUserDefined = true;
+  state.datasetMinimumThresholdPresetKey = DATASET_MINIMUM_THRESHOLD_MANUAL_KEY;
+  populateDatasetMinimumThresholdPresets();
 }
 
 function renderDatasetMinimumRunSources(payload = {}) {
@@ -2596,6 +2616,8 @@ async function runDatasetMinimumAnalysis() {
       run_roots: runRoots,
       primary_metric: datasetMinimumSelectedMetric(),
       threshold_mev: datasetMinimumSelectedThreshold(),
+      threshold_preset_key: datasetMinimumSelectedThresholdPresetKey(),
+      threshold_is_user_defined: datasetMinimumThresholdIsUserDefined(),
       x_axis: datasetMinimumSelectedXAxis(),
       fit_models: [
         "linear",
@@ -2618,6 +2640,7 @@ async function runDatasetMinimumAnalysis() {
       moving_average_window: datasetMinimumSelectedMovingAverageWindow(),
       aggregation_mode: datasetMinimumSelectedAggregationMode(),
       cost_basis: datasetMinimumSelectedCostBasis(),
+      claim_mode: datasetMinimumSelectedClaimMode(),
       bootstrap_replicates: datasetMinimumSelectedBootstrapReplicates(),
       bootstrap_seed: 12345,
       ci_level: datasetMinimumSelectedCiLevel(),
@@ -2657,6 +2680,67 @@ const DATASET_MINIMUM_METRIC_LABELS = {
   low_energy_rmse_eV: "Low-energy RMSE",
   fermi_window_rmse_eV: "Fermi RMSE",
 };
+
+const DATASET_MINIMUM_THRESHOLD_PRESETS = {
+  h_mae_eV_mean: [
+    {
+      key: "h_mae_relaxed_10",
+      threshold_mev: 10,
+      label: "H-MAE exploratory 10 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+    {
+      key: "h_mae_relaxed_20",
+      threshold_mev: 20,
+      label: "H-MAE exploratory 20 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+  ],
+  h_rmse_eV: [
+    {
+      key: "h_rmse_relaxed_15",
+      threshold_mev: 15,
+      label: "H-RMSE exploratory 15 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+    {
+      key: "h_rmse_relaxed_25",
+      threshold_mev: 25,
+      label: "H-RMSE exploratory 25 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+  ],
+  low_energy_rmse_eV: [
+    {
+      key: "low_energy_rmse_exploratory_20",
+      threshold_mev: 20,
+      label: "Low-energy RMSE exploratory 20 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+    {
+      key: "low_energy_rmse_exploratory_40",
+      threshold_mev: 40,
+      label: "Low-energy RMSE exploratory 40 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+  ],
+  fermi_window_rmse_eV: [
+    {
+      key: "fermi_window_rmse_exploratory_15",
+      threshold_mev: 15,
+      label: "Fermi RMSE exploratory 15 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+    {
+      key: "fermi_window_rmse_exploratory_30",
+      threshold_mev: 30,
+      label: "Fermi RMSE exploratory 30 meV",
+      reference: "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets",
+    },
+  ],
+};
+
+const DATASET_MINIMUM_THRESHOLD_MANUAL_KEY = "manual";
 
 const DATASET_MINIMUM_METHOD_COLORS = {
   deeph: "#d62728",
@@ -2718,7 +2802,17 @@ function datasetMinimumSelectedMetric() {
 }
 
 function datasetMinimumSelectedThreshold() {
-  return finiteNumber(datasetMinimumControlValue("dataset-minimum-threshold", "20"));
+  return finiteNumber(datasetMinimumControlValue("dataset-minimum-threshold", "10"));
+}
+
+function datasetMinimumSelectedThresholdPresetKey() {
+  return state.datasetMinimumThresholdUserDefined
+    ? DATASET_MINIMUM_THRESHOLD_MANUAL_KEY
+    : (state.datasetMinimumThresholdPresetKey || datasetMinimumControlValue("dataset-minimum-threshold-preset", "h_mae_relaxed_10"));
+}
+
+function datasetMinimumThresholdIsUserDefined() {
+  return Boolean(state.datasetMinimumThresholdUserDefined);
 }
 
 function datasetMinimumSelectedXAxis() {
@@ -2727,6 +2821,10 @@ function datasetMinimumSelectedXAxis() {
 
 function datasetMinimumSelectedCostBasis() {
   return datasetMinimumControlValue("dataset-minimum-cost-basis", "per_seed_mean");
+}
+
+function datasetMinimumSelectedClaimMode() {
+  return datasetMinimumControlValue("dataset-minimum-claim-mode", "diagnostic");
 }
 
 function datasetMinimumSelectedFit() {
@@ -2859,6 +2957,14 @@ function datasetMinimumOutputCostBasis(output = {}) {
   return String(output.cost_basis || "per_seed_mean");
 }
 
+function datasetMinimumOutputClaimModeRequested(output = {}) {
+  return String(output.claim_mode_requested || "diagnostic");
+}
+
+function datasetMinimumOutputClaimModeActual(output = {}) {
+  return String(output.claim_mode_actual || "diagnostic");
+}
+
 function datasetMinimumOutputAggregationMetadata(output = {}) {
   const requested = output.requested_aggregation_mode;
   const actual = String(
@@ -2896,6 +3002,15 @@ function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
   ) {
     return false;
   }
+  if (Boolean(output.threshold_is_user_defined) !== datasetMinimumThresholdIsUserDefined()) {
+    return false;
+  }
+  if (!datasetMinimumThresholdIsUserDefined()) {
+    const outputPresetKey = String(output.threshold_preset_key || "");
+    if (outputPresetKey !== String(datasetMinimumSelectedThresholdPresetKey() || "")) {
+      return false;
+    }
+  }
 
   const requestedSource = String(
     output.requested_n_min_source || output.n_min_source || "observed",
@@ -2914,6 +3029,9 @@ function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
   }
 
   if (datasetMinimumOutputCostBasis(output) !== datasetMinimumSelectedCostBasis()) {
+    return false;
+  }
+  if (datasetMinimumOutputClaimModeRequested(output) !== datasetMinimumSelectedClaimMode()) {
     return false;
   }
 
@@ -3284,6 +3402,56 @@ function renderDatasetMinimumTable(output, axis) {
     body.appendChild(tr);
   }
   container.appendChild(table);
+
+  const temporal = output?.temporal_diagnostics || {};
+  const nEffBySize = temporal.N_eff_by_dataset_size || output?.N_eff_by_dataset_size || {};
+  const ratioBySize = temporal.N_eff_over_N_by_dataset_size || output?.N_eff_over_N_by_dataset_size || {};
+  const availabilityBySize = temporal.autocorrelation_available_by_dataset_size || output?.autocorrelation_available_by_dataset_size || {};
+  const blockBySize = temporal.temporal_block_diagnostics_by_dataset_size || output?.temporal_block_diagnostics_by_dataset_size || {};
+  const sizeKeys = Array.from(new Set([
+    ...Object.keys(nEffBySize),
+    ...Object.keys(blockBySize),
+  ])).sort((left, right) => Number(left) - Number(right));
+  if (!sizeKeys.length) return;
+
+  const temporalTitle = document.createElement("div");
+  temporalTitle.className = "section-subtitle";
+  temporalTitle.textContent = "N nominal vs N_eff (diagnostic only)";
+  container.appendChild(temporalTitle);
+
+  const temporalTable = document.createElement("table");
+  temporalTable.className = "summary-table";
+  temporalTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>Dataset size (nominal N_train)</th>
+        <th>N_eff diagnostic</th>
+        <th>N_eff/N_nominal</th>
+        <th>Autocorrelation available</th>
+        <th>Blocks / datasets</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const temporalBody = temporalTable.querySelector("tbody");
+  sizeKeys.forEach((sizeKey) => {
+    const diag = blockBySize[sizeKey] || {};
+    const datasets = Array.isArray(diag.datasets) ? diag.datasets : [];
+    const blockEntries = datasets.reduce(
+      (sum, item) => sum + Object.keys(item?.block_diagnostics || {}).length,
+      0,
+    );
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(sizeKey)}</td>
+      <td>${datasetMinimumFormatN(nEffBySize[sizeKey])}</td>
+      <td>${ratioBySize[sizeKey] == null ? "-" : formatCompactNumber(ratioBySize[sizeKey])}</td>
+      <td>${availabilityBySize[sizeKey] ? "yes" : "no"}</td>
+      <td>${escapeHtml(`${diag.n_datasets || 0} dataset(s), ${blockEntries} block entry(ies)`)}</td>
+    `;
+    temporalBody.appendChild(tr);
+  });
+  container.appendChild(temporalTable);
 }
 
 function datasetMinimumPowerLawFitLinePoints(points) {
@@ -4097,6 +4265,12 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
 
   const requestedThreshold = datasetMinimumSelectedThreshold();
   const outputThreshold = finiteNumber(output.threshold_mev);
+  const thresholdPolicyNote = output.threshold_basis
+    ? ` Threshold policy: basis=${output.threshold_basis}, reference=${output.threshold_reference || "n/a"}, family=${output.threshold_metric_family || "unknown"}, user_defined=${Boolean(output.threshold_is_user_defined)}.`
+    : "";
+  const thresholdWarningNote = output.threshold_is_user_defined
+    ? " WARNING: manual threshold is user_defined_exploratory."
+    : "";
 
   const thresholdNote =
     requestedThreshold != null &&
@@ -4140,6 +4314,14 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : ` N_min source: ${actualSource}.`;
   const costBasis = datasetMinimumOutputCostBasis(output);
   const costBasisNote = ` Cost basis: ${costBasis === "protocol_total" ? "protocol total GPU-hours" : "per-seed mean GPU-hours"}.`;
+  const requestedClaimMode = datasetMinimumOutputClaimModeRequested(output);
+  const actualClaimMode = datasetMinimumOutputClaimModeActual(output);
+  const claimModeNote = ` Claim mode: requested=${requestedClaimMode}, actual=${actualClaimMode}.`;
+  const claimModeWarning = requestedClaimMode === "paper_candidate" && actualClaimMode !== "paper_candidate"
+    ? " Diagnostic only: do not use as a paper-level minimum snapshot claim."
+    : actualClaimMode === "paper_candidate"
+      ? " Paper-candidate only for nominal N_min under the audited sweep protocol; not a validated independent-sample minimum."
+      : "";
   const fitNote = ` Fit: ${datasetMinimumFitLabel(datasetMinimumSelectedFit())} (canonical: ${output.canonical_fit_model || datasetMinimumOutputNMinFitModel(output)}).`;
   const fallbackNote = output.fallback_used
     ? ` WARNING: canonical fit failed (${output.fallback_reason || "unknown"}); thresholds use observed points.`
@@ -4153,6 +4335,9 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : " Replicate-resampling CI: disabled.";
   const bootstrapWarningNote = Array.isArray(bootstrap.warnings) && bootstrap.warnings.length
     ? ` Replicate-resampling CI warnings: ${bootstrap.warnings.slice(0, 4).join("; ")}.`
+    : "";
+  const costEffBootstrapNote = bootstrap.cost_eff_ci_available === false
+    ? ` N_min_cost_eff has no replicate-resampling CI (${bootstrap.cost_eff_ci_reason || "cost and metric are not jointly bootstrapped"}).`
     : "";
   const hierarchical = datasetMinimumHierarchicalUncertainty(output);
   const hierarchicalLevels = hierarchical.levels || {};
@@ -4187,6 +4372,9 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   if (output.N_eff_over_N_nominal != null) {
     temporalNote += ` N_eff/N_nominal: ${formatCompactNumber(output.N_eff_over_N_nominal)}.`;
   }
+  if (Object.keys(temporal.N_eff_by_dataset_size || {}).length) {
+    temporalNote += " Per-size N_eff diagnostics are shown in the N nominal vs N_eff table below.";
+  }
   if (temporal.n_eff_convention) {
     temporalNote += ` Convention: ${temporal.n_eff_convention}.`;
   }
@@ -4213,8 +4401,8 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : "";
 
   status.textContent =
-    `${aggregationNote}${aggregationProtocolNote}${aggregationLegacyNote}${bestConfigWarning}${aggregationDiagnosticWarning}${nMinSourceNote}${costBasisNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${hierarchicalNote}${hierarchicalBlockerNote}${temporalNote}` +
-    `${thresholdNote}${outputNote}${axisNote}` +
+    `${aggregationNote}${aggregationProtocolNote}${aggregationLegacyNote}${bestConfigWarning}${aggregationDiagnosticWarning}${nMinSourceNote}${costBasisNote}${claimModeNote}${claimModeWarning}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${costEffBootstrapNote}${hierarchicalNote}${hierarchicalBlockerNote}${temporalNote}` +
+    `${thresholdPolicyNote}${thresholdWarningNote}${thresholdNote}${outputNote}${axisNote}` +
     `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}` +
     `${payload.diagnostic_warning ? ` ${payload.diagnostic_warning}` : ""}`;
 }
@@ -10848,6 +11036,7 @@ function setupEvents() {
       "dataset-minimum-threshold-preset",
       "dataset-minimum-x-axis",
       "dataset-minimum-cost-basis",
+      "dataset-minimum-claim-mode",
       "dataset-minimum-fit",
       "dataset-minimum-moving-average-window",
       "dataset-minimum-nmin-source",
@@ -10859,6 +11048,12 @@ function setupEvents() {
     ].forEach((id) => {
     const node = document.getElementById(id);
     node?.addEventListener("change", () => {
+      if (id === "dataset-minimum-metric") {
+        state.datasetMinimumThresholdUserDefined = false;
+        const presets = DATASET_MINIMUM_THRESHOLD_PRESETS[datasetMinimumSelectedMetric()] || [];
+        state.datasetMinimumThresholdPresetKey = presets[0]?.key || null;
+        populateDatasetMinimumThresholdPresets(state.datasetMinimumPayload || {});
+      }
       if (id === "dataset-minimum-threshold-preset") syncDatasetMinimumThresholdFromPreset();
       if (id === "dataset-minimum-threshold") syncDatasetMinimumThresholdPresetFromInput();
       if (id === "dataset-minimum-fit") updateDatasetMinimumMovingAverageVisibility();

@@ -253,8 +253,10 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "dataset-minimum-metric",
             "dataset-minimum-threshold",
             "dataset-minimum-threshold-preset",
+            "dataset-minimum-threshold-warning",
             "dataset-minimum-x-axis",
             "dataset-minimum-cost-basis",
+            "dataset-minimum-claim-mode",
             "dataset-minimum-fit",
             "dataset-minimum-moving-average-window",
             "dataset-minimum-nmin-source",
@@ -275,7 +277,11 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             'document.getElementById("g2m-deeph-dataset-minimum-run")?.addEventListener("click"',
             'showToast("Selecciona al menos un sweep terminado.");',
             "aggregation_mode: datasetMinimumSelectedAggregationMode()",
+            "claim_mode: datasetMinimumSelectedClaimMode()",
             "datasetMinimumAggregationModeClassification",
+            "Claim mode: requested=",
+            "Diagnostic only: do not use as a paper-level minimum snapshot claim.",
+            "Paper-candidate only for nominal N_min under the audited sweep protocol; not a validated independent-sample minimum.",
             "Selected aggregation mode is diagnostic-only",
             "legacy/inferred",
             'document.getElementById("dataset-minimum-status")',
@@ -288,6 +294,15 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "renderDatasetMinimumTable",
             "renderDatasetMinimumPlot",
             "renderDatasetMinimumSelectedOutput",
+            "DATASET_MINIMUM_THRESHOLD_PRESETS",
+            "datasetMinimumSelectedThresholdPresetKey",
+            "datasetMinimumThresholdIsUserDefined",
+            "N nominal vs N_eff (diagnostic only)",
+            "N_eff_by_dataset_size",
+            "temporal_block_diagnostics_by_dataset_size",
+            "Per-size N_eff diagnostics are shown in the N nominal vs N_eff table below.",
+            "Manual exploratory threshold",
+            "20 meV is not universal",
             '"/api/g2m-deeph/dataset-size-minimum"',
             '"/api/g2m-deeph/dataset-size-minimum/preview"',
             '"/api/g2m-deeph/dataset-size-minimum/analyze"',
@@ -298,8 +313,10 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "dataset-minimum-metric",
             "dataset-minimum-threshold",
             "dataset-minimum-threshold-preset",
+            "dataset-minimum-threshold-warning",
             "dataset-minimum-x-axis",
             "dataset-minimum-cost-basis",
+            "dataset-minimum-claim-mode",
             "dataset-minimum-fit",
             "dataset-minimum-moving-average-window",
             "dataset-minimum-nmin-source",
@@ -311,6 +328,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         ):
             self.assertIn(f'"{control_id}"', self.app_js)
         self.assertIn("Paper-ready protocol: seleccion explicita.", self.index_html)
+        self.assertIn("20 meV no es universal", self.index_html)
 
 
 if __name__ == "__main__":

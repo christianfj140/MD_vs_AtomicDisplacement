@@ -4,6 +4,37 @@ Read-only post-processing for Graph2Mat vs DeepH scaling sweeps. It estimates
 `N_min` thresholds from existing metric tables and does **not** train models or
 regenerate datasets.
 
+## Metric-specific threshold presets
+
+`threshold_mev` is now treated as a metric-specific protocol choice rather than
+as a universal `20 meV` rule.
+
+Current UI/backend presets are explicit per metric:
+
+- `h_mae_eV_mean` — exploratory presets distinct from spectral metrics
+- `h_rmse_eV` — exploratory presets distinct from H-MAE
+- `low_energy_rmse_eV` — exploratory spectral presets
+- `fermi_window_rmse_eV` — exploratory Fermi-window spectral presets
+
+The summary JSON records:
+
+- `threshold_basis`
+- `threshold_reference`
+- `threshold_interpretation`
+- `threshold_metric_family`
+- `threshold_is_user_defined`
+- `threshold_preset_key`
+
+Important semantics:
+
+- `20 meV` is **not universal**
+- metric-specific presets are currently exploratory defaults unless stronger
+  justification is documented
+- a manual threshold is recorded as `user_defined_exploratory`
+- exploratory threshold choices should keep `scientific_claim_status` at
+  `diagnostic_only` or add a paper blocker unless a stronger threshold protocol
+  is supplied separately
+
 ## Aggregation mode
 
 Aggregation mode is part of the reproducibility contract for Dataset Size
@@ -70,6 +101,11 @@ analysis adds `temporal_diagnostics` to the summary:
 | `N_min_nominal` | Per-method nominal threshold map copied from the canonical criteria |
 | `N_eff_diagnostic_available` | Whether `N_eff_over_N_nominal` could be estimated |
 | `N_eff_over_N_nominal` | Diagnostic ratio used to contextualize nominal thresholds |
+| `N_eff_by_dataset_size` | Diagnostic effective sample count keyed by nominal dataset size |
+| `N_eff_over_N_by_dataset_size` | Per-size diagnostic ratio keyed by nominal dataset size |
+| `autocorrelation_available_by_dataset_size` | Whether the per-size N_eff diagnostic was defensible for that size |
+| `temporal_block_diagnostics_by_dataset_size` | Per-size block/trajectory diagnostics and per-dataset block summaries |
+| `N_min_effective_diagnostic` | Effective-sample diagnostic at nominal `N_min` when the exact nominal size has a matching per-size `N_eff` entry |
 | `effective_samples_at_nominal_N_min_diagnostic` | Estimated effective sample count at the nominal `N_min`; diagnostic only; not an alternative threshold |
 | `scientific_claim_status` | `diagnostic_only` when temporal evidence blocks paper-level claims |
 | `paper_level_blockers` | Machine-readable blockers such as missing autocorrelation or very low N_eff |
@@ -105,6 +141,19 @@ Aggregate `estimated_n_eff_train` is reported only when the grouping assumptions
 are defensible. It remains diagnostic context, not a validated replacement for
 nominal `N_min`.
 
+The summary also records per-size temporal diagnostics:
+
+- `N_eff_by_dataset_size`
+- `N_eff_over_N_by_dataset_size`
+- `autocorrelation_available_by_dataset_size`
+- `temporal_block_diagnostics_by_dataset_size`
+
+These fields are keyed by nominal dataset size and answer a stricter
+reproducibility question than the global `N_eff/N_nominal` ratio: whether each
+size used by the sweep has defensible temporal diagnostics. If any dataset size
+used by a fitted `N_min` lacks defensible `N_eff`, paper-level status is
+blocked via `paper_blocked_if_n_eff_by_dataset_size_incomplete`.
+
 **Important:** `N_eff` is reported for transparency. The main `N_min` curves and
 replicate-resampling CIs still use nominal `N` until a future protocol explicitly
 switches to effective sizes.
@@ -121,7 +170,10 @@ the configured diagnostic threshold, the status is also diagnostic-only with
 diagnostic context, not validated paper-level replacement thresholds. In
 particular, `effective_samples_at_nominal_N_min_diagnostic` is the estimated
 effective sample count corresponding to the nominal `N_min`; a true
-effective-N threshold is not implemented in this analysis.
+effective-N threshold is not implemented in this analysis. Likewise,
+`N_min_effective_diagnostic` is only populated when the exact nominal threshold
+size has a matching per-size `N_eff` diagnostic. It does **not** replace
+`N_min_nominal`, and it does not make the result paper-ready by itself.
 
 Backward-compatible aliases currently remain in JSON:
 
@@ -146,6 +198,22 @@ variation, but it is **not** a temporal/block bootstrap and does not capture:
 
 When enabled, the summary/report/UI expose those limitations through warnings
 and `limitations`.
+
+`N_min_cost_eff` is handled more conservatively than the nominal-size
+thresholds:
+
+- `BOOTSTRAP_N_MIN_CRITERIA` does **not** include `N_min_cost_eff`
+- `replicate_bootstrap.cost_eff_ci_available = false`
+- `replicate_bootstrap.cost_eff_ci_policy = "excluded_no_joint_metric_cost_resampling"`
+
+Why: the current replicate-resampling diagnostic does not jointly resample
+metric and cost under the selected `cost_basis`, so attaching a CI to
+`N_min_cost_eff` would overstate what the bootstrap actually supports.
+
+The UI/report therefore states explicitly that `N_min_cost_eff` has **no
+replicate-resampling CI** in the current protocol. If rows are missing cost for
+the selected basis, that is also surfaced in the bootstrap warnings rather than
+being converted into a fake interval.
 
 ## Hierarchical uncertainty
 

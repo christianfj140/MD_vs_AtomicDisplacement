@@ -87,6 +87,7 @@ from material_presets import (  # noqa: E402
 from g2m_deeph_dataset_size_minimum import (
     AGGREGATION_MODES,
     CANONICAL_POWER_LAW_MODEL,
+    CLAIM_MODES,
     COST_BASES,
     MetricFileLoadError,
     aggregation_mode_classification as dataset_minimum_aggregation_mode_classification,
@@ -98,6 +99,7 @@ from g2m_deeph_dataset_size_minimum import (
     load_metric_file_rows as load_dataset_minimum_metric_file_rows,
     load_run_root_rows as dataset_minimum_load_run_root_rows,
     normalize_rows as dataset_minimum_normalize_rows,
+    parse_claim_mode as dataset_minimum_parse_claim_mode,
     parse_cost_basis as dataset_minimum_parse_cost_basis,
     parse_single_fit_model as dataset_minimum_parse_single_fit_model,
     resolve_aggregation_mode as resolve_dataset_minimum_aggregation_mode,
@@ -6063,6 +6065,11 @@ def dataset_size_minimum_output_matches_controls(
     out_threshold = output.get("threshold_mev")
     if out_threshold is None or abs(float(out_threshold) - threshold) >= 1e-9:
         return False
+    if bool(output.get("threshold_is_user_defined")) != bool(controls.get("threshold_is_user_defined")):
+        return False
+    if not bool(controls.get("threshold_is_user_defined")):
+        if str(output.get("threshold_preset_key") or "") != str(controls.get("threshold_preset_key") or ""):
+            return False
 
     if str(output.get("requested_n_min_source") or output.get("n_min_source") or "observed") != str(
         controls.get("n_min_source") or "observed"
@@ -6264,6 +6271,8 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
 
     threshold_mev = float(payload.get("threshold_mev") or 10.0)
     primary_metric = str(payload.get("primary_metric") or "h_mae_eV_mean").strip()
+    threshold_preset_key = payload.get("threshold_preset_key")
+    threshold_is_user_defined = bool(payload.get("threshold_is_user_defined"))
     x_axis = str(payload.get("x_axis") or "n_train").strip()
 
     if x_axis not in {"n_total", "n_train"}:
@@ -6271,6 +6280,12 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
     try:
         cost_basis = dataset_minimum_parse_cost_basis(
             str(payload.get("cost_basis") or COST_BASES[0])
+        )
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from None
+    try:
+        claim_mode = dataset_minimum_parse_claim_mode(
+            str(payload.get("claim_mode") or CLAIM_MODES[0])
         )
     except SystemExit as exc:
         raise RuntimeError(str(exc)) from None
@@ -6317,6 +6332,10 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         primary_metric,
         "--threshold-mev",
         str(threshold_mev),
+        "--threshold-preset-key",
+        str(threshold_preset_key or ""),
+        "--threshold-is-user-defined",
+        "true" if threshold_is_user_defined else "false",
         "--relative-tolerance",
         str(relative_tolerance),
         "--plateau-gain",
@@ -6335,6 +6354,8 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         aggregation_mode,
         "--cost-basis",
         cost_basis,
+        "--claim-mode",
+        claim_mode,
         "--bootstrap-replicates",
         str(bootstrap_replicates),
         "--bootstrap-seed",
@@ -6426,6 +6447,12 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "report_path": str(output_dir / "dataset_size_minimum_report.md"),
                 "primary_metric": summary.get("primary_metric"),
                 "threshold_mev": summary.get("threshold_mev"),
+                "threshold_basis": summary.get("threshold_basis"),
+                "threshold_reference": summary.get("threshold_reference"),
+                "threshold_interpretation": summary.get("threshold_interpretation"),
+                "threshold_metric_family": summary.get("threshold_metric_family"),
+                "threshold_is_user_defined": summary.get("threshold_is_user_defined"),
+                "threshold_preset_key": summary.get("threshold_preset_key"),
                 "x_axis": summary.get("x_axis"),
                 "thresholds": summary.get("thresholds") or {},
                 "fits": summary.get("fits") or {},
@@ -6469,6 +6496,8 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "N_eff_over_N_nominal": summary.get("N_eff_over_N_nominal"),
                 "effective_samples_at_N_min_nominal": summary.get("effective_samples_at_N_min_nominal") or {},
                 "N_min_eff_diagnostic": summary.get("N_min_eff_diagnostic") or {},
+                "claim_mode_requested": summary.get("claim_mode_requested") or CLAIM_MODES[0],
+                "claim_mode_actual": summary.get("claim_mode_actual") or CLAIM_MODES[0],
                 "scientific_claim_status": summary.get("scientific_claim_status"),
                 "paper_level_blockers": summary.get("paper_level_blockers") or [],
                 "paper_level_warnings": summary.get("paper_level_warnings") or [],

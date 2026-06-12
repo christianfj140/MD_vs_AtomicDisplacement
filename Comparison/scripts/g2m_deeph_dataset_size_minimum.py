@@ -32,6 +32,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - optional dependency path
+    np = None  # type: ignore[assignment]
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -58,6 +63,8 @@ CURVE_POINT_FIT_MODELS = {
     "cumulative_best",
 }
 NONNEG_PREDICTION_TOL = 1e-9
+DIAGNOSTIC_FIT_CONDITION_WARN = 1e8
+DIAGNOSTIC_FIT_CONDITION_UNSTABLE = 1e12
 POWER_LAW_ALPHA_MIN = 0.05
 POWER_LAW_ALPHA_MAX = 4.0
 POWER_LAW_ALPHA_GRID_POINTS = 160
@@ -73,6 +80,10 @@ AGGREGATION_MODES = (
 COST_BASES = (
     "per_seed_mean",
     "protocol_total",
+)
+CLAIM_MODES = (
+    "diagnostic",
+    "paper_candidate",
 )
 PAPER_READY_AGGREGATION_MODE = "mean_seeds_per_config"
 BASE_CONFIG_SEED_SUFFIX = re.compile(r"-seed\d+$", re.IGNORECASE)
@@ -90,8 +101,99 @@ LEGACY_THRESHOLD_ALIASES = {LEGACY_N_MIN_REL95_KEY: N_MIN_REL_TOL_KEY}
 BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau")
 MIN_BOOTSTRAP_SUCCESS_FOR_CI = 2
 REPLICATE_BOOTSTRAP_LABEL = "replicate-resampling CI"
+N_MIN_COST_EFF_BOOTSTRAP_POLICY = "excluded_no_joint_metric_cost_resampling"
+N_MIN_COST_EFF_BOOTSTRAP_REASON = (
+    "N_min_cost_eff is excluded from replicate-resampling CI because this diagnostic "
+    "does not jointly resample cost and metric under the selected cost_basis."
+)
 HIERARCHICAL_UNCERTAINTY_LABEL = "hierarchical uncertainty (paper-readiness audit)"
 HIERARCHICAL_UNCERTAINTY_REPLICATES = 200
+DEFAULT_THRESHOLD_REFERENCE = "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets"
+THRESHOLD_BASIS_EXPLORATORY_PRESET = "metric_specific_exploratory_preset"
+THRESHOLD_BASIS_USER_DEFINED = "user_defined_exploratory"
+THRESHOLD_MANUAL_PRESET_KEY = "manual"
+DATASET_MINIMUM_THRESHOLD_PRESETS: dict[str, list[dict[str, Any]]] = {
+    "h_mae_eV_mean": [
+        {
+            "key": "h_mae_relaxed_10",
+            "threshold_mev": 10.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Exploratory absolute H-MAE target in meV; not universal or paper-justified by itself.",
+            "metric_family": "hamiltonian_element_error_mev",
+            "paper_justified": False,
+        },
+        {
+            "key": "h_mae_relaxed_20",
+            "threshold_mev": 20.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Looser exploratory H-MAE threshold for internal scans; not a universal physical criterion.",
+            "metric_family": "hamiltonian_element_error_mev",
+            "paper_justified": False,
+        },
+    ],
+    "h_rmse_eV": [
+        {
+            "key": "h_rmse_relaxed_15",
+            "threshold_mev": 15.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Exploratory H-RMSE target in meV; chosen as a metric-specific internal protocol, not a universal claim threshold.",
+            "metric_family": "hamiltonian_element_error_mev",
+            "paper_justified": False,
+        },
+        {
+            "key": "h_rmse_relaxed_25",
+            "threshold_mev": 25.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Looser exploratory H-RMSE threshold for sweep triage; not paper-ready on its own.",
+            "metric_family": "hamiltonian_element_error_mev",
+            "paper_justified": False,
+        },
+    ],
+    "low_energy_rmse_eV": [
+        {
+            "key": "low_energy_rmse_exploratory_20",
+            "threshold_mev": 20.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Exploratory low-energy spectral RMSE target; metric-specific default, not a universal meV rule.",
+            "metric_family": "spectral_error_mev",
+            "paper_justified": False,
+        },
+        {
+            "key": "low_energy_rmse_exploratory_40",
+            "threshold_mev": 40.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Looser exploratory low-energy spectral RMSE threshold for internal scans.",
+            "metric_family": "spectral_error_mev",
+            "paper_justified": False,
+        },
+    ],
+    "fermi_window_rmse_eV": [
+        {
+            "key": "fermi_window_rmse_exploratory_15",
+            "threshold_mev": 15.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Exploratory Fermi-window spectral RMSE target; metric-specific and not universally transferable.",
+            "metric_family": "spectral_error_mev",
+            "paper_justified": False,
+        },
+        {
+            "key": "fermi_window_rmse_exploratory_30",
+            "threshold_mev": 30.0,
+            "basis": THRESHOLD_BASIS_EXPLORATORY_PRESET,
+            "reference": DEFAULT_THRESHOLD_REFERENCE,
+            "interpretation": "Looser exploratory Fermi-window RMSE threshold for internal comparisons.",
+            "metric_family": "spectral_error_mev",
+            "paper_justified": False,
+        },
+    ],
+}
 ENERGY_METRICS_WITHOUT_EV = {"dos_mae_500_fermi_window"}
 _REFERENCED_METRIC_CACHE: dict[tuple[str, str], float | None] = {}
 
@@ -127,13 +229,65 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in csv.DictReader(handle)]
 
 
-def read_json(path: Path) -> Any:
+class JSONLoadError(RuntimeError):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        category: str,
+        context: str,
+        cause: BaseException | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.category = category
+        self.context = context
+        self.cause = cause
+        detail = ""
+        if cause is not None:
+            detail = f": {type(cause).__name__}: {cause}"
+        super().__init__(f"{category}:{self.path}:{context}{detail}")
+
+
+def read_json_optional(path: Path, *, warnings: list[str] | None = None, context: str = "optional_json") -> Any:
     if not path.exists():
+        if warnings is not None:
+            warnings.append(f"missing_optional_json:{path}:{context}")
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError as exc:
+        if warnings is not None:
+            warnings.append(f"invalid_optional_json:{path}:{context}:{type(exc).__name__}")
         return None
+    except json.JSONDecodeError as exc:
+        if warnings is not None:
+            warnings.append(f"invalid_optional_json:{path}:{context}:{type(exc).__name__}")
+        return None
+
+
+def read_json_required(path: Path, *, context: str) -> Any:
+    if not path.exists():
+        raise JSONLoadError(path, category="missing_required_json", context=context)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise JSONLoadError(
+            path,
+            category="invalid_required_json",
+            context=context,
+            cause=exc,
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise JSONLoadError(
+            path,
+            category="invalid_required_json",
+            context=context,
+            cause=exc,
+        ) from exc
+
+
+def read_json(path: Path) -> Any:
+    return read_json_optional(path)
 
 
 class MetricFileLoadError(RuntimeError):
@@ -245,6 +399,17 @@ def parse_json_field(value: Any) -> Any:
         return {}
 
 
+def parse_bool_text(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    raise SystemExit(f"Invalid boolean value: {value}")
+
+
 def finite_number(value: Any) -> float | None:
     try:
         out = float(value)
@@ -314,6 +479,91 @@ def metric_scale(metric: str) -> tuple[float, str]:
     if "ev" in text or metric in ENERGY_METRICS_WITHOUT_EV:
         return 1000.0, "meV"
     return 1.0, "a.u."
+
+
+def threshold_metric_family(metric: str) -> str:
+    if metric in {"h_mae_eV_mean", "h_rmse_eV"}:
+        return "hamiltonian_element_error_mev"
+    if metric in {"low_energy_rmse_eV", "fermi_window_rmse_eV"}:
+        return "spectral_error_mev"
+    return "metric_specific_threshold_unknown_family"
+
+
+def threshold_presets_for_metric(metric: str) -> list[dict[str, Any]]:
+    presets = DATASET_MINIMUM_THRESHOLD_PRESETS.get(metric)
+    if presets:
+        return [dict(item) for item in presets]
+    return []
+
+
+def threshold_preset_by_key(metric: str, preset_key: str | None) -> dict[str, Any] | None:
+    key = str(preset_key or "").strip()
+    if not key:
+        return None
+    for preset in threshold_presets_for_metric(metric):
+        if str(preset.get("key")) == key:
+            return preset
+    return None
+
+
+def threshold_preset_by_value(metric: str, threshold_mev: float) -> dict[str, Any] | None:
+    for preset in threshold_presets_for_metric(metric):
+        value = finite_number(preset.get("threshold_mev"))
+        if value is not None and abs(value - float(threshold_mev)) < 1e-9:
+            return preset
+    return None
+
+
+def resolve_threshold_metadata(
+    *,
+    primary_metric: str,
+    threshold_mev: float,
+    threshold_preset_key: str | None = None,
+    threshold_is_user_defined: bool = False,
+) -> dict[str, Any]:
+    metric_family = threshold_metric_family(primary_metric)
+    preset = threshold_preset_by_key(primary_metric, threshold_preset_key) or threshold_preset_by_value(
+        primary_metric,
+        threshold_mev,
+    )
+    if threshold_is_user_defined:
+        return {
+            "threshold_basis": THRESHOLD_BASIS_USER_DEFINED,
+            "threshold_reference": "manual_user_input",
+            "threshold_interpretation": (
+                "Manual exploratory threshold entered by the user. It may be useful for internal scans "
+                "but is not a documented universal criterion."
+            ),
+            "threshold_metric_family": metric_family,
+            "threshold_is_user_defined": True,
+            "threshold_preset_key": THRESHOLD_MANUAL_PRESET_KEY,
+            "threshold_paper_justified": False,
+        }
+    if preset is not None:
+        return {
+            "threshold_basis": str(preset.get("basis") or THRESHOLD_BASIS_EXPLORATORY_PRESET),
+            "threshold_reference": str(preset.get("reference") or DEFAULT_THRESHOLD_REFERENCE),
+            "threshold_interpretation": str(
+                preset.get("interpretation")
+                or "Metric-specific exploratory threshold preset; not a universal physical rule."
+            ),
+            "threshold_metric_family": str(preset.get("metric_family") or metric_family),
+            "threshold_is_user_defined": False,
+            "threshold_preset_key": str(preset.get("key") or ""),
+            "threshold_paper_justified": bool(preset.get("paper_justified")),
+        }
+    return {
+        "threshold_basis": THRESHOLD_BASIS_USER_DEFINED,
+        "threshold_reference": "threshold_value_without_matching_documented_preset",
+        "threshold_interpretation": (
+            "Threshold value does not match a documented preset for this metric and is treated as "
+            "user_defined_exploratory."
+        ),
+        "threshold_metric_family": metric_family,
+        "threshold_is_user_defined": True,
+        "threshold_preset_key": THRESHOLD_MANUAL_PRESET_KEY,
+        "threshold_paper_justified": False,
+    }
 
 
 def metric_value(row: dict[str, Any], metric: str) -> float | None:
@@ -541,18 +791,14 @@ def load_json_metric_rows(
             explicit_run_root_mode=explicit_run_root_mode,
         )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        payload = read_json_required(
+            path,
+            context="explicit_metric_json" if explicit_run_root_mode else "discovered_metric_json",
+        )
+    except JSONLoadError as exc:
         raise MetricFileLoadError(
             path,
-            category="invalid_json",
-            explicit_run_root_mode=explicit_run_root_mode,
-            cause=exc,
-        ) from exc
-    except OSError as exc:
-        raise MetricFileLoadError(
-            path,
-            category="unreadable_file",
+            category=exc.category.replace("_required_json", "_json"),
             explicit_run_root_mode=explicit_run_root_mode,
             cause=exc,
         ) from exc
@@ -1563,6 +1809,104 @@ def fit_design(model: str, n_values: list[float]) -> list[list[float]]:
     raise ValueError(f"Unsupported linear fit model: {model}")
 
 
+def scale_linear_design(
+    design: list[list[float]],
+) -> tuple[list[list[float]], list[dict[str, float]]]:
+    if not design:
+        return [], []
+    n_columns = len(design[0])
+    scaled = [list(row) for row in design]
+    metadata: list[dict[str, float]] = []
+    for column in range(n_columns):
+        column_values = [float(row[column]) for row in design]
+        if column == 0:
+            metadata.append({"mean": 0.0, "scale": 1.0})
+            continue
+        mean_value = sum(column_values) / len(column_values)
+        centered = [value - mean_value for value in column_values]
+        scale_value = math.sqrt(sum(value * value for value in centered) / len(centered))
+        if not math.isfinite(scale_value) or scale_value <= 0.0:
+            scale_value = 1.0
+        metadata.append({"mean": float(mean_value), "scale": float(scale_value)})
+        for row_index, row in enumerate(scaled):
+            row[column] = (column_values[row_index] - mean_value) / scale_value
+    return scaled, metadata
+
+
+def unscale_linear_coefficients(
+    scaled_coefficients: list[float],
+    scaling_metadata: list[dict[str, float]],
+) -> list[float]:
+    coefficients = [0.0 for _ in scaled_coefficients]
+    if not scaled_coefficients:
+        return coefficients
+    intercept = float(scaled_coefficients[0])
+    for index in range(1, len(scaled_coefficients)):
+        meta = scaling_metadata[index] if index < len(scaling_metadata) else {"mean": 0.0, "scale": 1.0}
+        scale_value = float(meta.get("scale", 1.0) or 1.0)
+        mean_value = float(meta.get("mean", 0.0) or 0.0)
+        coefficient = float(scaled_coefficients[index]) / scale_value
+        coefficients[index] = coefficient
+        intercept -= coefficient * mean_value
+    coefficients[0] = intercept
+    return coefficients
+
+
+def matrix_rank_estimate(matrix: list[list[float]], *, tol: float = 1e-12) -> int:
+    if not matrix:
+        return 0
+    work = [list(map(float, row)) for row in matrix]
+    n_rows = len(work)
+    n_cols = len(work[0]) if work else 0
+    rank = 0
+    row = 0
+    for col in range(n_cols):
+        pivot = None
+        pivot_abs = tol
+        for candidate in range(row, n_rows):
+            value = abs(work[candidate][col])
+            if value > pivot_abs:
+                pivot = candidate
+                pivot_abs = value
+        if pivot is None:
+            continue
+        work[row], work[pivot] = work[pivot], work[row]
+        pivot_value = work[row][col]
+        for next_row in range(row + 1, n_rows):
+            factor = work[next_row][col] / pivot_value
+            if abs(factor) <= tol:
+                continue
+            for next_col in range(col, n_cols):
+                work[next_row][next_col] -= factor * work[row][next_col]
+        rank += 1
+        row += 1
+        if row >= n_rows:
+            break
+    return rank
+
+
+def estimate_design_condition(scaled_design: list[list[float]]) -> tuple[float | None, int | None]:
+    if not scaled_design:
+        return None, None
+    if np is not None:
+        matrix = np.asarray(scaled_design, dtype=float)
+        if matrix.size == 0:
+            return None, None
+        singular_values = np.linalg.svd(matrix, compute_uv=False)
+        if singular_values.size == 0:
+            return None, 0
+        max_sv = float(np.max(singular_values))
+        min_sv = float(np.min(singular_values))
+        condition = math.inf if min_sv <= 0.0 else float(max_sv / min_sv)
+        tolerance = float(max_sv * max(matrix.shape) * np.finfo(float).eps)
+        effective_rank = int(np.sum(singular_values > tolerance))
+        return condition, effective_rank
+    effective_rank = matrix_rank_estimate(scaled_design)
+    if effective_rank < len(scaled_design[0]):
+        return math.inf, effective_rank
+    return None, effective_rank
+
+
 def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
     n = len(vector)
     augmented = [list(row) + [float(value)] for row, value in zip(matrix, vector)]
@@ -1608,11 +1952,81 @@ def least_squares_coefficients(design: list[list[float]], y_values: list[float])
         return solve_linear_system(xtx, xty)
 
 
+def least_squares_coefficients_stable(
+    design: list[list[float]],
+    y_values: list[float],
+) -> tuple[list[float], dict[str, Any]]:
+    scaled_design, scaling_metadata = scale_linear_design(design)
+    condition_estimate, effective_rank = estimate_design_condition(scaled_design)
+    n_columns = len(design[0]) if design else 0
+    numerical_meta = {
+        "diagnostic_fit_numerical_policy": (
+            "numpy_lstsq_column_center_scale_v1"
+            if np is not None
+            else "normal_equations_column_center_scale_v1"
+        ),
+        "scaled_fit_domain": {
+            "columns": [
+                {
+                    "column": index,
+                    "mean": item.get("mean"),
+                    "scale": item.get("scale"),
+                }
+                for index, item in enumerate(scaling_metadata)
+            ]
+        },
+        "fit_condition_estimate": condition_estimate,
+        "effective_rank": effective_rank,
+        "condition_warning": None,
+    }
+    if effective_rank is not None and effective_rank < n_columns:
+        numerical_meta["condition_warning"] = "rank_deficient_scaled_design"
+    elif condition_estimate is not None and condition_estimate >= DIAGNOSTIC_FIT_CONDITION_UNSTABLE:
+        numerical_meta["condition_warning"] = "ill_conditioned_scaled_design"
+    elif condition_estimate is not None and condition_estimate >= DIAGNOSTIC_FIT_CONDITION_WARN:
+        numerical_meta["condition_warning"] = "high_condition_number_scaled_design"
+
+    if np is not None:
+        coefficients_scaled, residuals, rank, singular_values = np.linalg.lstsq(
+            np.asarray(scaled_design, dtype=float),
+            np.asarray(y_values, dtype=float),
+            rcond=None,
+        )
+        numerical_meta["lstsq_rank"] = int(rank)
+        numerical_meta["lstsq_singular_values"] = [float(value) for value in singular_values.tolist()]
+        return unscale_linear_coefficients(coefficients_scaled.tolist(), scaling_metadata), numerical_meta
+
+    coefficients_scaled = least_squares_coefficients(scaled_design, y_values)
+    return unscale_linear_coefficients(coefficients_scaled, scaling_metadata), numerical_meta
+
+
 def fit_linear_model(model: str, n_values: list[float], y_values: list[float]) -> dict[str, Any]:
     design = fit_design(model, n_values)
-    coefficients = least_squares_coefficients(design, y_values)
+    coefficients, numerical_meta = least_squares_coefficients_stable(design, y_values)
     predicted = [sum(coef * item for coef, item in zip(coefficients, row)) for row in design]
-    return fit_summary(model, n_values, y_values, predicted, coefficients)
+    summary = fit_summary(model, n_values, y_values, predicted, coefficients)
+    summary.update(numerical_meta)
+    summary["scaled_fit_domain"].setdefault(
+        "n_values",
+        {
+            "min": min(float(value) for value in n_values) if n_values else None,
+            "max": max(float(value) for value in n_values) if n_values else None,
+        },
+    )
+    condition_estimate = numerical_meta.get("fit_condition_estimate")
+    effective_rank = numerical_meta.get("effective_rank")
+    if (
+        (effective_rank is not None and effective_rank < len(design[0]))
+        or (
+            condition_estimate is not None
+            and math.isfinite(float(condition_estimate))
+            and float(condition_estimate) >= DIAGNOSTIC_FIT_CONDITION_UNSTABLE
+        )
+    ):
+        summary["status"] = "diagnostic_unstable"
+        summary["error"] = "diagnostic_fit_numerically_unstable"
+        summary["diagnostic_only"] = True
+    return summary
 
 
 def fit_policy_metadata(model: str, *, status: str = "ok", n_points: int | None = None) -> dict[str, Any]:
@@ -2687,6 +3101,15 @@ def parse_cost_basis(value: str | None) -> str:
     return basis
 
 
+def parse_claim_mode(value: str | None) -> str:
+    if value is None or not str(value).strip():
+        return CLAIM_MODES[0]
+    mode = str(value).strip()
+    if mode not in CLAIM_MODES:
+        raise SystemExit(f"Unknown claim_mode: {mode}")
+    return mode
+
+
 def cost_basis_label(cost_basis: str) -> str:
     if cost_basis == "protocol_total":
         return "protocol total GPU-hours across required seeds/replicates"
@@ -2776,10 +3199,25 @@ def merge_manifest_row(base: dict[str, Any], manifest_row: dict[str, str] | None
     return merged
 
 
-def load_temporal_sample_records(dataset_root: Path) -> list[dict[str, Any]]:
+def load_temporal_sample_records(
+    dataset_root: Path,
+    *,
+    strict_required_json: bool = False,
+    warnings: list[str] | None = None,
+) -> list[dict[str, Any]]:
     root = Path(dataset_root)
     records: list[dict[str, Any]] = []
-    frozen = read_json(root / "frozen_split_manifest.json")
+    if strict_required_json:
+        frozen = read_json_required(
+            root / "frozen_split_manifest.json",
+            context="temporal_diagnostics.frozen_split_manifest",
+        )
+    else:
+        frozen = read_json_optional(
+            root / "frozen_split_manifest.json",
+            warnings=warnings,
+            context="temporal_diagnostics.frozen_split_manifest",
+        )
     split_root = resolve_split_root(root, frozen if isinstance(frozen, dict) else None)
     manifest_index = load_split_manifest_index(split_root) if split_root else {}
 
@@ -2799,7 +3237,11 @@ def load_temporal_sample_records(dataset_root: Path) -> list[dict[str, Any]]:
                 records.append(merged)
 
     if not records:
-        validation = read_json(root / "artifact_validation.json")
+        validation = read_json_optional(
+            root / "artifact_validation.json",
+            warnings=warnings,
+            context="temporal_diagnostics.artifact_validation",
+        )
         if isinstance(validation, dict):
             for snapshot in validation.get("snapshots") or []:
                 if not isinstance(snapshot, dict):
@@ -2815,13 +3257,29 @@ def load_temporal_sample_records(dataset_root: Path) -> list[dict[str, Any]]:
     return records
 
 
-def load_split_summary(dataset_root: Path, split_root: Path | None) -> dict[str, Any]:
+def load_split_summary(
+    dataset_root: Path,
+    split_root: Path | None,
+    *,
+    strict_required_json: bool = False,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
     candidates: list[Path] = []
     if split_root is not None:
         candidates.append(split_root / "split_summary.json")
     candidates.append(Path(dataset_root) / "splits" / "split_summary.json")
     for path in candidates:
-        payload = read_json(path)
+        if strict_required_json:
+            payload = read_json_required(
+                path,
+                context="temporal_diagnostics.split_summary",
+            )
+        else:
+            payload = read_json_optional(
+                path,
+                warnings=warnings,
+                context="temporal_diagnostics.split_summary",
+            )
         if isinstance(payload, dict):
             return payload
     return {}
@@ -2839,7 +3297,7 @@ def read_metadata_scalar(sample_dir: Path) -> tuple[str, float] | None:
     metadata_path = sample_dir / "metadata.json"
     if not metadata_path.exists():
         return None
-    payload = read_json(metadata_path)
+    payload = read_json_optional(metadata_path)
     if not isinstance(payload, dict):
         return None
     return scalar_value_from_metadata(payload)
@@ -2849,7 +3307,7 @@ def read_sample_metadata(sample_dir: Path) -> dict[str, Any] | None:
     metadata_path = sample_dir / "metadata.json"
     if not metadata_path.exists():
         return None
-    payload = read_json(metadata_path)
+    payload = read_json_optional(metadata_path)
     return payload if isinstance(payload, dict) else None
 
 
@@ -3196,13 +3654,33 @@ def diagnose_dataset_temporal_metadata(
     dataset_root: Path,
     *,
     dataset_id: str = "",
+    strict_required_json: bool = False,
 ) -> dict[str, Any]:
     root = Path(dataset_root)
     warnings: list[str] = []
-    records = load_temporal_sample_records(root)
-    frozen = read_json(root / "frozen_split_manifest.json")
+    records = load_temporal_sample_records(
+        root,
+        strict_required_json=strict_required_json,
+        warnings=warnings,
+    )
+    if strict_required_json:
+        frozen = read_json_required(
+            root / "frozen_split_manifest.json",
+            context="temporal_diagnostics.frozen_split_manifest",
+        )
+    else:
+        frozen = read_json_optional(
+            root / "frozen_split_manifest.json",
+            warnings=warnings,
+            context="temporal_diagnostics.frozen_split_manifest",
+        )
     split_root = resolve_split_root(root, frozen if isinstance(frozen, dict) else None)
-    split_summary = load_split_summary(root, split_root)
+    split_summary = load_split_summary(
+        root,
+        split_root,
+        strict_required_json=strict_required_json,
+        warnings=warnings,
+    )
 
     strategy = str(split_summary.get("strategy") or "").strip().lower()
     if not strategy:
@@ -3462,6 +3940,12 @@ def summarize_temporal_diagnostics(
     autocorrelation_available = any(bool(item.get("autocorrelation_available")) for item in datasets)
     for item in datasets:
         warnings.extend(item.get("warnings") or [])
+    (
+        n_eff_by_dataset_size,
+        ratio_by_dataset_size,
+        autocorrelation_available_by_dataset_size,
+        temporal_block_diagnostics_by_dataset_size,
+    ) = per_dataset_size_temporal_diagnostics(datasets)
 
     maybe_warn_n_eff_much_smaller_than_nominal(
         warnings,
@@ -3483,6 +3967,10 @@ def summarize_temporal_diagnostics(
         "nominal_n_train": nominal_n_train,
         "estimated_n_eff_train": estimated_n_eff_train,
         "autocorrelation_available": autocorrelation_available,
+        "N_eff_by_dataset_size": n_eff_by_dataset_size,
+        "N_eff_over_N_by_dataset_size": ratio_by_dataset_size,
+        "autocorrelation_available_by_dataset_size": autocorrelation_available_by_dataset_size,
+        "temporal_block_diagnostics_by_dataset_size": temporal_block_diagnostics_by_dataset_size,
         "status_message": status_message,
         "warnings": sorted(set(warnings)),
         **autocorrelation_convention_payload(),
@@ -3493,6 +3981,104 @@ def representative_n_eff_value(value: Any) -> float | None:
     if isinstance(value, dict):
         return finite_number(value.get("median")) or finite_number(value.get("min")) or finite_number(value.get("max"))
     return finite_number(value)
+
+
+def summarize_numeric_values(values: list[float]) -> float | dict[str, float] | None:
+    clean = [float(value) for value in values if math.isfinite(float(value))]
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return clean[0]
+    return {
+        "min": min(clean),
+        "median": statistics.median(clean),
+        "max": max(clean),
+    }
+
+
+def dataset_size_diagnostics_key(dataset: dict[str, Any]) -> int | None:
+    return int_number(dataset.get("nominal_n_train")) or int_number(dataset.get("dataset_size"))
+
+
+def per_dataset_size_temporal_diagnostics(
+    datasets: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bool], dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for index, dataset in enumerate(datasets):
+        dataset_size = dataset_size_diagnostics_key(dataset)
+        if dataset_size is None or dataset_size <= 0:
+            continue
+        key = str(int(dataset_size))
+        bucket = buckets.setdefault(
+            key,
+            {
+                "dataset_size": int(dataset_size),
+                "dataset_ids": [],
+                "dataset_roots": [],
+                "datasets": [],
+                "n_eff_values": [],
+                "ratio_values": [],
+                "availability_flags": [],
+            },
+        )
+        dataset_id = str(dataset.get("dataset_id") or dataset.get("dataset_root") or f"dataset_{index}")
+        dataset_root = str(dataset.get("dataset_root") or "")
+        estimated_n_eff = finite_number(dataset.get("estimated_n_eff_train"))
+        available = bool(dataset.get("autocorrelation_available"))
+        ratio = (
+            float(estimated_n_eff) / float(dataset_size)
+            if estimated_n_eff is not None and dataset_size > 0
+            else None
+        )
+        if dataset_id:
+            bucket["dataset_ids"].append(dataset_id)
+        if dataset_root:
+            bucket["dataset_roots"].append(dataset_root)
+        if estimated_n_eff is not None:
+            bucket["n_eff_values"].append(float(estimated_n_eff))
+        if ratio is not None:
+            bucket["ratio_values"].append(float(ratio))
+        bucket["availability_flags"].append(available)
+        bucket["datasets"].append(
+            {
+                "dataset_id": dataset_id,
+                "dataset_root": dataset_root,
+                "nominal_n_train": int(dataset_size),
+                "estimated_n_eff_train": estimated_n_eff,
+                "autocorrelation_available": available,
+                "n_eff_over_n_nominal": ratio,
+                "train_grouping_policy": dataset.get("train_grouping_policy"),
+                "n_temporal_blocks": dataset.get("n_temporal_blocks"),
+                "block_ids": dataset.get("block_ids") or [],
+                "block_diagnostics": ((dataset.get("autocorrelation") or {}).get("by_block") or {}),
+                "warnings": list(dataset.get("warnings") or []),
+            }
+        )
+
+    n_eff_by_size: dict[str, Any] = {}
+    ratio_by_size: dict[str, Any] = {}
+    availability_by_size: dict[str, bool] = {}
+    temporal_block_diag_by_size: dict[str, Any] = {}
+    for key, bucket in sorted(buckets.items(), key=lambda item: int(item[0])):
+        n_eff_summary = summarize_numeric_values(bucket["n_eff_values"])
+        ratio_summary = summarize_numeric_values(bucket["ratio_values"])
+        availability = bool(bucket["availability_flags"]) and all(bucket["availability_flags"])
+        n_eff_by_size[key] = representative_n_eff_value(n_eff_summary)
+        ratio_by_size[key] = representative_n_eff_value(ratio_summary)
+        availability_by_size[key] = availability
+        temporal_block_diag_by_size[key] = {
+            "dataset_size": bucket["dataset_size"],
+            "dataset_ids": sorted(set(bucket["dataset_ids"])),
+            "dataset_roots": sorted(set(bucket["dataset_roots"])),
+            "n_datasets": len(bucket["datasets"]),
+            "n_with_n_eff": len(bucket["n_eff_values"]),
+            "autocorrelation_available_all": availability,
+            "autocorrelation_available_any": any(bucket["availability_flags"]),
+            "estimated_n_eff_summary": n_eff_summary,
+            "n_eff_over_n_nominal_summary": ratio_summary,
+            "datasets": bucket["datasets"],
+        }
+    return n_eff_by_size, ratio_by_size, availability_by_size, temporal_block_diag_by_size
 
 
 def n_eff_over_n_nominal(temporal_diagnostics: dict[str, Any]) -> float | None:
@@ -3528,6 +4114,25 @@ def effective_samples_at_nominal_n_min(
     return out
 
 
+def n_min_effective_diagnostic_by_dataset_size(
+    thresholds: dict[str, dict[str, Any]],
+    *,
+    n_eff_by_dataset_size: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    n_eff_by_dataset_size = dict(n_eff_by_dataset_size or {})
+    out: dict[str, dict[str, Any]] = {}
+    for method, method_thresholds in thresholds.items():
+        out[method] = {}
+        for criterion in N_MIN_CRITERIA:
+            nominal_n = finite_number(method_thresholds.get(criterion))
+            if nominal_n is None:
+                out[method][criterion] = None
+                continue
+            size_key = str(int(round(float(nominal_n))))
+            out[method][criterion] = representative_n_eff_value(n_eff_by_dataset_size.get(size_key))
+    return out
+
+
 CANONICAL_EFFECTIVE_SAMPLES_AT_NOMINAL_N_MIN_KEY = "effective_samples_at_nominal_N_min_diagnostic"
 LEGACY_EFFECTIVE_SAMPLES_AT_N_MIN_NOMINAL_KEY = "effective_samples_at_N_min_nominal"
 LEGACY_N_MIN_EFF_DIAGNOSTIC_KEY = "N_min_eff_diagnostic"
@@ -3537,6 +4142,8 @@ def scientific_claim_status_payload(
     *,
     temporal_diagnostics: dict[str, Any],
     thresholds: dict[str, dict[str, Any]],
+    threshold_metadata: dict[str, Any] | None = None,
+    claim_mode_requested: str = "diagnostic",
     aggregation_mode: str | None = None,
     requested_aggregation_mode: str | None = None,
     actual_aggregation_mode: str | None = None,
@@ -3551,6 +4158,7 @@ def scientific_claim_status_payload(
     fallback_used: bool,
     fallback_reason: str | None,
 ) -> dict[str, Any]:
+    claim_mode_requested = parse_claim_mode(claim_mode_requested)
     if aggregation_mode is not None and not actual_aggregation_mode:
         actual_aggregation_mode = aggregation_mode
     if aggregation_mode is not None and requested_aggregation_mode is None:
@@ -3559,8 +4167,13 @@ def scientific_claim_status_payload(
     blockers: list[str] = []
     warnings: list[str] = [N_MIN_NOMINAL_WARNING]
     temporal_warnings = [str(item) for item in temporal_diagnostics.get("warnings") or []]
+    threshold_metadata = dict(threshold_metadata or {})
     autocorrelation_available = bool(temporal_diagnostics.get("autocorrelation_available"))
     ratio = n_eff_over_n_nominal(temporal_diagnostics)
+    n_eff_by_dataset_size = dict(temporal_diagnostics.get("N_eff_by_dataset_size") or {})
+    autocorrelation_available_by_dataset_size = dict(
+        temporal_diagnostics.get("autocorrelation_available_by_dataset_size") or {}
+    )
     threshold_methods = sorted(str(method) for method in thresholds.keys())
     requested_fit_canonical = canonical_fit_model(requested_fit_model)
     actual_fit_canonical = canonical_fit_model(actual_fit_model) if actual_fit_model else None
@@ -3609,6 +4222,29 @@ def scientific_claim_status_payload(
         blockers.append("paper_blocked_if_actual_fit_model_missing")
     elif actual_fit_canonical != CANONICAL_POWER_LAW_MODEL:
         blockers.append(f"paper_blocked_if_n_min_fit_policy_diagnostic_only:{actual_fit_canonical}")
+    if bool(threshold_metadata.get("threshold_is_user_defined")):
+        blockers.append("paper_blocked_if_threshold_user_defined_exploratory")
+    elif not bool(threshold_metadata.get("threshold_paper_justified")):
+        blockers.append("paper_blocked_if_threshold_basis_not_paper_justified")
+
+    if actual_n_min_source == "fit":
+        fit_sizes_complete = True
+        for method in threshold_methods:
+            for size in (thresholds.get(method) or {}).get("available_sizes") or []:
+                size_value = int_number(size)
+                if size_value is None:
+                    continue
+                size_key = str(int(size_value))
+                if (
+                    representative_n_eff_value(n_eff_by_dataset_size.get(size_key)) is None
+                    or autocorrelation_available_by_dataset_size.get(size_key) is not True
+                ):
+                    fit_sizes_complete = False
+                    break
+            if not fit_sizes_complete:
+                break
+        if not fit_sizes_complete:
+            blockers.append("paper_blocked_if_n_eff_by_dataset_size_incomplete")
 
     for method in threshold_methods:
         fit_detail = fit_threshold_details.get(method)
@@ -3652,14 +4288,38 @@ def scientific_claim_status_payload(
     if hierarchical_uncertainty:
         blockers.extend(str(item) for item in (hierarchical_uncertainty.get("paper_level_blockers") or []))
 
+    if claim_mode_requested == "paper_candidate":
+        if actual_aggregation_mode == "best_config_mean":
+            blockers.append("paper_blocked_if_best_config_mean_policy_not_documented")
+        elif actual_aggregation_mode != PAPER_READY_AGGREGATION_MODE:
+            blockers.append(f"paper_blocked_if_claim_mode_requires_{PAPER_READY_AGGREGATION_MODE}")
+        if aggregation_mode_legacy_inferred:
+            blockers.append("paper_blocked_if_aggregation_mode_not_explicit")
+        if actual_n_min_source != "fit":
+            blockers.append("paper_blocked_if_claim_mode_requires_fit_n_min_source")
+        if actual_fit_canonical != CANONICAL_POWER_LAW_MODEL:
+            blockers.append("paper_blocked_if_claim_mode_requires_power_law_floor")
+
     status = "diagnostic_only" if blockers else "paper_candidate_nominal_with_n_eff_diagnostic"
+    claim_mode_actual = (
+        "paper_candidate"
+        if claim_mode_requested == "paper_candidate" and status == "paper_candidate_nominal_with_n_eff_diagnostic"
+        else "diagnostic"
+    )
     n_min_nominal = nominal_n_min_map(thresholds)
     effective_at_nominal = effective_samples_at_nominal_n_min(thresholds, n_eff_ratio=ratio)
+    effective_by_size = n_min_effective_diagnostic_by_dataset_size(
+        thresholds,
+        n_eff_by_dataset_size=n_eff_by_dataset_size,
+    )
     return {
         "n_min_basis": "nominal",
+        "claim_mode_requested": claim_mode_requested,
+        "claim_mode_actual": claim_mode_actual,
         "N_min_nominal": n_min_nominal,
         "N_eff_diagnostic_available": ratio is not None,
         "N_eff_over_N_nominal": ratio,
+        "N_min_effective_diagnostic": effective_by_size,
         CANONICAL_EFFECTIVE_SAMPLES_AT_NOMINAL_N_MIN_KEY: effective_at_nominal,
         LEGACY_EFFECTIVE_SAMPLES_AT_N_MIN_NOMINAL_KEY: effective_at_nominal,
         LEGACY_N_MIN_EFF_DIAGNOSTIC_KEY: effective_at_nominal,
@@ -3670,6 +4330,7 @@ def scientific_claim_status_payload(
         "n_min_protocol": n_min_protocol,
         "n_min_fit_policy": "paper_candidate" if status == "paper_candidate_nominal_with_n_eff_diagnostic" else "diagnostic_only",
         "n_min_fit_policy_by_method": n_min_fit_policy_by_method,
+        "threshold_policy": threshold_metadata,
         "fit_predictive_stability_by_left_out_N": fit_predictive_stability_by_left_out_N or {
             "status": "not_applicable",
             "reason": "missing_diagnostic",
@@ -3716,6 +4377,16 @@ def build_report(
     lines.append("\n## Configuracion\n")
     lines.append(f"- Primary metric: `{primary_metric}` convertido a meV")
     lines.append(f"- Threshold absoluto: `{threshold_mev:g}` meV")
+    threshold_policy = (scientific_status or {}).get("threshold_policy") or {}
+    if threshold_policy:
+        lines.append(
+            f"- Threshold policy: basis `{threshold_policy.get('threshold_basis')}`, "
+            f"reference `{threshold_policy.get('threshold_reference')}`, "
+            f"metric_family `{threshold_policy.get('threshold_metric_family')}`, "
+            f"user_defined={bool(threshold_policy.get('threshold_is_user_defined'))}"
+        )
+        lines.append(f"- Threshold interpretation: {threshold_policy.get('threshold_interpretation')}")
+    lines.append("- 20 meV is not universal; threshold presets are metric-specific and exploratory unless explicitly justified.")
     lines.append(f"- Eje x: `{x_axis}`")
     lines.append(f"- Cost basis for `N_min_cost_eff`: `{cost_basis}` ({cost_basis_label(cost_basis)})")
     lines.append(
@@ -3775,8 +4446,16 @@ def build_report(
     lines.append("  - does not model model-selection uncertainty")
     lines.append("  - does not model hyperparameter-selection uncertainty")
     lines.append("  - does not model dependence between dataset sizes")
+    lines.append("  - N_min_cost_eff has no replicate-resampling CI in this protocol")
+    lines.append(f"  - {boot.get('cost_eff_ci_reason') or N_MIN_COST_EFF_BOOTSTRAP_REASON}")
     if boot.get("warnings"):
         lines.append(f"- Replicate resampling warnings: `{json.dumps(boot.get('warnings'), ensure_ascii=False)}`")
+    lines.append(f"- N_min_cost_eff CI available: {bool(boot.get('cost_eff_ci_available'))}")
+    lines.append(f"- N_min_cost_eff CI policy: `{boot.get('cost_eff_ci_policy') or N_MIN_COST_EFF_BOOTSTRAP_POLICY}`")
+    if boot.get("cost_eff_rows_missing_cost"):
+        lines.append(
+            f"- Rows missing cost for selected basis `{boot.get('cost_eff_ci_basis') or cost_basis}`: {boot.get('cost_eff_rows_missing_cost')}"
+        )
     lines.append("\n## Hierarchical uncertainty\n")
     hierarchy = hierarchical_uncertainty or {}
     lines.append(f"- Label: {hierarchy.get('display_label') or HIERARCHICAL_UNCERTAINTY_LABEL}")
@@ -3824,8 +4503,40 @@ def build_report(
     lines.append(
         f"- Autocorrelation diagnostic available: {bool(temporal.get('autocorrelation_available'))}"
     )
+    n_eff_by_dataset_size = temporal.get("N_eff_by_dataset_size") or {}
+    ratio_by_dataset_size = temporal.get("N_eff_over_N_by_dataset_size") or {}
+    availability_by_dataset_size = temporal.get("autocorrelation_available_by_dataset_size") or {}
+    block_diag_by_dataset_size = temporal.get("temporal_block_diagnostics_by_dataset_size") or {}
+    if n_eff_by_dataset_size or block_diag_by_dataset_size:
+        lines.append("")
+        lines.append("| Dataset size (nominal N_train) | N_eff diagnostic | N_eff/N_nominal | Autocorrelation available | Blocks/datasets |")
+        lines.append("|---:|---:|---:|---|---|")
+        size_keys = sorted(
+            {
+                *[str(key) for key in n_eff_by_dataset_size.keys()],
+                *[str(key) for key in block_diag_by_dataset_size.keys()],
+            },
+            key=lambda item: int(item),
+        )
+        for size_key in size_keys:
+            block_diag = block_diag_by_dataset_size.get(size_key) or {}
+            lines.append(
+                "| {size} | {n_eff} | {ratio_value} | {available} | {blocks} |".format(
+                    size=size_key,
+                    n_eff=format_optional(n_eff_by_dataset_size.get(size_key)),
+                    ratio_value=format_optional(ratio_by_dataset_size.get(size_key)),
+                    available="yes" if availability_by_dataset_size.get(size_key) else "no",
+                    blocks=(
+                        f"{block_diag.get('n_datasets', 0)} dataset(s), "
+                        f"{sum(len((item.get('block_diagnostics') or {}).keys()) for item in (block_diag.get('datasets') or []))} block entry(ies)"
+                    ),
+                )
+            )
     status_payload = scientific_status or {}
     lines.append(f"- N_min basis: `{status_payload.get('n_min_basis') or 'nominal'}`")
+    lines.append(
+        f"- Claim mode: requested `{status_payload.get('claim_mode_requested') or 'diagnostic'}` -> `{status_payload.get('claim_mode_actual') or 'diagnostic'}`"
+    )
     lines.append(
         f"- Scientific claim status: `{status_payload.get('scientific_claim_status') or 'diagnostic_only'}`"
     )
@@ -3851,6 +4562,10 @@ def build_report(
         lines.append("- Paper-level blockers: none from temporal diagnostics")
     ratio = status_payload.get("N_eff_over_N_nominal")
     lines.append(f"- N_eff / N_nominal: {format_optional(ratio)}")
+    if status_payload.get("N_min_effective_diagnostic"):
+        lines.append(
+            f"- N_min_effective_diagnostic: `{json.dumps(status_payload.get('N_min_effective_diagnostic'), ensure_ascii=False)}`"
+        )
     lines.append(
         "- Effective samples at nominal N_min are diagnostic only; true effective-N thresholding is not implemented."
     )
@@ -3943,9 +4658,15 @@ def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float
         "by_method": {},
         "criteria": list(BOOTSTRAP_N_MIN_CRITERIA),
         "legacy_criterion_aliases": dict(LEGACY_THRESHOLD_ALIASES),
+        "cost_eff_ci_available": False,
+        "cost_eff_ci_policy": N_MIN_COST_EFF_BOOTSTRAP_POLICY,
+        "cost_eff_ci_reason": N_MIN_COST_EFF_BOOTSTRAP_REASON,
+        "cost_eff_ci_basis": None,
+        "cost_eff_rows_with_cost": 0,
+        "cost_eff_rows_missing_cost": 0,
         "failure_counts": {},
         "failure_reasons": [],
-        "warnings": [],
+        "warnings": ["replicate_bootstrap_excludes_n_min_cost_eff"],
         "limitations": [
             "replicate_row_resampling_only",
             "does_not_model_temporal_autocorrelation",
@@ -3953,6 +4674,7 @@ def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float
             "does_not_model_hyperparameter_selection_uncertainty",
             "does_not_model_dependence_between_dataset_sizes",
             "not_a_temporal_or_block_bootstrap",
+            "n_min_cost_eff_ci_not_available",
         ],
     }
 
@@ -3982,12 +4704,41 @@ def replicate_bootstrap_scope_warnings(rows: list[dict[str, Any]], *, aggregatio
         "replicate_bootstrap_does_not_capture_model_selection_uncertainty",
         "replicate_bootstrap_does_not_capture_hyperparameter_selection_uncertainty",
         "replicate_bootstrap_does_not_capture_dependence_between_dataset_sizes",
+        "replicate_bootstrap_excludes_n_min_cost_eff",
     ]
     if not bootstrap_resampling_has_variation(rows):
         warnings.append("replicate_bootstrap_no_multiple_seeds_or_replicates")
     if aggregation_mode in {"best_config", "mean_replicates"}:
         warnings.append(f"replicate_bootstrap_selected_aggregation_is_diagnostic:{aggregation_mode}")
     return warnings
+
+
+def replicate_bootstrap_cost_eff_metadata(
+    rows: list[dict[str, Any]],
+    *,
+    cost_basis: str,
+) -> dict[str, Any]:
+    metric_rows = [
+        row for row in rows
+        if row_primary_metric_mev(row) is not None
+    ]
+    rows_with_cost = [
+        row for row in metric_rows
+        if row_cost_for_basis(row, cost_basis) is not None
+    ]
+    missing_cost_rows = max(0, len(metric_rows) - len(rows_with_cost))
+    warnings: list[str] = ["replicate_bootstrap_excludes_n_min_cost_eff"]
+    if missing_cost_rows:
+        warnings.append(f"n_min_cost_eff_missing_cost_rows_for_selected_basis:{cost_basis}:{missing_cost_rows}")
+    return {
+        "cost_eff_ci_available": False,
+        "cost_eff_ci_policy": N_MIN_COST_EFF_BOOTSTRAP_POLICY,
+        "cost_eff_ci_reason": N_MIN_COST_EFF_BOOTSTRAP_REASON,
+        "cost_eff_ci_basis": cost_basis,
+        "cost_eff_rows_with_cost": len(rows_with_cost),
+        "cost_eff_rows_missing_cost": missing_cost_rows,
+        "warnings": warnings,
+    }
 
 
 def bootstrap_resample_normalized_rows(
@@ -4136,6 +4887,11 @@ def compute_bootstrap_n_min(
         normalized_rows,
         aggregation_mode=aggregation_mode,
     )
+    cost_eff_meta = replicate_bootstrap_cost_eff_metadata(
+        normalized_rows,
+        cost_basis=cost_basis,
+    )
+    warnings.extend(cost_eff_meta.get("warnings") or [])
     if not bootstrap_resampling_has_variation(normalized_rows):
         warnings.append("bootstrap_unavailable_no_replicates")
         return {
@@ -4153,6 +4909,7 @@ def compute_bootstrap_n_min(
             "by_method": {},
             "criteria": list(BOOTSTRAP_N_MIN_CRITERIA),
             "legacy_criterion_aliases": dict(LEGACY_THRESHOLD_ALIASES),
+            **cost_eff_meta,
             "failure_counts": {},
             "failure_reasons": [],
             "warnings": warnings,
@@ -4163,6 +4920,7 @@ def compute_bootstrap_n_min(
                 "does_not_model_hyperparameter_selection_uncertainty",
                 "does_not_model_dependence_between_dataset_sizes",
                 "not_a_temporal_or_block_bootstrap",
+                "n_min_cost_eff_ci_not_available",
             ],
         }
 
@@ -4256,6 +5014,7 @@ def compute_bootstrap_n_min(
         "by_method": by_method,
         "criteria": list(BOOTSTRAP_N_MIN_CRITERIA),
         "legacy_criterion_aliases": dict(LEGACY_THRESHOLD_ALIASES),
+        **cost_eff_meta,
         "failure_counts": {method: dict(counts) for method, counts in failure_counts.items()},
         "failure_reasons": sorted(failure_reasons),
         "warnings": warnings,
@@ -4266,6 +5025,7 @@ def compute_bootstrap_n_min(
             "does_not_model_hyperparameter_selection_uncertainty",
             "does_not_model_dependence_between_dataset_sizes",
             "not_a_temporal_or_block_bootstrap",
+            "n_min_cost_eff_ci_not_available",
         ],
     }
 
@@ -4643,6 +5403,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     fit_models = parse_fit_models(args.fit_models)
     moving_average_window = max(1, int(getattr(args, "moving_average_window", None) or 3))
     cost_basis = parse_cost_basis(getattr(args, "cost_basis", None))
+    claim_mode = parse_claim_mode(getattr(args, "claim_mode", None))
     aggregation_metadata = resolve_aggregation_mode_metadata(
         getattr(args, "aggregation_mode", None),
         run_root_count=len(run_roots),
@@ -4701,6 +5462,12 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     requested_n_min_source = str(getattr(args, "n_min_source", None) or "observed")
     requested_fit_model = str(getattr(args, "n_min_fit_model", None) or CANONICAL_POWER_LAW_MODEL)
     canonical_fit = canonical_fit_model(requested_fit_model)
+    threshold_metadata = resolve_threshold_metadata(
+        primary_metric=args.primary_metric,
+        threshold_mev=float(args.threshold_mev),
+        threshold_preset_key=getattr(args, "threshold_preset_key", None),
+        threshold_is_user_defined=parse_bool_text(getattr(args, "threshold_is_user_defined", False)),
+    )
     actual_n_min_source = requested_n_min_source
     actual_fit_model = canonical_fit if requested_n_min_source == "fit" else None
     fallback_used = False
@@ -4837,6 +5604,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     scientific_status = scientific_claim_status_payload(
         temporal_diagnostics=temporal_diagnostics,
         thresholds=thresholds,
+        threshold_metadata=threshold_metadata,
+        claim_mode_requested=claim_mode,
         requested_aggregation_mode=aggregation_metadata.get("requested_aggregation_mode"),
         actual_aggregation_mode=aggregation_mode,
         aggregation_mode_legacy_inferred=bool(aggregation_metadata.get("aggregation_mode_legacy_inferred")),
@@ -4882,9 +5651,12 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "primary_metric": args.primary_metric,
         "primary_metric_unit": metric_scale(args.primary_metric)[1],
         "threshold_mev": float(args.threshold_mev),
+        **threshold_metadata,
         "relative_tolerance": float(args.relative_tolerance),
         "plateau_gain": float(args.plateau_gain),
         "cost_basis": cost_basis,
+        "claim_mode_requested": claim_mode,
+        "claim_mode_actual": scientific_status.get("claim_mode_actual", "diagnostic"),
         "x_axis": args.x_axis,
         "fit_models": fit_models,
         "grouped_config_rows": len(grouped_rows),
@@ -4932,6 +5704,10 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "nominal_n_train": temporal_diagnostics.get("nominal_n_train"),
         "estimated_n_eff_train": temporal_diagnostics.get("estimated_n_eff_train"),
         "autocorrelation_available": temporal_diagnostics.get("autocorrelation_available", False),
+        "N_eff_by_dataset_size": temporal_diagnostics.get("N_eff_by_dataset_size", {}),
+        "N_eff_over_N_by_dataset_size": temporal_diagnostics.get("N_eff_over_N_by_dataset_size", {}),
+        "autocorrelation_available_by_dataset_size": temporal_diagnostics.get("autocorrelation_available_by_dataset_size", {}),
+        "temporal_block_diagnostics_by_dataset_size": temporal_diagnostics.get("temporal_block_diagnostics_by_dataset_size", {}),
         **scientific_status,
     }
     summary_path = output_dir / "dataset_size_minimum_summary.json"
@@ -4948,6 +5724,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, help="Directory for derived outputs.")
     parser.add_argument("--primary-metric", default=DEFAULT_PRIMARY_METRIC)
     parser.add_argument("--threshold-mev", type=float, required=True)
+    parser.add_argument(
+        "--threshold-preset-key",
+        default=None,
+        help="Metric-specific threshold preset key used by the caller; omitted for manual thresholds.",
+    )
+    parser.add_argument(
+        "--threshold-is-user-defined",
+        type=parse_bool_text,
+        default=False,
+        help="Whether the threshold was entered manually rather than selected from a documented metric-specific preset.",
+    )
     parser.add_argument("--relative-tolerance", type=float, default=0.05)
     parser.add_argument("--plateau-gain", type=float, default=0.05)
     parser.add_argument("--x-axis", choices=["n_total", "n_train"], default="n_train")
@@ -4989,6 +5776,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Cost basis used for N_min_cost_eff. "
             "per_seed_mean preserves historical behavior; protocol_total sums protocol seeds/replicates."
+        ),
+    )
+    parser.add_argument(
+        "--claim-mode",
+        choices=list(CLAIM_MODES),
+        default=CLAIM_MODES[0],
+        help=(
+            "Scientific-claim gate for this analysis. "
+            "diagnostic preserves permissive read-only post-processing; "
+            "paper_candidate requires the paper-level protocol blockers to clear."
         ),
     )
     parser.add_argument(

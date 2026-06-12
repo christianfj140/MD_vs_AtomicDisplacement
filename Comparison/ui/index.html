@@ -1180,10 +1180,11 @@
               <label class="field">
                 <span>Threshold meV</span>
                 <select id="dataset-minimum-threshold-preset">
-                  <option value="20" selected>20 meV</option>
+                  <option value="h_mae_relaxed_10" selected>H-MAE exploratory 10 meV</option>
+                  <option value="h_mae_relaxed_20">H-MAE exploratory 20 meV</option>
                 </select>
-                <input id="dataset-minimum-threshold" type="number" min="0" step="1" value="20" />
-                <small>Solo afecta a <code>N_min_abs</code>.</small>
+                <input id="dataset-minimum-threshold" type="number" min="0" step="1" value="10" />
+                <small id="dataset-minimum-threshold-warning">Solo afecta a <code>N_min_abs</code>. 20 meV no es universal; usa el preset especifico de la metrica o marca manual exploratory.</small>
               </label>
               <label class="field">
                 <span>Eje x</span>
@@ -1199,6 +1200,14 @@
                   <option value="protocol_total">protocol total GPU-hours</option>
                 </select>
                 <small>Para modos paper-level, protocol total representa mejor el coste de repetir seeds/replicas.</small>
+              </label>
+              <label class="field">
+                <span>Claim mode</span>
+                <select id="dataset-minimum-claim-mode">
+                  <option value="diagnostic" selected>Diagnostic</option>
+                  <option value="paper_candidate">Paper candidate gate</option>
+                </select>
+                <small>Paper candidate nunca pasa por defecto; bloquea el claim si faltan requisitos de protocolo.</small>
               </label>
               <label class="field">
                 <span>Fit</span>
