@@ -88,18 +88,18 @@ from g2m_deeph_dataset_size_minimum import (
     AGGREGATION_MODES,
     CANONICAL_POWER_LAW_MODEL,
     COST_BASES,
+    MetricFileLoadError,
+    aggregation_mode_classification as dataset_minimum_aggregation_mode_classification,
     analysis_rows_for_aggregation_mode as dataset_minimum_analysis_rows_for_aggregation_mode,
     canonical_fit_model as dataset_minimum_canonical_fit_model,
     discover_metric_files as discover_dataset_minimum_metric_files,
     fit_models_equivalent as dataset_minimum_fit_models_equivalent,
     group_config_rows as dataset_minimum_group_config_rows,
-    load_json_metric_rows as load_dataset_minimum_json_metric_rows,
+    load_metric_file_rows as load_dataset_minimum_metric_file_rows,
     load_run_root_rows as dataset_minimum_load_run_root_rows,
     normalize_rows as dataset_minimum_normalize_rows,
-    pivot_metric_scaling_rows as pivot_dataset_minimum_metric_rows,
     parse_cost_basis as dataset_minimum_parse_cost_basis,
     parse_single_fit_model as dataset_minimum_parse_single_fit_model,
-    read_csv as read_dataset_minimum_csv,
     resolve_aggregation_mode as resolve_dataset_minimum_aggregation_mode,
 )
 LOG_HEARTBEAT_SECONDS = 30.0
@@ -5825,11 +5825,7 @@ def _dataset_size_minimum_candidate_run_roots() -> list[Path]:
 
 
 def _dataset_size_minimum_rows_from_metric_file(path: Path) -> list[dict[str, Any]]:
-    if path.suffix == ".json":
-        rows = load_dataset_minimum_json_metric_rows(path)
-    else:
-        rows = [dict(row) for row in read_dataset_minimum_csv(path)]
-    return pivot_dataset_minimum_metric_rows(rows)
+    return load_dataset_minimum_metric_file_rows(path, explicit_run_root_mode=False)
 
 
 def iter_dataset_size_minimum_metric_sources() -> list[tuple[Path, Path]]:
@@ -5909,7 +5905,7 @@ def discover_dataset_size_minimum_run_roots() -> list[dict[str, Any]]:
         item["modified_at"] = max(item["modified_at"], metrics_path.stat().st_mtime)
         try:
             item["rows"].extend(_dataset_size_minimum_rows_from_metric_file(metrics_path))
-        except (OSError, json.JSONDecodeError, csv.Error, ValueError) as exc:
+        except (MetricFileLoadError, OSError, json.JSONDecodeError, csv.Error, ValueError) as exc:
             item["errors"].append(f"{metrics_path.name}:{exc}")
 
     items: list[dict[str, Any]] = []
@@ -6023,15 +6019,20 @@ def resolve_dataset_size_minimum_run_roots(run_roots_raw: list[Any]) -> list[Pat
         if not metric_files:
             raise RuntimeError(f"run_root sin metricas compatibles para dataset-size-minimum: {path}")
 
-        usable_rows = 0
-        for metric_file in metric_files:
-            try:
-                usable_rows += len(_dataset_size_minimum_rows_from_metric_file(metric_file))
-            except (OSError, json.JSONDecodeError, csv.Error, ValueError):
-                continue
+        try:
+            loaded_rows, _sources, root_warnings = dataset_minimum_load_run_root_rows(
+                path,
+                explicit_run_root_mode=True,
+            )
+        except MetricFileLoadError as exc:
+            raise RuntimeError(str(exc)) from exc
 
+        usable_rows = len(loaded_rows)
         if usable_rows <= 0:
-            raise RuntimeError(f"run_root sin filas metricas compatibles para dataset-size-minimum: {path}")
+            detail = f" ({'; '.join(root_warnings)})" if root_warnings else ""
+            raise RuntimeError(
+                f"run_root sin filas metricas compatibles para dataset-size-minimum: {path}{detail}"
+            )
 
         run_roots.append(path)
 
@@ -6123,6 +6124,30 @@ def parse_dataset_size_minimum_aggregation_mode(
     return resolve_dataset_minimum_aggregation_mode(None, run_root_count=run_root_count)
 
 
+def dataset_size_minimum_output_aggregation_metadata(output: dict[str, Any]) -> dict[str, Any]:
+    requested = output.get("requested_aggregation_mode")
+    actual = output.get("actual_aggregation_mode") or output.get("aggregation_mode")
+    legacy_inferred = bool(output.get("aggregation_mode_legacy_inferred"))
+
+    if not actual:
+        roots = output.get("run_roots") or []
+        actual = "mean_replicates" if len(roots) > 1 else "best_config"
+        legacy_inferred = True
+
+    classification = output.get("aggregation_mode_classification")
+    reason = output.get("aggregation_mode_classification_reason")
+    if not classification or not reason:
+        classification, reason = dataset_minimum_aggregation_mode_classification(str(actual))
+
+    return {
+        "requested_aggregation_mode": requested,
+        "actual_aggregation_mode": str(actual),
+        "aggregation_mode_legacy_inferred": legacy_inferred,
+        "aggregation_mode_classification": classification,
+        "aggregation_mode_classification_reason": reason,
+    }
+
+
 def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
     """Build plot-ready best_rows from completed sweeps without writing artifacts."""
     run_roots = resolve_dataset_size_minimum_run_roots(payload.get("run_roots") or [])
@@ -6140,6 +6165,9 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
         payload,
         run_root_count=len(run_roots),
     )
+    aggregation_classification, aggregation_reason = dataset_minimum_aggregation_mode_classification(
+        aggregation_mode
+    )
     all_normalized: list[dict[str, Any]] = []
     warnings: list[str] = []
     resolved_roots: list[str] = []
@@ -6151,7 +6179,10 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
             reason = source_meta.get("blocked_reason") or "no_selectable"
             raise RuntimeError(f"El sweep {run_root.name} no es selectable: {reason}")
 
-        loaded, _sources, root_warnings = dataset_minimum_load_run_root_rows(run_root)
+        loaded, _sources, root_warnings = dataset_minimum_load_run_root_rows(
+            run_root,
+            explicit_run_root_mode=True,
+        )
         normalized, normalize_warnings = dataset_minimum_normalize_rows(
             loaded,
             primary_metric=primary_metric,
@@ -6207,6 +6238,11 @@ def dataset_size_minimum_preview(payload: dict[str, Any]) -> dict[str, Any]:
         "is_preview": True,
         "aggregated": aggregated,
         "aggregation_mode": aggregation_mode,
+        "requested_aggregation_mode": payload.get("aggregation_mode"),
+        "actual_aggregation_mode": aggregation_mode,
+        "aggregation_mode_legacy_inferred": payload.get("aggregation_mode") in (None, ""),
+        "aggregation_mode_classification": aggregation_classification,
+        "aggregation_mode_classification_reason": aggregation_reason,
     }
 
 
@@ -6380,11 +6416,8 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
             aggregated_rows = best_rows
         result_rows = read_csv_rows(output_dir / "dataset_size_minimum_results.csv")
         summary_run_roots = summary.get("run_roots") or []
-        aggregation_mode = summary.get("aggregation_mode")
-        if not aggregation_mode:
-            aggregation_mode = (
-                "mean_replicates" if len(summary_run_roots) > 1 else "best_config"
-            )
+        aggregation_metadata = dataset_size_minimum_output_aggregation_metadata(summary)
+        aggregation_mode = aggregation_metadata["actual_aggregation_mode"]
         outputs.append(
             {
                 "status": summary.get("status") or "unknown",
@@ -6417,6 +6450,7 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
                 "fallback_used": summary.get("fallback_used"),
                 "fallback_reason": summary.get("fallback_reason"),
                 "aggregation_mode": aggregation_mode,
+                **aggregation_metadata,
                 "aggregated": summary.get("aggregated"),
                 "replicate_bootstrap": summary.get("replicate_bootstrap") or summary.get("bootstrap") or {},
                 "bootstrap": summary.get("bootstrap") or {},

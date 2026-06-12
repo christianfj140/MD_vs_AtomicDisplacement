@@ -2770,6 +2770,37 @@ function datasetMinimumAggregationModeLabel(mode) {
   return String(mode || "unknown");
 }
 
+function datasetMinimumAggregationModeClassification(mode) {
+  if (mode === "mean_seeds_per_config") {
+    return {
+      classification: "paper_candidate",
+      reason: "paper_ready_seed_mean_per_config",
+    };
+  }
+  if (mode === "best_config_mean") {
+    return {
+      classification: "paper_candidate",
+      reason: "paper_candidate_only_if_config_selection_policy_is_locked",
+    };
+  }
+  if (mode === "best_config") {
+    return {
+      classification: "diagnostic_only",
+      reason: "best_single_run_is_not_a_paper_level_protocol",
+    };
+  }
+  if (mode === "mean_replicates") {
+    return {
+      classification: "diagnostic_only",
+      reason: "replicate_mean_mixes_configs_or_seeds_without_locked_paper_protocol",
+    };
+  }
+  return {
+    classification: "diagnostic_only",
+    reason: `unknown_aggregation_mode:${mode || "unknown"}`,
+  };
+}
+
 function datasetMinimumUsesBackendAggregationMode(mode) {
   return mode === "mean_replicates"
     || mode === "mean_seeds_per_config"
@@ -2826,6 +2857,30 @@ function datasetMinimumOutputMovingAverageWindow(output = {}) {
 
 function datasetMinimumOutputCostBasis(output = {}) {
   return String(output.cost_basis || "per_seed_mean");
+}
+
+function datasetMinimumOutputAggregationMetadata(output = {}) {
+  const requested = output.requested_aggregation_mode;
+  const actual = String(
+    output.actual_aggregation_mode
+    || output.aggregation_mode
+    || (Array.isArray(output.run_roots) && output.run_roots.length > 1 ? "mean_replicates" : "best_config"),
+  );
+  const classification = output.aggregation_mode_classification
+    || datasetMinimumAggregationModeClassification(actual).classification;
+  const reason = output.aggregation_mode_classification_reason
+    || datasetMinimumAggregationModeClassification(actual).reason;
+  const legacyInferred = Boolean(
+    output.aggregation_mode_legacy_inferred
+    || (!output.actual_aggregation_mode && !output.requested_aggregation_mode && !output.aggregation_mode),
+  );
+  return {
+    requested,
+    actual,
+    classification,
+    reason,
+    legacyInferred,
+  };
 }
 
 function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
@@ -3550,6 +3605,10 @@ function datasetMinimumReplicateBootstrap(output = {}) {
   return output.replicate_bootstrap || output.bootstrap || {};
 }
 
+function datasetMinimumHierarchicalUncertainty(output = {}) {
+  return output.hierarchical_uncertainty || output.paper_uncertainty || {};
+}
+
 function datasetMinimumPreviewCacheKey() {
   return [
     datasetMinimumRootKey(datasetMinimumSelectedRunRoots()),
@@ -4010,6 +4069,8 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   }
 
   const selectedRunRoots = datasetMinimumNormalizeRoots(datasetMinimumSelectedRunRoots());
+  const selectedAggregation = datasetMinimumSelectedAggregationMode();
+  const selectedAggregationMeta = datasetMinimumAggregationModeClassification(selectedAggregation);
 
   if (!output) {
     const metric = datasetMinimumSelectedMetric();
@@ -4028,7 +4089,8 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
       `Run analysis required for this exact selection. ` +
       `No stored output matches metric=${DATASET_MINIMUM_METRIC_LABELS[metric] || metric}, ` +
       `threshold=${threshold ?? "-"} meV, aggregation=${datasetMinimumAggregationModeLabel(datasetMinimumSelectedAggregationMode())}, ` +
-      `bootstrap=${datasetMinimumSelectedBootstrapReplicates()}, ci=${datasetMinimumSelectedCiLevel()}.`;
+      `bootstrap=${datasetMinimumSelectedBootstrapReplicates()}, ci=${datasetMinimumSelectedCiLevel()}.` +
+      `${selectedAggregationMeta.classification === "diagnostic_only" ? ` Selected aggregation mode is diagnostic-only (${selectedAggregationMeta.reason}).` : ""}`;
 
     return;
   }
@@ -4054,13 +4116,23 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const outputRunRoots = datasetMinimumNormalizeRoots(output.run_roots || []);
   const exactRootMatch =
     datasetMinimumRootKey(outputRunRoots) === datasetMinimumRootKey(selectedRunRoots);
-  const aggregationMode = datasetMinimumEffectiveAggregationMode(output);
+  const aggregationMeta = datasetMinimumOutputAggregationMetadata(output);
+  const aggregationMode = aggregationMeta.actual;
   const aggregationNote = ` Aggregation: ${datasetMinimumAggregationModeLabel(aggregationMode)}.`;
+  const aggregationProtocolNote =
+    ` Aggregation protocol: requested=${aggregationMeta.requested || "legacy/inferred"}, actual=${aggregationMeta.actual}, ` +
+    `classification=${aggregationMeta.classification} (${aggregationMeta.reason}).`;
+  const aggregationLegacyNote = aggregationMeta.legacyInferred
+    ? " WARNING: aggregation mode is legacy/inferred because the original summary did not record an explicit requested mode."
+    : "";
   const bestConfigWarning = aggregationMode === "best_config"
     ? " Warning: best_config is diagnostic only, not recommended for paper-level reporting."
     : aggregationMode === "mean_replicates"
       ? " Warning: mean_replicates mixes configs/seeds and is diagnostic only."
       : "";
+  const aggregationDiagnosticWarning = aggregationMeta.classification === "diagnostic_only"
+    ? " WARNING: selected aggregation mode is diagnostic-only."
+    : "";
   const requestedSource = output.requested_n_min_source || output.n_min_source || "observed";
   const actualSource = output.actual_n_min_source || output.n_min_source || requestedSource;
   const nMinSourceNote = output.fallback_used
@@ -4081,6 +4153,17 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : " Replicate-resampling CI: disabled.";
   const bootstrapWarningNote = Array.isArray(bootstrap.warnings) && bootstrap.warnings.length
     ? ` Replicate-resampling CI warnings: ${bootstrap.warnings.slice(0, 4).join("; ")}.`
+    : "";
+  const hierarchical = datasetMinimumHierarchicalUncertainty(output);
+  const hierarchicalLevels = hierarchical.levels || {};
+  const hierarchicalSummary = Object.entries(hierarchicalLevels)
+    .map(([name, level]) => `${name}: available=${Boolean(level?.available)}, sufficient=${Boolean(level?.sufficient)}`)
+    .join("; ");
+  const hierarchicalNote = hierarchical.status
+    ? ` Hierarchical uncertainty: ${hierarchical.display_label || "hierarchical uncertainty"} (${hierarchical.status}; paper-ready=${Boolean(hierarchical.paper_ready)}${hierarchicalSummary ? `; ${hierarchicalSummary}` : ""}).`
+    : "";
+  const hierarchicalBlockerNote = Array.isArray(hierarchical.paper_level_blockers) && hierarchical.paper_level_blockers.length
+    ? ` Hierarchical uncertainty blockers: ${hierarchical.paper_level_blockers.slice(0, 4).join("; ")}.`
     : "";
 
   const temporal = output.temporal_diagnostics || {};
@@ -4130,7 +4213,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     : "";
 
   status.textContent =
-    `${aggregationNote}${bestConfigWarning}${nMinSourceNote}${costBasisNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${temporalNote}` +
+    `${aggregationNote}${aggregationProtocolNote}${aggregationLegacyNote}${bestConfigWarning}${aggregationDiagnosticWarning}${nMinSourceNote}${costBasisNote}${fitNote}${fallbackNote}${windowNote}${bootstrapNote}${bootstrapWarningNote}${hierarchicalNote}${hierarchicalBlockerNote}${temporalNote}` +
     `${thresholdNote}${outputNote}${axisNote}` +
     `${warnings.length ? ` Warnings: ${warnings.join("; ")}` : ""}` +
     `${payload.diagnostic_warning ? ` ${payload.diagnostic_warning}` : ""}`;

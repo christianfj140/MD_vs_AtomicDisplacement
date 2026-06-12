@@ -58,6 +58,11 @@ CURVE_POINT_FIT_MODELS = {
     "cumulative_best",
 }
 NONNEG_PREDICTION_TOL = 1e-9
+POWER_LAW_ALPHA_MIN = 0.05
+POWER_LAW_ALPHA_MAX = 4.0
+POWER_LAW_ALPHA_GRID_POINTS = 160
+POWER_LAW_ALPHA_REFINE_MAX_ITER = 48
+POWER_LAW_ALPHA_REFINE_TOL = 1e-4
 DEFAULT_AGGREGATION_MODE = "mean_replicates"
 AGGREGATION_MODES = (
     "mean_replicates",
@@ -69,6 +74,7 @@ COST_BASES = (
     "per_seed_mean",
     "protocol_total",
 )
+PAPER_READY_AGGREGATION_MODE = "mean_seeds_per_config"
 BASE_CONFIG_SEED_SUFFIX = re.compile(r"-seed\d+$", re.IGNORECASE)
 EXPLICIT_BASE_CONFIG_ID_FIELDS = (
     "base_config_id",
@@ -84,6 +90,8 @@ LEGACY_THRESHOLD_ALIASES = {LEGACY_N_MIN_REL95_KEY: N_MIN_REL_TOL_KEY}
 BOOTSTRAP_N_MIN_CRITERIA = ("N_min_abs", N_MIN_REL_TOL_KEY, "N_min_plateau")
 MIN_BOOTSTRAP_SUCCESS_FOR_CI = 2
 REPLICATE_BOOTSTRAP_LABEL = "replicate-resampling CI"
+HIERARCHICAL_UNCERTAINTY_LABEL = "hierarchical uncertainty (paper-readiness audit)"
+HIERARCHICAL_UNCERTAINTY_REPLICATES = 200
 ENERGY_METRICS_WITHOUT_EV = {"dos_mae_500_fermi_window"}
 _REFERENCED_METRIC_CACHE: dict[tuple[str, str], float | None] = {}
 
@@ -126,6 +134,59 @@ def read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+class MetricFileLoadError(RuntimeError):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        category: str,
+        explicit_run_root_mode: bool,
+        cause: BaseException | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.category = category
+        self.explicit_run_root_mode = explicit_run_root_mode
+        self.cause = cause
+        mode = "explicit_run_root" if explicit_run_root_mode else "optional_discovery"
+        detail = ""
+        if cause is not None:
+            detail = f": {type(cause).__name__}: {cause}"
+        super().__init__(
+            f"dataset-size-minimum metric file {category} (mode={mode}) at {self.path}{detail}"
+        )
+
+
+def read_metric_csv_rows(
+    path: Path,
+    *,
+    explicit_run_root_mode: bool,
+) -> list[dict[str, str]]:
+    if not path.exists():
+        raise MetricFileLoadError(
+            path,
+            category="missing_file",
+            explicit_run_root_mode=explicit_run_root_mode,
+        )
+    configure_csv()
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    except csv.Error as exc:
+        raise MetricFileLoadError(
+            path,
+            category="invalid_csv",
+            explicit_run_root_mode=explicit_run_root_mode,
+            cause=exc,
+        ) from exc
+    except OSError as exc:
+        raise MetricFileLoadError(
+            path,
+            category="unreadable_file",
+            explicit_run_root_mode=explicit_run_root_mode,
+            cause=exc,
+        ) from exc
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -468,8 +529,34 @@ def row_dataset_sizes(row: dict[str, Any]) -> tuple[int | None, int | None, list
     return n_total, n_train, warnings
 
 
-def load_json_metric_rows(path: Path) -> list[dict[str, Any]]:
-    payload = read_json(path)
+def load_json_metric_rows(
+    path: Path,
+    *,
+    explicit_run_root_mode: bool = False,
+) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise MetricFileLoadError(
+            path,
+            category="missing_file",
+            explicit_run_root_mode=explicit_run_root_mode,
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise MetricFileLoadError(
+            path,
+            category="invalid_json",
+            explicit_run_root_mode=explicit_run_root_mode,
+            cause=exc,
+        ) from exc
+    except OSError as exc:
+        raise MetricFileLoadError(
+            path,
+            category="unreadable_file",
+            explicit_run_root_mode=explicit_run_root_mode,
+            cause=exc,
+        ) from exc
+
     if isinstance(payload, dict):
         rows = payload.get("metric_scaling_rows") or payload.get("rows")
     else:
@@ -477,6 +564,27 @@ def load_json_metric_rows(path: Path) -> list[dict[str, Any]]:
     if isinstance(rows, list):
         return [dict(row) for row in rows if isinstance(row, dict)]
     return []
+
+
+def load_metric_file_rows(
+    path: Path,
+    *,
+    explicit_run_root_mode: bool = False,
+) -> list[dict[str, Any]]:
+    if path.suffix == ".json":
+        loaded = load_json_metric_rows(
+            path,
+            explicit_run_root_mode=explicit_run_root_mode,
+        )
+    else:
+        loaded = [
+            dict(row)
+            for row in read_metric_csv_rows(
+                path,
+                explicit_run_root_mode=explicit_run_root_mode,
+            )
+        ]
+    return pivot_metric_scaling_rows(loaded)
 
 
 def pivot_metric_scaling_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -517,39 +625,39 @@ def pivot_metric_scaling_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def metric_file_row_count(path: Path) -> int:
-    if not path.exists():
-        return 0
     try:
-        if path.suffix == ".json":
-            rows = load_json_metric_rows(path)
-        else:
-            rows = [dict(row) for row in read_csv(path)]
-        return len(pivot_metric_scaling_rows(rows))
-    except (OSError, json.JSONDecodeError, csv.Error, ValueError):
+        return len(load_metric_file_rows(path, explicit_run_root_mode=False))
+    except (MetricFileLoadError, ValueError):
         return 0
 
 
-def discover_metric_files(run_root: Path) -> list[Path]:
-    preferred_groups = [
+def preferred_metric_file_groups(run_root: Path) -> list[list[Path]]:
+    return [
         [run_root / "summary" / "ranking" / "normalized_run_metrics.json"],
         [run_root / "summary" / "ranking" / "normalized_run_metrics.csv"],
         [run_root / "sweep" / "training_sweep_metrics.csv"],
         [run_root / "final_test" / "sweep" / "training_sweep_metrics.csv"],
     ]
 
+
+def fallback_metric_file_candidates(run_root: Path) -> list[Path]:
+    found: list[Path] = []
+    found.extend(sorted(run_root.glob("*/summary/ranking/normalized_run_metrics.json")))
+    found.extend(sorted(run_root.glob("*/summary/ranking/normalized_run_metrics.csv")))
+    found.extend(sorted(run_root.glob("runs/*/sweep/training_sweep_metrics.csv")))
+    return found
+
+
+def discover_metric_files(run_root: Path) -> list[Path]:
     existing_preferred: list[Path] = []
-    for group in preferred_groups:
+    for group in preferred_metric_file_groups(run_root):
         existing = [path for path in group if path.exists()]
         existing_preferred.extend(existing)
         usable = [path for path in existing if metric_file_row_count(path) > 0]
         if usable:
             return usable
 
-    found: list[Path] = []
-    found.extend(sorted(run_root.glob("*/summary/ranking/normalized_run_metrics.json")))
-    found.extend(sorted(run_root.glob("*/summary/ranking/normalized_run_metrics.csv")))
-    found.extend(sorted(run_root.glob("runs/*/sweep/training_sweep_metrics.csv")))
-
+    found = fallback_metric_file_candidates(run_root)
     usable_fallback = [path for path in found if metric_file_row_count(path) > 0]
     if usable_fallback:
         return usable_fallback
@@ -557,16 +665,28 @@ def discover_metric_files(run_root: Path) -> list[Path]:
     return existing_preferred or found
 
 
-def load_run_root_rows(run_root: Path) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+def load_run_root_rows(
+    run_root: Path,
+    *,
+    explicit_run_root_mode: bool = False,
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     rows: list[dict[str, Any]] = []
     sources: list[str] = []
     warnings: list[str] = []
+
+    if explicit_run_root_mode:
+        for group in preferred_metric_file_groups(run_root):
+            existing = [path for path in group if path.exists()]
+            for path in existing:
+                preview_rows = load_metric_file_rows(path, explicit_run_root_mode=True)
+                if preview_rows:
+                    break
+
     for path in discover_metric_files(run_root):
-        if path.suffix == ".json":
-            loaded = load_json_metric_rows(path)
-        else:
-            loaded = [dict(row) for row in read_csv(path)]
-        loaded = pivot_metric_scaling_rows(loaded)
+        loaded = load_metric_file_rows(
+            path,
+            explicit_run_root_mode=explicit_run_root_mode,
+        )
         for row in loaded:
             row.setdefault("source_run_root", str(run_root))
             row.setdefault("source_metric_file", str(path))
@@ -701,6 +821,51 @@ def parse_aggregation_mode(value: str | None) -> str | None:
     if mode not in AGGREGATION_MODES:
         raise SystemExit(f"Unknown aggregation_mode: {mode}")
     return mode
+
+
+def aggregation_mode_classification(mode: str) -> tuple[str, str]:
+    if mode == "mean_seeds_per_config":
+        return (
+            "paper_candidate",
+            "paper_ready_seed_mean_per_config",
+        )
+    if mode == "best_config_mean":
+        return (
+            "paper_candidate",
+            "paper_candidate_only_if_config_selection_policy_is_locked",
+        )
+    if mode == "best_config":
+        return (
+            "diagnostic_only",
+            "best_single_run_is_not_a_paper_level_protocol",
+        )
+    if mode == "mean_replicates":
+        return (
+            "diagnostic_only",
+            "replicate_mean_mixes_configs_or_seeds_without_locked_paper_protocol",
+        )
+    return ("diagnostic_only", f"unknown_aggregation_mode:{mode}")
+
+
+def resolve_aggregation_mode_metadata(value: str | None, *, run_root_count: int) -> dict[str, Any]:
+    requested = parse_aggregation_mode(value)
+    actual = resolve_aggregation_mode(requested, run_root_count=run_root_count)
+    classification, reason = aggregation_mode_classification(actual)
+    inferred = requested is None
+    warning = (
+        f"aggregation_mode_not_explicit; inferred={actual}; "
+        f"paper_ready_protocol_prefers_explicit_{PAPER_READY_AGGREGATION_MODE}"
+        if inferred
+        else None
+    )
+    return {
+        "requested_aggregation_mode": requested,
+        "actual_aggregation_mode": actual,
+        "aggregation_mode_legacy_inferred": inferred,
+        "aggregation_mode_classification": classification,
+        "aggregation_mode_classification_reason": reason,
+        "aggregation_mode_warning": warning,
+    }
 
 
 def aggregate_rows_mean_replicates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1551,6 +1716,90 @@ def nonnegative_floor_coefficients(
     )
 
 
+def evaluate_power_law_floor_alpha(
+    alpha: float,
+    n_values: list[float],
+    y_values: list[float],
+) -> dict[str, Any] | None:
+    if not math.isfinite(alpha) or alpha <= 0:
+        return None
+    transformed = [n ** (-alpha) for n in n_values]
+    e_inf, amplitude = nonnegative_floor_coefficients(transformed, y_values)
+    coefficients = [float(e_inf), float(amplitude), float(alpha)]
+    if e_inf < 0 or amplitude < 0:
+        return None
+    if not predictions_nonnegative_on_domain(coefficients, n_values):
+        return None
+    predicted = power_law_floor_predictions(coefficients, n_values)
+    sse = sum((y - yhat) ** 2 for y, yhat in zip(y_values, predicted))
+    return {
+        "alpha": float(alpha),
+        "coefficients": coefficients,
+        "predicted": predicted,
+        "sse": float(sse),
+    }
+
+
+def golden_section_refine_power_law_alpha(
+    n_values: list[float],
+    y_values: list[float],
+    *,
+    left: float,
+    right: float,
+    max_iter: int = POWER_LAW_ALPHA_REFINE_MAX_ITER,
+    tol: float = POWER_LAW_ALPHA_REFINE_TOL,
+) -> tuple[dict[str, Any] | None, int]:
+    if not (math.isfinite(left) and math.isfinite(right)) or left <= 0 or right <= left:
+        return None, 0
+    phi = (1.0 + math.sqrt(5.0)) / 2.0
+    inv_phi = 1.0 / phi
+    inv_phi_sq = inv_phi * inv_phi
+
+    objective_evaluations = 0
+
+    def evaluate(alpha: float) -> dict[str, Any] | None:
+        nonlocal objective_evaluations
+        objective_evaluations += 1
+        return evaluate_power_law_floor_alpha(alpha, n_values, y_values)
+
+    a = float(left)
+    b = float(right)
+    c = b - (b - a) * inv_phi
+    d = a + (b - a) * inv_phi
+    result_c = evaluate(c)
+    result_d = evaluate(d)
+
+    candidates = [result for result in (result_c, result_d) if result is not None]
+    best = min(candidates, key=lambda item: item["sse"]) if candidates else None
+
+    for _ in range(max_iter):
+        if (b - a) <= tol * max(1.0, 0.5 * (abs(a) + abs(b))):
+            break
+        sse_c = float("inf") if result_c is None else float(result_c["sse"])
+        sse_d = float("inf") if result_d is None else float(result_d["sse"])
+        if sse_c <= sse_d:
+            b = d
+            d = c
+            result_d = result_c
+            c = b - (b - a) * inv_phi
+            result_c = evaluate(c)
+            candidate = result_c
+        else:
+            a = c
+            c = d
+            result_c = result_d
+            d = a + (b - a) * inv_phi
+            result_d = evaluate(d)
+            candidate = result_d
+        if candidate is not None and (best is None or candidate["sse"] < best["sse"]):
+            best = candidate
+
+    midpoint = evaluate(0.5 * (a + b))
+    if midpoint is not None and (best is None or midpoint["sse"] < best["sse"]):
+        best = midpoint
+    return best, objective_evaluations
+
+
 def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[str, Any]:
     """Constrained canonical model: y(N) = E_inf + A * N^(-alpha)."""
     if len(n_values) < required_fit_points(CANONICAL_POWER_LAW_MODEL):
@@ -1574,26 +1823,21 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
         }
 
     best: dict[str, Any] | None = None
-    for idx in range(160):
-        alpha = 0.05 + (4.0 - 0.05) * idx / 159.0
-        if alpha <= 0:
+    coarse_grid = [
+        POWER_LAW_ALPHA_MIN
+        + (POWER_LAW_ALPHA_MAX - POWER_LAW_ALPHA_MIN) * idx / (POWER_LAW_ALPHA_GRID_POINTS - 1)
+        for idx in range(POWER_LAW_ALPHA_GRID_POINTS)
+    ]
+    best_idx: int | None = None
+    objective_evaluations = 0
+    for idx, alpha in enumerate(coarse_grid):
+        candidate = evaluate_power_law_floor_alpha(alpha, n_values, y_values)
+        objective_evaluations += 1
+        if candidate is None:
             continue
-        transformed = [n ** (-alpha) for n in n_values]
-        e_inf, amplitude = nonnegative_floor_coefficients(transformed, y_values)
-        coefficients = [float(e_inf), float(amplitude), float(alpha)]
-        if e_inf < 0 or amplitude < 0:
-            continue
-        if not predictions_nonnegative_on_domain(coefficients, n_values):
-            continue
-        predicted = power_law_floor_predictions(coefficients, n_values)
-        sse = sum((y - yhat) ** 2 for y, yhat in zip(y_values, predicted))
-        if best is None or sse < best["sse"]:
-            best = {
-                "alpha": float(alpha),
-                "coefficients": coefficients,
-                "predicted": predicted,
-                "sse": sse,
-            }
+        if best is None or candidate["sse"] < best["sse"]:
+            best = candidate
+            best_idx = idx
 
     if best is None:
         return {
@@ -1603,6 +1847,23 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
             "formula": "y = E_inf + A N^-alpha",
             **fit_policy_metadata(CANONICAL_POWER_LAW_MODEL, status="failed_constraint_violation", n_points=len(n_values)),
         }
+
+    alpha_refinement_interval = [best["alpha"], best["alpha"]]
+    if best_idx is not None and len(coarse_grid) >= 2:
+        left_index = max(0, best_idx - 1)
+        right_index = min(len(coarse_grid) - 1, best_idx + 1)
+        refine_left = coarse_grid[left_index]
+        refine_right = coarse_grid[right_index]
+        alpha_refinement_interval = [float(refine_left), float(refine_right)]
+        refined_best, refinement_evaluations = golden_section_refine_power_law_alpha(
+            n_values,
+            y_values,
+            left=refine_left,
+            right=refine_right,
+        )
+        objective_evaluations += refinement_evaluations
+        if refined_best is not None and refined_best["sse"] < best["sse"]:
+            best = refined_best
 
     summary = fit_summary(
         CANONICAL_POWER_LAW_MODEL,
@@ -1626,6 +1887,19 @@ def fit_power_law_floor(n_values: list[float], y_values: list[float]) -> dict[st
         "amplitude": best["coefficients"][1],
         "alpha": best["coefficients"][2],
     }
+    summary["alpha"] = best["coefficients"][2]
+    summary["sse"] = best["sse"]
+    summary["alpha_search_method"] = "coarse_grid_plus_golden_section"
+    summary["alpha_bounds"] = {
+        "min": POWER_LAW_ALPHA_MIN,
+        "max": POWER_LAW_ALPHA_MAX,
+    }
+    summary["alpha_refinement_interval"] = {
+        "min": alpha_refinement_interval[0],
+        "max": alpha_refinement_interval[1],
+    }
+    summary["objective_evaluations"] = objective_evaluations
+    summary["nonnegative_constraints_active"] = True
     return summary
 
 
@@ -2373,6 +2647,11 @@ TEMPORAL_SCALAR_KEYS = (
     "instantaneous_temperature_K",
     "temperature_instant_K",
 )
+TEMPERATURE_ID_KEYS = (
+    "temperature_K",
+    "instantaneous_temperature_K",
+    "temperature_instant_K",
+)
 TEMPORAL_INDEX_KEYS = (
     "md_step",
     "snapshot_index",
@@ -2566,6 +2845,33 @@ def read_metadata_scalar(sample_dir: Path) -> tuple[str, float] | None:
     return scalar_value_from_metadata(payload)
 
 
+def read_sample_metadata(sample_dir: Path) -> dict[str, Any] | None:
+    metadata_path = sample_dir / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    payload = read_json(metadata_path)
+    return payload if isinstance(payload, dict) else None
+
+
+def enrich_temporal_record(record: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(record)
+    sample_dir_text = str(record.get("sample_dir") or record.get("snapshot_dir") or "").strip()
+    if not sample_dir_text:
+        return enriched
+    metadata = read_sample_metadata(Path(sample_dir_text))
+    if not isinstance(metadata, dict):
+        return enriched
+    for key in (
+        *TEMPORAL_INDEX_KEYS,
+        *BLOCK_ID_KEYS,
+        *TRAJECTORY_ID_KEYS,
+        *TEMPERATURE_ID_KEYS,
+    ):
+        if enriched.get(key) in (None, "") and metadata.get(key) not in (None, ""):
+            enriched[key] = metadata.get(key)
+    return enriched
+
+
 def autocorrelation_function(values: list[float], max_lag: int | None = None) -> list[float]:
     n = len(values)
     if n < 2:
@@ -2732,6 +3038,160 @@ def scalar_series_for_records(
     return series_key, values, used_records
 
 
+def temperature_label(record: dict[str, Any]) -> str | None:
+    return first_non_empty_text(record, *TEMPERATURE_ID_KEYS)
+
+
+def continuity_proven_for_single_implicit_block(records: list[dict[str, Any]]) -> bool:
+    if len(records) < 3:
+        return False
+    indices: list[int] = []
+    for record in records:
+        index = temporal_index_value(record)
+        if index is None:
+            return False
+        indices.append(index)
+    if len(set(indices)) != len(indices):
+        return False
+    temperatures = {label for record in records if (label := temperature_label(record))}
+    return len(temperatures) <= 1
+
+
+def build_train_temporal_groups(records: list[dict[str, Any]]) -> dict[str, Any]:
+    train_records = [
+        enrich_temporal_record(record)
+        for record in records
+        if split_name_normalized(record.get("split")) == "train"
+    ]
+    warnings: list[str] = []
+    if not train_records:
+        return {
+            "available": False,
+            "reason": "no_train_records",
+            "warnings": ["autocorrelation_unavailable_no_train_records"],
+            "groups": [],
+            "mixed_temperatures": False,
+        }
+
+    temperatures = {label for record in train_records if (label := temperature_label(record))}
+    mixed_temperatures = len(temperatures) > 1
+
+    trajectory_ids = [first_non_empty_text(record, *TRAJECTORY_ID_KEYS) for record in train_records]
+    if any(trajectory_ids):
+        if not all(trajectory_ids):
+            return {
+                "available": False,
+                "reason": "trajectory_id_ambiguous",
+                "warnings": ["autocorrelation_unavailable_missing_or_ambiguous_grouping_metadata"],
+                "groups": [],
+                "mixed_temperatures": mixed_temperatures,
+            }
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record, traj_id in zip(train_records, trajectory_ids):
+            temp = temperature_label(record) or "unknown_temperature"
+            grouped[f"trajectory:{traj_id}:T={temp}"].append(record)
+        return {
+            "available": True,
+            "reason": "trajectory_id",
+            "warnings": warnings,
+            "groups": grouped,
+            "mixed_temperatures": mixed_temperatures,
+        }
+
+    block_ids = [first_non_empty_text(record, *BLOCK_ID_KEYS) for record in train_records]
+    if any(block_ids):
+        grouped = defaultdict(list)
+        for record, block_id in zip(train_records, block_ids):
+            if block_id is None:
+                return {
+                    "available": False,
+                    "reason": "block_id_ambiguous",
+                    "warnings": ["autocorrelation_unavailable_missing_or_ambiguous_grouping_metadata"],
+                    "groups": [],
+                    "mixed_temperatures": mixed_temperatures,
+                }
+            temp = temperature_label(record)
+            key = f"block:{block_id}:T={temp}" if temp else f"block:{block_id}"
+            grouped[key].append(record)
+        return {
+            "available": True,
+            "reason": "block_id",
+            "warnings": warnings,
+            "groups": grouped,
+            "mixed_temperatures": mixed_temperatures,
+        }
+
+    if continuity_proven_for_single_implicit_block(train_records):
+        return {
+            "available": True,
+            "reason": "implicit_single_continuous_block",
+            "warnings": warnings,
+            "groups": {"implicit_single_continuous_block": train_records},
+            "mixed_temperatures": mixed_temperatures,
+        }
+
+    return {
+        "available": False,
+        "reason": "missing_or_ambiguous_grouping_metadata",
+        "warnings": ["autocorrelation_unavailable_missing_or_ambiguous_grouping_metadata"],
+        "groups": [],
+        "mixed_temperatures": mixed_temperatures,
+    }
+
+
+def scalar_series_for_group(records: list[dict[str, Any]]) -> tuple[str, list[float], list[dict[str, Any]], list[str]] | None:
+    ordered_records = sorted(
+        records,
+        key=lambda row: (
+            temporal_index_value(row) if temporal_index_value(row) is not None else 10**12,
+            str(row.get("sample_dir") or row.get("sample_id") or ""),
+        ),
+    )
+    if len(ordered_records) > MAX_METADATA_SCALAR_READS:
+        ordered_records = ordered_records[:MAX_METADATA_SCALAR_READS]
+
+    warnings: list[str] = []
+    series_key: str | None = None
+    values: list[float] = []
+    used_records: list[dict[str, Any]] = []
+    missing_scalar = False
+    mixed_scalar_key = False
+
+    for record in ordered_records:
+        sample_dir_text = str(record.get("sample_dir") or record.get("snapshot_dir") or "").strip()
+        scalar = None
+        if sample_dir_text:
+            scalar = read_metadata_scalar(Path(sample_dir_text))
+        if scalar is None:
+            for key in TEMPORAL_SCALAR_KEYS:
+                value = finite_number(record.get(key))
+                if value is not None:
+                    scalar = (key, value)
+                    break
+        if scalar is None:
+            missing_scalar = True
+            break
+        key, value = scalar
+        if series_key is None:
+            series_key = key
+        elif key != series_key:
+            mixed_scalar_key = True
+            break
+        values.append(value)
+        used_records.append(record)
+
+    if missing_scalar:
+        warnings.append("autocorrelation_unavailable_no_cheap_scalar_series")
+        return None
+    if mixed_scalar_key:
+        warnings.append("autocorrelation_unavailable_mixed_scalar_keys")
+        return None
+    if series_key is None or len(values) < 3:
+        warnings.append("autocorrelation_unavailable_insufficient_group_samples")
+        return None
+    return series_key, values, used_records, warnings
+
+
 def diagnose_dataset_temporal_metadata(
     dataset_root: Path,
     *,
@@ -2790,52 +3250,112 @@ def diagnose_dataset_temporal_metadata(
     if nominal_n_train is None:
         nominal_n_train = split_counts_from_dataset_root(root).get("training")
 
-    scalar_series = scalar_series_for_records(records, split="train")
     autocorrelation: dict[str, Any] = {
         "available": False,
         "scalar_series_key": None,
-        "train": {"status": "no_scalar_series"},
+        "train": {"status": "unavailable"},
     }
     estimated_n_eff_train: float | None = None
+    train_groups = build_train_temporal_groups(records)
+    warnings.extend(train_groups.get("warnings") or [])
+    per_block: dict[str, Any] = {}
+    valid_group_n_eff: list[float] = []
+    valid_group_nominal_n: list[int] = []
+    scalar_keys_used: set[str] = set()
 
-    if scalar_series is None:
-        warnings.append("autocorrelation_unavailable_no_cheap_scalar_series")
-    else:
-        series_key, values, used_records = scalar_series
-        autocorr = compute_scalar_autocorrelation_diagnostics(values)
-        per_block: dict[str, Any] = {}
-        for block_id, block_records in sorted(blocks.items()):
-            block_series = scalar_series_for_records(block_records, split="train")
-            if block_series is None:
-                continue
-            block_key, block_values, _ = block_series
-            if block_key != series_key:
-                continue
-            block_diag = compute_scalar_autocorrelation_diagnostics(block_values)
-            if block_diag.get("status") == "ok":
-                per_block[block_id] = {
-                    "n": block_diag.get("n"),
-                    "statistical_inefficiency": block_diag.get("statistical_inefficiency"),
-                    "tau_int": block_diag.get("tau_int"),
-                    "n_eff": block_diag.get("n_eff"),
-                }
+    if train_groups.get("mixed_temperatures"):
+        warnings.append("autocorrelation_unavailable_mixed_temperatures")
 
-        autocorrelation = {
-            "available": bool(autocorr.get("autocorrelation_available")),
-            "scalar_series_key": series_key,
-            **autocorrelation_convention_payload(),
-            "train": {
-                **autocorr,
-                "records_used": len(used_records),
-            },
-            "by_block": per_block,
+    groups = train_groups.get("groups") or {}
+    for group_id, group_records in sorted(groups.items()):
+        group_series = scalar_series_for_group(group_records)
+        group_warning_list: list[str] = []
+        if group_series is None:
+            if not any("autocorrelation_unavailable_no_cheap_scalar_series" in item for item in warnings):
+                group_warning_list.append("autocorrelation_unavailable_no_cheap_scalar_series")
+            warnings.extend(group_warning_list)
+            per_block[group_id] = {
+                "nominal_n": len(group_records),
+                "scalar_used": None,
+                "max_lag": None,
+                "statistical_inefficiency": None,
+                "n_eff": None,
+                "warnings": group_warning_list or ["autocorrelation_unavailable_group_series_invalid"],
+            }
+            continue
+
+        scalar_key, values, used_records, series_warnings = group_series
+        scalar_keys_used.add(scalar_key)
+        group_diag = compute_scalar_autocorrelation_diagnostics(values)
+        max_lag = max(0, len(group_diag.get("acf") or []) - 1) if group_diag.get("acf") else None
+        per_block[group_id] = {
+            "nominal_n": len(group_records),
+            "scalar_used": scalar_key,
+            "max_lag": max_lag,
+            "statistical_inefficiency": group_diag.get("statistical_inefficiency"),
+            "n_eff": group_diag.get("n_eff"),
+            "warnings": series_warnings,
         }
-        estimated_n_eff_train = finite_number(autocorr.get("n_eff"))
+        if group_diag.get("autocorrelation_available"):
+            n_eff_value = finite_number(group_diag.get("n_eff"))
+            if n_eff_value is not None:
+                valid_group_n_eff.append(n_eff_value)
+                valid_group_nominal_n.append(len(group_records))
+
+    aggregate_autocorrelation_available = (
+        bool(train_groups.get("available"))
+        and not bool(train_groups.get("mixed_temperatures"))
+        and bool(groups)
+        and len(valid_group_n_eff) == len(groups)
+    )
+
+    if not groups and not any(item.startswith("autocorrelation_unavailable") for item in warnings):
+        warnings.append("autocorrelation_unavailable_missing_or_ambiguous_grouping_metadata")
+
+    if aggregate_autocorrelation_available:
+        estimated_n_eff_train = sum(valid_group_n_eff)
         maybe_warn_n_eff_much_smaller_than_nominal(
             warnings,
             nominal_n=int_number(nominal_n_train),
             n_eff=estimated_n_eff_train,
         )
+        autocorrelation = {
+            "available": True,
+            "scalar_series_key": sorted(scalar_keys_used)[0] if len(scalar_keys_used) == 1 else None,
+            "grouping_policy": str(train_groups.get("reason") or "unknown"),
+            **autocorrelation_convention_payload(),
+            "train": {
+                "status": "ok",
+                "records_used": sum(valid_group_nominal_n),
+                "n_groups": len(groups),
+                "group_ids": sorted(groups.keys()),
+                "n_eff_aggregate_method": "sum_independent_group_n_eff",
+            },
+            "by_block": per_block,
+        }
+    else:
+        estimated_n_eff_train = None
+        if train_groups.get("mixed_temperatures"):
+            warnings.append("autocorrelation_grouping_invalid_mixed_temperatures")
+        if not train_groups.get("available"):
+            warnings.append("autocorrelation_grouping_missing_or_ambiguous")
+        autocorrelation = {
+            "available": False,
+            "scalar_series_key": sorted(scalar_keys_used)[0] if len(scalar_keys_used) == 1 else None,
+            "grouping_policy": str(train_groups.get("reason") or "unknown"),
+            **autocorrelation_convention_payload(),
+            "train": {
+                "status": "unavailable",
+                "reason": (
+                    "mixed_temperatures"
+                    if train_groups.get("mixed_temperatures")
+                    else str(train_groups.get("reason") or "missing_grouping_metadata")
+                ),
+                "n_groups": len(groups),
+                "group_ids": sorted(groups.keys()),
+            },
+            "by_block": per_block,
+        }
 
     return {
         "dataset_id": dataset_id or root.name,
@@ -2849,6 +3369,8 @@ def diagnose_dataset_temporal_metadata(
         "n_temporal_blocks": len(blocks),
         "block_sizes": block_sizes,
         "block_ids": sorted(blocks.keys()),
+        "train_grouping_policy": str(train_groups.get("reason") or "unknown"),
+        "train_group_count": len(groups),
         "nominal_n_train": nominal_n_train,
         "estimated_n_eff_train": estimated_n_eff_train,
         "autocorrelation_available": bool(autocorrelation.get("available")),
@@ -3015,16 +3537,25 @@ def scientific_claim_status_payload(
     *,
     temporal_diagnostics: dict[str, Any],
     thresholds: dict[str, dict[str, Any]],
-    aggregation_mode: str,
+    aggregation_mode: str | None = None,
+    requested_aggregation_mode: str | None = None,
+    actual_aggregation_mode: str | None = None,
+    aggregation_mode_legacy_inferred: bool = False,
     requested_n_min_source: str,
     actual_n_min_source: str,
     requested_fit_model: str,
     actual_fit_model: str | None,
     fit_threshold_details: dict[str, dict[str, Any]],
     fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
+    hierarchical_uncertainty: dict[str, Any] | None = None,
     fallback_used: bool,
     fallback_reason: str | None,
 ) -> dict[str, Any]:
+    if aggregation_mode is not None and not actual_aggregation_mode:
+        actual_aggregation_mode = aggregation_mode
+    if aggregation_mode is not None and requested_aggregation_mode is None:
+        requested_aggregation_mode = aggregation_mode
+    actual_aggregation_mode = actual_aggregation_mode or "best_config"
     blockers: list[str] = []
     warnings: list[str] = [N_MIN_NOMINAL_WARNING]
     temporal_warnings = [str(item) for item in temporal_diagnostics.get("warnings") or []]
@@ -3033,8 +3564,14 @@ def scientific_claim_status_payload(
     threshold_methods = sorted(str(method) for method in thresholds.keys())
     requested_fit_canonical = canonical_fit_model(requested_fit_model)
     actual_fit_canonical = canonical_fit_model(actual_fit_model) if actual_fit_model else None
+    aggregation_classification, aggregation_reason = aggregation_mode_classification(actual_aggregation_mode)
     n_min_protocol = {
-        "aggregation_mode": aggregation_mode,
+        "aggregation_mode": actual_aggregation_mode,
+        "requested_aggregation_mode": requested_aggregation_mode,
+        "actual_aggregation_mode": actual_aggregation_mode,
+        "aggregation_mode_classification": aggregation_classification,
+        "aggregation_mode_classification_reason": aggregation_reason,
+        "aggregation_mode_legacy_inferred": aggregation_mode_legacy_inferred,
         "requested_n_min_source": requested_n_min_source,
         "actual_n_min_source": actual_n_min_source,
         "requested_fit_model": requested_fit_model,
@@ -3050,12 +3587,20 @@ def scientific_claim_status_payload(
 
     if not autocorrelation_available:
         blockers.append("paper_blocked_if_autocorrelation_unavailable")
+    if any("temporal_gap_le_1" in item for item in temporal_warnings):
+        blockers.append("paper_blocked_if_temporal_gap_le_1")
+    if any("autocorrelation_grouping_missing_or_ambiguous" in item for item in temporal_warnings):
+        blockers.append("paper_blocked_if_autocorrelation_grouping_missing_or_ambiguous")
+    if any("autocorrelation_unavailable_mixed_temperatures" in item or "autocorrelation_grouping_invalid_mixed_temperatures" in item for item in temporal_warnings):
+        blockers.append("paper_blocked_if_autocorrelation_grouping_mixed_temperatures")
+    if any("autocorrelation_unavailable_no_cheap_scalar_series" in item for item in temporal_warnings):
+        blockers.append("paper_blocked_if_autocorrelation_scalar_series_unavailable")
     if ratio is not None and ratio < N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO:
         blockers.append("paper_blocked_if_n_eff_much_smaller_than_nominal")
     if "n_eff_much_smaller_than_nominal" in temporal_warnings and "paper_blocked_if_n_eff_much_smaller_than_nominal" not in blockers:
         blockers.append("paper_blocked_if_n_eff_much_smaller_than_nominal")
-    if aggregation_mode in {"best_config", "mean_replicates"}:
-        blockers.append(f"paper_blocked_if_aggregation_mode_{aggregation_mode}")
+    if actual_aggregation_mode in {"best_config", "mean_replicates"}:
+        blockers.append(f"paper_blocked_if_aggregation_mode_{actual_aggregation_mode}")
     if requested_n_min_source != "fit" or actual_n_min_source != "fit":
         blockers.append("paper_blocked_if_n_min_source_observed_without_locked_protocol")
     if fallback_used:
@@ -3104,6 +3649,9 @@ def scientific_claim_status_payload(
         if isinstance(method_stability, dict):
             blockers.extend(str(item) for item in (method_stability.get("paper_level_blockers") or []))
 
+    if hierarchical_uncertainty:
+        blockers.extend(str(item) for item in (hierarchical_uncertainty.get("paper_level_blockers") or []))
+
     status = "diagnostic_only" if blockers else "paper_candidate_nominal_with_n_eff_diagnostic"
     n_min_nominal = nominal_n_min_map(thresholds)
     effective_at_nominal = effective_samples_at_nominal_n_min(thresholds, n_eff_ratio=ratio)
@@ -3127,6 +3675,12 @@ def scientific_claim_status_payload(
             "reason": "missing_diagnostic",
             "methods": {},
         },
+        "hierarchical_uncertainty": hierarchical_uncertainty or {
+            "enabled": False,
+            "status": "not_available",
+            "paper_ready": False,
+            "paper_level_blockers": ["paper_uncertainty_not_computed"],
+        },
         "n_eff_diagnostic_note": (
             "Effective-N values are diagnostics only. They do not replace nominal N_min "
             "or constitute validated paper-level replacements without a stronger protocol."
@@ -3149,6 +3703,7 @@ def build_report(
     temporal_diagnostics: dict[str, Any] | None = None,
     scientific_status: dict[str, Any] | None = None,
     replicate_bootstrap: dict[str, Any] | None = None,
+    hierarchical_uncertainty: dict[str, Any] | None = None,
     cost_basis: str = "per_seed_mean",
     fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
 ) -> str:
@@ -3190,15 +3745,19 @@ def build_report(
     lines.append("\n## Fits\n")
     for method, method_fits in fits.items():
         lines.append(f"\n### {method}")
-        lines.append("| Modelo | Estado | Politica | RMSE meV | R2 | Coeficientes |")
-        lines.append("|---|---|---|---:|---:|---|")
+        lines.append("| Modelo | Estado | Politica | RMSE meV | SSE | alpha | alpha search | evals | R2 | Coeficientes |")
+        lines.append("|---|---|---|---:|---:|---:|---|---:|---:|---|")
         for model, fit in method_fits.items():
             lines.append(
-                "| {model} | {status} | {policy} | {rmse} | {r2} | `{coeffs}` |".format(
+                "| {model} | {status} | {policy} | {rmse} | {sse} | {alpha} | {alpha_search} | {evals} | {r2} | `{coeffs}` |".format(
                     model=model,
                     status=fit.get("status"),
                     policy=fit.get("fit_policy") or ("paper_candidate" if fit.get("paper_candidate") else "diagnostic_only"),
                     rmse=format_optional(fit.get("rmse_mev")),
+                    sse=format_optional(fit.get("sse")),
+                    alpha=format_optional(fit.get("alpha")),
+                    alpha_search=fit.get("alpha_search_method") or "-",
+                    evals=format_optional(fit.get("objective_evaluations"), precision=0),
                     r2=format_optional(fit.get("r2")),
                     coeffs=json.dumps(fit.get("coefficients") or [], ensure_ascii=False),
                 )
@@ -3218,6 +3777,25 @@ def build_report(
     lines.append("  - does not model dependence between dataset sizes")
     if boot.get("warnings"):
         lines.append(f"- Replicate resampling warnings: `{json.dumps(boot.get('warnings'), ensure_ascii=False)}`")
+    lines.append("\n## Hierarchical uncertainty\n")
+    hierarchy = hierarchical_uncertainty or {}
+    lines.append(f"- Label: {hierarchy.get('display_label') or HIERARCHICAL_UNCERTAINTY_LABEL}")
+    lines.append(f"- Status: `{hierarchy.get('status') or 'not_available'}`")
+    lines.append(f"- Paper-ready: {bool(hierarchy.get('paper_ready'))}")
+    lines.append(
+        "- This layer separates seed variability, config/hyperparameter selection variability, "
+        "block/trajectory temporal variability, fit/model-selection variability, and dataset-size dependence."
+    )
+    for level_name, level in sorted((hierarchy.get("levels") or {}).items()):
+        lines.append(
+            f"- Level `{level_name}`: available={bool(level.get('available'))}, "
+            f"sufficient={bool(level.get('sufficient'))}, "
+            f"blockers=`{json.dumps(level.get('paper_level_blockers') or [], ensure_ascii=False)}`"
+        )
+    if hierarchy.get("paper_level_blockers"):
+        lines.append(
+            f"- Hierarchical uncertainty blockers: `{json.dumps(hierarchy.get('paper_level_blockers') or [], ensure_ascii=False)}`"
+        )
     lines.append("\n## Fit stability (leave-one-size-out)\n")
     stability = fit_predictive_stability_by_left_out_N or {}
     lines.append(f"- Status: `{stability.get('status') or 'not_applicable'}`")
@@ -3255,8 +3833,15 @@ def build_report(
     if protocol:
         lines.append(
             f"- N_min protocol: source `{protocol.get('requested_n_min_source')}` -> `{protocol.get('actual_n_min_source')}`, "
-            f"fit `{protocol.get('requested_fit_model')}` -> `{protocol.get('actual_fit_model')}`"
+            f"fit `{protocol.get('requested_fit_model')}` -> `{protocol.get('actual_fit_model')}`, "
+            f"aggregation `{protocol.get('requested_aggregation_mode')}` -> `{protocol.get('actual_aggregation_mode')}`"
         )
+        lines.append(
+            f"- Aggregation mode policy: `{protocol.get('aggregation_mode_classification')}` "
+            f"(`{protocol.get('aggregation_mode_classification_reason')}`)"
+        )
+        if protocol.get("aggregation_mode_legacy_inferred"):
+            lines.append("- Aggregation mode was legacy/inferred because the caller omitted it explicitly.")
     if status_payload.get("n_min_fit_policy"):
         lines.append(f"- N_min fit policy: `{status_payload.get('n_min_fit_policy')}`")
     blockers = status_payload.get("paper_level_blockers") or []
@@ -3479,6 +4064,58 @@ def bootstrap_ci_from_samples(
     return result
 
 
+def bootstrap_ci_from_float_samples(
+    values: list[float],
+    *,
+    ci_level: float,
+    n_requested: int,
+) -> dict[str, Any]:
+    clean = sorted(float(value) for value in values if math.isfinite(float(value)))
+    n_success = len(clean)
+    result: dict[str, Any] = {
+        "mean": mean(clean),
+        "median": None,
+        "lower": None,
+        "upper": None,
+        "ci_level": ci_level,
+        "n_bootstrap_requested": n_requested,
+        "n_bootstrap_successful": n_success,
+        "n_bootstrap_failed": max(0, n_requested - n_success),
+    }
+    if not clean:
+        result["reason"] = "no_successful_bootstrap_values"
+        return result
+    result["median"] = quantile_value(clean, 0.5)
+    if n_success < MIN_BOOTSTRAP_SUCCESS_FOR_CI:
+        result["reason"] = "too_few_successful_bootstrap_replicates"
+        return result
+    alpha = (1.0 - ci_level) / 2.0
+    result["lower"] = quantile_value(clean, alpha)
+    result["upper"] = quantile_value(clean, 1.0 - alpha)
+    return result
+
+
+def resample_group_mean_ci(
+    values: list[float],
+    *,
+    seed: int,
+    n_replicates: int,
+    ci_level: float,
+) -> dict[str, Any]:
+    clean = [float(value) for value in values if math.isfinite(float(value))]
+    if not clean:
+        return bootstrap_ci_from_float_samples([], ci_level=ci_level, n_requested=n_replicates)
+    rng = random.Random(seed)
+    samples: list[float] = []
+    count = len(clean)
+    for _ in range(n_replicates):
+        picked = [clean[rng.randrange(count)] for _ in range(count)]
+        sample_mean = mean(picked)
+        if sample_mean is not None:
+            samples.append(float(sample_mean))
+    return bootstrap_ci_from_float_samples(samples, ci_level=ci_level, n_requested=n_replicates)
+
+
 def compute_bootstrap_n_min(
     normalized_rows: list[dict[str, Any]],
     *,
@@ -3633,6 +4270,372 @@ def compute_bootstrap_n_min(
     }
 
 
+def build_seed_uncertainty_level(
+    normalized_rows: list[dict[str, Any]],
+    *,
+    seed: int,
+    n_replicates: int,
+    ci_level: float,
+) -> dict[str, Any]:
+    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in normalized_rows:
+        metric = row_primary_metric_mev(row)
+        size = int_number(row.get("dataset_size_x"))
+        if metric is None or size is None:
+            continue
+        grouped[(str(row["method"]), int(size), extract_base_config_id(row))].append(row)
+
+    by_method: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    total_groups = 0
+    sufficient_groups = 0
+    blockers: list[str] = []
+    warnings: list[str] = []
+    for (method, size, base_config_id), items in sorted(grouped.items()):
+        total_groups += 1
+        values = [
+            float(metric)
+            for item in items
+            if (metric := row_primary_metric_mev(item)) is not None
+        ]
+        seeds = sorted(
+            {
+                str(item.get("seed") or "")
+                for item in items
+                if str(item.get("seed") or "").strip()
+            }
+        )
+        available = len(values) >= 2 and len(seeds) >= 2
+        if available:
+            sufficient_groups += 1
+        entry = {
+            "base_config_id": base_config_id,
+            "seed_count": len(seeds) if seeds else len(values),
+            "seeds": seeds,
+            "metric_mean_mev": mean(values),
+            "metric_ci_mev": (
+                resample_group_mean_ci(
+                    values,
+                    seed=seed + int(size) + len(base_config_id),
+                    n_replicates=n_replicates,
+                    ci_level=ci_level,
+                )
+                if available
+                else None
+            ),
+            "available": available,
+        }
+        by_method.setdefault(method, {}).setdefault(str(size), {})[base_config_id] = entry
+
+    if total_groups == 0:
+        blockers.append("paper_uncertainty_seed_hierarchy_unavailable")
+    elif sufficient_groups < total_groups:
+        blockers.append("paper_uncertainty_seed_hierarchy_incomplete")
+        warnings.append("seed_uncertainty_missing_multiple_seeds_for_some_config_groups")
+
+    return {
+        "display_label": "seed variability",
+        "available": total_groups > 0,
+        "sufficient": total_groups > 0 and sufficient_groups == total_groups,
+        "groups_total": total_groups,
+        "groups_with_multiple_seeds": sufficient_groups,
+        "paper_level_blockers": blockers,
+        "warnings": warnings,
+        "by_method": dict(by_method),
+    }
+
+
+def build_config_uncertainty_level(
+    normalized_rows: list[dict[str, Any]],
+    *,
+    seed: int,
+    n_replicates: int,
+    ci_level: float,
+) -> dict[str, Any]:
+    config_rows = aggregate_rows_mean_seeds_per_config(normalized_rows)
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in config_rows:
+        metric = finite_number(row.get("primary_metric_mev_mean"))
+        size = int_number(row.get("dataset_size_x"))
+        if metric is None or size is None:
+            continue
+        grouped[(str(row["method"]), int(size))].append(row)
+
+    by_method: dict[str, dict[str, Any]] = defaultdict(dict)
+    total_groups = 0
+    sufficient_groups = 0
+    blockers: list[str] = []
+    warnings: list[str] = []
+    for (method, size), items in sorted(grouped.items()):
+        total_groups += 1
+        values = [
+            float(metric)
+            for item in items
+            if (metric := finite_number(item.get("primary_metric_mev_mean"))) is not None
+        ]
+        config_ids = sorted(
+            {
+                str(item.get("base_config_id") or item.get("config_id") or "")
+                for item in items
+                if str(item.get("base_config_id") or item.get("config_id") or "").strip()
+            }
+        )
+        available = len(values) >= 2 and len(config_ids) >= 2
+        if available:
+            sufficient_groups += 1
+        by_method.setdefault(method, {})[str(size)] = {
+            "config_count": len(config_ids) if config_ids else len(values),
+            "config_ids": config_ids,
+            "metric_mean_mev": mean(values),
+            "metric_ci_mev": (
+                resample_group_mean_ci(
+                    values,
+                    seed=seed + int(size) + len(method) * 17,
+                    n_replicates=n_replicates,
+                    ci_level=ci_level,
+                )
+                if available
+                else None
+            ),
+            "available": available,
+        }
+
+    if total_groups == 0:
+        blockers.append("paper_uncertainty_config_hierarchy_unavailable")
+    elif sufficient_groups < total_groups:
+        blockers.append("paper_uncertainty_config_hierarchy_incomplete")
+        warnings.append("config_uncertainty_missing_multiple_configs_for_some_method_sizes")
+
+    return {
+        "display_label": "config/hyperparameter selection variability",
+        "available": total_groups > 0,
+        "sufficient": total_groups > 0 and sufficient_groups == total_groups,
+        "groups_total": total_groups,
+        "groups_with_multiple_configs": sufficient_groups,
+        "paper_level_blockers": blockers,
+        "warnings": warnings,
+        "by_method": dict(by_method),
+    }
+
+
+def build_block_uncertainty_level(
+    temporal_diagnostics: dict[str, Any],
+    *,
+    seed: int,
+    n_replicates: int,
+    ci_level: float,
+) -> dict[str, Any]:
+    datasets = list(temporal_diagnostics.get("datasets") or [])
+    by_dataset: dict[str, Any] = {}
+    total_datasets = 0
+    sufficient_datasets = 0
+    blockers: list[str] = []
+    warnings: list[str] = []
+    for index, dataset in enumerate(datasets):
+        total_datasets += 1
+        dataset_id = str(dataset.get("dataset_id") or dataset.get("dataset_root") or f"dataset_{index}")
+        by_block = ((dataset.get("autocorrelation") or {}).get("by_block") or {})
+        ratios = [
+            float(block["n_eff"]) / float(block["nominal_n"])
+            for block in by_block.values()
+            if finite_number(block.get("n_eff")) is not None
+            and int_number(block.get("nominal_n")) not in (None, 0)
+        ]
+        block_ids = sorted(str(block_id) for block_id in by_block.keys())
+        available = len(ratios) >= 2
+        if available:
+            sufficient_datasets += 1
+        by_dataset[dataset_id] = {
+            "dataset_root": dataset.get("dataset_root"),
+            "block_count": len(block_ids),
+            "block_ids": block_ids,
+            "grouping_policy": dataset.get("train_grouping_policy"),
+            "n_eff_over_n_nominal_mean": mean(ratios),
+            "n_eff_over_n_nominal_ci": (
+                resample_group_mean_ci(
+                    ratios,
+                    seed=seed + index * 101,
+                    n_replicates=n_replicates,
+                    ci_level=ci_level,
+                )
+                if available
+                else None
+            ),
+            "available": available,
+        }
+
+    if total_datasets == 0:
+        blockers.append("paper_uncertainty_block_hierarchy_unavailable")
+    elif sufficient_datasets < total_datasets:
+        blockers.append("paper_uncertainty_block_hierarchy_incomplete")
+        warnings.append("block_uncertainty_requires_multiple_temporal_blocks_per_dataset")
+
+    return {
+        "display_label": "block/trajectory temporal variability",
+        "available": total_datasets > 0,
+        "sufficient": total_datasets > 0 and sufficient_datasets == total_datasets,
+        "datasets_total": total_datasets,
+        "datasets_with_multiple_blocks": sufficient_datasets,
+        "paper_level_blockers": blockers,
+        "warnings": warnings,
+        "by_dataset": by_dataset,
+    }
+
+
+def build_fit_model_uncertainty_level(
+    *,
+    fits: dict[str, dict[str, dict[str, Any]]],
+    fit_threshold_details: dict[str, dict[str, Any]],
+    requested_fit_model: str,
+    actual_fit_model: str | None,
+    actual_n_min_source: str,
+) -> dict[str, Any]:
+    selected_canonical = canonical_fit_model(actual_fit_model or requested_fit_model)
+    by_method: dict[str, Any] = {}
+    blockers: list[str] = []
+    if actual_n_min_source != "fit":
+        blockers.append("paper_uncertainty_fit_model_requires_fit_based_n_min")
+    if selected_canonical != CANONICAL_POWER_LAW_MODEL:
+        blockers.append(f"paper_uncertainty_fit_model_not_paper_candidate:{selected_canonical}")
+
+    for method in sorted(set(fits.keys()) | set(fit_threshold_details.keys())):
+        method_fits = fits.get(method) or {}
+        fit_detail = fit_threshold_details.get(method) or {}
+        ok_models = sorted(
+            model
+            for model, fit in method_fits.items()
+            if str(fit.get("status") or "") == "ok"
+        )
+        diagnostic_ok_models = sorted(
+            model
+            for model, fit in method_fits.items()
+            if str(fit.get("status") or "") == "ok" and str(fit.get("fit_policy") or "") != "paper_candidate"
+        )
+        by_method[method] = {
+            "selected_fit_model": fit_detail.get("fit_model") or fit_detail.get("model") or actual_fit_model,
+            "selected_fit_status": fit_detail.get("status"),
+            "selected_fit_policy": fit_detail.get("fit_policy"),
+            "paper_candidate": bool(fit_detail.get("paper_candidate")),
+            "available_successful_models": ok_models,
+            "diagnostic_only_successful_models": diagnostic_ok_models,
+        }
+        if not bool(fit_detail.get("paper_candidate")):
+            blockers.append(f"paper_uncertainty_fit_model_selection_not_paper_candidate:{method}")
+
+    return {
+        "display_label": "fit/model-selection variability",
+        "available": bool(by_method),
+        "sufficient": not blockers and bool(by_method),
+        "selected_fit_model": actual_fit_model or requested_fit_model,
+        "selected_fit_model_canonical": selected_canonical,
+        "paper_level_blockers": sorted(set(blockers)),
+        "warnings": [],
+        "by_method": by_method,
+    }
+
+
+def build_dataset_size_dependence_uncertainty_level(
+    fit_stability: dict[str, Any] | None,
+) -> dict[str, Any]:
+    stability = fit_stability or {"status": "not_applicable", "methods": {}}
+    blockers = list(stability.get("paper_level_blockers") or [])
+    available = str(stability.get("status") or "") == "ok"
+    return {
+        "display_label": "dataset-size dependence",
+        "available": available,
+        "sufficient": available and not blockers,
+        "status": stability.get("status") or "not_applicable",
+        "reason": stability.get("reason"),
+        "paper_level_blockers": blockers,
+        "warnings": [],
+        "methods": stability.get("methods") or {},
+    }
+
+
+def compute_hierarchical_uncertainty(
+    normalized_rows: list[dict[str, Any]],
+    *,
+    temporal_diagnostics: dict[str, Any],
+    fits: dict[str, dict[str, dict[str, Any]]],
+    fit_threshold_details: dict[str, dict[str, Any]],
+    fit_predictive_stability_by_left_out_N: dict[str, Any] | None,
+    requested_fit_model: str,
+    actual_fit_model: str | None,
+    actual_n_min_source: str,
+    seed: int = DEFAULT_BOOTSTRAP_SEED,
+    ci_level: float = DEFAULT_CI_LEVEL,
+    n_replicates: int = HIERARCHICAL_UNCERTAINTY_REPLICATES,
+) -> dict[str, Any]:
+    seed_level = build_seed_uncertainty_level(
+        normalized_rows,
+        seed=seed,
+        n_replicates=n_replicates,
+        ci_level=ci_level,
+    )
+    config_level = build_config_uncertainty_level(
+        normalized_rows,
+        seed=seed + 1000,
+        n_replicates=n_replicates,
+        ci_level=ci_level,
+    )
+    block_level = build_block_uncertainty_level(
+        temporal_diagnostics,
+        seed=seed + 2000,
+        n_replicates=n_replicates,
+        ci_level=ci_level,
+    )
+    fit_level = build_fit_model_uncertainty_level(
+        fits=fits,
+        fit_threshold_details=fit_threshold_details,
+        requested_fit_model=requested_fit_model,
+        actual_fit_model=actual_fit_model,
+        actual_n_min_source=actual_n_min_source,
+    )
+    dataset_size_level = build_dataset_size_dependence_uncertainty_level(
+        fit_predictive_stability_by_left_out_N,
+    )
+
+    levels = {
+        "seed": seed_level,
+        "config": config_level,
+        "block": block_level,
+        "fit_model": fit_level,
+        "dataset_size_dependence": dataset_size_level,
+    }
+    blockers = sorted(
+        {
+            str(item)
+            for level in levels.values()
+            for item in (level.get("paper_level_blockers") or [])
+        }
+    )
+    warnings = sorted(
+        {
+            str(item)
+            for level in levels.values()
+            for item in (level.get("warnings") or [])
+        }
+    )
+    status = "paper_ready_supporting_uncertainty_available" if not blockers else "diagnostic_only"
+    return {
+        "enabled": True,
+        "uncertainty_type": "hierarchical_paper_ready",
+        "display_label": HIERARCHICAL_UNCERTAINTY_LABEL,
+        "status": status,
+        "paper_ready": not blockers,
+        "seed": seed,
+        "ci_level": ci_level,
+        "replicates": n_replicates,
+        "levels": levels,
+        "paper_level_blockers": blockers,
+        "warnings": warnings,
+        "limitations": [
+            "separates_seed_config_block_fit_and_dataset_size_dependence",
+            "does_not_replace_nominal_n_min_thresholds",
+            "requires_explicit_hierarchy_metadata_for_paper_ready_status",
+        ],
+    }
+
+
 def analyze(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3640,15 +4643,21 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     fit_models = parse_fit_models(args.fit_models)
     moving_average_window = max(1, int(getattr(args, "moving_average_window", None) or 3))
     cost_basis = parse_cost_basis(getattr(args, "cost_basis", None))
-    aggregation_mode = resolve_aggregation_mode(
+    aggregation_metadata = resolve_aggregation_mode_metadata(
         getattr(args, "aggregation_mode", None),
         run_root_count=len(run_roots),
     )
+    aggregation_mode = str(aggregation_metadata["actual_aggregation_mode"])
     warnings: list[str] = []
+    if aggregation_metadata.get("aggregation_mode_warning"):
+        warnings.append(str(aggregation_metadata["aggregation_mode_warning"]))
     sources: list[str] = []
     all_normalized_rows: list[dict[str, Any]] = []
     for root in run_roots:
-        loaded, root_sources, root_warnings = load_run_root_rows(root)
+        loaded, root_sources, root_warnings = load_run_root_rows(
+            root,
+            explicit_run_root_mode=True,
+        )
         normalized_rows, normalize_warnings = normalize_rows(
             loaded,
             primary_metric=args.primary_metric,
@@ -3812,16 +4821,32 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         run_roots=run_roots,
     )
     warnings.extend(temporal_diagnostics.get("warnings") or [])
+    hierarchical_uncertainty = compute_hierarchical_uncertainty(
+        all_normalized_rows,
+        temporal_diagnostics=temporal_diagnostics,
+        fits=fits,
+        fit_threshold_details=fit_threshold_details,
+        fit_predictive_stability_by_left_out_N=fit_stability,
+        requested_fit_model=requested_fit_model,
+        actual_fit_model=actual_fit_model,
+        actual_n_min_source=actual_n_min_source,
+        seed=bootstrap_seed,
+        ci_level=ci_level,
+    )
+    warnings.extend(hierarchical_uncertainty.get("warnings") or [])
     scientific_status = scientific_claim_status_payload(
         temporal_diagnostics=temporal_diagnostics,
         thresholds=thresholds,
-        aggregation_mode=aggregation_mode,
+        requested_aggregation_mode=aggregation_metadata.get("requested_aggregation_mode"),
+        actual_aggregation_mode=aggregation_mode,
+        aggregation_mode_legacy_inferred=bool(aggregation_metadata.get("aggregation_mode_legacy_inferred")),
         requested_n_min_source=requested_n_min_source,
         actual_n_min_source=actual_n_min_source,
         requested_fit_model=requested_fit_model,
         actual_fit_model=actual_fit_model,
         fit_threshold_details=fit_threshold_details,
         fit_predictive_stability_by_left_out_N=fit_stability,
+        hierarchical_uncertainty=hierarchical_uncertainty,
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
     )
@@ -3841,6 +4866,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         temporal_diagnostics=temporal_diagnostics,
         scientific_status=scientific_status,
         replicate_bootstrap=replicate_bootstrap,
+        hierarchical_uncertainty=hierarchical_uncertainty,
         cost_basis=cost_basis,
         fit_predictive_stability_by_left_out_N=fit_stability,
     )
@@ -3865,6 +4891,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "best_by_size_rows": len(best_rows),
         "aggregated": aggregated,
         "aggregation_mode": aggregation_mode,
+        **aggregation_metadata,
         "aggregated_rows": best_rows,
         "raw_rows_count": raw_rows_count,
         "normalized_rows": summary_normalized_rows(all_normalized_rows),
@@ -3900,6 +4927,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             "deprecated_alias_for": "replicate_bootstrap",
         },
         "bootstrap_deprecated_alias_for": "replicate_bootstrap",
+        "hierarchical_uncertainty": hierarchical_uncertainty,
         "temporal_diagnostics": temporal_diagnostics,
         "nominal_n_train": temporal_diagnostics.get("nominal_n_train"),
         "estimated_n_eff_train": temporal_diagnostics.get("estimated_n_eff_train"),
@@ -3950,7 +4978,8 @@ def build_parser() -> argparse.ArgumentParser:
             "How to combine replicate rows per method and dataset size. "
             "Paper-level: mean_seeds_per_config, best_config_mean. "
             "Diagnostic: mean_replicates, best_config. "
-            "Default: best_config for one --run-root, mean_replicates for multiple."
+            "If omitted, a legacy fallback is inferred (best_config for one --run-root, "
+            "mean_replicates for multiple) and a reproducibility warning is recorded."
         ),
     )
     parser.add_argument(

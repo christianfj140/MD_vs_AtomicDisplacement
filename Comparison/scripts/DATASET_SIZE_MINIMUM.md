@@ -4,6 +4,42 @@ Read-only post-processing for Graph2Mat vs DeepH scaling sweeps. It estimates
 `N_min` thresholds from existing metric tables and does **not** train models or
 regenerate datasets.
 
+## Aggregation mode
+
+Aggregation mode is part of the reproducibility contract for Dataset Size
+Minimum and should be treated as an explicit protocol choice, not a cosmetic UI
+setting.
+
+Preferred paper-ready mode:
+
+- `mean_seeds_per_config`
+
+Other supported modes:
+
+- `best_config_mean` — paper-candidate only if the config-selection policy is
+  locked and documented
+- `mean_replicates` — diagnostic only
+- `best_config` — diagnostic only
+
+The summary JSON records:
+
+- `requested_aggregation_mode`
+- `actual_aggregation_mode`
+- `aggregation_mode_classification`
+- `aggregation_mode_classification_reason`
+- `aggregation_mode_legacy_inferred`
+
+If older CLI calls omit `aggregation_mode`, the current transition is
+warning-first rather than hard-fail:
+
+- the script still resolves the legacy fallback
+  (`best_config` for one run root, `mean_replicates` for multiple);
+- a warning is recorded in `warnings`;
+- the summary marks the mode as legacy/inferred.
+
+Old summaries without stored aggregation metadata still render in the UI/API,
+but they are labeled as legacy inferred rather than fully explicit.
+
 ## Nominal N vs effective N (N_eff)
 
 `N_min` fits and threshold crossings use **nominal** dataset sizes:
@@ -45,6 +81,29 @@ computes:
 - autocorrelation function up to a modest lag cap;
 - `statistical_inefficiency = 1 + 2 Σ ρ(k)` (positive lags only; `tau_int` is a legacy alias);
 - `N_eff = N / statistical_inefficiency`.
+
+Trajectory/block assumptions are conservative:
+
+- prefer `trajectory_id` when available;
+- else group by `block_id + temperature_K` when available;
+- else allow a single implicit continuous block only when metadata proves a
+  single ordered trajectory;
+- otherwise mark autocorrelation as unavailable for paper-level claims.
+
+The diagnostic does **not** concatenate unrelated blocks or mixed temperatures
+into one continuous time series. Per-block diagnostics are reported separately,
+including:
+
+- `nominal_n`
+- `scalar_used`
+- `max_lag`
+- `statistical_inefficiency`
+- `n_eff`
+- `warnings`
+
+Aggregate `estimated_n_eff_train` is reported only when the grouping assumptions
+are defensible. It remains diagnostic context, not a validated replacement for
+nominal `N_min`.
 
 **Important:** `N_eff` is reported for transparency. The main `N_min` curves and
 replicate-resampling CIs still use nominal `N` until a future protocol explicitly
@@ -88,6 +147,43 @@ variation, but it is **not** a temporal/block bootstrap and does not capture:
 When enabled, the summary/report/UI expose those limitations through warnings
 and `limitations`.
 
+## Hierarchical uncertainty
+
+The summary now also exposes `hierarchical_uncertainty` as a paper-readiness
+audit layer. It is deliberately separate from `replicate_bootstrap`.
+
+`replicate_bootstrap` remains a backward-compatible **diagnostic** interval for
+row-level replicate resampling. It is **not** a paper-level uncertainty model.
+
+`hierarchical_uncertainty` separates uncertainty sources instead of collapsing
+them into one ambiguous interval:
+
+- `seed` — seed-to-seed variability within the same base config
+- `config` — config/hyperparameter selection variability across base configs
+- `block` — block/trajectory temporal variability from per-block `N_eff / N`
+- `fit_model` — selected fit policy plus successful alternative model statuses
+- `dataset_size_dependence` — leave-one-size-out stability of fitted `N_min`
+
+Paper-ready uncertainty requires explicit hierarchy support. If the necessary
+metadata is missing, the analysis stays `diagnostic_only` and records machine-
+readable blockers such as:
+
+- `paper_uncertainty_seed_hierarchy_incomplete`
+- `paper_uncertainty_config_hierarchy_incomplete`
+- `paper_uncertainty_block_hierarchy_unavailable`
+- `paper_uncertainty_fit_model_not_paper_candidate:*`
+- `paper_uncertainty_fit_model_selection_not_paper_candidate:*`
+
+Important semantics:
+
+- no fallback from missing block hierarchy to row bootstrap is treated as
+  paper-ready;
+- block uncertainty requires explicit temporal grouping metadata and multiple
+  defensible train blocks;
+- `hierarchical_uncertainty` does not replace nominal `N_min` thresholds;
+- deterministic seeds are used for the audit resampling so the JSON is
+  reproducible across repeated runs with the same inputs.
+
 ## Fit policy
 
 `power_law_floor` is the only fit marked `paper_candidate`, and only when the
@@ -96,6 +192,33 @@ sizes for that method. The fit can still run with fewer points for diagnostic
 use; the paper-candidate gate is stricter than the mathematical minimum needed
 to execute the fit. `power_law` remains a legacy alias for that same
 constrained model.
+
+For `power_law_floor`, alpha is no longer chosen only from a fixed coarse grid.
+The current implementation uses a deterministic bounded search:
+
+- coarse alpha scan on `[0.05, 4.0]`;
+- local golden-section refinement around the best coarse alpha;
+- constrained nonnegative re-fit of `E_inf` and `A` at each alpha evaluation.
+
+The fit summary/report records:
+
+- `alpha`
+- `alpha_search_method`
+- `alpha_bounds`
+- `alpha_refinement_interval`
+- `objective_evaluations`
+- `sse`
+- `rmse_mev`
+- `fit_domain`
+- `nonnegative_constraints_active`
+
+This preserves the same model,
+
+`y(N) = E_inf + A * N^(-alpha)` with `E_inf >= 0`, `A >= 0`, `alpha > 0`,
+
+while giving a more stable alpha estimate for paper-candidate screening. A
+power-law fit is still not sufficient by itself for a paper-level claim: the
+leave-one-size-out stability gate must also pass.
 
 The following fits are `diagnostic_only`: `linear`, `quadratic`, `inverse`,
 `inverse_square`, `moving_average`, LOWESS variants, `cumulative_best`, and
@@ -133,6 +256,10 @@ Observed-only mode marks this diagnostic as not applicable.
 - `temporal_metadata_missing_*` — no usable temporal manifests; only nominal N is known.
 - `temporal_gap_le_1_*` — adjacent MD frames may leak across split boundaries.
 - `autocorrelation_unavailable_*` — no cheap scalar series; N_eff is not estimated.
+- `autocorrelation_grouping_missing_or_ambiguous` — trajectory/block identity is
+  not strong enough to justify a continuous ACF estimate.
+- `autocorrelation_unavailable_mixed_temperatures` — different temperatures were
+  detected and are not concatenated into one time series.
 - `n_eff_much_smaller_than_nominal` — estimated N_eff is far below nominal N_train.
 - `N is nominal; N_eff not estimated` — safe default message in UI/report.
 

@@ -246,6 +246,72 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("border-radius: 6px", self.styles_css)
         self.assertIn("background: #ffffff", self.styles_css)
 
+    def test_dataset_size_minimum_controls_have_js_read_and_render_paths(self) -> None:
+        required_ids = (
+            "g2m-deeph-dataset-minimum-run",
+            "g2m-deeph-dataset-minimum-refresh",
+            "dataset-minimum-metric",
+            "dataset-minimum-threshold",
+            "dataset-minimum-threshold-preset",
+            "dataset-minimum-x-axis",
+            "dataset-minimum-cost-basis",
+            "dataset-minimum-fit",
+            "dataset-minimum-moving-average-window",
+            "dataset-minimum-nmin-source",
+            "dataset-minimum-aggregation-mode",
+            "dataset-minimum-bootstrap-replicates",
+            "dataset-minimum-ci-level",
+            "dataset-minimum-show-raw-replicates",
+            "dataset-minimum-criterion",
+            "dataset-minimum-status",
+            "dataset-minimum-table",
+            "dataset-minimum-plot",
+        )
+        for control_id in required_ids:
+            self.assertIn(f'id="{control_id}"', self.index_html)
+
+        for token in (
+            'document.getElementById("g2m-deeph-dataset-minimum-refresh")?.addEventListener("click"',
+            'document.getElementById("g2m-deeph-dataset-minimum-run")?.addEventListener("click"',
+            'showToast("Selecciona al menos un sweep terminado.");',
+            "aggregation_mode: datasetMinimumSelectedAggregationMode()",
+            "datasetMinimumAggregationModeClassification",
+            "Selected aggregation mode is diagnostic-only",
+            "legacy/inferred",
+            'document.getElementById("dataset-minimum-status")',
+            'document.getElementById("dataset-minimum-table")',
+            'document.getElementById("dataset-minimum-plot")',
+            "runDatasetMinimumAnalysis",
+            "loadDatasetMinimum",
+            "refreshDatasetMinimumView",
+            "renderDatasetMinimumStatus",
+            "renderDatasetMinimumTable",
+            "renderDatasetMinimumPlot",
+            "renderDatasetMinimumSelectedOutput",
+            '"/api/g2m-deeph/dataset-size-minimum"',
+            '"/api/g2m-deeph/dataset-size-minimum/preview"',
+            '"/api/g2m-deeph/dataset-size-minimum/analyze"',
+        ):
+            self.assertIn(token, self.app_js)
+
+        for control_id in (
+            "dataset-minimum-metric",
+            "dataset-minimum-threshold",
+            "dataset-minimum-threshold-preset",
+            "dataset-minimum-x-axis",
+            "dataset-minimum-cost-basis",
+            "dataset-minimum-fit",
+            "dataset-minimum-moving-average-window",
+            "dataset-minimum-nmin-source",
+            "dataset-minimum-aggregation-mode",
+            "dataset-minimum-bootstrap-replicates",
+            "dataset-minimum-ci-level",
+            "dataset-minimum-show-raw-replicates",
+            "dataset-minimum-criterion",
+        ):
+            self.assertIn(f'"{control_id}"', self.app_js)
+        self.assertIn("Paper-ready protocol: seleccion explicita.", self.index_html)
+
 
 if __name__ == "__main__":
     unittest.main()
