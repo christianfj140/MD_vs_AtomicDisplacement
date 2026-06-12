@@ -99,6 +99,26 @@ analysis adds a blocker such as:
 
 - `paper_blocked_if_threshold_sensitivity_unstable:<method>`
 
+For `claim_mode=paper_candidate`, the threshold audit must also cover a real
+range around the main protocol threshold:
+
+- a lower threshold,
+- the main/equality threshold itself,
+- and an upper threshold.
+
+If that range is missing, the analysis adds:
+
+- `paper_blocked_if_threshold_sensitivity_insufficient_range`
+
+If an audited threshold never crosses the absolute threshold for a method, the
+analysis records the missing crossing and adds:
+
+- `paper_blocked_if_threshold_sensitivity_missing_n_min_abs:<method>`
+
+The per-threshold diagnostics report `N_min_abs`, `N_min_rel_tol`, and
+`N_min_plateau`. `N_min_cost_eff` remains diagnostic-only here; no paper-ready
+threshold-sensitivity CI is implied for cost efficiency.
+
 This prevents fragile threshold choices from silently appearing paper-ready.
 
 ## Aggregation mode

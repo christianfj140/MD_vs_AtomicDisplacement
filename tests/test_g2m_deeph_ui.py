@@ -257,6 +257,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "dataset-minimum-x-axis",
             "dataset-minimum-cost-basis",
             "dataset-minimum-claim-mode",
+            "dataset-minimum-threshold-protocol-file",
             "dataset-minimum-fit",
             "dataset-minimum-moving-average-window",
             "dataset-minimum-nmin-source",
@@ -278,6 +279,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             'showToast("Selecciona al menos un sweep terminado.");',
             "aggregation_mode: datasetMinimumSelectedAggregationMode()",
             "claim_mode: datasetMinimumSelectedClaimMode()",
+            "threshold_protocol_file: datasetMinimumSelectedThresholdProtocolFile()",
             "datasetMinimumAggregationModeClassification",
             "Claim mode: requested=",
             "Diagnostic only: do not use as a paper-level minimum snapshot claim.",
@@ -305,6 +307,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Per-size N_eff diagnostics are shown in the N nominal vs N_eff table below.",
             "Manual exploratory threshold",
             "20 meV is not universal",
+            "datasetMinimumSelectedThresholdProtocolFile",
             '"/api/g2m-deeph/dataset-size-minimum"',
             '"/api/g2m-deeph/dataset-size-minimum/preview"',
             '"/api/g2m-deeph/dataset-size-minimum/analyze"',
@@ -319,6 +322,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "dataset-minimum-x-axis",
             "dataset-minimum-cost-basis",
             "dataset-minimum-claim-mode",
+            "dataset-minimum-threshold-protocol-file",
             "dataset-minimum-fit",
             "dataset-minimum-moving-average-window",
             "dataset-minimum-nmin-source",
@@ -331,6 +335,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             self.assertIn(f'"{control_id}"', self.app_js)
         self.assertIn("Paper-ready protocol: seleccion explicita.", self.index_html)
         self.assertIn("20 meV no es universal", self.index_html)
+        self.assertIn("Threshold protocol JSON", self.index_html)
 
 
 if __name__ == "__main__":

@@ -1723,12 +1723,14 @@ def threshold_sensitivity_summary(
     best_rows: list[dict[str, Any]],
     *,
     threshold_values_mev: list[float],
+    main_threshold_mev: float,
     relative_tolerance: float,
     plateau_gain: float,
     cost_basis: str,
     n_min_source: str,
     fit_model: str,
     moving_average_window: int,
+    claim_mode: str = "diagnostic",
 ) -> dict[str, Any]:
     unique_thresholds = sorted({round(float(value), 12) for value in threshold_values_mev if finite_number(value) is not None})
     if not unique_thresholds:
@@ -1740,6 +1742,7 @@ def threshold_sensitivity_summary(
             "paper_level_blockers": [],
             "warnings": [],
         }
+    claim_mode = parse_claim_mode(claim_mode)
     by_method: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     methods = sorted({str(row["method"]) for row in best_rows})
@@ -1766,10 +1769,22 @@ def threshold_sensitivity_summary(
             )
         per_threshold_results[threshold_mev] = threshold_map
     blockers: list[str] = []
+    has_below_main = any(value < float(main_threshold_mev) for value in unique_thresholds)
+    has_main = any(abs(value - float(main_threshold_mev)) < 1e-9 for value in unique_thresholds)
+    has_above_main = any(value > float(main_threshold_mev) for value in unique_thresholds)
+    sufficient_range = (
+        len(unique_thresholds) >= 3
+        and has_below_main
+        and has_main
+        and has_above_main
+    )
+    if claim_mode == "paper_candidate" and not sufficient_range:
+        blockers.append("paper_blocked_if_threshold_sensitivity_insufficient_range")
     for method in methods:
         series: list[dict[str, Any]] = []
         n_values: list[int] = []
         available_sizes: list[int] = []
+        missing_threshold_crossings: list[float] = []
         for threshold_mev in unique_thresholds:
             method_thresholds = per_threshold_results.get(threshold_mev, {}).get(method) or {}
             n_min_abs_value = int_number(method_thresholds.get("N_min_abs"))
@@ -1777,13 +1792,22 @@ def threshold_sensitivity_summary(
                 available_sizes = [
                     int(size) for size in (method_thresholds.get("available_sizes") or []) if int_number(size) is not None
                 ]
+            n_min_rel_tol_value = int_number(
+                method_thresholds.get(N_MIN_REL_TOL_KEY)
+                or method_thresholds.get(LEGACY_N_MIN_REL95_KEY)
+            )
+            n_min_plateau_value = int_number(method_thresholds.get("N_min_plateau"))
             series.append({
                 "threshold_mev": threshold_mev,
                 "N_min_abs": n_min_abs_value,
+                N_MIN_REL_TOL_KEY: n_min_rel_tol_value,
+                "N_min_plateau": n_min_plateau_value,
                 "source": method_thresholds.get("N_min_abs_source"),
             })
             if n_min_abs_value is not None:
                 n_values.append(n_min_abs_value)
+            else:
+                missing_threshold_crossings.append(float(threshold_mev))
         observed_steps = sorted({
             later - earlier
             for earlier, later in zip(available_sizes, available_sizes[1:])
@@ -1797,11 +1821,14 @@ def threshold_sensitivity_summary(
             and span > allowed_delta * THRESHOLD_SENSITIVITY_MAX_STEP_MULTIPLIER
         )
         method_blockers: list[str] = []
+        if missing_threshold_crossings:
+            method_blockers.append(f"paper_blocked_if_threshold_sensitivity_missing_n_min_abs:{method}")
         if unstable:
             method_blockers.append(f"paper_blocked_if_threshold_sensitivity_unstable:{method}")
-            blockers.extend(method_blockers)
+        blockers.extend(method_blockers)
         by_method[method] = {
             "threshold_series": series,
+            "missing_threshold_crossings": missing_threshold_crossings,
             "n_min_abs_span": span,
             "allowed_n_min_abs_delta": allowed_delta,
             "unstable": unstable,
@@ -1811,6 +1838,8 @@ def threshold_sensitivity_summary(
         "enabled": True,
         "status": "ok",
         "thresholds_mev": unique_thresholds,
+        "main_threshold_mev": float(main_threshold_mev),
+        "sufficient_range_for_paper_candidate": sufficient_range,
         "by_method": by_method,
         "paper_level_blockers": sorted(set(blockers)),
         "warnings": sorted(set(warnings)),
@@ -4091,15 +4120,38 @@ def summarize_temporal_diagnostics(
     normalized_rows: list[dict[str, Any]],
     *,
     run_roots: list[Path],
+    strict_required_json: bool = False,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     datasets: list[dict[str, Any]] = []
     for dataset_id, dataset_root in collect_dataset_roots_for_diagnostics(normalized_rows, run_roots):
         try:
             datasets.append(
-                diagnose_dataset_temporal_metadata(dataset_root, dataset_id=dataset_id)
+                diagnose_dataset_temporal_metadata(
+                    dataset_root,
+                    dataset_id=dataset_id,
+                    strict_required_json=strict_required_json,
+                )
+            )
+        except JSONLoadError:
+            raise
+        except OSError:
+            if strict_required_json:
+                raise
+            exc = sys.exc_info()[1]
+            warnings.append(f"temporal_diagnostics_failed:{dataset_root}:{exc}")
+            datasets.append(
+                {
+                    "dataset_id": dataset_id or dataset_root.name,
+                    "dataset_root": str(dataset_root),
+                    "dataset_size": 0,
+                    "warnings": [f"temporal_diagnostics_failed:{exc}"],
+                    "autocorrelation_available": False,
+                }
             )
         except Exception as exc:  # noqa: BLE001 - diagnostics must never abort analysis.
+            if strict_required_json:
+                raise
             warnings.append(f"temporal_diagnostics_failed:{dataset_root}:{exc}")
             datasets.append(
                 {
@@ -5793,12 +5845,14 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
             threshold_metadata.get("threshold_protocol_sensitivity_thresholds_mev")
             or [float(args.threshold_mev)]
         ),
+        main_threshold_mev=float(args.threshold_mev),
         relative_tolerance=float(args.relative_tolerance),
         plateau_gain=float(args.plateau_gain),
         cost_basis=cost_basis,
         n_min_source=actual_n_min_source,
         fit_model=requested_fit_model,
         moving_average_window=moving_average_window,
+        claim_mode=claim_mode,
     )
     warnings.extend(threshold_sensitivity.get("warnings") or [])
     if aggregation_mode in {"mean_seeds_per_config", "best_config_mean"} and cost_basis == "per_seed_mean":
@@ -5841,6 +5895,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     temporal_diagnostics = summarize_temporal_diagnostics(
         all_normalized_rows,
         run_roots=run_roots,
+        strict_required_json=(claim_mode == "paper_candidate"),
     )
     warnings.extend(temporal_diagnostics.get("warnings") or [])
     hierarchical_uncertainty = compute_hierarchical_uncertainty(

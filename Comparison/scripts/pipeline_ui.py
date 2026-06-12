@@ -6289,6 +6289,17 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         )
     except SystemExit as exc:
         raise RuntimeError(str(exc)) from None
+    threshold_protocol_file_value = payload.get("threshold_protocol_file")
+    threshold_protocol_file: Path | None = None
+    if threshold_protocol_file_value not in (None, ""):
+        protocol_text = str(threshold_protocol_file_value).strip()
+        if not protocol_text:
+            raise RuntimeError("threshold_protocol_file debe ser una ruta no vacia si se proporciona.")
+        threshold_protocol_file = Path(protocol_text).expanduser().resolve()
+        if not threshold_protocol_file.exists():
+            raise RuntimeError(f"threshold_protocol_file no existe: {threshold_protocol_file}")
+        if not threshold_protocol_file.is_file():
+            raise RuntimeError(f"threshold_protocol_file debe apuntar a un fichero JSON: {threshold_protocol_file}")
 
     relative_tolerance = float(payload.get("relative_tolerance") or 0.05)
     plateau_gain = float(payload.get("plateau_gain") or 0.05)
@@ -6363,6 +6374,8 @@ def run_dataset_size_minimum_analysis(payload: dict[str, Any]) -> dict[str, Any]
         "--ci-level",
         str(ci_level),
     ]
+    if threshold_protocol_file is not None:
+        command.extend(["--threshold-protocol-file", str(threshold_protocol_file)])
 
     for path in run_roots:
         command.extend(["--run-root", str(path)])

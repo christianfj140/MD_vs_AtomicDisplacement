@@ -324,6 +324,7 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
         sensitivity = minimum.threshold_sensitivity_summary(
             rows,
             threshold_values_mev=[10.0, 60.0],
+            main_threshold_mev=10.0,
             relative_tolerance=0.05,
             plateau_gain=0.05,
             cost_basis="per_seed_mean",
@@ -337,6 +338,77 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
             "paper_blocked_if_threshold_sensitivity_unstable:graph2mat",
             sensitivity["paper_level_blockers"],
         )
+
+    def test_threshold_sensitivity_blocks_missing_threshold_crossings(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=8.0, seed="1", config_id="a"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=7.0, seed="1", config_id="b"),
+            make_normalized_replicate_row(method="graph2mat", size=30, mev=6.0, seed="1", config_id="c"),
+        ]
+        sensitivity = minimum.threshold_sensitivity_summary(
+            rows,
+            threshold_values_mev=[5.0, 7.0, 9.0],
+            main_threshold_mev=7.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            cost_basis="per_seed_mean",
+            n_min_source="observed",
+            fit_model="power_law_floor",
+            moving_average_window=3,
+            claim_mode="paper_candidate",
+        )
+        method_payload = sensitivity["by_method"]["graph2mat"]
+        self.assertEqual(method_payload["missing_threshold_crossings"], [5.0])
+        self.assertIn(
+            "paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat",
+            method_payload["paper_level_blockers"],
+        )
+
+    def test_threshold_sensitivity_requires_real_range_for_paper_candidate(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=25.0, seed="1", config_id="a"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=15.0, seed="1", config_id="b"),
+            make_normalized_replicate_row(method="graph2mat", size=30, mev=9.0, seed="1", config_id="c"),
+        ]
+        sensitivity = minimum.threshold_sensitivity_summary(
+            rows,
+            threshold_values_mev=[10.0],
+            main_threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            cost_basis="per_seed_mean",
+            n_min_source="observed",
+            fit_model="power_law_floor",
+            moving_average_window=3,
+            claim_mode="paper_candidate",
+        )
+        self.assertFalse(sensitivity["sufficient_range_for_paper_candidate"])
+        self.assertIn(
+            "paper_blocked_if_threshold_sensitivity_insufficient_range",
+            sensitivity["paper_level_blockers"],
+        )
+
+    def test_threshold_sensitivity_reports_abs_rel_tol_and_plateau(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=18.0, seed="1", config_id="a"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=12.0, seed="1", config_id="b"),
+            make_normalized_replicate_row(method="graph2mat", size=30, mev=9.0, seed="1", config_id="c"),
+        ]
+        sensitivity = minimum.threshold_sensitivity_summary(
+            rows,
+            threshold_values_mev=[10.0, 12.0, 15.0],
+            main_threshold_mev=12.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            cost_basis="per_seed_mean",
+            n_min_source="observed",
+            fit_model="power_law_floor",
+            moving_average_window=3,
+        )
+        series = sensitivity["by_method"]["graph2mat"]["threshold_series"]
+        self.assertIn("N_min_abs", series[0])
+        self.assertIn(minimum.N_MIN_REL_TOL_KEY, series[0])
+        self.assertIn("N_min_plateau", series[0])
 
 
 class DatasetSizeMinimumTests(unittest.TestCase):
@@ -2520,6 +2592,20 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             run_root = self._write_minimum_run_root(base)
+            protocol_path = base / "threshold_protocol.json"
+            protocol_path.write_text(
+                json.dumps(
+                    {
+                        "metric": "h_mae_eV_mean",
+                        "threshold_mev": 25.0,
+                        "physical_rationale": "Test-only protocol rationale.",
+                        "reference": "internal_protocol_v1",
+                        "applies_to_metrics": ["h_mae_eV_mean"],
+                        "recommended_sensitivity_thresholds_mev": [20.0, 25.0, 30.0],
+                    }
+                ),
+                encoding="utf-8",
+            )
             captured_command: list[str] = []
 
             def fake_run(command, **kwargs):
@@ -2546,6 +2632,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                         "aggregation_mode": "mean_seeds_per_config",
                         "cost_basis": "protocol_total",
                         "claim_mode": "paper_candidate",
+                        "threshold_protocol_file": str(protocol_path),
                         "bootstrap_replicates": 12,
                         "ci_level": 0.9,
                     }
@@ -2562,9 +2649,27 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertEqual(command[command.index("--aggregation-mode") + 1], "mean_seeds_per_config")
             self.assertEqual(command[command.index("--cost-basis") + 1], "protocol_total")
             self.assertEqual(command[command.index("--claim-mode") + 1], "paper_candidate")
+            self.assertEqual(command[command.index("--threshold-protocol-file") + 1], str(protocol_path.resolve()))
             self.assertEqual(command[command.index("--bootstrap-replicates") + 1], "12")
             self.assertEqual(command[command.index("--ci-level") + 1], "0.9")
             self.assertEqual(command[command.index("--run-root") + 1], str(run_root.resolve()))
+
+    def test_invalid_threshold_protocol_file_rejected_by_run_analysis_before_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_root = self._write_minimum_run_root(base)
+            missing_protocol = base / "missing_threshold_protocol.json"
+            with patch.object(self.pipeline_ui.subprocess, "run") as mocked_run:
+                with self.assertRaises(RuntimeError) as exc:
+                    self.pipeline_ui.run_dataset_size_minimum_analysis(
+                        {
+                            "run_roots": [str(run_root)],
+                            "threshold_mev": 10.0,
+                            "threshold_protocol_file": str(missing_protocol),
+                        }
+                    )
+            self.assertIn("threshold_protocol_file no existe", str(exc.exception))
+            mocked_run.assert_not_called()
 
     def test_invalid_aggregation_mode_rejected_by_run_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2693,6 +2798,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertEqual(summary["n_min_basis"], "nominal")
             self.assertEqual(summary["cost_basis"], "protocol_total")
             self.assertEqual(summary["thresholds"]["graph2mat"]["N_min_cost_eff_basis"], "protocol_total")
+            self.assertIn("threshold_sensitivity", summary)
             report_path = next(Path(path) for path in summary["outputs"] if str(path).endswith("_report.md"))
             report_text = report_path.read_text(encoding="utf-8")
             self.assertIn("N_min uses nominal N.", report_text)
@@ -2700,6 +2806,33 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertTrue((output_dir / "dataset_size_minimum_summary.json").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_results.csv").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_best_by_size.csv").exists())
+
+    def test_claim_mode_paper_candidate_activates_strict_required_temporal_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dataset_root = write_synthetic_temporal_dataset(base / "dataset", n_train=80)
+            (dataset_root / "splits" / "split_summary.json").write_text('{"broken": ', encoding="utf-8")
+            run_root = self._write_smoke_run_root(
+                base / "graphene_w90_snapshot_scaling_smoke_campaign",
+                dataset_root=dataset_root,
+            )
+
+            with self.assertRaises(minimum.JSONLoadError) as exc:
+                self._run_analysis_via_helper(
+                    payload={
+                        "run_roots": [str(run_root)],
+                        "threshold_mev": 20.0,
+                        "primary_metric": "h_mae_eV_mean",
+                        "x_axis": "n_train",
+                        "n_min_source": "fit",
+                        "n_min_fit_model": "power_law_floor",
+                        "aggregation_mode": "mean_seeds_per_config",
+                        "cost_basis": "protocol_total",
+                        "claim_mode": "paper_candidate",
+                        "bootstrap_replicates": 0,
+                    }
+                )
+            self.assertIn("invalid_required_json", str(exc.exception))
 
     def test_http_endpoints_cover_get_preview_and_analyze(self) -> None:
         import http.server

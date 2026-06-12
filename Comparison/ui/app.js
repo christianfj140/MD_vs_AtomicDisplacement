@@ -2641,6 +2641,7 @@ async function runDatasetMinimumAnalysis() {
       aggregation_mode: datasetMinimumSelectedAggregationMode(),
       cost_basis: datasetMinimumSelectedCostBasis(),
       claim_mode: datasetMinimumSelectedClaimMode(),
+      threshold_protocol_file: datasetMinimumSelectedThresholdProtocolFile(),
       bootstrap_replicates: datasetMinimumSelectedBootstrapReplicates(),
       bootstrap_seed: 12345,
       ci_level: datasetMinimumSelectedCiLevel(),
@@ -2813,6 +2814,10 @@ function datasetMinimumSelectedThresholdPresetKey() {
 
 function datasetMinimumThresholdIsUserDefined() {
   return Boolean(state.datasetMinimumThresholdUserDefined);
+}
+
+function datasetMinimumSelectedThresholdProtocolFile() {
+  return datasetMinimumControlValue("dataset-minimum-threshold-protocol-file", "").trim();
 }
 
 function datasetMinimumSelectedXAxis() {
@@ -3032,6 +3037,13 @@ function datasetMinimumOutputMatchesCurrentSelection(output = {}) {
     return false;
   }
   if (datasetMinimumOutputClaimModeRequested(output) !== datasetMinimumSelectedClaimMode()) {
+    return false;
+  }
+  const outputThresholdProtocolFile = datasetMinimumNormalizePath(output.threshold_protocol_file || "");
+  const selectedThresholdProtocolFile = datasetMinimumNormalizePath(
+    datasetMinimumSelectedThresholdProtocolFile(),
+  );
+  if (outputThresholdProtocolFile !== selectedThresholdProtocolFile) {
     return false;
   }
 

@@ -1210,6 +1210,15 @@
                 <small>Paper candidate nunca pasa por defecto; bloquea el claim si faltan requisitos de protocolo.</small>
               </label>
               <label class="field">
+                <span>Threshold protocol JSON</span>
+                <input
+                  id="dataset-minimum-threshold-protocol-file"
+                  type="text"
+                  placeholder="/ruta/al/threshold_protocol.json"
+                />
+                <small>Opcional. Solo un protocolo explicito puede justificar un threshold paper-level; si se deja vacio, el analisis sigue en modo diagnostico/exploratorio.</small>
+              </label>
+              <label class="field">
                 <span>Fit</span>
                 <select id="dataset-minimum-fit">
                   <option value="power_law_floor" selected>power law + floor (constrained)</option>
