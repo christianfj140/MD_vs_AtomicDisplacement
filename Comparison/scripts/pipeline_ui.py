@@ -31,7 +31,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import yaml
 from siesta_settings import DEFAULT_SHARED, compare_method_settings, file_digest
@@ -68,6 +68,23 @@ UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 COMPARISON_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = COMPARISON_ROOT / "results"
 DEFAULT_VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+DATASET_SIZE_MINIMUM_UI_ARTIFACTS = {
+    "dataset_size_minimum_cost_efficiency.png": {
+        "label": "Cost efficiency plot",
+        "kind": "image",
+        "mime_type": "image/png",
+    },
+    "dataset_size_minimum_cost_efficiency.pdf": {
+        "label": "Cost efficiency PDF",
+        "kind": "document",
+        "mime_type": "application/pdf",
+    },
+    "dataset_size_minimum_primary_metric.pdf": {
+        "label": "Primary metric PDF",
+        "kind": "document",
+        "mime_type": "application/pdf",
+    },
+}
 
 
 def postprocess_python_executable() -> str:
@@ -6452,12 +6469,29 @@ def dataset_size_minimum_payload() -> dict[str, Any]:
         summary_run_roots = summary.get("run_roots") or []
         aggregation_metadata = dataset_size_minimum_output_aggregation_metadata(summary)
         aggregation_mode = aggregation_metadata["actual_aggregation_mode"]
+        artifact_outputs: list[dict[str, Any]] = []
+        for filename, meta in DATASET_SIZE_MINIMUM_UI_ARTIFACTS.items():
+            artifact_path = output_dir / filename
+            if not artifact_path.exists() or not artifact_path.is_file():
+                continue
+            query = urlencode({"output_dir": str(output_dir), "name": filename})
+            artifact_outputs.append(
+                {
+                    "name": filename,
+                    "label": meta["label"],
+                    "kind": meta["kind"],
+                    "mime_type": meta["mime_type"],
+                    "path": str(artifact_path),
+                    "url": f"/api/g2m-deeph/dataset-size-minimum/artifact?{query}",
+                }
+            )
         outputs.append(
             {
                 "status": summary.get("status") or "unknown",
                 "output_dir": str(output_dir),
                 "summary_path": str(summary_path),
                 "report_path": str(output_dir / "dataset_size_minimum_report.md"),
+                "artifact_outputs": artifact_outputs,
                 "primary_metric": summary.get("primary_metric"),
                 "threshold_mev": summary.get("threshold_mev"),
                 "threshold_basis": summary.get("threshold_basis"),
@@ -15070,6 +15104,23 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, G2M_DEEPH_RUNNER.plots(selected_run_ids=selected_run_ids))
             elif path == "/api/g2m-deeph/dataset-size-minimum":
                 json_response(self, dataset_size_minimum_payload())
+            elif path == "/api/g2m-deeph/dataset-size-minimum/artifact":
+                query = parse_qs(parsed_url.query)
+                output_dir_text = str((query.get("output_dir") or [""])[0] or "").strip()
+                filename = str((query.get("name") or [""])[0] or "").strip()
+                if not output_dir_text or not filename:
+                    raise RuntimeError("output_dir y name son obligatorios.")
+                artifact_meta = DATASET_SIZE_MINIMUM_UI_ARTIFACTS.get(filename)
+                if artifact_meta is None:
+                    raise RuntimeError(f"Artefacto dataset-size-minimum no permitido: {filename}")
+                output_dir = Path(output_dir_text).expanduser().resolve()
+                if RESULTS_ROOT.resolve() not in output_dir.parents:
+                    raise RuntimeError("output_dir fuera de Comparison/results no permitido.")
+                summary_path = output_dir / "dataset_size_minimum_summary.json"
+                if not summary_path.exists():
+                    raise FileNotFoundError(summary_path)
+                artifact_path = output_dir / filename
+                self._serve_file(artifact_path, content_type=str(artifact_meta["mime_type"]))
             elif path == "/":
                 self._serve_file(UI_DIR / "index.html")
             else:
@@ -15439,14 +15490,17 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             error_response(self, exc)
 
-    def _serve_file(self, path: Path) -> None:
+    def _serve_file(self, path: Path, *, content_type: str | None = None) -> None:
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(path)
-        content_type = {
-            ".html": "text/html; charset=utf-8",
-            ".css": "text/css; charset=utf-8",
-            ".js": "application/javascript; charset=utf-8",
-        }.get(path.suffix, "application/octet-stream")
+        if content_type is None:
+            content_type = {
+                ".html": "text/html; charset=utf-8",
+                ".css": "text/css; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".png": "image/png",
+                ".pdf": "application/pdf",
+            }.get(path.suffix, "application/octet-stream")
         body = path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)

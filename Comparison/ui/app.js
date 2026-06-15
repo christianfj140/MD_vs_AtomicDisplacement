@@ -2228,6 +2228,19 @@ function paddedLinearRange(values, options = {}) {
   return [minRange, maxRange];
 }
 
+function paddedLogRange(values, options = {}) {
+  const finiteValues = values.filter((value) => typeof value === "number" && Number.isFinite(value) && value > 0);
+  if (!finiteValues.length) return null;
+  const minValue = Math.min(...finiteValues);
+  const maxValue = Math.max(...finiteValues);
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || minValue <= 0 || maxValue <= 0) return null;
+  const logMin = Math.log10(minValue);
+  const logMax = Math.log10(maxValue);
+  const span = logMax - logMin;
+  const padding = span > 0 ? span * (options.padFraction ?? 0.08) : 0.25;
+  return [logMin - padding, logMax + padding];
+}
+
 function renderG2MDeepHTimingScalingPlot(card, plot) {
   const rows = (plot.rows || [])
     .map((row) => ({
@@ -2960,6 +2973,23 @@ function datasetMinimumOutputMovingAverageWindow(output = {}) {
 
 function datasetMinimumOutputCostBasis(output = {}) {
   return String(output.cost_basis || "per_seed_mean");
+}
+
+function datasetMinimumCostBasisLabel(costBasis) {
+  return costBasis === "protocol_total"
+    ? "protocol total GPU-hours"
+    : "per-seed mean GPU-hours";
+}
+
+function datasetMinimumRowCost(row = {}, costBasis = "per_seed_mean") {
+  const keys = costBasis === "protocol_total"
+    ? ["gpu_hours_protocol_total", "gpu_hours_total_sum", "gpu_hours_total_mean", "gpu_hours_total"]
+    : ["gpu_hours_per_seed_mean", "gpu_hours_total_mean", "gpu_hours_total", "gpu_hours_protocol_total"];
+  for (const key of keys) {
+    const value = finiteNumber(row[key]);
+    if (value != null) return value;
+  }
+  return null;
 }
 
 function datasetMinimumOutputClaimModeRequested(output = {}) {
@@ -3870,6 +3900,50 @@ function datasetMinimumAggregateRowsByMethod(rows = [], axis = "n_train") {
     .sort((left, right) => left.x_value - right.x_value || String(left.method).localeCompare(String(right.method)));
 }
 
+function datasetMinimumAggregateCostRowsByMethod(rows = []) {
+  const buckets = new Map();
+  for (const row of rows) {
+    const method = String(row.method || "unknown");
+    const xValue = finiteNumber(row.x_value);
+    const yValue = finiteNumber(row.y_value);
+    const costValue = finiteNumber(row.cost_value);
+    if (xValue == null || yValue == null || costValue == null) continue;
+    const key = `${method}\u0000${xValue}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        method,
+        xValue,
+        yValues: [],
+        costValues: [],
+        sources: [],
+        sample: row,
+      });
+    }
+    const bucket = buckets.get(key);
+    bucket.yValues.push(yValue);
+    bucket.costValues.push(costValue);
+    const source = String(row.sweep_label || row.source_run_root || "").trim();
+    if (source && !source.startsWith("mean (")) bucket.sources.push(source);
+  }
+  return Array.from(buckets.values())
+    .map((bucket) => {
+      const yMean = bucket.yValues.reduce((sum, value) => sum + value, 0) / bucket.yValues.length;
+      const costMean = bucket.costValues.reduce((sum, value) => sum + value, 0) / bucket.costValues.length;
+      return {
+        ...bucket.sample,
+        method: bucket.method,
+        x_value: bucket.xValue,
+        y_value: yMean,
+        primary_metric_mev_mean: yMean,
+        cost_value: costMean,
+        source_count: bucket.yValues.length,
+        aggregated_sources: Array.from(new Set(bucket.sources)),
+        config_id: bucket.yValues.length > 1 ? "aggregated_mean" : (bucket.sample.config_id || "-"),
+      };
+    })
+    .sort((left, right) => left.x_value - right.x_value || String(left.method).localeCompare(String(right.method)));
+}
+
 function datasetMinimumPlotRowsFromOutput(output = {}) {
   if (!output) return [];
   if (Array.isArray(output.aggregated_rows) && output.aggregated_rows.length) {
@@ -4236,6 +4310,261 @@ function renderDatasetMinimumPlot(output, axis) {
   });
 }
 
+function datasetMinimumCostPlotRows(output, axis) {
+  const costBasis = datasetMinimumOutputCostBasis(output);
+  const rows = datasetMinimumPlotRowsFromOutput(output)
+    .map((row) => ({
+      ...row,
+      x_value: datasetMinimumRowX(row, axis),
+      y_value: finiteNumber(row.primary_metric_mev_mean),
+      cost_value: datasetMinimumRowCost(row, costBasis),
+    }))
+    .filter((row) => row.x_value != null && row.y_value != null && row.cost_value != null)
+    .sort((a, b) => a.x_value - b.x_value || String(a.method || "").localeCompare(String(b.method || "")));
+  if (!rows.length) return [];
+
+  const aggregationMode = output?.aggregation_mode
+    || (output?.is_preview ? datasetMinimumSelectedAggregationMode() : "mean_replicates");
+  const selectedRootCount = datasetMinimumSelectedRunRoots().length;
+  const useBackendAggregation = !output?.is_preview && (
+    datasetMinimumUsesBackendAggregationMode(aggregationMode)
+    || rows.some((row) => row.is_aggregated_mean || (row.replicate_count || 0) > 1)
+  );
+  const aggregated = datasetMinimumUsesBackendAggregationMode(aggregationMode)
+    || useBackendAggregation
+    || Boolean(output?.aggregated)
+    || datasetMinimumShouldAggregateRows(rows, selectedRootCount);
+  return useBackendAggregation
+    || datasetMinimumUsesBackendAggregationMode(aggregationMode)
+    || !output?.is_preview
+    ? rows
+    : aggregated
+      ? datasetMinimumAggregateCostRowsByMethod(rows)
+      : rows;
+}
+
+function datasetMinimumCostPerErrorPlotRows(output, axis) {
+  return datasetMinimumCostPlotRows(output, axis)
+    .map((row) => ({
+      ...row,
+      efficiency_value: row.y_value > 0 ? row.cost_value / row.y_value : null,
+    }))
+    .filter((row) => row.efficiency_value != null && Number.isFinite(row.efficiency_value) && row.efficiency_value > 0);
+}
+
+function renderDatasetMinimumCostPlot(output, axis) {
+  const card = document.getElementById("dataset-minimum-cost-plot");
+  if (!card) return;
+  if (!window.Plotly) {
+    card.textContent = "Plotly no esta cargado.";
+    return;
+  }
+  const rows = datasetMinimumCostPlotRows(output, axis);
+  const costBasis = datasetMinimumOutputCostBasis(output);
+  const costLabel = datasetMinimumCostBasisLabel(costBasis);
+  if (!rows.length) {
+    renderPlot(card, [], plotLayout("Dataset size minimum cost efficiency", "GPU-hours", {
+      annotations: [emptyPlotAnnotation(`No finite cost rows for selected cost basis (${costLabel}).`)],
+    }));
+    return;
+  }
+
+  const methods = Array.from(new Set(rows.map((row) => String(row.method || "unknown")))).sort();
+  const traces = [];
+  methods.forEach((method, index) => {
+    const group = rows.filter((row) => String(row.method || "unknown") === method);
+    const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
+    const label = methodDisplayLabel(method);
+    const hoverText = group.map((row) => [
+      `method: ${label}`,
+      `${datasetMinimumAxisLabel(axis)}: ${formatCompactNumber(row.x_value)}`,
+      `error: ${formatCompactNumber(row.y_value)} meV`,
+      `cost: ${formatCompactNumber(row.cost_value)} GPU-hours`,
+      `cost_basis: ${costBasis}`,
+      `config_id: ${row.config_id || "-"}`,
+      `seeds: ${datasetMinimumListField(row.seeds || row.seed)}`,
+      `source_run_roots: ${datasetMinimumListField(row.source_run_roots || row.source_run_root)}`,
+    ].join("<br>"));
+
+    traces.push({
+      type: "scatter",
+      mode: "lines+markers",
+      x: group.map((row) => row.x_value),
+      y: group.map((row) => row.cost_value),
+      marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8, color },
+      line: { color, width: 2 },
+      name: `${label} cost`,
+      legendgroup: method,
+      text: hoverText,
+      hovertemplate: "%{text}<extra>%{fullData.name}</extra>",
+      xaxis: "x",
+      yaxis: "y",
+    });
+    traces.push({
+      type: "scatter",
+      mode: "markers+text",
+      x: group.map((row) => row.cost_value),
+      y: group.map((row) => row.y_value),
+      text: group.map((row) => formatCompactNumber(row.x_value)),
+      customdata: hoverText,
+      marker: {
+        symbol: g2mDeephMarkerSymbol(method),
+        size: g2mDeephIsDeepH(method) ? 11 : 9,
+        color,
+        opacity: 0.88,
+      },
+      textposition: "top center",
+      textfont: { size: 10, color },
+      name: `${label} accuracy/cost`,
+      legendgroup: method,
+      showlegend: false,
+      hovertemplate: "%{customdata}<extra>%{fullData.name}</extra>",
+      xaxis: "x2",
+      yaxis: "y2",
+    });
+  });
+
+  const title = `Dataset size minimum cost efficiency · ${costLabel}`;
+  const layout = plotLayout(title, "GPU-hours", {
+    grid: undefined,
+    xaxis: {
+      title: datasetMinimumAxisLabel(axis),
+      domain: [0, 0.44],
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.x_value), { forceZeroMin: true }),
+    },
+    yaxis: {
+      title: costLabel,
+      anchor: "x",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.cost_value), { forceZeroMin: true }),
+    },
+    xaxis2: {
+      title: costLabel,
+      domain: [0.58, 1],
+      anchor: "y2",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.cost_value), { forceZeroMin: true }),
+    },
+    yaxis2: {
+      title: "Error (meV)",
+      anchor: "x2",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.y_value), { forceZeroMin: true }),
+    },
+    annotations: [
+      {
+        text: "Cost vs dataset size",
+        xref: "paper",
+        yref: "paper",
+        x: 0.22,
+        y: 1.08,
+        showarrow: false,
+        font: { size: 13, color: "#374151" },
+      },
+      {
+        text: "Accuracy vs cost",
+        xref: "paper",
+        yref: "paper",
+        x: 0.79,
+        y: 1.08,
+        showarrow: false,
+        font: { size: 13, color: "#374151" },
+      },
+    ],
+    legend: { orientation: "h", y: -0.2 },
+    margin: { t: 92, r: 48, b: 76, l: 78 },
+  });
+  renderPlot(card, traces, layout, {
+    toImageButtonOptions: { filename: "dataset_size_minimum_cost_efficiency_interactive" },
+  });
+}
+
+function renderDatasetMinimumCostPerErrorPlot(output, axis) {
+  const card = document.getElementById("dataset-minimum-cost-per-error-plot");
+  if (!card) return;
+  if (!window.Plotly) {
+    card.textContent = "Plotly no esta cargado.";
+    return;
+  }
+  const rows = datasetMinimumCostPerErrorPlotRows(output, axis);
+  const costBasis = datasetMinimumOutputCostBasis(output);
+  const costLabel = datasetMinimumCostBasisLabel(costBasis);
+  if (!rows.length) {
+    renderPlot(card, [], plotLayout("Dataset size minimum GPU-hours per error", "GPU-hours / error (meV)", {
+      annotations: [emptyPlotAnnotation(`No finite GPU-hours / error rows for selected cost basis (${costLabel}).`)],
+    }));
+    return;
+  }
+
+  const methods = Array.from(new Set(rows.map((row) => String(row.method || "unknown")))).sort();
+  const traces = [];
+  methods.forEach((method, index) => {
+    const group = rows.filter((row) => String(row.method || "unknown") === method);
+    const color = DATASET_MINIMUM_METHOD_COLORS[method] || plotColor(index);
+    const label = methodDisplayLabel(method);
+    traces.push({
+      type: "scatter",
+      mode: "lines+markers",
+      x: group.map((row) => row.x_value),
+      y: group.map((row) => row.efficiency_value),
+      marker: { symbol: g2mDeephMarkerSymbol(method), size: g2mDeephIsDeepH(method) ? 10 : 8, color },
+      line: { color, width: 2 },
+      name: label,
+      text: group.map((row) => [
+        `method: ${label}`,
+        `${datasetMinimumAxisLabel(axis)}: ${formatCompactNumber(row.x_value)}`,
+        `cost/error: ${formatCompactNumber(row.efficiency_value)} GPU-hours per meV`,
+        `cost: ${formatCompactNumber(row.cost_value)} GPU-hours`,
+        `error: ${formatCompactNumber(row.y_value)} meV`,
+        `cost_basis: ${costBasis}`,
+        `config_id: ${row.config_id || "-"}`,
+        `seeds: ${datasetMinimumListField(row.seeds || row.seed)}`,
+        `source_run_roots: ${datasetMinimumListField(row.source_run_roots || row.source_run_root)}`,
+      ].join("<br>")),
+      hovertemplate: "%{text}<extra>%{fullData.name}</extra>",
+    });
+  });
+
+  const title = `Dataset size minimum GPU-hours per error · ${costLabel}`;
+  const layout = plotLayout(title, "GPU-hours / error (meV)", {
+    xaxis: {
+      title: datasetMinimumAxisLabel(axis),
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLinearRange(rows.map((row) => row.x_value), { forceZeroMin: true }),
+    },
+    yaxis: {
+      title: "GPU-hours / error (meV)",
+      type: "log",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      range: paddedLogRange(rows.map((row) => row.efficiency_value)),
+    },
+    annotations: [
+      {
+        text: "Y axis in log scale",
+        xref: "paper",
+        yref: "paper",
+        x: 0,
+        y: 1.08,
+        xanchor: "left",
+        showarrow: false,
+        font: { size: 13, color: "#6b7280" },
+      },
+    ],
+    legend: { orientation: "h", y: -0.2 },
+    margin: { t: 82, r: 48, b: 76, l: 78 },
+  });
+  renderPlot(card, traces, layout, {
+    toImageButtonOptions: { filename: "dataset_size_minimum_gpu_hours_per_error" },
+  });
+}
+
 function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const status = document.getElementById("dataset-minimum-status");
   if (!status) return;
@@ -4325,7 +4654,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     ? ` N_min source: requested=${requestedSource}, actual=${actualSource} (FIT FAILED; explicit observed fallback).`
     : ` N_min source: ${actualSource}.`;
   const costBasis = datasetMinimumOutputCostBasis(output);
-  const costBasisNote = ` Cost basis: ${costBasis === "protocol_total" ? "protocol total GPU-hours" : "per-seed mean GPU-hours"}.`;
+  const costBasisNote = ` Cost basis: ${datasetMinimumCostBasisLabel(costBasis)}.`;
   const requestedClaimMode = datasetMinimumOutputClaimModeRequested(output);
   const actualClaimMode = datasetMinimumOutputClaimModeActual(output);
   const claimModeNote = ` Claim mode: requested=${requestedClaimMode}, actual=${actualClaimMode}.`;
@@ -4432,6 +4761,9 @@ function renderDatasetMinimumSelectedOutput(
   const selectedCount = datasetMinimumSelectedRunRoots().length;
   const table = document.getElementById("dataset-minimum-table");
   const card = document.getElementById("dataset-minimum-plot");
+  const costCard = document.getElementById("dataset-minimum-cost-plot");
+  const costPerErrorCard = document.getElementById("dataset-minimum-cost-per-error-plot");
+  const artifactsNode = document.getElementById("dataset-minimum-artifacts");
 
   if (view.previewError) {
     renderDatasetMinimumStatus(output, currentPayload, plotOutput);
@@ -4442,6 +4774,15 @@ function renderDatasetMinimumSelectedOutput(
     }
     if (card) {
       card.textContent = `No plot available: ${view.previewError.message || String(view.previewError)}`;
+    }
+    if (costCard) {
+      costCard.textContent = `No cost plot available: ${view.previewError.message || String(view.previewError)}`;
+    }
+    if (costPerErrorCard) {
+      costPerErrorCard.textContent = `No GPU-hours / error plot available: ${view.previewError.message || String(view.previewError)}`;
+    }
+    if (artifactsNode) {
+      artifactsNode.textContent = "";
     }
     return;
   }
@@ -4461,9 +4802,21 @@ function renderDatasetMinimumSelectedOutput(
       card.textContent =
         "No plot available: selected sweeps do not contain usable rows for the selected metric/x-axis.";
     }
+    renderDatasetMinimumArtifacts(output);
     if ((plotOutput?.best_rows || []).length) {
       renderDatasetMinimumPlot(plotOutput, axis);
+      renderDatasetMinimumCostPlot(plotOutput, axis);
+      renderDatasetMinimumCostPerErrorPlot(plotOutput, axis);
       schedulePlotResize("dataset-minimum-plot");
+      schedulePlotResize("dataset-minimum-cost-plot");
+      schedulePlotResize("dataset-minimum-cost-per-error-plot");
+    } else if (costCard) {
+      costCard.textContent =
+        "No cost plot available: selected sweeps do not contain usable rows for the selected metric/x-axis.";
+      if (costPerErrorCard) {
+        costPerErrorCard.textContent =
+          "No GPU-hours / error plot available: selected sweeps do not contain usable rows for the selected metric/x-axis.";
+      }
     }
     return;
   }
@@ -4477,6 +4830,7 @@ function renderDatasetMinimumSelectedOutput(
       ? "No N_min table for this sweep selection yet. Run analysis to compute thresholds."
       : "No N_min threshold table available.";
   }
+  renderDatasetMinimumArtifacts(output);
 
   const plotRows = plotOutput?.best_rows || [];
   if (!plotRows.length) {
@@ -4485,11 +4839,56 @@ function renderDatasetMinimumSelectedOutput(
         ? "No plot available: selected sweeps do not contain usable rows for the selected metric/x-axis."
         : "No plot available for selected metric/threshold.";
     }
+    if (costCard) {
+      costCard.textContent = selectedCount
+        ? "No cost plot available: selected sweeps do not contain usable rows for the selected metric/x-axis."
+        : "No cost plot available for selected metric/threshold.";
+    }
+    if (costPerErrorCard) {
+      costPerErrorCard.textContent = selectedCount
+        ? "No GPU-hours / error plot available: selected sweeps do not contain usable rows for the selected metric/x-axis."
+        : "No GPU-hours / error plot available for selected metric/threshold.";
+    }
     return;
   }
 
   renderDatasetMinimumPlot(plotOutput, axis);
+  renderDatasetMinimumCostPlot(plotOutput, axis);
+  renderDatasetMinimumCostPerErrorPlot(plotOutput, axis);
   schedulePlotResize("dataset-minimum-plot");
+  schedulePlotResize("dataset-minimum-cost-plot");
+  schedulePlotResize("dataset-minimum-cost-per-error-plot");
+}
+
+function renderDatasetMinimumArtifacts(output = null) {
+  const container = document.getElementById("dataset-minimum-artifacts");
+  if (!container) return;
+  const artifacts = Array.isArray(output?.artifact_outputs) ? output.artifact_outputs : [];
+  if (!artifacts.length) {
+    container.textContent = "";
+    return;
+  }
+
+  const linkArtifacts = artifacts.filter((item) => item?.url);
+
+  const cards = [`
+    <section class="dataset-minimum-artifact-card">
+      <div>
+        <p class="eyebrow">Downloads</p>
+        <h3>Export files</h3>
+      </div>
+      <div class="dataset-minimum-artifact-links">
+        ${linkArtifacts.map((artifact) => `
+          <a class="dataset-minimum-artifact-link" href="${escapeHtml(artifact.url)}" target="_blank" rel="noopener noreferrer">
+            ${escapeHtml(artifact.label || artifact.name || "artifact")}
+          </a>
+        `).join("")}
+      </div>
+    </section>
+  `];
+
+  container.className = "dataset-minimum-artifacts";
+  container.innerHTML = cards.join("");
 }
 
 function renderDatasetMinimum(payload = state.datasetMinimumPayload) {
@@ -4516,6 +4915,14 @@ function renderDatasetMinimumLoadError(error) {
   const card = document.getElementById("dataset-minimum-plot");
   if (card) {
     card.textContent = "No plot available because dataset-size-minimum loading failed.";
+  }
+  const costCard = document.getElementById("dataset-minimum-cost-plot");
+  if (costCard) {
+    costCard.textContent = "No cost plot available because dataset-size-minimum loading failed.";
+  }
+  const costPerErrorCard = document.getElementById("dataset-minimum-cost-per-error-plot");
+  if (costPerErrorCard) {
+    costPerErrorCard.textContent = "No GPU-hours / error plot available because dataset-size-minimum loading failed.";
   }
 }
 

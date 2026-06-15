@@ -2807,6 +2807,56 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertTrue((output_dir / "dataset_size_minimum_results.csv").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_best_by_size.csv").exists())
 
+    def test_dataset_size_minimum_payload_exposes_allowed_artifact_outputs_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            output_dir = base / "dataset_size_minimum_ui_20260615" / "threshold_10meV"
+            output_dir.mkdir(parents=True)
+            summary_path = output_dir / "dataset_size_minimum_summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "primary_metric": "h_mae_eV_mean",
+                        "threshold_mev": 10.0,
+                        "thresholds": {"graph2mat": {"N_min_abs": 10}},
+                        "warnings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "dataset_size_minimum_best_by_size.csv").write_text("method,dataset_size_x\n", encoding="utf-8")
+            (output_dir / "dataset_size_minimum_results.csv").write_text("method,dataset_size_x\n", encoding="utf-8")
+            (output_dir / "dataset_size_minimum_cost_efficiency.png").write_bytes(b"png")
+            (output_dir / "dataset_size_minimum_cost_efficiency.pdf").write_bytes(b"pdf")
+            (output_dir / "dataset_size_minimum_primary_metric.pdf").write_bytes(b"pdf-primary")
+            (output_dir / "dataset_size_minimum_primary_metric.png").write_bytes(b"excluded")
+
+            original_paths = self.pipeline_ui._dataset_size_minimum_summary_paths
+            original_results_root = self.pipeline_ui.RESULTS_ROOT
+            try:
+                self.pipeline_ui._dataset_size_minimum_summary_paths = lambda: [summary_path]
+                self.pipeline_ui.RESULTS_ROOT = base
+                payload = self.pipeline_ui.dataset_size_minimum_payload()
+            finally:
+                self.pipeline_ui._dataset_size_minimum_summary_paths = original_paths
+                self.pipeline_ui.RESULTS_ROOT = original_results_root
+
+            latest = payload["outputs"][0]
+            artifact_names = [item["name"] for item in latest["artifact_outputs"]]
+            self.assertEqual(
+                artifact_names,
+                [
+                    "dataset_size_minimum_cost_efficiency.png",
+                    "dataset_size_minimum_cost_efficiency.pdf",
+                    "dataset_size_minimum_primary_metric.pdf",
+                ],
+            )
+            self.assertTrue(
+                all("/api/g2m-deeph/dataset-size-minimum/artifact?" in item["url"] for item in latest["artifact_outputs"])
+            )
+            self.assertNotIn("dataset_size_minimum_primary_metric.png", artifact_names)
+
     def test_claim_mode_paper_candidate_activates_strict_required_temporal_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -2972,6 +3022,15 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     self.assertTrue(Path(latest["report_path"]).exists())
                     self.assertTrue(latest["best_rows"])
                     self.assertTrue(latest["aggregated_rows"])
+                    self.assertTrue(latest["artifact_outputs"])
+
+                    artifact = latest["artifact_outputs"][0]
+                    expected_mime = "image/png" if artifact["name"].endswith(".png") else "application/pdf"
+                    request = urllib.request.Request(f"{base_url}{artifact['url']}", method="GET")
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.headers.get_content_type(), expected_mime)
+                        self.assertGreater(len(response.read()), 0)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -3600,9 +3659,15 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
             diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
 
-            self.assertFalse(diag["autocorrelation_available"])
-            self.assertIsNone(diag["estimated_n_eff_train"])
-            self.assertIn("autocorrelation_unavailable_mixed_temperatures", diag["warnings"])
+            self.assertTrue(diag["autocorrelation_available"])
+            self.assertIsNotNone(diag["estimated_n_eff_train"])
+            self.assertEqual(diag["train_group_count"], 2)
+            self.assertEqual(diag["autocorrelation"]["train"]["n_groups"], 2)
+            self.assertEqual(
+                diag["autocorrelation"]["train"]["n_eff_aggregate_method"],
+                "sum_independent_group_n_eff",
+            )
+            self.assertNotIn("autocorrelation_unavailable_mixed_temperatures", diag["warnings"])
 
     def test_summarize_temporal_diagnostics_marks_partial_n_eff_by_dataset_size(self) -> None:
         specs = []
@@ -3685,6 +3750,274 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertFalse(diag["autocorrelation_available"])
             self.assertIn("autocorrelation_unavailable_no_cheap_scalar_series", diag["warnings"])
 
+    def test_scalar_series_for_group_reports_insufficient_group_samples_with_geometry_scalar(self) -> None:
+        specs = []
+        for index in range(2):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_a",
+                        "temperature_K": "300",
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+            group_records = minimum.load_temporal_sample_records(dataset_root, warnings=[])
+
+            def fake_derived_geometry_scalar(sample_dir: Path, *, reference_sample_dir: Path) -> tuple[str, float]:
+                return (minimum.GEOMETRY_SCALAR_KEY, float(sample_dir.name))
+
+            with patch.object(minimum, "derived_geometry_scalar", side_effect=fake_derived_geometry_scalar):
+                series = minimum.scalar_series_for_group(group_records)
+
+            self.assertEqual(series["status"], "insufficient_group_samples")
+            self.assertEqual(series["scalar_key"], minimum.GEOMETRY_SCALAR_KEY)
+            self.assertEqual(series["values"], [0.0, 1.0])
+            self.assertIn("autocorrelation_unavailable_insufficient_group_samples", series["warnings"])
+
+    def test_scalar_series_for_group_reports_missing_scalar_without_geometry(self) -> None:
+        specs = []
+        for index in range(3):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_a",
+                        "temperature_K": "300",
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+            group_records = minimum.load_temporal_sample_records(dataset_root, warnings=[])
+            with patch.object(minimum, "derived_geometry_scalar", return_value=None):
+                series = minimum.scalar_series_for_group(group_records)
+
+            self.assertEqual(series["status"], "missing_scalar")
+            self.assertIsNone(series["scalar_key"])
+            self.assertIn("autocorrelation_unavailable_no_cheap_scalar_series", series["warnings"])
+
+    def test_scalar_series_for_group_reports_mixed_scalar_keys(self) -> None:
+        specs = []
+        for index in range(3):
+            metadata = {
+                "frame_index": index,
+                "source_frame_index": index,
+                "block_id": "block_a",
+                "temperature_K": "300",
+            }
+            if index < 2:
+                metadata["total_energy_eV"] = float(index)
+            specs.append({"metadata": metadata})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+            group_records = minimum.load_temporal_sample_records(dataset_root, warnings=[])
+
+            def fake_derived_geometry_scalar(sample_dir: Path, *, reference_sample_dir: Path) -> tuple[str, float] | None:
+                if sample_dir.name == "2":
+                    return (minimum.GEOMETRY_SCALAR_KEY, 2.0)
+                return None
+
+            with patch.object(minimum, "derived_geometry_scalar", side_effect=fake_derived_geometry_scalar):
+                series = minimum.scalar_series_for_group(group_records)
+
+            self.assertEqual(series["status"], "mixed_scalar_keys")
+            self.assertEqual(series["scalar_key"], "total_energy_eV")
+            self.assertIn("autocorrelation_unavailable_mixed_scalar_keys", series["warnings"])
+
+    def test_temporal_diagnostics_derives_scalar_from_geometry_when_metadata_scalar_missing(self) -> None:
+        specs = []
+        for index in range(6):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_a",
+                        "temperature_K": "300",
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+
+            def fake_derived_geometry_scalar(sample_dir: Path, *, reference_sample_dir: Path) -> tuple[str, float]:
+                index = int(sample_dir.name)
+                self.assertEqual(reference_sample_dir.name, "0")
+                return (minimum.GEOMETRY_SCALAR_KEY, float(index))
+
+            with patch.object(
+                minimum,
+                "derived_geometry_scalar",
+                side_effect=fake_derived_geometry_scalar,
+            ) as patched:
+                diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+
+            self.assertTrue(diag["autocorrelation_available"])
+            self.assertEqual(diag["autocorrelation"]["scalar_series_key"], minimum.GEOMETRY_SCALAR_KEY)
+            self.assertEqual(
+                diag["autocorrelation"]["by_block"]["block:block_a:T=300"]["scalar_used"],
+                minimum.GEOMETRY_SCALAR_KEY,
+            )
+            self.assertGreaterEqual(patched.call_count, 3)
+
+    def test_temporal_diagnostics_missing_geometry_and_metadata_scalar_still_blocks(self) -> None:
+        specs = []
+        for index in range(6):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_a",
+                        "temperature_K": "300",
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+            with patch.object(minimum, "derived_geometry_scalar", return_value=None):
+                diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+
+            self.assertFalse(diag["autocorrelation_available"])
+            self.assertEqual(diag["autocorrelation"]["train"]["reason"], "missing_scalar_series")
+            self.assertIn("autocorrelation_unavailable_no_cheap_scalar_series", diag["warnings"])
+
+    def test_temporal_diagnostics_short_explicit_mixed_temperature_block_is_not_reclassified_as_mixed_temperatures(self) -> None:
+        specs = []
+        for index in range(2):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_a",
+                        "temperature_K": "150",
+                    }
+                }
+            )
+        for index in range(2, 6):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_b",
+                        "temperature_K": "300",
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+
+            def fake_derived_geometry_scalar(sample_dir: Path, *, reference_sample_dir: Path) -> tuple[str, float]:
+                return (minimum.GEOMETRY_SCALAR_KEY, float(sample_dir.name))
+
+            with patch.object(minimum, "derived_geometry_scalar", side_effect=fake_derived_geometry_scalar):
+                diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+
+            self.assertFalse(diag["autocorrelation_available"])
+            self.assertEqual(diag["autocorrelation"]["train"]["reason"], "insufficient_group_samples")
+            self.assertIn("autocorrelation_unavailable_insufficient_group_samples", diag["warnings"])
+            self.assertNotIn("autocorrelation_grouping_invalid_mixed_temperatures", diag["warnings"])
+            self.assertNotIn("autocorrelation_unavailable_mixed_temperatures", diag["warnings"])
+            self.assertNotIn("autocorrelation_unavailable_no_cheap_scalar_series", diag["warnings"])
+
+    def test_temporal_diagnostics_explicit_mixed_temperature_missing_geometry_reports_missing_scalar_only(self) -> None:
+        specs = []
+        for index in range(3):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_a",
+                        "temperature_K": "150",
+                    }
+                }
+            )
+        for index in range(3, 6):
+            specs.append(
+                {
+                    "metadata": {
+                        "frame_index": index,
+                        "source_frame_index": index,
+                        "block_id": "block_b",
+                        "temperature_K": "300",
+                    }
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset_root = write_temporal_dataset_from_specs(Path(tmp) / "dataset", specs=specs)
+            with patch.object(minimum, "derived_geometry_scalar", return_value=None):
+                diag = minimum.diagnose_dataset_temporal_metadata(dataset_root)
+
+            self.assertFalse(diag["autocorrelation_available"])
+            self.assertEqual(diag["autocorrelation"]["train"]["reason"], "missing_scalar_series")
+            self.assertIn("autocorrelation_unavailable_no_cheap_scalar_series", diag["warnings"])
+            self.assertNotIn("autocorrelation_grouping_invalid_mixed_temperatures", diag["warnings"])
+            self.assertNotIn("autocorrelation_unavailable_mixed_temperatures", diag["warnings"])
+
+    def test_paper_blockers_do_not_misclassify_short_explicit_mixed_temperature_groups(self) -> None:
+        temporal_diagnostics = {
+            "autocorrelation_available": False,
+            "nominal_n_train": 6,
+            "estimated_n_eff_train": None,
+            "warnings": ["autocorrelation_unavailable_insufficient_group_samples"],
+            "N_eff_by_dataset_size": {"6": None},
+            "autocorrelation_available_by_dataset_size": {"6": False},
+        }
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics=temporal_diagnostics,
+            thresholds={"graph2mat": {"N_min_abs": 20, "available_sizes": [6]}},
+            threshold_metadata={
+                "threshold_basis": minimum.THRESHOLD_BASIS_EXPLICIT_PROTOCOL,
+                "threshold_reference": "doc",
+                "threshold_interpretation": "paper protocol",
+                "threshold_metric_family": "hamiltonian_element_error_mev",
+                "threshold_is_user_defined": False,
+                "threshold_paper_justified": True,
+            },
+            aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertIn("paper_blocked_if_autocorrelation_unavailable", status["paper_level_blockers"])
+        self.assertIn("paper_blocked_if_n_eff_by_dataset_size_incomplete", status["paper_level_blockers"])
+        self.assertNotIn(
+            "paper_blocked_if_autocorrelation_grouping_mixed_temperatures",
+            status["paper_level_blockers"],
+        )
+        self.assertNotIn(
+            "paper_blocked_if_autocorrelation_scalar_series_unavailable",
+            status["paper_level_blockers"],
+        )
+
     def test_summarize_temporal_diagnostics_preserves_block_details_by_dataset_size(self) -> None:
         specs = []
         for index in range(4):
@@ -3720,9 +4053,38 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             )
 
             diag = summary["temporal_block_diagnostics_by_dataset_size"]["8"]
-            self.assertFalse(summary["autocorrelation_available_by_dataset_size"]["8"])
+            self.assertTrue(summary["autocorrelation_available_by_dataset_size"]["8"])
             self.assertEqual(diag["n_datasets"], 1)
             self.assertEqual(len(diag["datasets"][0]["block_diagnostics"]), 2)
+
+    def test_committed_graphene_paper_audit_payload_pins_protocol_and_run_roots(self) -> None:
+        payload_path = REPO_ROOT / "Comparison" / "config" / "graphene_dataset_size_minimum_paper_audit_payload.json"
+        protocol_path = REPO_ROOT / "Comparison" / "config" / "graphene_dataset_size_minimum_paper_threshold_protocol.json"
+
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["aggregation_mode"], "mean_seeds_per_config")
+        self.assertEqual(payload["cost_basis"], "protocol_total")
+        self.assertEqual(payload["claim_mode"], "paper_candidate")
+        self.assertEqual(payload["n_min_source"], "fit")
+        self.assertEqual(payload["n_min_fit_model"], "power_law_floor")
+        self.assertEqual(payload["bootstrap_replicates"], 2000)
+        self.assertEqual(payload["ci_level"], 0.95)
+        self.assertEqual(
+            payload["threshold_protocol_file"],
+            "Comparison/config/graphene_dataset_size_minimum_paper_threshold_protocol.json",
+        )
+        self.assertEqual(len(payload["run_roots"]), 2)
+        self.assertTrue(
+            any("graphene_w90_snapshot_scaling_reuse_10_1000_4seeds" in root for root in payload["run_roots"])
+        )
+        self.assertTrue(
+            any("graphene_w90_snapshot_scaling_1100_1300_4seeds_followup" in root for root in payload["run_roots"])
+        )
+        self.assertEqual(protocol["metric"], "h_mae_eV_mean")
+        self.assertEqual(protocol["threshold_mev"], 10.0)
+        self.assertEqual(protocol["recommended_sensitivity_thresholds_mev"], [8.0, 10.0, 12.0])
 
     def test_analyze_blocks_paper_claim_when_n_eff_much_smaller_than_nominal(self) -> None:
         def smooth_builder(index: int) -> float:

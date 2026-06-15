@@ -1,0 +1,15 @@
+{
+  "metric": "h_mae_eV_mean",
+  "threshold_mev": 10.0,
+  "physical_rationale": "Paper-audit Hamiltonian MAE threshold for the locked Graphene W90 Graph2Mat-vs-DeepH scaling protocol. This threshold is documented explicitly for publication-facing N_min analysis and is not an exploratory UI preset.",
+  "reference": "graphene_dataset_size_minimum_paper_protocol_v1",
+  "applies_to_metrics": [
+    "h_mae_eV_mean"
+  ],
+  "recommended_sensitivity_thresholds_mev": [
+    8.0,
+    10.0,
+    12.0
+  ],
+  "sensitivity_recommendation": "Audit the lower, main, and upper Hamiltonian MAE thresholds before treating nominal N_min as a paper-level claim."
+}

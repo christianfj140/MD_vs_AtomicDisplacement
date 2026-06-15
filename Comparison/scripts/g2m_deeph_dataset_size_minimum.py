@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import math
 import random
@@ -3291,6 +3292,11 @@ TEMPORAL_SCALAR_KEYS = (
     "instantaneous_temperature_K",
     "temperature_instant_K",
 )
+GEOMETRY_SCALAR_KEY = "derived_displacement_magnitude_ang"
+GEOMETRY_SCALAR_CANDIDATES = (
+    ("xv", ".XV"),
+    ("struct_out", ".STRUCT_OUT"),
+)
 TEMPERATURE_ID_KEYS = (
     "temperature_K",
     "instantaneous_temperature_K",
@@ -3531,6 +3537,93 @@ def read_metadata_scalar(sample_dir: Path) -> tuple[str, float] | None:
     if not isinstance(payload, dict):
         return None
     return scalar_value_from_metadata(payload)
+
+
+def _sample_system_label(sample_dir: Path) -> str | None:
+    metadata = read_sample_metadata(sample_dir)
+    if isinstance(metadata, dict):
+        label = first_non_empty_text(
+            metadata,
+            "system_label",
+            "siesta_system_label",
+        )
+        if label:
+            return label
+    for _artifact_key, suffix in GEOMETRY_SCALAR_CANDIDATES:
+        matches = sorted(sample_dir.glob(f"*{suffix}"))
+        if matches:
+            stem = matches[0].name[: -len(suffix)]
+            if stem:
+                return stem
+    return None
+
+
+def _geometry_candidate_paths(sample_dir: Path) -> list[Path]:
+    label = _sample_system_label(sample_dir)
+    candidates: list[Path] = []
+    for _artifact_key, suffix in GEOMETRY_SCALAR_CANDIDATES:
+        if label:
+            candidates.append(sample_dir / f"{label}{suffix}")
+        candidates.extend(sorted(sample_dir.glob(f"*{suffix}")))
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+@functools.lru_cache(maxsize=8192)
+def _read_geometry_positions(sample_dir_text: str) -> tuple[tuple[float, float, float], ...] | None:
+    sample_dir = Path(sample_dir_text)
+    if not sample_dir.exists():
+        return None
+    try:
+        import sisl  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    for geometry_path in _geometry_candidate_paths(sample_dir):
+        if not geometry_path.exists():
+            continue
+        try:
+            geometry = sisl.get_sile(str(geometry_path)).read_geometry()
+        except Exception:
+            continue
+        xyz = getattr(geometry, "xyz", None)
+        if xyz is None:
+            continue
+        try:
+            positions = tuple(tuple(float(value) for value in row[:3]) for row in xyz)
+        except Exception:
+            continue
+        if positions:
+            return positions
+    return None
+
+
+def derived_geometry_scalar(
+    sample_dir: Path,
+    *,
+    reference_sample_dir: Path,
+) -> tuple[str, float] | None:
+    current_positions = _read_geometry_positions(str(sample_dir.resolve()))
+    reference_positions = _read_geometry_positions(str(reference_sample_dir.resolve()))
+    if not current_positions or not reference_positions:
+        return None
+    if len(current_positions) != len(reference_positions):
+        return None
+    squared_norm_sum = 0.0
+    for current_row, reference_row in zip(current_positions, reference_positions):
+        dx = current_row[0] - reference_row[0]
+        dy = current_row[1] - reference_row[1]
+        dz = current_row[2] - reference_row[2]
+        squared_norm_sum += dx * dx + dy * dy + dz * dz
+    if len(current_positions) <= 0:
+        return None
+    rms_displacement = math.sqrt(squared_norm_sum / len(current_positions))
+    return (GEOMETRY_SCALAR_KEY, rms_displacement)
 
 
 def read_sample_metadata(sample_dir: Path) -> dict[str, Any] | None:
@@ -3827,7 +3920,7 @@ def build_train_temporal_groups(records: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def scalar_series_for_group(records: list[dict[str, Any]]) -> tuple[str, list[float], list[dict[str, Any]], list[str]] | None:
+def scalar_series_for_group(records: list[dict[str, Any]]) -> dict[str, Any]:
     ordered_records = sorted(
         records,
         key=lambda row: (
@@ -3837,6 +3930,13 @@ def scalar_series_for_group(records: list[dict[str, Any]]) -> tuple[str, list[fl
     )
     if len(ordered_records) > MAX_METADATA_SCALAR_READS:
         ordered_records = ordered_records[:MAX_METADATA_SCALAR_READS]
+
+    reference_sample_dir: Path | None = None
+    for record in ordered_records:
+        sample_dir_text = str(record.get("sample_dir") or record.get("snapshot_dir") or "").strip()
+        if sample_dir_text:
+            reference_sample_dir = Path(sample_dir_text)
+            break
 
     warnings: list[str] = []
     series_key: str | None = None
@@ -3849,7 +3949,13 @@ def scalar_series_for_group(records: list[dict[str, Any]]) -> tuple[str, list[fl
         sample_dir_text = str(record.get("sample_dir") or record.get("snapshot_dir") or "").strip()
         scalar = None
         if sample_dir_text:
-            scalar = read_metadata_scalar(Path(sample_dir_text))
+            sample_dir = Path(sample_dir_text)
+            scalar = read_metadata_scalar(sample_dir)
+            if scalar is None and reference_sample_dir is not None:
+                scalar = derived_geometry_scalar(
+                    sample_dir,
+                    reference_sample_dir=reference_sample_dir,
+                )
         if scalar is None:
             for key in TEMPORAL_SCALAR_KEYS:
                 value = finite_number(record.get(key))
@@ -3870,14 +3976,38 @@ def scalar_series_for_group(records: list[dict[str, Any]]) -> tuple[str, list[fl
 
     if missing_scalar:
         warnings.append("autocorrelation_unavailable_no_cheap_scalar_series")
-        return None
+        return {
+            "status": "missing_scalar",
+            "scalar_key": None,
+            "values": [],
+            "used_records": used_records,
+            "warnings": warnings,
+        }
     if mixed_scalar_key:
         warnings.append("autocorrelation_unavailable_mixed_scalar_keys")
-        return None
+        return {
+            "status": "mixed_scalar_keys",
+            "scalar_key": series_key,
+            "values": values,
+            "used_records": used_records,
+            "warnings": warnings,
+        }
     if series_key is None or len(values) < 3:
         warnings.append("autocorrelation_unavailable_insufficient_group_samples")
-        return None
-    return series_key, values, used_records, warnings
+        return {
+            "status": "insufficient_group_samples",
+            "scalar_key": series_key,
+            "values": values,
+            "used_records": used_records,
+            "warnings": warnings,
+        }
+    return {
+        "status": "ok",
+        "scalar_key": series_key,
+        "values": values,
+        "used_records": used_records,
+        "warnings": warnings,
+    }
 
 
 def diagnose_dataset_temporal_metadata(
@@ -3970,21 +4100,20 @@ def diagnose_dataset_temporal_metadata(
     valid_group_n_eff: list[float] = []
     valid_group_nominal_n: list[int] = []
     scalar_keys_used: set[str] = set()
-
-    if train_groups.get("mixed_temperatures"):
-        warnings.append("autocorrelation_unavailable_mixed_temperatures")
+    dataset_level_group_warnings: set[str] = set()
+    group_failure_statuses: set[str] = set()
 
     groups = train_groups.get("groups") or {}
     for group_id, group_records in sorted(groups.items()):
         group_series = scalar_series_for_group(group_records)
-        group_warning_list: list[str] = []
-        if group_series is None:
-            if not any("autocorrelation_unavailable_no_cheap_scalar_series" in item for item in warnings):
-                group_warning_list.append("autocorrelation_unavailable_no_cheap_scalar_series")
-            warnings.extend(group_warning_list)
+        group_warning_list = [str(item) for item in (group_series.get("warnings") or [])]
+        dataset_level_group_warnings.update(group_warning_list)
+        if group_series.get("status") != "ok":
+            status = str(group_series.get("status") or "group_series_invalid")
+            group_failure_statuses.add(status)
             per_block[group_id] = {
                 "nominal_n": len(group_records),
-                "scalar_used": None,
+                "scalar_used": group_series.get("scalar_key"),
                 "max_lag": None,
                 "statistical_inefficiency": None,
                 "n_eff": None,
@@ -3992,7 +4121,8 @@ def diagnose_dataset_temporal_metadata(
             }
             continue
 
-        scalar_key, values, used_records, series_warnings = group_series
+        scalar_key = str(group_series.get("scalar_key"))
+        values = [float(value) for value in (group_series.get("values") or [])]
         scalar_keys_used.add(scalar_key)
         group_diag = compute_scalar_autocorrelation_diagnostics(values)
         max_lag = max(0, len(group_diag.get("acf") or []) - 1) if group_diag.get("acf") else None
@@ -4002,7 +4132,7 @@ def diagnose_dataset_temporal_metadata(
             "max_lag": max_lag,
             "statistical_inefficiency": group_diag.get("statistical_inefficiency"),
             "n_eff": group_diag.get("n_eff"),
-            "warnings": series_warnings,
+            "warnings": group_warning_list,
         }
         if group_diag.get("autocorrelation_available"):
             n_eff_value = finite_number(group_diag.get("n_eff"))
@@ -4012,10 +4142,11 @@ def diagnose_dataset_temporal_metadata(
 
     aggregate_autocorrelation_available = (
         bool(train_groups.get("available"))
-        and not bool(train_groups.get("mixed_temperatures"))
         and bool(groups)
         and len(valid_group_n_eff) == len(groups)
     )
+
+    warnings.extend(sorted(item for item in dataset_level_group_warnings if item not in warnings))
 
     if not groups and not any(item.startswith("autocorrelation_unavailable") for item in warnings):
         warnings.append("autocorrelation_unavailable_missing_or_ambiguous_grouping_metadata")
@@ -4043,10 +4174,18 @@ def diagnose_dataset_temporal_metadata(
         }
     else:
         estimated_n_eff_train = None
-        if train_groups.get("mixed_temperatures"):
-            warnings.append("autocorrelation_grouping_invalid_mixed_temperatures")
         if not train_groups.get("available"):
             warnings.append("autocorrelation_grouping_missing_or_ambiguous")
+        failure_reason = str(train_groups.get("reason") or "missing_grouping_metadata")
+        if train_groups.get("available"):
+            if "missing_scalar" in group_failure_statuses:
+                failure_reason = "missing_scalar_series"
+            elif "mixed_scalar_keys" in group_failure_statuses:
+                failure_reason = "mixed_scalar_keys"
+            elif len(group_failure_statuses) == 1 and "insufficient_group_samples" in group_failure_statuses:
+                failure_reason = "insufficient_group_samples"
+            elif group_failure_statuses:
+                failure_reason = "partial_group_autocorrelation_unavailable"
         autocorrelation = {
             "available": False,
             "scalar_series_key": sorted(scalar_keys_used)[0] if len(scalar_keys_used) == 1 else None,
@@ -4054,11 +4193,7 @@ def diagnose_dataset_temporal_metadata(
             **autocorrelation_convention_payload(),
             "train": {
                 "status": "unavailable",
-                "reason": (
-                    "mixed_temperatures"
-                    if train_groups.get("mixed_temperatures")
-                    else str(train_groups.get("reason") or "missing_grouping_metadata")
-                ),
+                "reason": failure_reason,
                 "n_groups": len(groups),
                 "group_ids": sorted(groups.keys()),
             },

@@ -1,0 +1,24 @@
+{
+  "primary_metric": "h_mae_eV_mean",
+  "threshold_mev": 10.0,
+  "threshold_preset_key": "h_mae_relaxed_10",
+  "threshold_is_user_defined": false,
+  "threshold_protocol_file": "Comparison/config/graphene_dataset_size_minimum_paper_threshold_protocol.json",
+  "relative_tolerance": 0.05,
+  "plateau_gain": 0.05,
+  "x_axis": "n_train",
+  "aggregation_mode": "mean_seeds_per_config",
+  "cost_basis": "protocol_total",
+  "claim_mode": "paper_candidate",
+  "fit_models": "linear,quadratic,inverse,inverse_square,power_law_floor",
+  "n_min_source": "fit",
+  "n_min_fit_model": "power_law_floor",
+  "moving_average_window": 3,
+  "bootstrap_replicates": 2000,
+  "bootstrap_seed": 12345,
+  "ci_level": 0.95,
+  "run_roots": [
+    "Comparison/results/graphene_w90_snapshot_scaling_reuse_10_1000_4seeds/graphene_w90_snapshot_scaling_reuse_10_1000_4seeds_20260610_122311",
+    "Comparison/results/graphene_w90_snapshot_scaling_1100_1300_4seeds_followup/graphene_w90_snapshot_scaling_1100_1300_4seeds_followup_20260612_104920"
+  ]
+}
