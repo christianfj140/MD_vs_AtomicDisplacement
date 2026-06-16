@@ -508,11 +508,21 @@ def discover_derivative_stencils(
     samples = [
         sample
         for sample in (_discover_sample(sample_dir, result_dir=result_dir, source_model=source_model) for sample_dir in sorted(structures_root.iterdir()))
-        if sample is not None and _sample_in_split(sample, split)
+        if sample is not None
     ]
+    discoveries: list[DerivativeStencilDiscovery] = []
+    selected_samples: list[_DiscoveredDerivativeSample] = []
+    requested_split = str(split or "all").strip().lower()
+    for sample in samples:
+        split_issue = _sample_split_issue(sample, requested_split)
+        if split_issue is not None:
+            discoveries.append(_split_filtered_discovery_for_sample(sample, requested_split, split_issue))
+            continue
+        if _sample_in_split(sample, requested_split):
+            selected_samples.append(sample)
+    samples = selected_samples
     base_samples = [sample for sample in samples if sample.is_base]
     displaced_samples = [sample for sample in samples if not sample.is_base]
-    discoveries: list[DerivativeStencilDiscovery] = []
     ungroupable = [sample for sample in displaced_samples if not sample.can_group]
     for sample in ungroupable:
         discoveries.append(_incomplete_discovery_for_sample(sample, requested_method))
@@ -526,13 +536,23 @@ def discover_derivative_stencils(
     for group_key, by_sign in sorted(groups.items(), key=lambda item: str(item[0])):
         plus_samples = by_sign.get(1, [])
         minus_samples = by_sign.get(-1, [])
-        base_match = _matching_base_sample(group_key, base_samples)
+        base_matches = _matching_base_samples(group_key, base_samples)
+        base_match = base_matches[0] if len(base_matches) == 1 else None
         if len(plus_samples) > 1 or len(minus_samples) > 1:
             discoveries.append(_ambiguous_discovery(group_key, plus_samples, minus_samples, requested_method))
             continue
 
         plus = plus_samples[0] if plus_samples else None
         minus = minus_samples[0] if minus_samples else None
+        if _base_ambiguity_blocks_discovery(
+            requested_method=requested_method,
+            require_central=require_central,
+            plus=plus,
+            minus=minus,
+            base_matches=base_matches,
+        ):
+            discoveries.append(_ambiguous_base_discovery(group_key, plus, minus, base_matches, requested_method))
+            continue
         methods = _methods_to_emit(
             requested_method=requested_method,
             require_central=require_central,
@@ -912,7 +932,27 @@ def _sample_in_split(sample: _DiscoveredDerivativeSample, split: str) -> bool:
     if split == "all":
         return True
     metadata_split = _metadata_text(sample.metadata, "split", "split_name", "dataset_split")
-    return metadata_split is None or metadata_split.lower() == split
+    return metadata_split is not None and metadata_split.lower() == split
+
+
+def _sample_split_issue(sample: _DiscoveredDerivativeSample, split: str) -> DerivativeValidationIssue | None:
+    split = str(split or "all").strip().lower()
+    if split == "all":
+        return None
+    metadata_split = _metadata_text(sample.metadata, "split", "split_name", "dataset_split")
+    if metadata_split is not None:
+        return None
+    return DerivativeValidationIssue(
+        severity="error",
+        code="missing_split_metadata",
+        message=(
+            "Requested split-specific derivative discovery requires metadata split information; "
+            "samples without split metadata are excluded fail-closed."
+        ),
+        field="split",
+        sample_id=sample.sample_id,
+        details={"requested_split": split, "metadata_path": str(sample.metadata_path)},
+    )
 
 
 def _is_base_metadata(metadata: dict[str, Any] | None) -> bool:
@@ -1043,10 +1083,28 @@ def _rounded_delta(delta_ang: float | None) -> float | None:
     return round(float(delta_ang), 12) if delta_ang is not None else None
 
 
-def _matching_base_sample(group_key: tuple[Any, ...], bases: list[_DiscoveredDerivativeSample]) -> _DiscoveredDerivativeSample | None:
+def _matching_base_samples(group_key: tuple[Any, ...], bases: list[_DiscoveredDerivativeSample]) -> list[_DiscoveredDerivativeSample]:
     group_base_key = (group_key[1], group_key[2], group_key[7], group_key[8], group_key[9], group_key[10], group_key[11], group_key[12])
-    matches = [sample for sample in bases if sample.base_key == group_base_key]
-    return matches[0] if len(matches) == 1 else None
+    return [sample for sample in bases if sample.base_key == group_base_key]
+
+
+def _base_ambiguity_blocks_discovery(
+    *,
+    requested_method: str | None,
+    require_central: bool,
+    plus: _DiscoveredDerivativeSample | None,
+    minus: _DiscoveredDerivativeSample | None,
+    base_matches: list[_DiscoveredDerivativeSample],
+) -> bool:
+    if len(base_matches) <= 1:
+        return False
+    if requested_method in {"forward", "backward"}:
+        return True
+    if requested_method == "central" or require_central:
+        return False
+    if plus is not None and minus is not None:
+        return False
+    return (plus is not None) or (minus is not None)
 
 
 def _methods_to_emit(
@@ -1149,6 +1207,24 @@ def _incomplete_discovery_for_sample(
     )
 
 
+def _split_filtered_discovery_for_sample(
+    sample: _DiscoveredDerivativeSample,
+    split: str,
+    split_issue: DerivativeValidationIssue,
+) -> DerivativeStencilDiscovery:
+    issues = [issue for issue in (sample.metadata_issue, sample.siesta_issue, sample.ml_issue) if issue is not None]
+    issues.append(split_issue)
+    return DerivativeStencilDiscovery(
+        status="incomplete",
+        method=None,
+        group_key=("split_filtered", split, sample.sample_id),
+        stencil=None,
+        issues=tuple(issues),
+        sample_ids=(sample.sample_id,),
+        details={"comparison_status": "diagnostic_only", "requested_split": split},
+    )
+
+
 def _incomplete_discovery_for_group(
     group_key: tuple[Any, ...],
     plus: _DiscoveredDerivativeSample | None,
@@ -1203,6 +1279,33 @@ def _ambiguous_discovery(
         stencil=None,
         issues=(issue,),
         sample_ids=tuple(sample.sample_id for sample in (*plus_samples, *minus_samples)),
+        details={"comparison_status": "diagnostic_only"},
+    )
+
+
+def _ambiguous_base_discovery(
+    group_key: tuple[Any, ...],
+    plus: _DiscoveredDerivativeSample | None,
+    minus: _DiscoveredDerivativeSample | None,
+    base_samples: list[_DiscoveredDerivativeSample],
+    method: str | None,
+) -> DerivativeStencilDiscovery:
+    issue = DerivativeValidationIssue(
+        severity="error",
+        code="ambiguous_base_sample",
+        message="Multiple base/reference samples match this derivative grouping key for a base-dependent stencil.",
+        details={
+            "base_samples": [sample.sample_id for sample in base_samples],
+            "method": method,
+        },
+    )
+    return DerivativeStencilDiscovery(
+        status="ambiguous",
+        method=method,
+        group_key=group_key,
+        stencil=None,
+        issues=(issue,),
+        sample_ids=tuple(sample.sample_id for sample in (*base_samples, *(item for item in (plus, minus) if item is not None))),
         details={"comparison_status": "diagnostic_only"},
     )
 

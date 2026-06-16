@@ -59,6 +59,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-derivative-status",
             "g2m-deeph-derivative-summary",
             "g2m-deeph-derivative-comparison",
+            "g2m-deeph-derivative-gate-report",
             "g2m-deeph-derivative-issues",
             "g2m-deeph-derivative-plots",
             "g2m-deeph-derivative-artifacts",
@@ -139,6 +140,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("g2mDeephPlotsInFlight", self.app_js)
         self.assertIn("loadG2MDeepHDerivativeMetrics", self.app_js)
         self.assertIn("renderG2MDeepHDerivativePayload", self.app_js)
+        self.assertIn("renderG2MDeepHDerivativeGateReport", self.app_js)
         self.assertIn("renderG2MDeepHDerivativeRunSelector", self.app_js)
         self.assertIn("graph2mat_log_every_n_steps", self.app_js)
         self.assertIn("graph2mat_check_val_every_n_epoch", self.app_js)
@@ -220,8 +222,11 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Hamiltonian derivative diagnostics",
             "Reference: finite differences of SIESTA Hamiltonians",
             "SIESTA force constants are not treated as dH/dR",
+            "finite difference method",
             "Default status: diagnostic-only unless all scientific gates pass",
             "Derivative metrics not computed.",
+            "diagnostic-only / no winner claim",
+            "Derivative gate report",
             "Model comparison table Graph2Mat vs DeepH",
             "Warning/fatal error table",
         ):
@@ -241,6 +246,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Reference: finite differences of SIESTA Hamiltonians",
             "SIESTA force constants are not treated as dH/dR",
             "Default status: diagnostic-only unless all scientific gates pass",
+            "Gate report",
         ):
             self.assertIn(text, derivative_html)
         self.assertNotIn("paper-ready", derivative_html.lower())

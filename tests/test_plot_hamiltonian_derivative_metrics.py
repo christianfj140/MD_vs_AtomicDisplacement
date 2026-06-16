@@ -129,7 +129,7 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         manifest = json.loads((output_dir / "derivative_plot_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], "hamiltonian_derivative_plot_manifest_v1")
-        self.assertEqual(manifest["title"], "Hamiltonian derivative finite-difference diagnostic")
+        self.assertEqual(manifest["title"], "Hamiltonian derivative diagnostics")
         self.assertTrue((output_dir / "derivative_plot_payload.json").exists())
 
     def test_plot_metadata_contains_scientific_warnings(self) -> None:
@@ -238,9 +238,9 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         payload_text = (output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8").lower()
         self.assertNotIn("paper-level", payload_text)
         payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
-        self.assertEqual(payload["title"], "Hamiltonian derivative finite-difference diagnostic")
-        self.assertEqual(payload["reference_label"], "Reference: SIESTA Hamiltonian finite difference")
-        self.assertEqual(payload["force_constants_label"], "Force constants are not used as dH/dR reference")
+        self.assertEqual(payload["title"], "Hamiltonian derivative diagnostics")
+        self.assertEqual(payload["reference_label"], "Reference: finite differences of SIESTA Hamiltonians")
+        self.assertEqual(payload["force_constants_label"], "SIESTA force constants are not treated as dH/dR")
         paired_plot = next(plot for plot in payload["plots"] if plot["id"] == "graph2mat_vs_deeph_paired_comparison")
         self.assertEqual(len(paired_plot["rows"]), 1)
 

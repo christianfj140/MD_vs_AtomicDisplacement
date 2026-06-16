@@ -730,7 +730,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--hermiticity-threshold", type=float, default=DEFAULT_HERMITICITY_THRESHOLD)
     parser.add_argument("--support-discontinuity-threshold", type=float, default=DEFAULT_SUPPORT_DISCONTINUITY_THRESHOLD)
+    parser.add_argument(
+        "--fail-on-blocked",
+        action="store_true",
+        help="Exit non-zero when the generated report scientific_status is blocked.",
+    )
+    parser.add_argument(
+        "--fail-below",
+        choices=("internal_diagnostic", "technical_presentation", "paper_level_candidate"),
+        default=None,
+        help=(
+            "Exit non-zero when the generated report scientific_status is below the requested minimum "
+            "(blocked is always below these thresholds)."
+        ),
+    )
     return parser.parse_args()
+
+
+def exit_code_for_report(
+    report: dict[str, Any],
+    *,
+    output_path: Path,
+    fail_on_blocked: bool = False,
+    fail_below: str | None = None,
+) -> tuple[int, str | None]:
+    scientific_status = str(report.get("scientific_status") or "").strip()
+    if scientific_status not in STATUS_RANK:
+        return 1, (
+            f"Derivative gate report at {output_path} has unknown scientific_status="
+            f"{scientific_status or '<empty>'}."
+        )
+    if fail_on_blocked and scientific_status == "blocked":
+        return 2, f"Derivative gate report at {output_path} has scientific_status=blocked."
+    if fail_below is not None and STATUS_RANK[scientific_status] < STATUS_RANK[fail_below]:
+        return 2, (
+            f"Derivative gate report at {output_path} has scientific_status={scientific_status}, "
+            f"below required minimum {fail_below}."
+        )
+    return 0, None
 
 
 def main() -> int:
@@ -745,7 +782,15 @@ def main() -> int:
     output_path = args.output or default_output_path(args.run_root, roots)
     write_json(output_path, report)
     print(json.dumps(json_safe(report), ensure_ascii=True))
-    return 0
+    exit_code, error_message = exit_code_for_report(
+        report,
+        output_path=output_path,
+        fail_on_blocked=bool(args.fail_on_blocked),
+        fail_below=args.fail_below,
+    )
+    if error_message:
+        print(error_message)
+    return exit_code
 
 
 if __name__ == "__main__":

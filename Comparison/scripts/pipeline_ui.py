@@ -7938,6 +7938,31 @@ def _g2m_deeph_derivative_comparison_rows(plot_payload: dict[str, Any]) -> list[
     ]
 
 
+def _g2m_deeph_derivative_gate_report(run_root: Path) -> dict[str, Any]:
+    common_summary = load_json_object(run_root / "common_metrics" / "summary" / "common_summary.json")
+    ranking_summary = load_json_object(run_root / "summary" / "ranking" / "ranking_summary.json")
+    common_recommendation = common_summary.get("recommendation") if isinstance(common_summary.get("recommendation"), dict) else {}
+    ranking_recommendation = ranking_summary.get("recommendation") if isinstance(ranking_summary.get("recommendation"), dict) else {}
+    gate_rows = [
+        *( {"gate": gate, "status": "failed"} for gate in ranking_recommendation.get("gates_failed") or [] ),
+        *( {"gate": gate, "status": "passed"} for gate in ranking_recommendation.get("gates_passed") or [] ),
+    ]
+    return {
+        "common_metrics_status": str(common_summary.get("status") or "unknown"),
+        "common_recommendation_status": str(common_recommendation.get("status") or common_summary.get("status") or "unknown"),
+        "common_reason": str(common_recommendation.get("reason") or ""),
+        "ranking_status": str(ranking_recommendation.get("status") or "unknown"),
+        "ranking_scientific_status": str(ranking_recommendation.get("scientific_status") or "unknown"),
+        "ranking_reason": str(ranking_recommendation.get("reason") or ""),
+        "winner": ranking_recommendation.get("winner"),
+        "primary_metric": ranking_recommendation.get("primary_metric") or common_recommendation.get("primary_metric") or "",
+        "gate_rows": gate_rows,
+        "derivative_winner_claim": "none",
+        "diagnostic_only": True,
+        "message": "Hamiltonian derivative diagnostics are diagnostic-only / no winner claim and never override the gate report.",
+    }
+
+
 def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str, Any]:
     run_root = resolve_g2m_deeph_run_root(run_id)
     requested_run_id = str(run_id or "").strip()
@@ -7952,6 +7977,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
     effective_run_id = run_root.name
     graph2mat_root = _g2m_deeph_derivative_root(run_root, "graph2mat")
     deeph_root = _g2m_deeph_derivative_root(run_root, "deeph")
+    gate_report = _g2m_deeph_derivative_gate_report(run_root)
     if graph2mat_root is None and deeph_root is None:
         return {
             "available": False,
@@ -7961,6 +7987,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "message": "Derivative metrics not computed.",
             "not_computed": True,
             "title": "Hamiltonian derivative diagnostics",
+            "gate_report": gate_report,
         }
     output_dir = run_root / "common_metrics" / "summary" / "derivative_plots"
     plot_result = write_derivative_plot_outputs(
@@ -8027,6 +8054,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         "default_status_text": "Default status: diagnostic-only unless all scientific gates pass",
         "not_computed": False,
         "winner": None,
+        "gate_report": gate_report,
         "status_rows": status_rows,
         "issue_rows": issue_rows,
         "prominent_issue_rows": prominent,

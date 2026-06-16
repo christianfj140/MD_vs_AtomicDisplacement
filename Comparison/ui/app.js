@@ -2595,20 +2595,66 @@ function renderG2MDeepHDerivativeArtifacts(payload = {}) {
   }
 }
 
+function renderG2MDeepHDerivativeGateReport(payload = {}) {
+  const container = document.getElementById("g2m-deeph-derivative-gate-report");
+  if (!container) return;
+  container.textContent = "";
+  const gateReport = payload.gate_report || {};
+  if (!payload.available && !Object.keys(gateReport).length) {
+    container.className = "result-list muted-text";
+    container.textContent = payload.not_computed ? "Derivative metrics not computed." : "No derivative gate report available.";
+    return;
+  }
+  container.className = "result-list";
+  const banner = document.createElement("div");
+  banner.className = "comparison-status-banner diagnostic";
+  banner.textContent = gateReport.message || "diagnostic-only / no winner claim";
+  container.appendChild(banner);
+  appendG2MDeepHTable(
+    container,
+    "Derivative gate report",
+    [
+      { key: "common_metrics_status", label: "Common metrics status" },
+      { key: "common_recommendation_status", label: "Common recommendation" },
+      { key: "ranking_status", label: "Ranking status" },
+      { key: "ranking_scientific_status", label: "Scientific status" },
+      { key: "winner", label: "Benchmark winner", format: (value) => (value ? methodDisplayLabel(value) : "none") },
+      { key: "primary_metric", label: "Primary metric" },
+      { key: "derivative_winner_claim", label: "Derivative winner claim" },
+      { key: "ranking_reason", label: "Gate report reason" },
+    ],
+    [gateReport],
+    "No derivative gate report available.",
+  );
+  appendG2MDeepHTable(
+    container,
+    "Scientific gates",
+    [
+      { key: "gate", label: "Gate" },
+      { key: "status", label: "Status" },
+    ],
+    gateReport.gate_rows || [],
+    "No gate information available.",
+  );
+}
+
 function renderG2MDeepHDerivativePayload(payload = null) {
   const statusEl = document.getElementById("g2m-deeph-derivative-status");
   const summaryEl = document.getElementById("g2m-deeph-derivative-summary");
   const issuesEl = document.getElementById("g2m-deeph-derivative-issues");
   const comparisonEl = document.getElementById("g2m-deeph-derivative-comparison");
-  if (!statusEl || !summaryEl || !issuesEl || !comparisonEl) return;
+  const gateReportEl = document.getElementById("g2m-deeph-derivative-gate-report");
+  if (!statusEl || !summaryEl || !issuesEl || !comparisonEl || !gateReportEl) return;
   statusEl.className = "result-list";
   statusEl.textContent = "";
   summaryEl.textContent = "";
   comparisonEl.textContent = "";
   issuesEl.textContent = "";
+  gateReportEl.textContent = "";
   if (!payload) {
     statusEl.className = "result-list muted-text";
     statusEl.textContent = "Derivative diagnostics not loaded yet.";
+    renderG2MDeepHDerivativeGateReport({});
     renderG2MDeepHDerivativePlotsPayload({});
     renderG2MDeepHDerivativeArtifacts({});
     return;
@@ -2617,14 +2663,14 @@ function renderG2MDeepHDerivativePayload(payload = null) {
   banner.className = "comparison-status-banner diagnostic";
   banner.textContent = payload.not_computed
     ? "Derivative metrics not computed."
-    : `${g2mDeephDerivativeStatusText(payload)} No derivative winner is shown.`;
+    : `${g2mDeephDerivativeStatusText(payload)} diagnostic-only / no winner claim.`;
   statusEl.appendChild(banner);
   appendKeyValue(statusEl, "Panel", payload.title || G2M_DEEPH_DERIVATIVE_TITLE);
   appendKeyValue(statusEl, "Reference", payload.reference_label || G2M_DEEPH_DERIVATIVE_REFERENCE);
   appendKeyValue(statusEl, "Force constants", payload.force_constants_label || G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS);
   appendKeyValue(statusEl, "Default status", payload.default_status_text || G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS);
   appendKeyValue(statusEl, "Run", payload.run_id || "-");
-  appendKeyValue(statusEl, "finite_difference_method", (payload.status_rows || []).map((row) => row.finite_difference_method).filter(Boolean).join(" | ") || "-");
+  appendKeyValue(statusEl, "finite difference method", (payload.status_rows || []).map((row) => row.finite_difference_method).filter(Boolean).join(" | ") || "-");
   appendKeyValue(statusEl, "delta_ang", (payload.status_rows || []).map((row) => row.delta_ang).filter(Boolean).join(" | ") || "-");
   appendKeyValue(statusEl, "derivative_units", (payload.status_rows || []).map((row) => row.derivative_units).filter(Boolean).join(" | ") || "-");
   if ((payload.prominent_issue_rows || []).length) {
@@ -2647,7 +2693,7 @@ function renderG2MDeepHDerivativePayload(payload = null) {
     [
       { key: "method", label: "Method" },
       { key: "scientific_status", label: "Status" },
-      { key: "finite_difference_method", label: "finite_difference_method" },
+      { key: "finite_difference_method", label: "finite difference method" },
       { key: "delta_ang", label: "delta_ang (Ang)" },
       { key: "derivative_units", label: "derivative_units" },
       { key: "stencils_ok", label: "stencils ok", format: g2mDeephIntegerValue },
@@ -2683,6 +2729,7 @@ function renderG2MDeepHDerivativePayload(payload = null) {
     issueRows,
     payload.not_computed ? "Derivative metrics not computed." : "No derivative warnings or fatal errors.",
   );
+  renderG2MDeepHDerivativeGateReport(payload);
   renderG2MDeepHDerivativePlotsPayload(payload);
   renderG2MDeepHDerivativeArtifacts(payload);
 }
@@ -5272,7 +5319,7 @@ function renderG2MDeepHPlotRunSelector() {
     status.textContent = "No previous Graph2Mat/DeepH runs found yet.";
     return;
   }
-  status.textContent = `${selected.size}/${runs.length} run(s) selected for plots. Running jobs are added only after their records finish.`;
+  status.textContent = `${selected.size}/${runs.length} run(s) selected for plots. Active runs appear once the backend writes runner status.`;
   for (const run of runs) {
     const option = document.createElement("label");
     option.className = "plot-run-option";

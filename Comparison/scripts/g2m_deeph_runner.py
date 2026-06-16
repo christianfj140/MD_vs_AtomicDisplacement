@@ -1248,6 +1248,31 @@ def _derivative_metrics_settings(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalized_derivative_metrics_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("derivative_metrics") if isinstance(payload.get("derivative_metrics"), dict) else {}
+    normalized = dict(raw)
+    normalized["enabled"] = _parse_bool(raw.get("enabled"), False)
+    return normalized
+
+
+def _has_derivative_stencils(
+    *,
+    result_dir: Path,
+    source_model: str,
+    settings: dict[str, Any],
+) -> bool:
+    from hamiltonian_derivative_stencil import discover_derivative_stencils
+
+    discoveries = discover_derivative_stencils(
+        result_dir,
+        method=source_model,
+        split=str(settings.get("split") or "all"),
+        finite_difference_method=str(settings.get("finite_difference_method") or "central"),
+        require_central=bool(settings.get("require_central")),
+    )
+    return any(discovery.stencil is not None for discovery in discoveries)
+
+
 def _derivative_metric_command_args(
     *,
     python_executable: str,
@@ -4327,6 +4352,7 @@ class Graph2MatDeepHBenchmarkRunner:
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload or {})
+        payload["derivative_metrics"] = _normalized_derivative_metrics_payload(payload)
         dataset_mode = str(payload.get("dataset_mode") or "reuse_validated").strip() or "reuse_validated"
         run_mode = str(payload.get("run_mode") or "").strip()
         precomputed_training_sweep_plan = payload.get("_training_sweep_plan")
@@ -4998,12 +5024,15 @@ class Graph2MatDeepHBenchmarkRunner:
     def _discover_plot_run_roots_locked(self) -> list[Path]:
         roots: dict[str, Path] = {}
         patterns = (
+            "*/runs/*/runner_status.json",
             "*/runs/*/sweep/training_sweep_manifest.json",
             "*/runs/*/summary/ranking/normalized_run_metrics.json",
             "*/runs/*/common_metrics/summary/common_summary.json",
+            "*/runner_status.json",
             "*/sweep/training_sweep_manifest.json",
             "*/summary/ranking/normalized_run_metrics.json",
             "*/common_metrics/summary/common_summary.json",
+            "*/*/runner_status.json",
             "*/*/sweep/training_sweep_manifest.json",
             "*/*/summary/ranking/normalized_run_metrics.json",
             "*/*/common_metrics/summary/common_summary.json",
@@ -5028,7 +5057,9 @@ class Graph2MatDeepHBenchmarkRunner:
                 continue
             for pattern in patterns:
                 for artifact in base.glob(pattern):
-                    if artifact.name == "training_sweep_manifest.json":
+                    if artifact.name == "runner_status.json":
+                        run_root = artifact.parent
+                    elif artifact.name == "training_sweep_manifest.json":
                         run_root = artifact.parent.parent
                     else:
                         run_root = artifact.parents[2]
@@ -5039,6 +5070,17 @@ class Graph2MatDeepHBenchmarkRunner:
         training_sweep = self._optional_json(str(run_root / "sweep" / "training_sweep_manifest.json"))
         normalized = self._optional_json(str(run_root / "summary" / "ranking" / "normalized_run_metrics.json"))
         common_summary = self._optional_json(str(run_root / "common_metrics" / "summary" / "common_summary.json"))
+        runner_status_payload = self._optional_json(str(run_root / "runner_status.json"))
+        runner_status = (
+            runner_status_payload.get("status")
+            if isinstance(runner_status_payload.get("status"), dict)
+            else {}
+        )
+        runner_training_sweep = (
+            runner_status.get("training_sweep")
+            if isinstance(runner_status.get("training_sweep"), dict)
+            else {}
+        )
         rows = training_sweep.get("runs") if isinstance(training_sweep.get("runs"), list) else []
         planned = training_sweep.get("planned_runs") if isinstance(training_sweep.get("planned_runs"), list) else []
         partial_records: list[dict[str, Any]] = []
@@ -5084,27 +5126,55 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif manifest_path.parent.joinpath("train", "result.txt").exists():
                     record["status"] = "running"
                 partial_records.append(record)
+        active_runs = runner_training_sweep.get("active_runs") if isinstance(runner_training_sweep.get("active_runs"), list) else []
         dataset_ids = sorted(
             {
                 str(row.get("dataset_id") or "")
-                for row in [*rows, *planned, *partial_records]
+                for row in [*rows, *planned, *partial_records, *active_runs]
                 if isinstance(row, dict) and row.get("dataset_id")
             }
         )
+        if not dataset_ids:
+            dataset_ids = sorted(
+                {
+                    item.strip()
+                    for item in str(runner_training_sweep.get("active_dataset") or "").split(",")
+                    if item.strip()
+                }
+            )
         models = sorted(
             {
                 str(row.get("model") or "")
-                for row in [*rows, *planned, *partial_records]
+                for row in [*rows, *planned, *partial_records, *active_runs]
                 if isinstance(row, dict) and row.get("model")
             }
         )
+        if not models:
+            models = sorted(
+                {
+                    item.strip().removesuffix("_parallel")
+                    for item in str(runner_training_sweep.get("active_model") or "").split(",")
+                    if item.strip()
+                }
+            )
         completed = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "completed") + sum(
             1 for row in partial_records if isinstance(row, dict) and row.get("status") == "completed"
         )
         failed = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed") + sum(
             1 for row in partial_records if isinstance(row, dict) and row.get("status") == "failed"
         )
-        status = str(training_sweep.get("status") or common_summary.get("status") or normalized.get("status") or "")
+        if not completed:
+            completed = int(runner_training_sweep.get("completed") or 0)
+        if not failed:
+            failed = int(runner_training_sweep.get("failed") or 0)
+        planned_runs = len(planned) or len(partial_records) or int(runner_training_sweep.get("total") or 0)
+        status = str(
+            training_sweep.get("status")
+            or common_summary.get("status")
+            or normalized.get("status")
+            or (runner_status.get("stage") if runner_status.get("running") else "")
+            or ""
+        )
         live_deeph_result_files = list(run_root.glob("sweep/deeph/*/*/deeph/train/result.txt"))
         if live_deeph_result_files and not status:
             status = "running"
@@ -5134,7 +5204,7 @@ class Graph2MatDeepHBenchmarkRunner:
             "models": models,
             "completed_runs": completed,
             "failed_runs": failed,
-            "planned_runs": len(planned) or len(partial_records),
+            "planned_runs": planned_runs,
             "has_training_sweep": bool(training_sweep),
             "has_metric_rows": has_metric_rows,
             "modified_at": modified_at,
@@ -5972,6 +6042,23 @@ class Graph2MatDeepHBenchmarkRunner:
                                 ("graph2mat", staged_graph2mat.result_dir, graph2mat_derivative_root),
                                 ("deeph", common_root / "deeph_eval", deeph_derivative_root),
                             ):
+                                if not _has_derivative_stencils(
+                                    result_dir=derivative_result_dir,
+                                    source_model=derivative_method,
+                                    settings=derivative_settings,
+                                ):
+                                    derivative_runs[derivative_method] = {
+                                        "label": f"{derivative_method} derivative metrics",
+                                        "status": "skipped_no_stencils",
+                                        "result_dir": str(derivative_result_dir),
+                                        "output_dir": str(derivative_output_dir),
+                                        "enabled": True,
+                                    }
+                                    self._logs.append(
+                                        "[G2M-DEEPH] derivative_metrics: skipped for "
+                                        f"{derivative_method} because no derivative stencils were discovered.\n"
+                                    )
+                                    continue
                                 command = _derivative_metric_command_args(
                                     python_executable=self._graph2mat_python(payload),
                                     result_dir=derivative_result_dir,
@@ -6007,6 +6094,13 @@ class Graph2MatDeepHBenchmarkRunner:
                             "deeph_eval": deeph_eval_run,
                             "derivative_metrics": derivative_runs,
                         }
+                        common_metrics_manifest.setdefault("derivative_metrics", {})
+                        common_metrics_manifest["derivative_metrics"].update(
+                            {
+                                "enabled": bool(derivative_settings["enabled"]),
+                                "execution": derivative_runs,
+                            }
+                        )
                         graph2mat_telemetry = self._write_run_cost_telemetry(
                             model="graph2mat",
                             run_root=context.run_root,

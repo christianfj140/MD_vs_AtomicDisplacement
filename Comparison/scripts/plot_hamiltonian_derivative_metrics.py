@@ -14,9 +14,9 @@ from typing import Any
 
 PLOT_SCHEMA = "hamiltonian_derivative_plot_payload_v1"
 MANIFEST_SCHEMA = "hamiltonian_derivative_plot_manifest_v1"
-TITLE = "Hamiltonian derivative finite-difference diagnostic"
-REFERENCE_LABEL = "Reference: SIESTA Hamiltonian finite difference"
-FORCE_CONSTANTS_LABEL = "Force constants are not used as dH/dR reference"
+TITLE = "Hamiltonian derivative diagnostics"
+REFERENCE_LABEL = "Reference: finite differences of SIESTA Hamiltonians"
+FORCE_CONSTANTS_LABEL = "SIESTA force constants are not treated as dH/dR"
 
 
 def read_json(path: Path) -> dict[str, Any]:

@@ -62,6 +62,7 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         include_reference: bool = True,
         forbidden_reference: bool = False,
         include_prediction: bool = True,
+        metadata_split: str | None = None,
     ) -> None:
         structures = self.root / "result" / "structures" / sample_id
         structures.mkdir(parents=True, exist_ok=True)
@@ -94,6 +95,8 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
                 "basis_hash": "basis-hash",
                 "pseudopotential_hash": "pseudo-hash",
             }
+            if metadata_split is not None:
+                metadata["split"] = metadata_split
             (structures / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         if include_reference or forbidden_reference:
             ref_dir = self.root / "result" / "siesta_hamiltonians" / sample_id
@@ -544,6 +547,34 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertIsNotNone(discovery.stencil.ml_base)
         self.assertEqual(discovery.stencil.ml_plus.source, "deeph")
 
+    def test_discovery_forward_with_ambiguous_base_is_reported(self) -> None:
+        self.write_result_sample("base_a", sign=0, is_reference=True)
+        self.write_result_sample("base_b", sign=0, is_reference=True)
+        self.write_result_sample("plus", sign=1)
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            finite_difference_method="forward",
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        discovery = discoveries[0]
+        self.assertEqual(discovery.status, "ambiguous")
+        self.assertIsNone(discovery.stencil)
+        self.assertIn("ambiguous_base_sample", {issue.code for issue in discovery.issues})
+
+    def test_discovery_forward_without_base_is_incomplete(self) -> None:
+        self.write_result_sample("plus", sign=1)
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            finite_difference_method="forward",
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        self.assertEqual(discoveries[0].status, "incomplete")
+        self.assertIn("incomplete_derivative_stencil", {issue.code for issue in discoveries[0].issues})
+
     def test_discovery_missing_minus_with_require_central_is_incomplete(self) -> None:
         self.write_result_sample("base", sign=0, is_reference=True)
         self.write_result_sample("plus", sign=1)
@@ -600,6 +631,22 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertEqual(discoveries[0].status, "ambiguous")
         self.assertIn("ambiguous_derivative_pairing", {issue.code for issue in discoveries[0].issues})
 
+    def test_discovery_central_with_ambiguous_base_remains_valid(self) -> None:
+        self.write_result_sample("base_a", sign=0, is_reference=True)
+        self.write_result_sample("base_b", sign=0, is_reference=True)
+        self.write_result_sample("plus", sign=1)
+        self.write_result_sample("minus", sign=-1)
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            finite_difference_method="central",
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        self.assertIn(discoveries[0].status, {"valid", "diagnostic_only"})
+        self.assertIsNotNone(discoveries[0].stencil)
+        self.assertNotIn("ambiguous_base_sample", {issue.code for issue in discoveries[0].issues})
+
     def test_discovery_forbidden_reference_candidate_is_reported(self) -> None:
         self.write_result_sample("plus", sign=1, include_reference=False, forbidden_reference=True)
         self.write_result_sample("minus", sign=-1)
@@ -624,6 +671,73 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertEqual(discoveries[0].details["comparison_status"], "diagnostic_only")
         self.assertIn("missing_metadata", {issue.code for issue in discoveries[0].issues})
         self.assertIn("insufficient_metadata_for_pairing", {issue.code for issue in discoveries[0].issues})
+
+    def test_split_specific_discovery_accepts_matching_split_metadata(self) -> None:
+        self.write_result_sample("plus", sign=1, metadata_split="test")
+        self.write_result_sample("minus", sign=-1, metadata_split="test")
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            split="test",
+            finite_difference_method="central",
+            require_central=True,
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        self.assertEqual(discoveries[0].status, "valid")
+        self.assertIsNotNone(discoveries[0].stencil)
+
+    def test_split_specific_discovery_excludes_other_split_metadata(self) -> None:
+        self.write_result_sample("plus", sign=1, metadata_split="test")
+        self.write_result_sample("minus", sign=-1, metadata_split="train")
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            split="test",
+            finite_difference_method="central",
+            require_central=True,
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        self.assertEqual(discoveries[0].status, "incomplete")
+        self.assertIsNone(discoveries[0].stencil)
+        self.assertEqual(discoveries[0].issues[0].code, "incomplete_derivative_stencil")
+        self.assertEqual(discoveries[0].issues[0].details["missing"], ["minus"])
+
+    def test_split_specific_discovery_rejects_missing_split_metadata_fail_closed(self) -> None:
+        self.write_result_sample("plus", sign=1, metadata_split="test")
+        self.write_result_sample("minus", sign=-1)
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            split="test",
+            finite_difference_method="central",
+            require_central=True,
+        )
+
+        self.assertEqual(len(discoveries), 2)
+        missing_split = next(item for item in discoveries if any(issue.code == "missing_split_metadata" for issue in item.issues))
+        self.assertEqual(missing_split.status, "incomplete")
+        self.assertIsNone(missing_split.stencil)
+        self.assertEqual(missing_split.details["comparison_status"], "diagnostic_only")
+        self.assertEqual(missing_split.issues[-1].details["requested_split"], "test")
+        incomplete = next(item for item in discoveries if any(issue.code == "incomplete_derivative_stencil" for issue in item.issues))
+        self.assertIsNone(incomplete.stencil)
+
+    def test_split_all_keeps_missing_split_metadata_inclusive(self) -> None:
+        self.write_result_sample("plus", sign=1)
+        self.write_result_sample("minus", sign=-1)
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            split="all",
+            finite_difference_method="central",
+            require_central=True,
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        self.assertIsNotNone(discoveries[0].stencil)
+        self.assertNotIn("missing_split_metadata", {issue.code for issue in discoveries[0].issues})
 
 
 if __name__ == "__main__":

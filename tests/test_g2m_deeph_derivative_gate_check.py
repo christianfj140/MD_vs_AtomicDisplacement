@@ -15,7 +15,7 @@ SCRIPT = SCRIPTS_DIR / "g2m_deeph_derivative_gate_check.py"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from g2m_deeph_derivative_gate_check import build_derivative_gate_report  # noqa: E402
+from g2m_deeph_derivative_gate_check import build_derivative_gate_report, exit_code_for_report  # noqa: E402
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -376,6 +376,119 @@ class DerivativeGateCheckTests(unittest.TestCase):
         payload = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema_version"], "graph2mat_deeph_derivative_gate_report_v1")
         self.assertEqual(payload["scientific_status"], "internal_diagnostic")
+
+    def test_default_blocked_report_exit_policy_preserves_zero(self) -> None:
+        report = {"scientific_status": "blocked"}
+
+        exit_code, message = exit_code_for_report(report, output_path=self.root / "report.json")
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNone(message)
+
+    def test_fail_on_blocked_exits_nonzero_for_blocked(self) -> None:
+        self.write_fixture(manifest_overrides={"force_constants_used": True})
+        output = self.root / "blocked_gate_report.json"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--derivative-root",
+                str(self.derivative_root),
+                "--output",
+                str(output),
+                "--fail-on-blocked",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0, msg=completed.stderr + completed.stdout)
+        self.assertTrue(output.exists())
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(payload["scientific_status"], "blocked")
+        self.assertIn(str(output), completed.stdout)
+        self.assertIn("scientific_status=blocked", completed.stdout)
+
+    def test_fail_on_blocked_exits_zero_for_non_blocked_statuses(self) -> None:
+        cases = [
+            (
+                "internal",
+                {"scientific_status": "diagnostic_only", "diagnostic_only_requested": True},
+                "internal_diagnostic",
+            ),
+            (
+                "technical",
+                {
+                    "basis_gauge_verified": True,
+                    "orbital_ordering_verified": True,
+                    "independent_dataset_metadata": True,
+                },
+                "technical_presentation",
+            ),
+        ]
+        for label, manifest_overrides, expected_status in cases:
+            with self.subTest(label=label):
+                self.tmp.cleanup()
+                self.tmp = tempfile.TemporaryDirectory()
+                self.root = Path(self.tmp.name)
+                self.derivative_root = self.root / "graph2mat_eval" / "derivative_metrics"
+                self.write_fixture(manifest_overrides=manifest_overrides)
+                output = self.root / f"{label}_gate_report.json"
+
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--derivative-root",
+                        str(self.derivative_root),
+                        "--output",
+                        str(output),
+                        "--fail-on-blocked",
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+                self.assertEqual(completed.returncode, 0, msg=completed.stderr + completed.stdout)
+                self.assertTrue(output.exists())
+                payload = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(payload["scientific_status"], expected_status)
+
+    def test_fail_below_exits_nonzero_and_writes_output_first(self) -> None:
+        self.write_fixture(manifest_overrides={"scientific_status": "diagnostic_only", "diagnostic_only_requested": True})
+        output = self.root / "threshold_gate_report.json"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--derivative-root",
+                str(self.derivative_root),
+                "--output",
+                str(output),
+                "--fail-below",
+                "technical_presentation",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0, msg=completed.stderr + completed.stdout)
+        self.assertTrue(output.exists())
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(payload["scientific_status"], "internal_diagnostic")
+        self.assertIn(str(output), completed.stdout)
+        self.assertIn("scientific_status=internal_diagnostic", completed.stdout)
 
 
 if __name__ == "__main__":

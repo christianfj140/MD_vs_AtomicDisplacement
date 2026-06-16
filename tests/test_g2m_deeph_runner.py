@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from contextlib import ExitStack
 from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +23,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 from g2m_deeph_runner import (  # noqa: E402
     CommandRunError,
     DEFAULT_DATASET_ROOT,
+    DeepHBenchmarkContext,
+    Graph2MatBenchmarkContext,
     METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY,
     METRIC_FAIL_POLICY_FAIL_CLOSED,
     Graph2MatDeepHBenchmarkRunner,
@@ -1784,6 +1787,53 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertEqual(empty_payload["metric_scaling_rows"], [])
             self.assertEqual(empty_payload["timing_scaling_rows"], [])
 
+    def test_plot_runs_discovers_live_run_from_runner_status_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
+            run_root = output_root / "run_live_only"
+            run_root.mkdir(parents=True)
+            (run_root / "runner_status.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "graph2mat_deeph_benchmark_runner_v1",
+                        "status": {
+                            "running": True,
+                            "stage": "training_sweep",
+                            "training_sweep": {
+                                "completed": 7,
+                                "failed": 0,
+                                "total": 20,
+                                "active_model": "deeph_parallel",
+                                "active_dataset": "graphene_5x2_scale_iid20",
+                                "active_runs": [
+                                    {
+                                        "model": "deeph",
+                                        "dataset_id": "graphene_5x2_scale_iid20",
+                                        "config_id": "DH-live",
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            with mock.patch("g2m_deeph_runner.DEFAULT_OUTPUT_ROOT", output_root):
+                runs = runner.plot_runs()["runs"]
+
+            self.assertTrue(runs)
+            entry = next(run for run in runs if run["run_id"] == "run_live_only")
+            self.assertEqual(entry["status"], "training_sweep")
+            self.assertEqual(entry["planned_runs"], 20)
+            self.assertEqual(entry["completed_runs"], 7)
+            self.assertEqual(entry["failed_runs"], 0)
+            self.assertEqual(entry["models"], ["deeph"])
+            self.assertEqual(entry["dataset_ids"], ["graphene_5x2_scale_iid20"])
+            self.assertFalse(entry["has_training_sweep"])
+            self.assertFalse(entry["has_metric_rows"])
+
     def test_plots_endpoint_includes_live_metric_scaling_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
@@ -1812,12 +1862,18 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                 payload = runner.plots()
 
             self.assertTrue(payload["available"])
-            self.assertEqual(payload["metric_scaling_rows"], [live_row])
+            self.assertIn(live_row, payload["metric_scaling_rows"])
+            self.assertTrue(any(row.get("run_id") == "run_live" for row in payload["metric_scaling_rows"]))
             self.assertEqual(payload["live_metric_rows"], 1)
-            self.assertEqual(payload["archived_runs"], 1)
+            self.assertGreaterEqual(payload["archived_runs"], 1)
             metric_plot = next(plot for plot in payload["plots"] if plot["id"] == "metric_scaling_h_mae")
             self.assertEqual(metric_plot["kind"], "metric_scaling")
-            self.assertEqual(metric_plot["rows"][0]["metric_value"], 0.123)
+            self.assertTrue(
+                any(
+                    row.get("run_id") == "run_live" and row.get("metric_value") == 0.123
+                    for row in metric_plot["rows"]
+                )
+            )
 
     def test_pipeline_ui_declares_g2m_deeph_endpoints(self):
         source = (SCRIPTS_DIR / "pipeline_ui.py").read_text(encoding="utf-8")
@@ -1867,6 +1923,284 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
 
             self.assertTrue(payload["benchmark_ready"])
             self.assertEqual(payload["artifact_summary"]["total_snapshots"], 1)
+
+    def _benchmark_validation_payload(self, dataset_root: Path) -> dict[str, object]:
+        return {
+            "contract_name": "joint_graph2mat_deeph_artifact_contract_v1",
+            "benchmark_ready": True,
+            "repair_required": False,
+            "dataset_root": str(dataset_root),
+            "snapshot_root": str(dataset_root),
+            "artifact_summary": {},
+            "errors": [],
+            "warnings": [],
+            "manifest_paths": {},
+        }
+
+    def _benchmark_contexts(self, root: Path) -> tuple[Graph2MatBenchmarkContext, DeepHBenchmarkContext]:
+        dataset_root = root / "dataset"
+        run_root = root / "run"
+        graph2mat_eval_root = run_root / "common_metrics" / "graph2mat_eval"
+        deeph_eval_root = run_root / "common_metrics" / "deeph_eval"
+        dataset_root.mkdir(parents=True, exist_ok=True)
+        graph2mat_eval_root.mkdir(parents=True, exist_ok=True)
+        deeph_eval_root.mkdir(parents=True, exist_ok=True)
+        (dataset_root / "frozen_split_manifest.json").write_text(
+            json.dumps({"rows": [], "valid": True, "split_hash": "split-hash"}) + "\n",
+            encoding="utf-8",
+        )
+        (dataset_root / "benchmark_dataset_manifest.json").write_text(
+            json.dumps({"benchmark_ready": True, "generation_mode": "reused_validated", "warnings": []}) + "\n",
+            encoding="utf-8",
+        )
+        training_dir = run_root / "graph2mat_training"
+        training_dir.mkdir(parents=True, exist_ok=True)
+        (training_dir / "checkpoint_manifest.json").write_text("{}\n", encoding="utf-8")
+        graph_context = Graph2MatBenchmarkContext(
+            dataset_root=dataset_root,
+            run_root=run_root,
+            graph2mat_root=root / "graph2mat",
+            training_dir=training_dir,
+            prediction_structs_dir=run_root / "graph2mat_predictions",
+            config_path=run_root / "graph2mat_config.yaml",
+            graph2mat_config_path=run_root / "graph2mat_config_resolved.yaml",
+            graph2mat_manifest_path=run_root / "graph2mat" / "graph2mat_manifest.json",
+            frozen_split_manifest_path=dataset_root / "frozen_split_manifest.json",
+            benchmark_dataset_manifest_path=dataset_root / "benchmark_dataset_manifest.json",
+            runs_json_path=training_dir / "runs.json",
+            runs_json_counts={},
+            train_glob="train/*.pkl",
+            validation_glob="validation/*.pkl",
+            predict_glob="test/*.pkl",
+            output_file="predictions.npz",
+            test_sample_ids=["s0"],
+            split_hash="split-hash",
+            prediction_split="test",
+            dry_run=False,
+        )
+        deeph_context = DeepHBenchmarkContext(
+            root=root / "deeph",
+            raw_dir=root / "deeph_raw",
+            processed_dir=root / "deeph_processed",
+            graph_dir=root / "deeph_graph",
+            save_dir=root / "deeph_save",
+            inference_dir=root / "deeph_inference",
+            preprocess_config=root / "deeph" / "preprocess.ini",
+            train_config=root / "deeph" / "train.ini",
+            inference_configs=[root / "deeph" / "inference_test.ini"],
+            inference_work_dirs=[root / "deeph" / "inference_work"],
+            manifest_path=run_root / "deeph" / "deeph_manifest.json",
+            deeph_discovery={"source": "test"},
+            split_audit_path=run_root / "deeph" / "split_audit.json",
+            split_audit_csv_path=run_root / "deeph" / "split_audit.csv",
+            split_hash="split-hash",
+            raw_mirror={"rows": [{"sample_id": "s0", "split": "test", "raw_dir": str(root / "deeph_raw" / "s0")}]},
+            inference_split="test",
+            dry_run=False,
+        )
+        return graph_context, deeph_context
+
+    def _run_common_metrics_workflow(
+        self,
+        *,
+        derivative_enabled: bool,
+        derivative_stencils_exist: bool,
+        failing_derivative_method: str | None = None,
+    ) -> tuple[Graph2MatDeepHBenchmarkRunner, list[list[str]], list[dict[str, object]]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            graph_context, deeph_context = self._benchmark_contexts(root)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            runner._state.running = True
+            runner._state.started_at = time.time()
+            recorded_commands: list[list[str]] = []
+            aggregate_calls: list[dict[str, object]] = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **kwargs):
+                recorded_commands.append(list(command))
+                if (
+                    failing_derivative_method is not None
+                    and "evaluate_hamiltonian_derivative_metrics.py" in " ".join(command)
+                    and command[command.index("--source-model") + 1] == failing_derivative_method
+                ):
+                    raise CommandRunError(
+                        f"{label} failed",
+                        {
+                            "label": label,
+                            "command": list(command),
+                            "cwd": str(cwd),
+                            "started_at": 1.0,
+                            "finished_at": 2.0,
+                            "elapsed_seconds": 1.0,
+                            "returncode": 2,
+                        },
+                    )
+                return {
+                    "label": label,
+                    "command": list(command),
+                    "cwd": str(cwd),
+                    "started_at": 1.0,
+                    "finished_at": 2.0,
+                    "elapsed_seconds": 1.0,
+                    "returncode": 0,
+                }
+
+            def fake_aggregate_common_metrics(**kwargs):
+                aggregate_calls.append(dict(kwargs))
+                return {
+                    "status": "valid_reused_joint_dataset",
+                    "warnings": [],
+                    "summary_rows": [
+                        {"method": "graph2mat", "h_mae_eV_mean": 0.2},
+                        {"method": "deeph", "h_mae_eV_mean": 0.1},
+                    ],
+                    "derivative_summary_rows": [],
+                    "derivative_metrics": {
+                        "available": False,
+                        "winner_metric": False,
+                        "paper_level": False,
+                        "summary_rows": [],
+                    },
+                    "recommendation": {
+                        "winner": "deeph",
+                        "robust_recommendation": True,
+                        "primary_metric": "h_mae_eV_mean",
+                    },
+                }
+
+            payload = {"run_id": "derivative-runner-test"}
+            if derivative_enabled:
+                payload["derivative_metrics"] = {"enabled": True}
+            validation = self._benchmark_validation_payload(graph_context.dataset_root)
+
+            with ExitStack() as stack:
+                runner._run_command = fake_run_command  # type: ignore[method-assign]
+                runner._run_ranking = mock.Mock(  # type: ignore[method-assign]
+                    return_value={
+                        "recommendation": {
+                            "status": "exploratory_deeph_win",
+                            "scientific_status": "exploratory_only",
+                            "winner": "deeph",
+                            "primary_metric": "h_mae_eV",
+                        },
+                        "best_runs_by_model": [],
+                        "pairwise_graph2mat_vs_deeph": [],
+                        "pareto_accuracy_cost": [],
+                    }
+                )
+                stack.enter_context(mock.patch.object(runner, "_prepare_graph2mat_context", return_value=graph_context))
+                stack.enter_context(mock.patch.object(runner, "_prepare_deeph_context", return_value=deeph_context))
+                stack.enter_context(mock.patch.object(runner, "_graph2mat_python", return_value=sys.executable))
+                stack.enter_context(mock.patch.object(runner, "_deeph_command", side_effect=lambda _payload, name: name))
+                stack.enter_context(mock.patch.object(runner, "_audit_deeph_split", return_value={}))
+                stack.enter_context(mock.patch.object(runner, "_stage_deeph_inference_inputs", return_value={"staged": True}))
+                stack.enter_context(mock.patch.object(runner, "_validate_graph2mat_prediction_outputs", return_value={}))
+                stack.enter_context(mock.patch.object(runner, "_validate_deeph_prediction_outputs", return_value={}))
+                stack.enter_context(mock.patch.object(runner, "_validate_deeph_training_outputs", return_value={}))
+                stack.enter_context(mock.patch.object(runner, "_write_graph2mat_manifest"))
+                stack.enter_context(mock.patch.object(runner, "_write_deeph_manifest"))
+                stack.enter_context(mock.patch.object(runner, "_write_run_cost_telemetry", return_value={}))
+                stack.enter_context(
+                    mock.patch(
+                        "g2m_deeph_runner.stage_graph2mat_metric_result",
+                        return_value=mock.Mock(result_dir=graph_context.run_root / "common_metrics" / "graph2mat_eval", sample_ids=["s0"]),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch(
+                        "g2m_deeph_runner.stage_deeph_metric_inputs",
+                        return_value=mock.Mock(
+                            processed_dir=graph_context.run_root / "common_metrics" / "deeph_inputs" / "processed",
+                            predictions_dir=graph_context.run_root / "common_metrics" / "deeph_inputs" / "predictions",
+                            sample_ids=["s0"],
+                        ),
+                    )
+                )
+                stack.enter_context(mock.patch("g2m_deeph_runner.aggregate_common_metrics", side_effect=fake_aggregate_common_metrics))
+                stack.enter_context(mock.patch("g2m_deeph_runner._force_diagnostic_metric_manifest"))
+                stack.enter_context(mock.patch("g2m_deeph_runner._has_derivative_stencils", return_value=derivative_stencils_exist))
+                runner._run_workflow(payload, validation, allow_repair=False)
+
+            self.assertEqual(runner.status()["returncode"], 0)
+            return runner, recorded_commands, aggregate_calls
+
+    def test_runner_default_disabled_preserves_existing_common_metric_behavior(self):
+        runner, recorded_commands, aggregate_calls = self._run_common_metrics_workflow(
+            derivative_enabled=False,
+            derivative_stencils_exist=True,
+        )
+
+        derivative_commands = [
+            command for command in recorded_commands if any("evaluate_hamiltonian_derivative_metrics.py" in token for token in command)
+        ]
+        self.assertEqual(derivative_commands, [])
+        self.assertEqual(len(aggregate_calls), 1)
+        self.assertIsNone(aggregate_calls[0]["graph2mat_derivative_root"])
+        self.assertIsNone(aggregate_calls[0]["deeph_derivative_root"])
+        assert runner._last_results is not None
+        derivative_metrics = runner._last_results["common_metrics"]["derivative_metrics"]
+        self.assertFalse(derivative_metrics["enabled"])
+        self.assertEqual(derivative_metrics["execution"], {})
+
+    def test_runner_enabled_derivative_plumbing_records_commands_and_passes_roots(self):
+        runner, recorded_commands, aggregate_calls = self._run_common_metrics_workflow(
+            derivative_enabled=True,
+            derivative_stencils_exist=True,
+        )
+
+        derivative_commands = [
+            command for command in recorded_commands if any("evaluate_hamiltonian_derivative_metrics.py" in token for token in command)
+        ]
+        self.assertEqual(len(derivative_commands), 2)
+        self.assertEqual(
+            {command[command.index("--source-model") + 1] for command in derivative_commands},
+            {"graph2mat", "deeph"},
+        )
+        self.assertEqual(len(aggregate_calls), 1)
+        assert runner._last_results is not None
+        common_root = Path(runner._last_results["graph2mat"]["run_root"]) / "common_metrics"
+        self.assertEqual(aggregate_calls[0]["graph2mat_derivative_root"], common_root / "graph2mat_eval" / "derivative_metrics")
+        self.assertEqual(aggregate_calls[0]["deeph_derivative_root"], common_root / "deeph_eval" / "derivative_metrics")
+        derivative_metrics = runner._last_results["common_metrics"]["derivative_metrics"]
+        self.assertTrue(derivative_metrics["enabled"])
+        self.assertFalse(derivative_metrics["winner_metric"])
+        self.assertEqual(runner._last_results["common_metrics"]["recommendation"]["primary_metric"], "h_mae_eV_mean")
+
+    def test_runner_enabled_derivative_metrics_skip_when_no_stencils_exist(self):
+        runner, recorded_commands, aggregate_calls = self._run_common_metrics_workflow(
+            derivative_enabled=True,
+            derivative_stencils_exist=False,
+        )
+
+        derivative_commands = [
+            command for command in recorded_commands if any("evaluate_hamiltonian_derivative_metrics.py" in token for token in command)
+        ]
+        self.assertEqual(derivative_commands, [])
+        self.assertEqual(len(aggregate_calls), 1)
+        assert runner._last_results is not None
+        derivative_execution = runner._last_results["common_metrics"]["derivative_metrics"]["execution"]
+        self.assertEqual(
+            {record["status"] for record in derivative_execution.values()},
+            {"skipped_no_stencils"},
+        )
+
+    def test_runner_derivative_failures_are_reported_without_overwriting_h_metrics(self):
+        runner, recorded_commands, _aggregate_calls = self._run_common_metrics_workflow(
+            derivative_enabled=True,
+            derivative_stencils_exist=True,
+            failing_derivative_method="graph2mat",
+        )
+
+        derivative_commands = [
+            command for command in recorded_commands if any("evaluate_hamiltonian_derivative_metrics.py" in token for token in command)
+        ]
+        self.assertEqual(len(derivative_commands), 2)
+        assert runner._last_results is not None
+        common_metrics = runner._last_results["common_metrics"]
+        self.assertEqual(common_metrics["recommendation"]["winner"], "deeph")
+        self.assertEqual(common_metrics["derivative_metrics"]["execution"]["graph2mat"]["returncode"], 2)
+        self.assertEqual(common_metrics["runs"]["derivative_metrics"]["graph2mat"]["returncode"], 2)
+        self.assertIn("existing H metrics are preserved", "".join(runner.logs()["lines"]))
 
 
 if __name__ == "__main__":

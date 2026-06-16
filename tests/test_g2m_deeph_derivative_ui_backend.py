@@ -99,11 +99,62 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertTrue(payload["not_computed"])
         self.assertEqual(payload["status"], "not_computed")
 
+    def test_not_computed_payload_can_still_include_gate_report_for_selected_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run_demo"
+            write_json(
+                run_root / "common_metrics" / "summary" / "common_summary.json",
+                {
+                    "status": "diagnostic_only",
+                    "recommendation": {"status": "diagnostic_only", "reason": "Common metrics are diagnostic only."},
+                },
+            )
+            write_json(
+                run_root / "summary" / "ranking" / "ranking_summary.json",
+                {
+                    "recommendation": {
+                        "status": "no_robust_winner",
+                        "scientific_status": "diagnostic_only",
+                        "reason": "Review gates and warnings.",
+                    }
+                },
+            )
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_demo")
+        self.assertFalse(payload["available"])
+        self.assertTrue(payload["not_computed"])
+        self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
+
     def test_derivative_payload_includes_status_warnings_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run_demo"
             self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat", fatal_error=True)
             self.write_derivative_tree(run_root, "deeph", source_model="deeph")
+            write_json(
+                run_root / "common_metrics" / "summary" / "common_summary.json",
+                {
+                    "status": "diagnostic_only",
+                    "recommendation": {
+                        "status": "diagnostic_only",
+                        "primary_metric": "h_mae_eV_mean",
+                        "reason": "Comparability warnings prevent a stronger claim.",
+                    },
+                },
+            )
+            write_json(
+                run_root / "summary" / "ranking" / "ranking_summary.json",
+                {
+                    "recommendation": {
+                        "status": "no_robust_winner",
+                        "scientific_status": "diagnostic_only",
+                        "winner": None,
+                        "primary_metric": "h_mae_eV_mean",
+                        "reason": "Review gates and warnings.",
+                        "gates_failed": ["adapter_equivalence"],
+                        "gates_passed": ["split_audit"],
+                    }
+                },
+            )
             with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
                 payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_demo")
         self.assertTrue(payload["available"])
@@ -115,6 +166,11 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertTrue(payload["issue_rows"])
         self.assertTrue(payload["prominent_issue_rows"])
         self.assertIsNone(payload["winner"])
+        self.assertEqual(payload["reference_label"], "Reference: finite differences of SIESTA Hamiltonians")
+        self.assertEqual(payload["force_constants_label"], "SIESTA force constants are not treated as dH/dR")
+        self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
+        self.assertEqual(payload["gate_report"]["ranking_status"], "no_robust_winner")
+        self.assertTrue(payload["gate_report"]["gate_rows"])
 
 
 if __name__ == "__main__":
