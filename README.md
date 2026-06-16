@@ -5,6 +5,38 @@ agua usando datasets generados con SIESTA. El flujo actual ya no es solo
 `MD vs AtomDisplacement`: la ruta de comparacion admite tres metodos
 canonicos y permite ejecutar cualquier subconjunto de ellos.
 
+## Documentation map
+
+- [Architecture](docs/architecture.md)
+- [Workflows](docs/workflows.md)
+- [Data and outputs](docs/data_and_outputs.md)
+- [Development](docs/development.md)
+- [Known limitations](docs/known_limitations.md)
+- [Graph2Mat vs DeepH benchmark runbook](docs/graph2mat_deeph_benchmark.md)
+
+## Quick start
+
+1. Create the local environment:
+
+   ```bash
+   ./scripts/create_graph2mat_venv.sh
+   ```
+
+2. Activate it:
+
+   ```bash
+   source .venv/bin/activate
+   ```
+
+3. Start the main comparison UI:
+
+   ```bash
+   python3 Comparison/scripts/pipeline_ui.py
+   ```
+
+4. Open the printed URL, then use the `Experiment` tab to select methods,
+   datasets, and run mode.
+
 ## Metodos soportados
 
 La fuente de verdad de identificadores esta en

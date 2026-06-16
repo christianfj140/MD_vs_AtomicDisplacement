@@ -1746,6 +1746,21 @@ pre {
   margin: 12px 0;
 }
 
+.g2m-deeph-derivative-artifact-list {
+  display: grid;
+  gap: 8px;
+}
+
+.g2m-deeph-derivative-artifact-link {
+  color: var(--accent-strong);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.g2m-deeph-derivative-artifact-link:hover {
+  text-decoration: underline;
+}
+
 .dataset-minimum-artifacts {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

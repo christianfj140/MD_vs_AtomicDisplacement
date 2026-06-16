@@ -218,6 +218,171 @@ Reported metrics include:
   auxiliary target. Auxiliary-channel rows are never mixed into the main
   Hamiltonian MAE/RMSE/R2 metrics or into official winner metrics.
 
+## Hamiltonian Derivative Sparse Metrics
+
+Derivative metrics compare finite differences of Hamiltonian matrices,
+`dH_pred/dR` versus `dH_ref/dR`, in the raw global Hamiltonian basis. They are
+not force-constant metrics, phonon dynamical-matrix metrics, or finite
+differences of forces. The valid SIESTA reference derivative is built from
+Hamiltonian matrices, for example central difference:
+
+In this repository, `dH/dR` means the derivative of Hamiltonian matrix elements
+with respect to Cartesian atomic displacement. SIESTA force constants, `.FC`
+files, dynamical matrices, and phonons are not `dH/dR` references and must not
+be substituted for Hamiltonian finite differences.
+
+```text
+dH_ref/dR = (H_SIESTA(R + delta) - H_SIESTA(R - delta)) / (2 * delta)
+```
+
+The internal derivative metric target space is:
+
+```text
+raw_global_hamiltonian_derivative
+```
+
+Implemented sparse derivative metrics include:
+
+- `dh_mae_ref_eV_per_Ang`, `dh_rmse_ref_eV_per_Ang`,
+  `dh_mse_ref_eV2_per_Ang2`: derivative errors on the SIESTA derivative
+  support.
+- `dh_mae_pred_eV_per_Ang`, `dh_rmse_pred_eV_per_Ang`: derivative errors on
+  the predicted derivative support.
+- `dh_mae_union_eV_per_Ang`, `dh_rmse_union_eV_per_Ang`,
+  `dh_max_abs_error_union_eV_per_Ang`: derivative errors on the union support.
+- `dh_relative_frobenius_ref`, `dh_relative_frobenius_union`,
+  `dh_relative_l1_union`, `dh_cosine_similarity_union`: relative and angular
+  diagnostics over sparse derivative values.
+- `dh_support_precision`, `dh_support_recall`, `dh_support_f1`,
+  `dh_false_zero_rate`, `dh_false_nonzero_rate`: derivative sparsity-support
+  diagnostics.
+- `dh_hermiticity_ref`, `dh_hermiticity_pred`,
+  `dh_hermiticity_error_delta`: Hermiticity diagnostics for reference and
+  predicted derivative matrices.
+
+Rows carry derivative-specific metadata: `sample`, `atom_index_zero_based`,
+`axis`, `axis_index`, `delta_ang`, `finite_difference_method`,
+`source_model`, `reference_source`, `derivative_units`, `hamiltonian_units`,
+`displacement_units`, `matrix_metric_target_space`, and `comparison_status`.
+Until all required comparability metadata gates are present, derivative metric
+rows remain `diagnostic_only`. If the reference derivative norm is zero,
+relative metrics are left unavailable as `NaN` and the row records an explicit
+unavailability reason.
+
+Required derivative artifacts are:
+
+- `RUN.fdf`
+- `metadata.json`
+- SIESTA Hamiltonian reference in `.HSX` or `.TSHS`
+- predicted `ML_prediction.HSX`
+- explicit plus/minus displacement metadata
+- `ORB_INDX` and basis/gauge evidence where available
+
+`Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py` evaluates these
+metrics from already archived Hamiltonian references and predictions. It does
+not run SIESTA, Graph2Mat, or DeepH, and it does not read force constants,
+phonon outputs, dynamical matrices, or finite differences of forces. Example:
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py \
+  <result_dir> \
+  --method central \
+  --split test \
+  --require-central \
+  --diagnostic-only \
+  --support-threshold 1e-12 \
+  --overwrite
+```
+
+Implemented evaluator options are:
+
+- `--method {central,forward,backward}`
+- `--split {test,validation,train,all}`
+- `--require-central`
+- `--overwrite`
+- `--diagnostic-only`
+- `--support-threshold <float>`
+- `--max-stencils <int>`
+- `--output-dir <path>`
+- `--source-model {graph2mat,deeph}`
+
+The derivative evaluator writes:
+
+- `derivative_metrics/manifest.json`
+- `derivative_metrics/stencil_status.csv`
+- `derivative_metrics/derivative_matrix_metrics.csv`
+- `derivative_metrics/derivative_support_sweep.csv`
+- `derivative_metrics/derivative_hermiticity.csv`
+- `derivative_metrics/derivative_summary.json`
+
+The manifest records `force_constants_used: false`,
+`reference_definition: siesta_hamiltonian_finite_difference`, and
+`paper_level: false`. `scientific_status` defaults to `diagnostic_only` and is
+promoted only to `presentation_ready` for central finite differences when
+required metadata, unit, shape, sign, finite-value, and Hermiticity gates pass.
+No current derivative evaluator path promotes results to paper-level status.
+
+The fail-closed derivative gate checker consumes those files and emits a report:
+
+```bash
+python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
+  --derivative-root <result_dir>/derivative_metrics \
+  --output <result_dir>/derivative_metrics/derivative_gate_report.json
+```
+
+Or, for a staged benchmark run with both methods:
+
+```bash
+python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
+  --run-root <benchmark_run_root> \
+  --output <benchmark_run_root>/common_metrics/summary/derivative_gate_report.json
+```
+
+The gate report contains:
+
+- `scientific_status`
+- `allowed_claims`
+- `blocked_claims`
+- `blockers`
+- `warnings`
+- `recommended_next_steps`
+- `evidence_paths`
+
+Derivative scientific gate levels are:
+
+- `internal_diagnostic`
+- `technical_presentation`
+- `paper_level_candidate`
+- `blocked`
+
+Required blockers include:
+
+- force constants used as reference
+- reference definition other than SIESTA Hamiltonian finite difference
+- no central stencils
+- missing plus/minus pairing
+- mismatched shapes, delta, or units
+- missing or inconsistent atom indexing
+- missing or inconsistent orbital ordering metadata
+- high Hermiticity defect
+- support discontinuity above threshold
+
+Paper-level candidate status is additionally blocked without:
+
+- basis/gauge evidence
+- orbital ordering evidence
+- delta sensitivity study
+- independent dataset/split metadata
+- proven Graph2Mat/DeepH equivalence when both are compared
+
+Derivative limitations that must be stated explicitly in reports:
+
+- gauge, basis, and orbital ordering can remain ambiguous
+- neighbor-list or sparsity discontinuities may dominate derivative errors
+- finite-difference sensitivity to `delta` must be checked
+- ML prediction noise can be amplified by finite differences
+- no force-constants comparison is implemented
+
 Training loss is not an official winner metric. For H-only benchmark configs,
 `loss: graph2mat.metrics.block_type_mae` is interpretable as Hamiltonian-only
 only because the generated/validated Graph2Mat config requires

@@ -109,6 +109,7 @@ DEFAULT_MD_PIPELINE_CONFIG = REPO_ROOT / "MD" / "pipeline_config.yaml"
 DEFAULT_MD_TRAINING_SCRIPT = REPO_ROOT / "MD" / "scripts" / "run_md_training.py"
 DEFAULT_MD_PREDICTION_SCRIPT = REPO_ROOT / "MD" / "scripts" / "run_md_prediction.py"
 DEFAULT_HAMILTONIAN_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py"
+DEFAULT_DERIVATIVE_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_derivative_metrics.py"
 DEFAULT_DEEPH_KPOINT_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_deeph_kpoint_metrics.py"
 DEEPH_PACK_ROOT_ENV = "DEEPH_PACK_ROOT"
 DEEPH_CLI_NAMES = ("deeph-preprocess", "deeph-train", "deeph-inference")
@@ -1229,6 +1230,54 @@ def _deeph_metric_command_args(
     ]
     if metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY:
         command.append("--no-fail-closed")
+    return command
+
+
+def _derivative_metrics_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("derivative_metrics") if isinstance(payload.get("derivative_metrics"), dict) else {}
+    enabled = _parse_bool(raw.get("enabled"), False)
+    split = str(raw.get("split") or (_metric_evaluation_split(payload) if enabled else "test"))
+    return {
+        "enabled": enabled,
+        "finite_difference_method": str(raw.get("finite_difference_method") or raw.get("method") or "central"),
+        "split": split,
+        "require_central": _parse_bool(raw.get("require_central"), True),
+        "diagnostic_only": _parse_bool(raw.get("diagnostic_only"), True),
+        "support_threshold": float(raw.get("support_threshold", 1e-12) or 1e-12),
+        "max_stencils": _optional_int_value(raw.get("max_stencils")),
+    }
+
+
+def _derivative_metric_command_args(
+    *,
+    python_executable: str,
+    result_dir: Path,
+    output_dir: Path,
+    source_model: str,
+    settings: dict[str, Any],
+) -> list[str]:
+    command = [
+        python_executable,
+        str(DEFAULT_DERIVATIVE_METRICS_SCRIPT),
+        str(result_dir),
+        "--method",
+        str(settings["finite_difference_method"]),
+        "--split",
+        str(settings["split"]),
+        "--support-threshold",
+        str(settings["support_threshold"]),
+        "--output-dir",
+        str(output_dir),
+        "--source-model",
+        source_model,
+        "--overwrite",
+    ]
+    if settings.get("require_central"):
+        command.append("--require-central")
+    if settings.get("diagnostic_only"):
+        command.append("--diagnostic-only")
+    if settings.get("max_stencils") is not None:
+        command.extend(["--max-stencils", str(settings["max_stencils"])])
     return command
 
 
@@ -5912,16 +5961,51 @@ class Graph2MatDeepHBenchmarkRunner:
                             label="DeepH common metrics",
                             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
                         )
+                        derivative_settings = _derivative_metrics_settings(payload)
+                        derivative_runs: dict[str, Any] = {}
+                        graph2mat_derivative_root = None
+                        deeph_derivative_root = None
+                        if derivative_settings["enabled"]:
+                            graph2mat_derivative_root = common_root / "graph2mat_eval" / "derivative_metrics"
+                            deeph_derivative_root = common_root / "deeph_eval" / "derivative_metrics"
+                            for derivative_method, derivative_result_dir, derivative_output_dir in (
+                                ("graph2mat", staged_graph2mat.result_dir, graph2mat_derivative_root),
+                                ("deeph", common_root / "deeph_eval", deeph_derivative_root),
+                            ):
+                                command = _derivative_metric_command_args(
+                                    python_executable=self._graph2mat_python(payload),
+                                    result_dir=derivative_result_dir,
+                                    output_dir=derivative_output_dir,
+                                    source_model=derivative_method,
+                                    settings=derivative_settings,
+                                )
+                                try:
+                                    derivative_runs[derivative_method] = self._run_command(
+                                        command,
+                                        cwd=REPO_ROOT,
+                                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                                        label=f"{derivative_method} derivative metrics",
+                                        allowed_returncodes=(0, 2),
+                                    )
+                                except CommandRunError as exc:
+                                    derivative_runs[derivative_method] = exc.run_record
+                                    self._logs.append(
+                                        "[G2M-DEEPH][WARN] Derivative metric postprocess failed "
+                                        f"for {derivative_method}; existing H metrics are preserved.\n"
+                                    )
                         common_metrics_manifest = aggregate_common_metrics(
                             graph2mat_metrics_root=staged_graph2mat.result_dir / "metrics",
                             deeph_metrics_root=common_root / "deeph_eval" / "metrics",
                             output_dir=common_root / "summary",
                             frozen_split_manifest_path=context.frozen_split_manifest_path,
                             dataset_manifest_path=context.benchmark_dataset_manifest_path,
+                            graph2mat_derivative_root=graph2mat_derivative_root,
+                            deeph_derivative_root=deeph_derivative_root,
                         )
                         common_metrics_manifest["runs"] = {
                             "graph2mat_eval": graph2mat_eval_run,
                             "deeph_eval": deeph_eval_run,
+                            "derivative_metrics": derivative_runs,
                         }
                         graph2mat_telemetry = self._write_run_cost_telemetry(
                             model="graph2mat",

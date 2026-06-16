@@ -28,6 +28,8 @@ from g2m_deeph_runner import (  # noqa: E402
     _deeph_device_settings,
     _deeph_training_parallelism,
     _deeph_metric_command_args,
+    _derivative_metric_command_args,
+    _derivative_metrics_settings,
     _extract_validation_metrics,
     _force_diagnostic_metric_manifest,
     _link_or_copy_file,
@@ -206,6 +208,46 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         )
 
         self.assertIn("--no-fail-closed", command)
+
+    def test_derivative_metrics_payload_defaults_disabled(self):
+        settings = _derivative_metrics_settings({})
+
+        self.assertFalse(settings["enabled"])
+        self.assertEqual(settings["finite_difference_method"], "central")
+        self.assertEqual(settings["split"], "test")
+        self.assertTrue(settings["require_central"])
+        self.assertTrue(settings["diagnostic_only"])
+        self.assertEqual(settings["support_threshold"], 1e-12)
+
+    def test_derivative_metric_command_args_include_expected_cli_options(self):
+        settings = _derivative_metrics_settings(
+            {
+                "derivative_metrics": {
+                    "enabled": True,
+                    "finite_difference_method": "central",
+                    "split": "test",
+                    "require_central": True,
+                    "diagnostic_only": True,
+                    "support_threshold": 1e-10,
+                    "max_stencils": 3,
+                }
+            }
+        )
+
+        command = _derivative_metric_command_args(
+            python_executable="/venv/bin/python",
+            result_dir=Path("/tmp/result"),
+            output_dir=Path("/tmp/result/derivative_metrics"),
+            source_model="graph2mat",
+            settings=settings,
+        )
+
+        self.assertIn("evaluate_hamiltonian_derivative_metrics.py", command[1])
+        self.assertIn("--require-central", command)
+        self.assertIn("--diagnostic-only", command)
+        self.assertIn("--overwrite", command)
+        self.assertEqual(command[command.index("--source-model") + 1], "graph2mat")
+        self.assertEqual(command[command.index("--max-stencils") + 1], "3")
 
     def test_deeph_metric_command_can_target_validation_split(self):
         command = _deeph_metric_command_args(

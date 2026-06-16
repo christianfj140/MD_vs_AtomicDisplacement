@@ -271,6 +271,36 @@ COMMON_METRIC_GROUPS = [
     CPU_TIME_METRIC_GROUP,
     THROUGHPUT_METRIC_GROUP,
 ]
+DERIVATIVE_METRIC_GROUPS = [
+    {
+        "id": "derivative_mae",
+        "title": "dH/dR MAE",
+        "y_title": "eV/Ang",
+        "metrics": [{"key": "dh_mae_union_eV_per_Ang_mean", "label": "dH MAE", "unit": "eV/Ang", "direction": "lower_is_better"}],
+        "diagnostic_only": True,
+    },
+    {
+        "id": "derivative_rmse",
+        "title": "dH/dR RMSE",
+        "y_title": "eV/Ang",
+        "metrics": [{"key": "dh_rmse_union_eV_per_Ang_mean", "label": "dH RMSE", "unit": "eV/Ang", "direction": "lower_is_better"}],
+        "diagnostic_only": True,
+    },
+    {
+        "id": "derivative_support_f1",
+        "title": "dH/dR Support F1",
+        "y_title": "F1",
+        "metrics": [{"key": "dh_support_f1_mean", "label": "dH support F1", "unit": "", "direction": "higher_is_better"}],
+        "diagnostic_only": True,
+    },
+    {
+        "id": "derivative_relative_frobenius",
+        "title": "dH/dR Relative Frobenius",
+        "y_title": "Relative error",
+        "metrics": [{"key": "dh_relative_frobenius_ref_mean", "label": "dH rel. Frobenius", "unit": "", "direction": "lower_is_better"}],
+        "diagnostic_only": True,
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -658,6 +688,43 @@ def summarize_method(method: str, metrics_root: Path) -> dict[str, Any]:
     return row
 
 
+def summarize_derivative_method(method: str, derivative_root: Path | None) -> dict[str, Any]:
+    if derivative_root is None:
+        return {"method": method, "derivative_metrics_available": False}
+    derivative_root = Path(derivative_root)
+    if derivative_root.name != "derivative_metrics":
+        derivative_root = derivative_root / "derivative_metrics"
+    manifest = read_json(derivative_root / "manifest.json")
+    rows = read_csv_rows(derivative_root / "derivative_matrix_metrics.csv")
+    hermiticity_rows = read_csv_rows(derivative_root / "derivative_hermiticity.csv")
+    available = bool(manifest or rows)
+    summary: dict[str, Any] = {
+        "method": method,
+        "derivative_metrics_available": available,
+        "derivative_metrics_root": str(derivative_root) if available else "",
+        "derivative_scientific_status": manifest.get("scientific_status") if manifest else "",
+        "derivative_force_constants_used": manifest.get("force_constants_used") if manifest else False,
+        "derivative_paper_level": manifest.get("paper_level") if manifest else False,
+        "derivative_stencils_total": manifest.get("stencils_total") if manifest else 0,
+        "derivative_stencils_ok": manifest.get("stencils_ok") if manifest else 0,
+        "derivative_stencils_failed": manifest.get("stencils_failed") if manifest else 0,
+        "derivative_warning_count": len(manifest.get("warnings") or []) if manifest else 0,
+        "derivative_fatal_error_count": len(manifest.get("fatal_errors") or []) if manifest else 0,
+    }
+    if rows:
+        summary.update(
+            {
+                "dh_mae_union_eV_per_Ang_mean": mean([number(row.get("dh_mae_union_eV_per_Ang")) for row in rows]),
+                "dh_rmse_union_eV_per_Ang_mean": mean([number(row.get("dh_rmse_union_eV_per_Ang")) for row in rows]),
+                "dh_support_f1_mean": mean([number(row.get("dh_support_f1")) for row in rows]),
+                "dh_relative_frobenius_ref_mean": mean([number(row.get("dh_relative_frobenius_ref")) for row in rows]),
+                "dh_hermiticity_ref_mean": mean([number(row.get("dH_ref_hermiticity_defect")) for row in hermiticity_rows]),
+                "dh_hermiticity_pred_mean": mean([number(row.get("dH_pred_hermiticity_defect")) for row in hermiticity_rows]),
+            }
+        )
+    return summary
+
+
 def sample_metric_rows(method: str, metrics_root: Path) -> list[dict[str, Any]]:
     rows = []
     for row in weighted_sample_rows(metrics_root):
@@ -720,6 +787,28 @@ def build_recommendation(summary_rows: list[dict[str, Any]], status: str, warnin
         "reason": f"{winner} has the lower {PRIMARY_METRIC}; this is a supporting H-MAE recommendation, not a final spectral winner claim.",
         "severe_warnings": severe,
     }
+
+
+def add_derivative_diagnostic_notes(recommendation: dict[str, Any], derivative_summary_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    notes = list(recommendation.get("diagnostic_notes") or [])
+    for row in derivative_summary_rows:
+        if not row.get("derivative_metrics_available"):
+            continue
+        notes.append(
+            {
+                "kind": "hamiltonian_derivative_metrics",
+                "method": row.get("method"),
+                "scientific_status": row.get("derivative_scientific_status") or "diagnostic_only",
+                "force_constants_used": bool(row.get("derivative_force_constants_used")),
+                "paper_level": bool(row.get("derivative_paper_level")),
+                "winner_metric": False,
+                "message": "Hamiltonian derivative metrics are diagnostic notes only and are not used for winner selection.",
+            }
+        )
+    if notes:
+        recommendation = dict(recommendation)
+        recommendation["diagnostic_notes"] = notes
+    return recommendation
 
 
 def _safe_recommendation_for_display(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -808,6 +897,7 @@ def build_common_plot_payload(
             "available": bool(timing_scaling_plots or metric_scaling_plots),
             "plots": [*metric_scaling_plots, *timing_scaling_plots],
             "metric_groups": COMMON_METRIC_GROUPS,
+            "derivative_metric_groups": DERIVATIVE_METRIC_GROUPS,
             "artifact_summary": artifact_summary or {},
             "timing_rows": timing_rows or [],
             "timing_scaling_rows": timing_scaling_rows,
@@ -818,6 +908,16 @@ def build_common_plot_payload(
 
     manifest = dict(common_metrics_manifest)
     summary_rows = [dict(row) for row in manifest.get("summary_rows") or []]
+    derivative_summary_rows = [dict(row) for row in manifest.get("derivative_summary_rows") or []]
+    rows_for_plots = [dict(row) for row in summary_rows]
+    if derivative_summary_rows:
+        by_method = {str(row.get("method") or ""): row for row in rows_for_plots}
+        for derivative_row in derivative_summary_rows:
+            method = str(derivative_row.get("method") or "")
+            if method not in by_method:
+                by_method[method] = {"method": method}
+                rows_for_plots.append(by_method[method])
+            by_method[method].update(derivative_row)
     scientific_status = str(manifest.get("status") or "diagnostic_only")
     recommendation = _safe_recommendation_for_display(manifest)
     plots: list[dict[str, Any]] = []
@@ -834,6 +934,22 @@ def build_common_plot_payload(
                 "missing_metrics": _missing_metrics(rows, metric_group),
             }
         )
+    for metric_group in DERIVATIVE_METRIC_GROUPS:
+        rows = _plot_rows(rows_for_plots, metric_group)
+        if not any(row.get(metric["key"]) is not None for row in rows for metric in metric_group.get("metrics") or []):
+            continue
+        plots.append(
+            {
+                "id": metric_group["id"],
+                "kind": "grouped_bar",
+                "title": metric_group["title"],
+                "y_title": metric_group["y_title"],
+                "metrics": metric_group["metrics"],
+                "rows": rows,
+                "missing_metrics": _missing_metrics(rows, metric_group),
+                "diagnostic_only": True,
+            }
+        )
     plots.extend(metric_scaling_plots)
     plots.extend(timing_scaling_plots)
     return {
@@ -848,6 +964,8 @@ def build_common_plot_payload(
         },
         "summary_rows": summary_rows,
         "metric_groups": COMMON_METRIC_GROUPS,
+        "derivative_summary_rows": derivative_summary_rows,
+        "derivative_metric_groups": DERIVATIVE_METRIC_GROUPS,
         "artifact_summary": artifact_summary or {},
         "timing_rows": timing_rows or [],
         "timing_scaling_rows": timing_scaling_rows,
@@ -867,6 +985,8 @@ def aggregate_common_metrics(
     output_dir: Path,
     frozen_split_manifest_path: Path | None = None,
     dataset_manifest_path: Path | None = None,
+    graph2mat_derivative_root: Path | None = None,
+    deeph_derivative_root: Path | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     frozen_split = read_json(frozen_split_manifest_path) if frozen_split_manifest_path else {}
@@ -893,6 +1013,14 @@ def aggregate_common_metrics(
     summary_rows = [
         summarize_method("graph2mat", graph2mat_metrics_root),
         summarize_method("deeph", deeph_metrics_root),
+    ]
+    derivative_summary_rows = [
+        row
+        for row in (
+            summarize_derivative_method("graph2mat", graph2mat_derivative_root),
+            summarize_derivative_method("deeph", deeph_derivative_root),
+        )
+        if row.get("derivative_metrics_available")
     ]
     for row in summary_rows:
         if row["method_status"] != "ok":
@@ -924,7 +1052,10 @@ def aggregate_common_metrics(
 
     sample_rows = [*sample_metric_rows("graph2mat", graph2mat_metrics_root), *sample_metric_rows("deeph", deeph_metrics_root)]
     recommendation = build_recommendation(summary_rows, status, warnings)
+    recommendation = add_derivative_diagnostic_notes(recommendation, derivative_summary_rows)
     write_csv_rows(output_dir / "common_method_metrics.csv", summary_rows)
+    if derivative_summary_rows:
+        write_csv_rows(output_dir / "common_derivative_method_metrics.csv", derivative_summary_rows)
     write_csv_rows(output_dir / "common_sample_metrics.csv", sample_rows)
     write_json(output_dir / "recommendation.json", recommendation)
     manifest = {
@@ -938,6 +1069,13 @@ def aggregate_common_metrics(
         "sample_ids": sorted(g2m_ids | deeph_ids),
         "warnings": warnings,
         "summary_rows": summary_rows,
+        "derivative_summary_rows": derivative_summary_rows,
+        "derivative_metrics": {
+            "available": bool(derivative_summary_rows),
+            "winner_metric": False,
+            "paper_level": False,
+            "summary_rows": derivative_summary_rows,
+        },
         "recommendation": recommendation,
     }
     write_json(output_dir / "common_summary.json", manifest)
@@ -952,6 +1090,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--frozen-split-manifest", type=Path, default=None)
     parser.add_argument("--dataset-manifest", type=Path, default=None)
+    parser.add_argument("--graph2mat-derivative-root", type=Path, default=None)
+    parser.add_argument("--deeph-derivative-root", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -963,6 +1103,8 @@ def main() -> None:
         output_dir=args.output_dir,
         frozen_split_manifest_path=args.frozen_split_manifest,
         dataset_manifest_path=args.dataset_manifest,
+        graph2mat_derivative_root=args.graph2mat_derivative_root,
+        deeph_derivative_root=args.deeph_derivative_root,
     )
     print(json.dumps(json_safe({"status": manifest["status"], "output_dir": manifest["output_dir"]}), ensure_ascii=False))
 

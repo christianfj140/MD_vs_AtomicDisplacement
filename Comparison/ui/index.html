@@ -1111,6 +1111,58 @@
             </div>
           </section>
 
+          <section class="panel g2m-deeph-derivative-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Derivative diagnostics</p>
+                <h3>Hamiltonian derivative diagnostics</h3>
+                <p class="field-help">Reference: finite differences of SIESTA Hamiltonians</p>
+                <p class="field-help">SIESTA force constants are not treated as dH/dR</p>
+                <p class="field-help">Default status: diagnostic-only unless all scientific gates pass</p>
+              </div>
+              <button id="g2m-deeph-derivative-refresh" class="button secondary" type="button">Refresh derivative diagnostics</button>
+            </div>
+            <div class="g2m-deeph-run-selector" aria-label="Derivative diagnostics run selector">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Derivative run selector</strong>
+                  <p class="field-help">Pick a finished Graph2Mat vs DeepH run. If derivative metrics are absent, the UI shows not computed.</p>
+                </div>
+              </div>
+              <label class="field">
+                <span>Run</span>
+                <select id="g2m-deeph-derivative-run-select">
+                  <option value="">No run selected</option>
+                </select>
+              </label>
+            </div>
+            <div id="g2m-deeph-derivative-status" class="result-list muted-text">Derivative diagnostics not loaded yet.</div>
+            <div class="grid two split-grid">
+              <section>
+                <h3>Derivative status summary</h3>
+                <div id="g2m-deeph-derivative-summary" class="result-list muted-text">No derivative status summary yet.</div>
+              </section>
+              <section>
+                <h3>Model comparison</h3>
+                <div id="g2m-deeph-derivative-comparison" class="result-list muted-text">No derivative model comparison yet.</div>
+              </section>
+            </div>
+            <section>
+              <h3>Warnings and fatal errors</h3>
+              <div id="g2m-deeph-derivative-issues" class="result-list muted-text">No derivative warning table yet.</div>
+            </section>
+            <section>
+              <h3>Plots</h3>
+              <div id="g2m-deeph-derivative-plots" class="plot-grid">
+                <div class="plot-card full placeholder-card">Derivative plots not loaded yet.</div>
+              </div>
+            </section>
+            <section>
+              <h3>Artifacts</h3>
+              <div id="g2m-deeph-derivative-artifacts" class="result-list muted-text">No derivative CSV or manifest links yet.</div>
+            </section>
+          </section>
+
           <section class="panel g2m-deeph-dataset-minimum-panel">
             <div class="panel-heading">
               <div>
@@ -1669,6 +1721,7 @@
             <code>GET /api/g2m-deeph/results</code>
             <code>GET /api/g2m-deeph/plot-runs</code>
             <code>GET /api/g2m-deeph/plots</code>
+            <code>GET /api/g2m-deeph/derivative-metrics?run_id=...</code>
             <code>GET /api/g2m-deeph/dataset-size-minimum</code>
           </div>
         </section>

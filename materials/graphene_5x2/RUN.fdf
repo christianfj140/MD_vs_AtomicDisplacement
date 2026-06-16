@@ -1,0 +1,94 @@
+SystemName         graphene_5x2
+#                  Graphene 5x2 supercell generated from materials/graphene/RUN.fdf
+#                  20 C atoms = 10 primitive 2-atom graphene cells
+#                  Primitive template C-C distance is 1.467 Ang.
+#                  k-grid scaled from 20 x 20 x 1 to 4 x 10 x 1.
+#                  Wannier blocks are omitted here because supercell projections
+#                  must be regenerated instead of reusing primitive-cell indices.
+
+SystemLabel        graphene_5x2
+
+NumberOfAtoms          20
+NumberOfSpecies        1
+
+%block ChemicalSpeciesLabel
+  1   6  C
+%endblock ChemicalSpeciesLabel
+
+%block PAO.Basis
+C           2
+ n=2   0   1
+   4.088
+   1.000
+ n=2   1   1
+   4.870
+   1.000
+%endblock PAO.Basis
+
+#
+# Atomic structure: 5 repeats of lattice vector 1 and 2 repeats of lattice vector 2
+#
+
+LatticeConstant      1.46700 Ang
+
+%block LatticeVectors
+   7.500000000       -4.3301270190        0.0000000000
+   3.000000000        1.7320508076        0.0000000000
+   0.000000000        0.0000000000       20.0000000000
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Fractional
+%block AtomicCoordinatesAndAtomicSpecies
+   0.0666666667   0.1666666667   0.0000000000  1
+   0.1333333333   0.3333333333   0.0000000000  1
+   0.2666666667   0.1666666667   0.0000000000  1
+   0.3333333333   0.3333333333   0.0000000000  1
+   0.4666666667   0.1666666667   0.0000000000  1
+   0.5333333333   0.3333333333   0.0000000000  1
+   0.6666666667   0.1666666667   0.0000000000  1
+   0.7333333333   0.3333333333   0.0000000000  1
+   0.8666666667   0.1666666667   0.0000000000  1
+   0.9333333333   0.3333333333   0.0000000000  1
+   0.0666666667   0.6666666667   0.0000000000  1
+   0.1333333333   0.8333333333   0.0000000000  1
+   0.2666666667   0.6666666667   0.0000000000  1
+   0.3333333333   0.8333333333   0.0000000000  1
+   0.4666666667   0.6666666667   0.0000000000  1
+   0.5333333333   0.8333333333   0.0000000000  1
+   0.6666666667   0.6666666667   0.0000000000  1
+   0.7333333333   0.8333333333   0.0000000000  1
+   0.8666666667   0.6666666667   0.0000000000  1
+   0.9333333333   0.8333333333   0.0000000000  1
+%endblock AtomicCoordinatesAndAtomicSpecies
+
+%block kgrid_Monkhorst_Pack
+   4   0   0  0.0
+   0  10   0  0.0
+   0   0   1  0.0
+%endblock Kgrid_Monkhorst_Pack
+
+#
+# DFT, Grid, SCF
+#
+
+XC.functional          GGA
+XC.authors             PBE
+
+MeshCutoff             600.0 Ry
+MaxSCFIterations       500
+DM.MixingWeight        0.1
+DM.NumberPulay         5
+DM.Tolerance           1.d-4
+DM.UseSaveDM           F
+SolutionMethod         diagon
+ElectronicTemperature  0.075 eV
+
+WriteMullikenPop    1
+
+#
+# Raw SIESTA artifacts for Graph2Mat/DeepH fair benchmarking
+#
+SaveHS                           true
+Save.HS                          T
+TS.HS.Save                       T
+XML.Write                        T

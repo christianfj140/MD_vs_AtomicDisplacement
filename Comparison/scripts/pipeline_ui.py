@@ -57,6 +57,7 @@ from material_provenance import (
     read_json_file,
 )
 from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner
+from plot_hamiltonian_derivative_metrics import write_derivative_plot_outputs
 
 try:
     import pty
@@ -7724,6 +7725,319 @@ def archived_run_diagnostic_outputs(result_dir: Path) -> dict[str, dict[str, Any
     return outputs
 
 
+G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
+    "graph2mat_manifest": {
+        "label": "Graph2Mat derivative manifest",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/manifest.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "graph2mat_matrix_metrics": {
+        "label": "Graph2Mat derivative matrix metrics CSV",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_matrix_metrics.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "graph2mat_hermiticity": {
+        "label": "Graph2Mat derivative hermiticity CSV",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_hermiticity.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "graph2mat_stencil_status": {
+        "label": "Graph2Mat derivative stencil status CSV",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/stencil_status.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "deeph_manifest": {
+        "label": "DeepH derivative manifest",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/manifest.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "deeph_matrix_metrics": {
+        "label": "DeepH derivative matrix metrics CSV",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_matrix_metrics.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "deeph_hermiticity": {
+        "label": "DeepH derivative hermiticity CSV",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_hermiticity.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "deeph_stencil_status": {
+        "label": "DeepH derivative stencil status CSV",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/stencil_status.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "plot_payload": {
+        "label": "Derivative plot payload JSON",
+        "relative_path": Path("common_metrics/summary/derivative_plots/derivative_plot_payload.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "plot_manifest": {
+        "label": "Derivative plot manifest JSON",
+        "relative_path": Path("common_metrics/summary/derivative_plots/derivative_plot_manifest.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+}
+
+
+def _g2m_deeph_plot_run_entries() -> list[dict[str, Any]]:
+    payload = G2M_DEEPH_RUNNER.plot_runs()
+    runs = payload.get("runs")
+    return [dict(item) for item in runs] if isinstance(runs, list) else []
+
+
+def resolve_g2m_deeph_run_root(run_id: str | None = None) -> Path | None:
+    requested_run_id = str(run_id or "").strip()
+    status = G2M_DEEPH_RUNNER.status()
+    status_run_root = Path(str(status.get("run_root") or "")).expanduser() if status.get("run_root") else None
+    if requested_run_id:
+        if status_run_root and status_run_root.name == requested_run_id:
+            return status_run_root
+        for entry in _g2m_deeph_plot_run_entries():
+            if str(entry.get("run_id") or "").strip() != requested_run_id:
+                continue
+            run_root = Path(str(entry.get("run_root") or "")).expanduser()
+            return run_root if run_root.exists() else None
+        return None
+    if status_run_root and status_run_root.exists():
+        return status_run_root
+    runs = _g2m_deeph_plot_run_entries()
+    if runs:
+        run_root = Path(str(runs[0].get("run_root") or "")).expanduser()
+        return run_root if run_root.exists() else None
+    return None
+
+
+def _g2m_deeph_derivative_root(run_root: Path, method: str) -> Path | None:
+    root = run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics"
+    return root if root.exists() else None
+
+
+def _g2m_deeph_derivative_artifact_url(run_id: str, kind: str) -> str:
+    return "/api/g2m-deeph/derivative-metrics/artifact?" + urlencode({"run_id": run_id, "kind": kind})
+
+
+def _g2m_deeph_derivative_issue_rows(
+    model_label: str,
+    manifest: dict[str, Any],
+    stencil_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in manifest.get("warnings") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "model": model_label,
+                "severity": item.get("severity") or "warning",
+                "code": item.get("code") or item.get("kind") or "warning",
+                "sample": item.get("sample") or "",
+                "message": item.get("message") or "",
+            }
+        )
+    for item in manifest.get("fatal_errors") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "model": model_label,
+                "severity": "severe",
+                "code": item.get("code") or item.get("kind") or "fatal_error",
+                "sample": item.get("sample") or "",
+                "message": item.get("message") or "",
+            }
+        )
+    for row in stencil_rows:
+        issue_codes = [code.strip() for code in str(row.get("issue_codes") or "").split(";") if code.strip()]
+        issue_messages = [message.strip() for message in str(row.get("issue_messages") or "").split(";") if message.strip()]
+        if not issue_codes and not issue_messages:
+            continue
+        rows.append(
+            {
+                "model": model_label,
+                "severity": "severe" if str(row.get("status") or "") != "ok" else "warning",
+                "code": ", ".join(issue_codes) or "stencil_issue",
+                "sample": row.get("sample") or "",
+                "message": "; ".join(issue_messages) or "Derivative stencil diagnostic issue.",
+            }
+        )
+    return rows
+
+
+def _g2m_deeph_derivative_status_row(model_label: str, root: Path) -> dict[str, Any]:
+    manifest = load_json_object(root / "manifest.json")
+    metric_rows = read_csv_rows(root / "derivative_matrix_metrics.csv")
+    stencil_rows = read_csv_rows(root / "stencil_status.csv")
+    methods_seen = sorted(
+        {
+            str(row.get("finite_difference_method") or "").strip()
+            for row in metric_rows
+            if str(row.get("finite_difference_method") or "").strip()
+        }
+    )
+    delta_values = sorted(
+        {
+            float(row.get("delta_ang"))
+            for row in metric_rows
+            if finite_number(row.get("delta_ang")) is not None
+        }
+    )
+    units_seen = sorted(
+        {
+            str(row.get("derivative_units") or "").strip()
+            for row in metric_rows
+            if str(row.get("derivative_units") or "").strip()
+        }
+    )
+    issue_rows = _g2m_deeph_derivative_issue_rows(model_label, manifest, stencil_rows)
+    return {
+        "method": model_label,
+        "scientific_status": str(manifest.get("scientific_status") or "diagnostic_only"),
+        "finite_difference_method": ", ".join(methods_seen) if methods_seen else str(manifest.get("finite_difference_method") or ""),
+        "delta_ang": ", ".join(f"{value:.6g}" for value in delta_values) if delta_values else "",
+        "derivative_units": ", ".join(units_seen) if units_seen else str(manifest.get("derivative_units") or ""),
+        "stencils_ok": int(manifest.get("stencils_ok") or 0),
+        "stencils_failed": int(manifest.get("stencils_failed") or 0),
+        "diagnostic_only": str(manifest.get("scientific_status") or "diagnostic_only") == "diagnostic_only",
+        "issue_rows": issue_rows,
+    }
+
+
+def _g2m_deeph_derivative_comparison_rows(plot_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    lookup = {str(plot.get("id") or ""): plot for plot in plot_payload.get("plots") or [] if isinstance(plot, dict)}
+    mae_rows = {
+        str(row.get("method") or ""): row
+        for row in lookup.get("dh_mae_by_model", {}).get("rows", [])
+        if isinstance(row, dict)
+    }
+    rmse_rows = {
+        str(row.get("method") or ""): row
+        for row in lookup.get("dh_rmse_by_model", {}).get("rows", [])
+        if isinstance(row, dict)
+    }
+    fro_rows = {
+        str(row.get("method") or ""): row
+        for row in lookup.get("relative_frobenius_by_model", {}).get("rows", [])
+        if isinstance(row, dict)
+    }
+    herm_rows = {
+        str(row.get("method") or ""): row
+        for row in lookup.get("hermiticity_defect_by_model", {}).get("rows", [])
+        if isinstance(row, dict)
+    }
+    methods = sorted(set(mae_rows) | set(rmse_rows) | set(fro_rows) | set(herm_rows))
+    return [
+        {
+            "method": method,
+            "dh_mae_union_eV_per_Ang": (mae_rows.get(method) or {}).get("dh_mae_union_eV_per_Ang"),
+            "dh_rmse_union_eV_per_Ang": (rmse_rows.get(method) or {}).get("dh_rmse_union_eV_per_Ang"),
+            "dh_relative_frobenius_ref": (fro_rows.get(method) or {}).get("dh_relative_frobenius_ref"),
+            "dH_pred_hermiticity_defect": (herm_rows.get(method) or {}).get("dH_pred_hermiticity_defect"),
+            "dH_hermiticity_error_delta": (herm_rows.get(method) or {}).get("dH_hermiticity_error_delta"),
+        }
+        for method in methods
+    ]
+
+
+def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str, Any]:
+    run_root = resolve_g2m_deeph_run_root(run_id)
+    requested_run_id = str(run_id or "").strip()
+    if run_root is None:
+        return {
+            "available": False,
+            "status": "not_computed",
+            "run_id": requested_run_id,
+            "message": "Derivative metrics not computed for this run.",
+            "not_computed": True,
+        }
+    effective_run_id = run_root.name
+    graph2mat_root = _g2m_deeph_derivative_root(run_root, "graph2mat")
+    deeph_root = _g2m_deeph_derivative_root(run_root, "deeph")
+    if graph2mat_root is None and deeph_root is None:
+        return {
+            "available": False,
+            "status": "not_computed",
+            "run_id": effective_run_id,
+            "run_root": str(run_root),
+            "message": "Derivative metrics not computed.",
+            "not_computed": True,
+            "title": "Hamiltonian derivative diagnostics",
+        }
+    output_dir = run_root / "common_metrics" / "summary" / "derivative_plots"
+    plot_result = write_derivative_plot_outputs(
+        derivative_roots=[],
+        output_dir=output_dir,
+        graph2mat_root=graph2mat_root,
+        deeph_root=deeph_root,
+    )
+    plot_payload = plot_result["payload"]
+    status_rows: list[dict[str, Any]] = []
+    issue_rows: list[dict[str, Any]] = []
+    artifact_rows: list[dict[str, Any]] = []
+    for method_key, label, root in (
+        ("graph2mat", "Graph2Mat", graph2mat_root),
+        ("deeph", "DeepH", deeph_root),
+    ):
+        if root is None:
+            continue
+        row = _g2m_deeph_derivative_status_row(label, root)
+        status_rows.append({key: value for key, value in row.items() if key != "issue_rows"})
+        issue_rows.extend(row.get("issue_rows") or [])
+        for artifact_kind, meta in G2M_DEEPH_DERIVATIVE_ARTIFACTS.items():
+            if not artifact_kind.startswith(method_key):
+                continue
+            path = run_root / meta["relative_path"]
+            artifact_rows.append(
+                {
+                    "label": meta["label"],
+                    "kind": artifact_kind,
+                    "exists": path.exists(),
+                    "path": str(path),
+                    "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path.exists() else "",
+                }
+            )
+    for artifact_kind in ("plot_payload", "plot_manifest"):
+        meta = G2M_DEEPH_DERIVATIVE_ARTIFACTS[artifact_kind]
+        path = run_root / meta["relative_path"]
+        artifact_rows.append(
+            {
+                "label": meta["label"],
+                "kind": artifact_kind,
+                "exists": path.exists(),
+                "path": str(path),
+                "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path.exists() else "",
+            }
+        )
+    prominent = [
+        row for row in issue_rows
+        if any(token in f"{row.get('code', '')} {row.get('message', '')}".lower() for token in ("gauge", "orbital", "order", "metadata", "hash"))
+    ]
+    overall_status = (
+        "presentation_ready"
+        if status_rows and all(str(row.get("scientific_status") or "") == "presentation_ready" for row in status_rows)
+        else "diagnostic_only"
+    )
+    return {
+        "available": True,
+        "status": overall_status,
+        "run_id": effective_run_id,
+        "run_root": str(run_root),
+        "title": "Hamiltonian derivative diagnostics",
+        "reference_label": "Reference: finite differences of SIESTA Hamiltonians",
+        "force_constants_label": "SIESTA force constants are not treated as dH/dR",
+        "default_status_text": "Default status: diagnostic-only unless all scientific gates pass",
+        "not_computed": False,
+        "winner": None,
+        "status_rows": status_rows,
+        "issue_rows": issue_rows,
+        "prominent_issue_rows": prominent,
+        "comparison_rows": _g2m_deeph_derivative_comparison_rows(plot_payload),
+        "plot_payload": plot_payload,
+        "artifact_rows": artifact_rows,
+        "scientific_warnings": plot_payload.get("scientific_warnings") or [],
+        "message": "Derivative diagnostics are available for inspection only.",
+    }
+
+
 def weighted_kpoint_matrix_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if str(row.get("row_type") or "") == "weighted_sample"]
 
@@ -15102,6 +15416,24 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                                 if item.strip()
                             )
                 json_response(self, G2M_DEEPH_RUNNER.plots(selected_run_ids=selected_run_ids))
+            elif path == "/api/g2m-deeph/derivative-metrics":
+                query = parse_qs(parsed_url.query)
+                run_id = str((query.get("run_id") or [""])[0] or "").strip() or None
+                json_response(self, g2m_deeph_derivative_metrics_payload(run_id=run_id))
+            elif path == "/api/g2m-deeph/derivative-metrics/artifact":
+                query = parse_qs(parsed_url.query)
+                run_id = str((query.get("run_id") or [""])[0] or "").strip()
+                kind = str((query.get("kind") or [""])[0] or "").strip()
+                if not run_id or not kind:
+                    raise RuntimeError("run_id y kind son obligatorios.")
+                artifact_meta = G2M_DEEPH_DERIVATIVE_ARTIFACTS.get(kind)
+                if artifact_meta is None:
+                    raise RuntimeError(f"Artefacto derivative no permitido: {kind}")
+                run_root = resolve_g2m_deeph_run_root(run_id)
+                if run_root is None:
+                    raise RuntimeError("run_id derivative no encontrado.")
+                artifact_path = run_root / artifact_meta["relative_path"]
+                self._serve_file(artifact_path, content_type=str(artifact_meta["mime_type"]))
             elif path == "/api/g2m-deeph/dataset-size-minimum":
                 json_response(self, dataset_size_minimum_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum/artifact":
@@ -15498,6 +15830,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 ".html": "text/html; charset=utf-8",
                 ".css": "text/css; charset=utf-8",
                 ".js": "application/javascript; charset=utf-8",
+                ".json": "application/json; charset=utf-8",
+                ".csv": "text/csv; charset=utf-8",
                 ".png": "image/png",
                 ".pdf": "application/pdf",
             }.get(path.suffix, "application/octet-stream")

@@ -934,6 +934,170 @@ FINAL_RUN_ROOT="$WORKFLOW_ROOT/runs/<final-run-id>"
     final statistics plus gate status. The evidence bundle and release manifest
     should be archived together.
 
+## Optional Hamiltonian Derivative Diagnostics
+
+Derivative metrics are an optional postprocess and are disabled by default.
+They compare finite differences of Hamiltonian matrices, not force constants,
+phonon dynamical matrices, or finite differences of forces.
+
+For this repository, `dH/dR` means the derivative of Hamiltonian matrix
+elements with respect to Cartesian atomic displacement. The valid reference is
+the finite-difference SIESTA Hamiltonian derivative:
+
+```text
+(H_SIESTA(R + delta) - H_SIESTA(R - delta)) / (2 * delta)
+```
+
+SIESTA force constants, `.FC` files, dynamical matrices, and phonons are not
+valid `dH/dR` references here. They must not be substituted for finite
+differences of SIESTA Hamiltonians.
+
+```yaml
+derivative_metrics:
+  enabled: false
+  finite_difference_method: central
+  split: test
+  require_central: true
+  diagnostic_only: true
+  support_threshold: 1e-12
+```
+
+When enabled, the runner calls
+`Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py` after common H
+metrics. Derivative failures are recorded as diagnostic derivative manifests and
+must not hide or rewrite existing H metric outputs. Aggregation preserves the
+`graph2mat` and `deeph` method labels, adds derivative rows only when
+`derivative_metrics/*.csv` outputs exist, and adds recommendation notes only as
+diagnostics. Derivative metrics are not winner metrics and do not enable
+paper-level claims.
+
+### Required derivative artifacts
+
+Derivative comparisons assume archived Hamiltonian artifacts already exist. The
+minimum expected evidence is:
+
+- `RUN.fdf`
+- `metadata.json`
+- SIESTA Hamiltonian reference such as `*.HSX` or `*.TSHS`
+- predicted Hamiltonian `ML_prediction.HSX`
+- explicit plus/minus displacement metadata
+- `ORB_INDX` and basis/gauge evidence where available
+
+For central finite differences, plus/minus pairing must be unambiguous. Missing
+pairing, mismatched delta, mismatched units, inconsistent atom indexing, or
+missing orbital-ordering evidence must keep the derivative result in a blocked
+or diagnostic-only state.
+
+### Derivative CLI usage
+
+The derivative evaluator consumes archived references and predictions; it does
+not rerun SIESTA, Graph2Mat, or DeepH.
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py \
+  <result_dir> \
+  --method central \
+  --split test \
+  --require-central \
+  --diagnostic-only \
+  --support-threshold 1e-12 \
+  --overwrite
+```
+
+Implemented options include:
+
+- `--method {central,forward,backward}`
+- `--split {test,validation,train,all}`
+- `--require-central`
+- `--diagnostic-only`
+- `--support-threshold <float>`
+- `--max-stencils <int>`
+- `--output-dir <path>`
+- `--source-model {graph2mat,deeph}`
+- `--overwrite`
+
+Outputs are written under `derivative_metrics/`:
+
+- `manifest.json`
+- `stencil_status.csv`
+- `derivative_matrix_metrics.csv`
+- `derivative_support_sweep.csv`
+- `derivative_hermiticity.csv`
+- `derivative_summary.json`
+
+The fail-closed derivative gate checker reads those outputs and classifies what
+can honestly be claimed:
+
+```bash
+python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
+  --derivative-root <result_dir>/derivative_metrics \
+  --output <result_dir>/derivative_metrics/derivative_gate_report.json
+```
+
+If a benchmark run already staged both methods, the same checker can discover
+the two derivative roots from the run directory:
+
+```bash
+python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
+  --run-root <benchmark_run_root> \
+  --output <benchmark_run_root>/common_metrics/summary/derivative_gate_report.json
+```
+
+### Derivative metrics and units
+
+Derivative metrics are reported in `eV/Ang` and remain diagnostic-only by
+default. The current derivative outputs include:
+
+- derivative MAE and RMSE on reference, predicted, and union supports
+- relative Frobenius, relative L1, and cosine diagnostics
+- support precision, recall, F1, false-zero, and false-nonzero diagnostics
+- Hermiticity diagnostics for reference and predicted derivative matrices
+
+Rows also carry derivative metadata such as `atom_index_zero_based`, `axis`,
+`delta_ang`, `finite_difference_method`, `derivative_units`, and
+`comparison_status`.
+
+### Derivative scientific gates
+
+The derivative gate checker emits one of four statuses:
+
+- `internal_diagnostic`
+- `technical_presentation`
+- `paper_level_candidate`
+- `blocked`
+
+Fail-closed blockers include:
+
+- `force_constants_used=true`
+- `reference_definition != siesta_hamiltonian_finite_difference`
+- no central stencils
+- missing plus/minus pairing
+- mismatched shapes
+- mismatched `delta_ang`
+- mismatched units
+- missing or inconsistent atom indexing
+- missing or inconsistent orbital ordering metadata
+- high Hermiticity defect
+- support pattern discontinuity above threshold
+
+Paper-level candidate status is additionally blocked without:
+
+- basis/gauge evidence
+- orbital-ordering evidence
+- delta sensitivity study
+- independent dataset/split metadata
+- proven Graph2Mat/DeepH equivalence when both methods are compared
+
+### Derivative limitations
+
+Current derivative comparisons must be interpreted conservatively:
+
+- gauge, basis, and orbital ordering may still be ambiguous across tools
+- neighbor-list or sparsity discontinuities can dominate derivative errors
+- delta sensitivity can change rankings or invalidate naive comparisons
+- ML prediction noise may be amplified by finite differences
+- no force-constants comparison is implemented or scientifically accepted here
+
 ## Claim Checklist
 
 | Gate | Evidence file or field | Robust claim requirement |

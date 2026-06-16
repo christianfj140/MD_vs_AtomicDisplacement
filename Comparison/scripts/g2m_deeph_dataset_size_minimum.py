@@ -107,6 +107,11 @@ N_MIN_COST_EFF_BOOTSTRAP_REASON = (
     "N_min_cost_eff is excluded from replicate-resampling CI because this diagnostic "
     "does not jointly resample cost and metric under the selected cost_basis."
 )
+N_MIN_COST_EFF_DIAGNOSTIC_LABEL = "observed_cost_error_behavior_only"
+N_MIN_COST_EFF_DIAGNOSTIC_NOTE = (
+    "N_min_cost_eff is a diagnostic based on observed cost-error behavior under the selected cost_basis; "
+    "it is not a joint cost-error uncertainty estimate."
+)
 HIERARCHICAL_UNCERTAINTY_LABEL = "hierarchical uncertainty (paper-readiness audit)"
 HIERARCHICAL_UNCERTAINTY_REPLICATES = 200
 DEFAULT_THRESHOLD_REFERENCE = "DATASET_SIZE_MINIMUM.md#metric-specific-threshold-presets"
@@ -114,6 +119,13 @@ THRESHOLD_BASIS_EXPLORATORY_PRESET = "metric_specific_exploratory_preset"
 THRESHOLD_BASIS_USER_DEFINED = "user_defined_exploratory"
 THRESHOLD_BASIS_EXPLICIT_PROTOCOL = "explicit_threshold_publication_protocol"
 THRESHOLD_MANUAL_PRESET_KEY = "manual"
+THRESHOLD_PROTOCOL_REFERENCE_TYPES = {
+    "internal_protocol",
+    "external_publication",
+    "experimental_validation",
+    "other_documented_protocol",
+    "unspecified_documented_protocol",
+}
 THRESHOLD_SENSITIVITY_MAX_STEP_MULTIPLIER = 1.0
 DATASET_MINIMUM_THRESHOLD_PRESETS: dict[str, list[dict[str, Any]]] = {
     "h_mae_eV_mean": [
@@ -524,6 +536,23 @@ def load_threshold_protocol(path: Path) -> dict[str, Any]:
     return payload
 
 
+def normalize_threshold_protocol_scope(
+    value: Any,
+    *,
+    field_name: str,
+    path: Path,
+) -> str | list[str] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    if isinstance(value, list):
+        normalized_list = [str(item).strip() for item in value if str(item).strip()]
+        return normalized_list or None
+    raise ValueError(f"threshold protocol {field_name} must be a string or list: {path}")
+
+
 def resolve_threshold_protocol(
     *,
     primary_metric: str,
@@ -553,6 +582,15 @@ def resolve_threshold_protocol(
     reference = str(payload.get("reference") or "").strip()
     if not reference:
         raise ValueError(f"threshold protocol missing reference: {path}")
+    reference_type = str(payload.get("reference_type") or "unspecified_documented_protocol").strip()
+    if not reference_type:
+        reference_type = "unspecified_documented_protocol"
+    if reference_type not in THRESHOLD_PROTOCOL_REFERENCE_TYPES:
+        raise ValueError(
+            "threshold protocol reference_type must be one of: "
+            + ", ".join(sorted(THRESHOLD_PROTOCOL_REFERENCE_TYPES))
+            + f": {path}"
+        )
     applicability = payload.get("applies_to_metrics")
     if applicability is None:
         applicability = [primary_metric]
@@ -584,12 +622,31 @@ def resolve_threshold_protocol(
         payload.get("sensitivity_recommendation")
         or "Check N_min sensitivity across the documented threshold range before paper-level use."
     ).strip()
+    validation_scope = normalize_threshold_protocol_scope(
+        payload.get("validation_scope"),
+        field_name="validation_scope",
+        path=path,
+    )
+    material_scope = normalize_threshold_protocol_scope(
+        payload.get("material_scope"),
+        field_name="material_scope",
+        path=path,
+    )
+    metric_scope = normalize_threshold_protocol_scope(
+        payload.get("metric_scope"),
+        field_name="metric_scope",
+        path=path,
+    ) or list(applicability)
     return {
         "threshold_protocol_file": str(path),
         "threshold_protocol_metric": primary_metric,
         "threshold_protocol_threshold_mev": float(protocol_threshold),
         "threshold_protocol_physical_rationale": rationale,
         "threshold_protocol_reference": reference,
+        "threshold_protocol_reference_type": reference_type,
+        "threshold_protocol_validation_scope": validation_scope,
+        "threshold_protocol_material_scope": material_scope,
+        "threshold_protocol_metric_scope": metric_scope,
         "threshold_protocol_applies_to_metrics": applicability,
         "threshold_protocol_sensitivity_recommendation": sensitivity_recommendation,
         "threshold_protocol_sensitivity_thresholds_mev": thresholds_mev,
@@ -615,13 +672,30 @@ def resolve_threshold_metadata(
         threshold_mev,
     )
     if threshold_protocol is not None:
+        reference_type = str(
+            threshold_protocol.get("threshold_protocol_reference_type") or "unspecified_documented_protocol"
+        )
+        if reference_type == "internal_protocol":
+            interpretation = (
+                "Explicit internally documented threshold protocol supplied by the user. "
+                "It is documented for this analysis but is not implied to be a universal external physical reference. "
+                "Paper-candidate use still depends on the recorded sensitivity audit and all other blockers."
+            )
+        elif reference_type in {"external_publication", "experimental_validation"}:
+            interpretation = (
+                "Explicit externally documented threshold protocol supplied by the user. "
+                "Paper-candidate use still depends on the recorded sensitivity audit and all other blockers."
+            )
+        else:
+            interpretation = (
+                "Explicit documented threshold protocol supplied by the user. "
+                "Its scope is limited to the declared protocol metadata and is not implied to be a universal physical rule. "
+                "Paper-candidate use still depends on the recorded sensitivity audit and all other blockers."
+            )
         return {
             "threshold_basis": THRESHOLD_BASIS_EXPLICIT_PROTOCOL,
             "threshold_reference": str(threshold_protocol["threshold_protocol_reference"]),
-            "threshold_interpretation": (
-                "Explicit threshold publication protocol supplied by the user. "
-                "Paper-candidate use still depends on the recorded sensitivity audit."
-            ),
+            "threshold_interpretation": interpretation,
             "threshold_metric_family": metric_family,
             "threshold_is_user_defined": bool(threshold_is_user_defined),
             "threshold_preset_key": (
@@ -1387,7 +1461,13 @@ def analysis_rows_for_aggregation_mode(
 ) -> list[dict[str, Any]]:
     if aggregation_mode == "best_config":
         return best_by_method_size(grouped_rows)
-    return analysis_rows_from_normalized(normalized_rows, aggregation_mode=aggregation_mode)
+    if aggregation_mode == "mean_replicates":
+        return aggregate_rows_mean_replicates(normalized_rows)
+    if aggregation_mode == "mean_seeds_per_config":
+        return aggregate_rows_mean_seeds_per_config(normalized_rows)
+    if aggregation_mode == "best_config_mean":
+        return aggregate_rows_best_config_mean(normalized_rows)
+    raise ValueError(f"Unknown aggregation_mode: {aggregation_mode}")
 
 
 def best_by_method_size(grouped_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4787,10 +4867,26 @@ def build_report(
         lines.append(f"- Threshold interpretation: {threshold_policy.get('threshold_interpretation')}")
         if threshold_policy.get("threshold_protocol_file"):
             lines.append(f"- Threshold protocol file: `{threshold_policy.get('threshold_protocol_file')}`")
+            lines.append(
+                f"- Threshold protocol reference: `{threshold_policy.get('threshold_protocol_reference')}` "
+                f"(type `{threshold_policy.get('threshold_protocol_reference_type') or 'unspecified_documented_protocol'}`)"
+            )
             lines.append(f"- Threshold physical rationale: {threshold_policy.get('threshold_protocol_physical_rationale')}")
             lines.append(
                 f"- Threshold applicability: `{json.dumps(threshold_policy.get('threshold_protocol_applies_to_metrics') or [], ensure_ascii=False)}`"
             )
+            if threshold_policy.get("threshold_protocol_validation_scope") is not None:
+                lines.append(
+                    f"- Threshold validation scope: `{json.dumps(threshold_policy.get('threshold_protocol_validation_scope'), ensure_ascii=False)}`"
+                )
+            if threshold_policy.get("threshold_protocol_material_scope") is not None:
+                lines.append(
+                    f"- Threshold material scope: `{json.dumps(threshold_policy.get('threshold_protocol_material_scope'), ensure_ascii=False)}`"
+                )
+            if threshold_policy.get("threshold_protocol_metric_scope") is not None:
+                lines.append(
+                    f"- Threshold metric scope: `{json.dumps(threshold_policy.get('threshold_protocol_metric_scope'), ensure_ascii=False)}`"
+                )
             lines.append(
                 f"- Threshold sensitivity recommendation: {threshold_policy.get('threshold_protocol_sensitivity_recommendation')}"
             )
@@ -4856,6 +4952,12 @@ def build_report(
     lines.append("  - does not model dependence between dataset sizes")
     lines.append("  - N_min_cost_eff has no replicate-resampling CI in this protocol")
     lines.append(f"  - {boot.get('cost_eff_ci_reason') or N_MIN_COST_EFF_BOOTSTRAP_REASON}")
+    lines.append(
+        f"- N_min_cost_eff diagnostic label: `{boot.get('cost_eff_diagnostic_label') or N_MIN_COST_EFF_DIAGNOSTIC_LABEL}`"
+    )
+    lines.append(
+        f"- N_min_cost_eff diagnostic note: {boot.get('cost_eff_diagnostic_note') or N_MIN_COST_EFF_DIAGNOSTIC_NOTE}"
+    )
     if boot.get("warnings"):
         lines.append(f"- Replicate resampling warnings: `{json.dumps(boot.get('warnings'), ensure_ascii=False)}`")
     lines.append(f"- N_min_cost_eff CI available: {bool(boot.get('cost_eff_ci_available'))}")
@@ -5088,6 +5190,8 @@ def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float
         "cost_eff_ci_available": False,
         "cost_eff_ci_policy": N_MIN_COST_EFF_BOOTSTRAP_POLICY,
         "cost_eff_ci_reason": N_MIN_COST_EFF_BOOTSTRAP_REASON,
+        "cost_eff_diagnostic_label": N_MIN_COST_EFF_DIAGNOSTIC_LABEL,
+        "cost_eff_diagnostic_note": N_MIN_COST_EFF_DIAGNOSTIC_NOTE,
         "cost_eff_ci_basis": None,
         "cost_eff_rows_with_cost": 0,
         "cost_eff_rows_missing_cost": 0,
@@ -5161,6 +5265,8 @@ def replicate_bootstrap_cost_eff_metadata(
         "cost_eff_ci_available": False,
         "cost_eff_ci_policy": N_MIN_COST_EFF_BOOTSTRAP_POLICY,
         "cost_eff_ci_reason": N_MIN_COST_EFF_BOOTSTRAP_REASON,
+        "cost_eff_diagnostic_label": N_MIN_COST_EFF_DIAGNOSTIC_LABEL,
+        "cost_eff_diagnostic_note": N_MIN_COST_EFF_DIAGNOSTIC_NOTE,
         "cost_eff_ci_basis": cost_basis,
         "cost_eff_rows_with_cost": len(rows_with_cost),
         "cost_eff_rows_missing_cost": missing_cost_rows,
@@ -5193,8 +5299,10 @@ def analysis_rows_from_normalized(
         return aggregate_rows_mean_seeds_per_config(normalized_rows)
     if aggregation_mode == "best_config_mean":
         return aggregate_rows_best_config_mean(normalized_rows)
-    grouped = group_config_rows(normalized_rows)
-    return best_by_method_size(grouped)
+    if aggregation_mode == "best_config":
+        grouped = group_config_rows(normalized_rows)
+        return best_by_method_size(grouped)
+    raise ValueError(f"Unknown aggregation_mode: {aggregation_mode}")
 
 
 def quantile_value(values: list[float], q: float) -> float | None:

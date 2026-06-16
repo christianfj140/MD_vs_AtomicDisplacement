@@ -54,6 +54,14 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-plot-runs-all",
             "g2m-deeph-plot-runs-clear",
             "g2m-deeph-plots",
+            "g2m-deeph-derivative-run-select",
+            "g2m-deeph-derivative-refresh",
+            "g2m-deeph-derivative-status",
+            "g2m-deeph-derivative-summary",
+            "g2m-deeph-derivative-comparison",
+            "g2m-deeph-derivative-issues",
+            "g2m-deeph-derivative-plots",
+            "g2m-deeph-derivative-artifacts",
         ):
             self.assertIn(f'id="{control_id}"', self.index_html)
         self.assertIn('value="Comparison/datasets/graphene_w90_joint"', self.index_html)
@@ -108,6 +116,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "/api/g2m-deeph/results",
             "/api/g2m-deeph/plot-runs",
             "/api/g2m-deeph/plots",
+            "/api/g2m-deeph/derivative-metrics",
         ):
             self.assertIn(endpoint, self.app_js)
         self.assertIn("g2mDeephPayload", self.app_js)
@@ -128,6 +137,9 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("Completed Graph2Mat/DeepH metrics", self.app_js)
         self.assertIn("maybeRefreshG2MDeepHLivePlots", self.app_js)
         self.assertIn("g2mDeephPlotsInFlight", self.app_js)
+        self.assertIn("loadG2MDeepHDerivativeMetrics", self.app_js)
+        self.assertIn("renderG2MDeepHDerivativePayload", self.app_js)
+        self.assertIn("renderG2MDeepHDerivativeRunSelector", self.app_js)
         self.assertIn("graph2mat_log_every_n_steps", self.app_js)
         self.assertIn("graph2mat_check_val_every_n_epoch", self.app_js)
         self.assertIn("graph2mat_checkpoint_every_n_epochs", self.app_js)
@@ -205,12 +217,42 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Scientific gates",
             "Adapter equivalence",
             "DeepH split audit",
+            "Hamiltonian derivative diagnostics",
+            "Reference: finite differences of SIESTA Hamiltonians",
+            "SIESTA force constants are not treated as dH/dR",
+            "Default status: diagnostic-only unless all scientific gates pass",
+            "Derivative metrics not computed.",
+            "Model comparison table Graph2Mat vs DeepH",
+            "Warning/fatal error table",
         ):
             self.assertIn(text, self.app_js)
         self.assertIn('status === "diagnostic_only"', self.app_js)
         self.assertIn('status === "no_robust_winner"', self.app_js)
         self.assertIn(".comparison-status-banner.diagnostic", self.styles_css)
         self.assertIn(".comparison-status-banner.invalid", self.styles_css)
+
+    def test_derivative_panel_html_contains_required_text_and_ids(self) -> None:
+        derivative_html = self.index_html.split('<section class="panel g2m-deeph-derivative-panel">', 1)[1].split(
+            '<section class="panel g2m-deeph-dataset-minimum-panel">',
+            1,
+        )[0]
+        for text in (
+            "Hamiltonian derivative diagnostics",
+            "Reference: finite differences of SIESTA Hamiltonians",
+            "SIESTA force constants are not treated as dH/dR",
+            "Default status: diagnostic-only unless all scientific gates pass",
+        ):
+            self.assertIn(text, derivative_html)
+        self.assertNotIn("paper-ready", derivative_html.lower())
+
+    def test_derivative_app_section_has_no_paper_ready_text(self) -> None:
+        derivative_js = self.app_js.split("function renderG2MDeepHDerivativeRunSelector", 1)[1].split(
+            "const DATASET_MINIMUM_CRITERIA",
+            1,
+        )[0]
+        self.assertNotIn("paper-ready", derivative_js.lower())
+        self.assertIn("Derivative metrics not computed.", derivative_js)
+        self.assertIn("Derivative metadata/order diagnostics need attention", derivative_js)
 
     def test_plot_payload_renders_grouped_bar_plots(self) -> None:
         self.assertIn("renderG2MDeepHGroupedBarPlot", self.app_js)
@@ -323,7 +365,13 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Per-size N_eff diagnostics are shown in the N nominal vs N_eff table below.",
             "Manual exploratory threshold",
             "20 meV is not universal",
+            "reference_type=",
             "datasetMinimumSelectedThresholdProtocolFile",
+            "Diagnostic only: paper-ready N_min blocked",
+            "N_min_effective_diagnostic does not replace nominal N_min.",
+            "Paper-candidate nominal N_min under the audited protocol.",
+            "diagnostic observed cost-error behavior; no replicate-resampling CI",
+            "N_min_cost_eff is diagnostic observed cost-error behavior only and has no replicate-resampling CI",
             '"/api/g2m-deeph/dataset-size-minimum"',
             '"/api/g2m-deeph/dataset-size-minimum/preview"',
             '"/api/g2m-deeph/dataset-size-minimum/analyze"',

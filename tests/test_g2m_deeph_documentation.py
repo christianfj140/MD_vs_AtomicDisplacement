@@ -34,6 +34,32 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
         self.assertIn("not exact DeepH local-frame", self.doc)
         self.assertIn("diagnostic_only", self.metrics)
 
+    def test_derivative_reference_and_non_reference_are_documented(self) -> None:
+        for text in (
+            "(H_SIESTA(R + delta) - H_SIESTA(R - delta)) / (2 * delta)",
+            "RUN.fdf",
+            "metadata.json",
+            "ML_prediction.HSX",
+            "ORB_INDX",
+            "basis/gauge evidence",
+            "internal_diagnostic",
+            "technical_presentation",
+            "paper_level_candidate",
+            "blocked",
+            "no force-constants comparison is implemented",
+        ):
+            self.assertIn(text, self.doc)
+            self.assertIn(text, self.metrics)
+        for text in (
+            "derivative of Hamiltonian matrix",
+            "Cartesian atomic displacement",
+            "SIESTA force constants",
+            "dynamical matrices",
+            "phonons are not",
+        ):
+            self.assertIn(text, self.doc)
+            self.assertIn(text, self.metrics)
+
     def test_readme_links_to_dedicated_guide(self) -> None:
         self.assertIn("docs/graph2mat_deeph_benchmark.md", self.readme)
 

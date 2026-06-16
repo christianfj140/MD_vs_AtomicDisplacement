@@ -129,6 +129,65 @@ def write_deeph_adapter_manifest(metrics_root: Path, *, proven: bool = True) -> 
     )
 
 
+def write_derivative_metrics(root: Path, *, status: str = "diagnostic_only") -> None:
+    derivative_root = root / "derivative_metrics"
+    write_json(
+        derivative_root / "manifest.json",
+        {
+            "schema_version": "hamiltonian_derivative_metrics_v1",
+            "scientific_status": status,
+            "force_constants_used": False,
+            "paper_level": False,
+            "stencils_total": 1,
+            "stencils_ok": 1,
+            "stencils_failed": 0,
+            "warnings": [],
+            "fatal_errors": [],
+        },
+    )
+    write_csv(
+        derivative_root / "derivative_matrix_metrics.csv",
+        [
+            {
+                "sample": "dH_s0",
+                "dh_mae_union_eV_per_Ang": 0.2,
+                "dh_rmse_union_eV_per_Ang": 0.3,
+                "dh_support_f1": 0.9,
+                "dh_relative_frobenius_ref": 0.4,
+                "comparison_status": "diagnostic_only",
+            }
+        ],
+    )
+    write_csv(
+        derivative_root / "derivative_hermiticity.csv",
+        [
+            {
+                "sample": "dH_s0",
+                "dH_ref_hermiticity_defect": 0.0,
+                "dH_pred_hermiticity_defect": 0.01,
+            }
+        ],
+    )
+
+
+def write_failed_derivative_metrics(root: Path) -> None:
+    derivative_root = root / "derivative_metrics"
+    write_json(
+        derivative_root / "manifest.json",
+        {
+            "schema_version": "hamiltonian_derivative_metrics_v1",
+            "scientific_status": "diagnostic_only",
+            "force_constants_used": False,
+            "paper_level": False,
+            "stencils_total": 1,
+            "stencils_ok": 0,
+            "stencils_failed": 1,
+            "warnings": [],
+            "fatal_errors": [{"kind": "incomplete_derivative_stencil"}],
+        },
+    )
+
+
 def write_valid_dataset_manifests(root: Path, sample_ids: list[str]) -> tuple[Path, Path]:
     dataset_manifest = root / "benchmark_dataset_manifest.json"
     split_manifest = root / "frozen_split_manifest.json"
@@ -301,6 +360,86 @@ class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
             self.assertTrue(manifest["recommendation"]["robust_recommendation"])
             self.assertTrue((root / "summary" / "common_method_metrics.csv").exists())
             self.assertTrue((root / "summary" / "common_summary.json").exists())
+
+    def test_aggregate_common_metrics_includes_derivative_diagnostics_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_manifest, split_manifest = write_valid_dataset_manifests(root, ["s0"])
+            write_method_metrics(root / "g2m", sample_ids=["s0"], h_mae=0.2)
+            write_method_metrics(root / "deeph", sample_ids=["s0"], h_mae=0.1)
+            write_deeph_adapter_manifest(root / "deeph", proven=True)
+            write_derivative_metrics(root / "g2m_derivative")
+            write_derivative_metrics(root / "deeph_derivative")
+
+            manifest = aggregate_common_metrics(
+                graph2mat_metrics_root=root / "g2m",
+                deeph_metrics_root=root / "deeph",
+                output_dir=root / "summary",
+                frozen_split_manifest_path=split_manifest,
+                dataset_manifest_path=dataset_manifest,
+                graph2mat_derivative_root=root / "g2m_derivative",
+                deeph_derivative_root=root / "deeph_derivative",
+            )
+
+            self.assertTrue(manifest["derivative_metrics"]["available"])
+            self.assertEqual({row["method"] for row in manifest["derivative_summary_rows"]}, {"graph2mat", "deeph"})
+            self.assertFalse(manifest["derivative_metrics"]["winner_metric"])
+            self.assertTrue((root / "summary" / "common_derivative_method_metrics.csv").exists())
+            self.assertTrue(manifest["recommendation"]["diagnostic_notes"])
+            self.assertEqual(manifest["recommendation"]["winner"], "deeph")
+
+    def test_failed_derivative_diagnostics_do_not_hide_h_metric_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_manifest, split_manifest = write_valid_dataset_manifests(root, ["s0"])
+            write_method_metrics(root / "g2m", sample_ids=["s0"], h_mae=0.2)
+            write_method_metrics(root / "deeph", sample_ids=["s0"], h_mae=0.1)
+            write_deeph_adapter_manifest(root / "deeph", proven=True)
+            write_failed_derivative_metrics(root / "g2m_derivative")
+
+            manifest = aggregate_common_metrics(
+                graph2mat_metrics_root=root / "g2m",
+                deeph_metrics_root=root / "deeph",
+                output_dir=root / "summary",
+                frozen_split_manifest_path=split_manifest,
+                dataset_manifest_path=dataset_manifest,
+                graph2mat_derivative_root=root / "g2m_derivative",
+            )
+
+            self.assertEqual(manifest["recommendation"]["winner"], "deeph")
+            self.assertTrue(manifest["derivative_metrics"]["available"])
+            derivative_row = manifest["derivative_summary_rows"][0]
+            self.assertEqual(derivative_row["derivative_stencils_failed"], 1)
+            self.assertEqual(derivative_row["derivative_scientific_status"], "diagnostic_only")
+
+    def test_plot_payload_includes_derivative_diagnostic_plot(self) -> None:
+        payload = build_common_plot_payload(
+            {
+                "status": "valid_reused_joint_dataset",
+                "summary_rows": [
+                    {"method": "graph2mat", "h_mae_eV_mean": 0.2},
+                    {"method": "deeph", "h_mae_eV_mean": 0.1},
+                ],
+                "derivative_summary_rows": [
+                    {
+                        "method": "graph2mat",
+                        "derivative_metrics_available": True,
+                        "dh_mae_union_eV_per_Ang_mean": 0.25,
+                    },
+                    {
+                        "method": "deeph",
+                        "derivative_metrics_available": True,
+                        "dh_mae_union_eV_per_Ang_mean": 0.35,
+                    },
+                ],
+                "warnings": [],
+                "recommendation": {"winner": "deeph", "robust_recommendation": True},
+            }
+        )
+
+        derivative_plot = next(plot for plot in payload["plots"] if plot["id"] == "derivative_mae")
+        self.assertTrue(derivative_plot["diagnostic_only"])
+        self.assertEqual({row["method"] for row in derivative_plot["rows"]}, {"graph2mat", "deeph"})
 
     def test_deeph_adapter_without_proven_equivalence_blocks_winner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

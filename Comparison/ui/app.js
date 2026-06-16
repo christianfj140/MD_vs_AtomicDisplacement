@@ -654,9 +654,11 @@ const state = {
   g2mDeephValidation: null,
   g2mDeephResults: null,
   g2mDeephPlotPayload: null,
+  g2mDeephDerivativePayload: null,
   g2mDeephPlotRuns: [],
   g2mDeephDefaultPlotRunIds: [],
   g2mDeephSelectedPlotRunIds: [],
+  g2mDeephDerivativeRunId: null,
   datasetMinimumPayload: null,
   datasetMinimumRunRootSelection: null,
   datasetMinimumThresholdPresetKey: "h_mae_relaxed_10",
@@ -2162,6 +2164,9 @@ async function loadG2MDeepHResults() {
     validation: state.g2mDeephValidation,
     results: payload.results,
   });
+  loadG2MDeepHDerivativeMetrics().catch((error) => {
+    renderG2MDeepHDerivativePayload({ available: false, not_computed: true, message: error.message });
+  });
   return payload;
 }
 
@@ -2424,6 +2429,277 @@ function renderG2MDeepHPlotsPayload(payload) {
     }
   }
   schedulePlotResize();
+}
+
+function preferredG2MDeepHDerivativeRunId() {
+  const runs = state.g2mDeephPlotRuns || [];
+  if (!runs.length) return state.g2mDeephRunId || null;
+  if (state.g2mDeephDerivativeRunId && runs.some((run) => run.run_id === state.g2mDeephDerivativeRunId)) {
+    return state.g2mDeephDerivativeRunId;
+  }
+  if (state.g2mDeephRunId && runs.some((run) => run.run_id === state.g2mDeephRunId)) return state.g2mDeephRunId;
+  return runs[0]?.run_id || null;
+}
+
+const G2M_DEEPH_DERIVATIVE_TITLE = "Hamiltonian derivative diagnostics";
+const G2M_DEEPH_DERIVATIVE_REFERENCE = "Reference: finite differences of SIESTA Hamiltonians";
+const G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS = "SIESTA force constants are not treated as dH/dR";
+const G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS = "Default status: diagnostic-only unless all scientific gates pass";
+
+function renderG2MDeepHDerivativeRunSelector() {
+  const select = document.getElementById("g2m-deeph-derivative-run-select");
+  if (!select) return;
+  const runs = state.g2mDeephPlotRuns || [];
+  const selectedRunId = preferredG2MDeepHDerivativeRunId();
+  state.g2mDeephDerivativeRunId = selectedRunId;
+  select.textContent = "";
+  if (!runs.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No Graph2Mat vs DeepH runs available yet";
+    select.appendChild(option);
+    return;
+  }
+  for (const run of runs) {
+    const option = document.createElement("option");
+    option.value = run.run_id || "";
+    option.textContent = run.label || run.run_id || run.id;
+    option.selected = option.value === selectedRunId;
+    select.appendChild(option);
+  }
+}
+
+function g2mDeephDerivativeStatusText(payload = {}) {
+  if (payload.not_computed) return "Derivative metrics not computed.";
+  const statuses = (payload.status_rows || []).map((row) => row.scientific_status).filter(Boolean);
+  const distinct = Array.from(new Set(statuses));
+  return distinct.length ? `Derivative status: ${distinct.join(", ")}` : "Derivative diagnostics loaded.";
+}
+
+function g2mDeephDerivativePlotLabel(row = {}) {
+  if (row.method && row.axis) return `${row.axis} · ${row.method}`;
+  if (row.method && row.atom_index_zero_based != null) return `atom ${row.atom_index_zero_based} · ${row.method}`;
+  if (row.method) return String(row.method);
+  if (row.axis) return String(row.axis);
+  if (row.atom_index_zero_based != null) return `atom ${row.atom_index_zero_based}`;
+  return row.sample || "value";
+}
+
+function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
+  const rows = plot.rows || [];
+  const labels = rows.map((row) => g2mDeephDerivativePlotLabel(row));
+  const traces = (plot.metrics || []).map((metric) => ({
+    type: "bar",
+    x: labels,
+    y: rows.map((row) => finiteNumber(row[metric.key])),
+    name: metric.label || metric.key,
+    hovertemplate: `%{x}<br>%{fullData.name}: %{y:.5g}<extra></extra>`,
+  }));
+  const finiteValues = traces.flatMap((trace) => (trace.y || []).filter((value) => value != null));
+  renderPlot(
+    card,
+    traces,
+    plotLayout(plot.title || "Derivative diagnostic", plot.metrics?.[0]?.unit ? `${plot.metrics[0].label} (${plot.metrics[0].unit})` : "", {
+      barmode: "group",
+      annotations: finiteValues.length ? [] : [emptyPlotAnnotation("No derivative values available for this plot.")],
+      xaxis: { title: "Group", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: plot.metrics?.[0]?.unit ? `${plot.metrics[0].label} (${plot.metrics[0].unit})` : plot.title || "", gridcolor: "#edf1f4", zeroline: false },
+    }),
+  );
+}
+
+function renderG2MDeepHDerivativeScatterPlot(card, plot) {
+  const grouped = new Map();
+  for (const row of plot.rows || []) {
+    const key = String(row.method || row.finite_difference_method || "diagnostic");
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(row);
+  }
+  const traces = Array.from(grouped.entries()).map(([key, rows], index) => ({
+    type: "scatter",
+    mode: "markers",
+    name: key,
+    marker: { symbol: g2mDeephIsDeepH(key) ? "triangle-up" : "circle", size: 9, color: plotColor(index) },
+    x: rows.map((row) => finiteNumber(row[plot.x_key || "x"])),
+    y: rows.map((row) => finiteNumber(row[plot.y_key])),
+    text: rows.map((row) => [row.sample, row.axis, row.atom_index_zero_based, row.finite_difference_method].filter((item) => item !== undefined && item !== "").join(" | ")),
+    hovertemplate: `%{x:.5g}, %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
+  }));
+  renderPlot(
+    card,
+    traces,
+    plotLayout(plot.title || "Derivative scatter", plot.y_title || "", {
+      annotations: traces.length ? [] : [emptyPlotAnnotation("No derivative scatter rows available.")],
+      xaxis: { title: plot.x_title || "x", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: plot.y_title || "y", gridcolor: "#edf1f4", zeroline: false },
+      legend: { orientation: "h", y: -0.24 },
+    }),
+  );
+}
+
+function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
+  const container = document.getElementById("g2m-deeph-derivative-plots");
+  if (!container) return;
+  container.textContent = "";
+  const plotPayload = payload.plot_payload || {};
+  if (!payload.available || !plotPayload.available || !(plotPayload.plots || []).length) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "plot-card full placeholder-card";
+    placeholder.textContent = payload.not_computed ? "Derivative metrics not computed." : "No derivative plots available yet.";
+    container.appendChild(placeholder);
+    return;
+  }
+  for (const plot of plotPayload.plots || []) {
+    const card = document.createElement("div");
+    card.id = `g2m-deeph-derivative-plot-${plot.id || container.children.length}`;
+    card.className = "plot-card wide";
+    container.appendChild(card);
+    if (window.Plotly && plot.kind === "grouped_bar") {
+      renderG2MDeepHDerivativeGroupedBarPlot(card, plot);
+    } else if (window.Plotly && plot.kind === "scatter") {
+      renderG2MDeepHDerivativeScatterPlot(card, plot);
+    } else {
+      card.textContent = plot.title || "Derivative diagnostic plot";
+    }
+  }
+  schedulePlotResize();
+}
+
+function renderG2MDeepHDerivativeArtifacts(payload = {}) {
+  const container = document.getElementById("g2m-deeph-derivative-artifacts");
+  if (!container) return;
+  container.textContent = "";
+  const rows = payload.artifact_rows || [];
+  if (!rows.length) {
+    container.className = "result-list muted-text";
+    container.textContent = payload.not_computed ? "Derivative metrics not computed." : "No derivative CSV or manifest links available.";
+    return;
+  }
+  container.className = "result-list g2m-deeph-derivative-artifact-list";
+  for (const row of rows) {
+    const line = document.createElement("div");
+    if (row.exists && row.url) {
+      const link = document.createElement("a");
+      link.href = row.url;
+      link.textContent = row.label || row.kind;
+      link.className = "g2m-deeph-derivative-artifact-link";
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      line.appendChild(link);
+    } else {
+      const text = document.createElement("span");
+      text.textContent = `${row.label || row.kind}: not available`;
+      line.appendChild(text);
+    }
+    container.appendChild(line);
+  }
+}
+
+function renderG2MDeepHDerivativePayload(payload = null) {
+  const statusEl = document.getElementById("g2m-deeph-derivative-status");
+  const summaryEl = document.getElementById("g2m-deeph-derivative-summary");
+  const issuesEl = document.getElementById("g2m-deeph-derivative-issues");
+  const comparisonEl = document.getElementById("g2m-deeph-derivative-comparison");
+  if (!statusEl || !summaryEl || !issuesEl || !comparisonEl) return;
+  statusEl.className = "result-list";
+  statusEl.textContent = "";
+  summaryEl.textContent = "";
+  comparisonEl.textContent = "";
+  issuesEl.textContent = "";
+  if (!payload) {
+    statusEl.className = "result-list muted-text";
+    statusEl.textContent = "Derivative diagnostics not loaded yet.";
+    renderG2MDeepHDerivativePlotsPayload({});
+    renderG2MDeepHDerivativeArtifacts({});
+    return;
+  }
+  const banner = document.createElement("div");
+  banner.className = "comparison-status-banner diagnostic";
+  banner.textContent = payload.not_computed
+    ? "Derivative metrics not computed."
+    : `${g2mDeephDerivativeStatusText(payload)} No derivative winner is shown.`;
+  statusEl.appendChild(banner);
+  appendKeyValue(statusEl, "Panel", payload.title || G2M_DEEPH_DERIVATIVE_TITLE);
+  appendKeyValue(statusEl, "Reference", payload.reference_label || G2M_DEEPH_DERIVATIVE_REFERENCE);
+  appendKeyValue(statusEl, "Force constants", payload.force_constants_label || G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS);
+  appendKeyValue(statusEl, "Default status", payload.default_status_text || G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS);
+  appendKeyValue(statusEl, "Run", payload.run_id || "-");
+  appendKeyValue(statusEl, "finite_difference_method", (payload.status_rows || []).map((row) => row.finite_difference_method).filter(Boolean).join(" | ") || "-");
+  appendKeyValue(statusEl, "delta_ang", (payload.status_rows || []).map((row) => row.delta_ang).filter(Boolean).join(" | ") || "-");
+  appendKeyValue(statusEl, "derivative_units", (payload.status_rows || []).map((row) => row.derivative_units).filter(Boolean).join(" | ") || "-");
+  if ((payload.prominent_issue_rows || []).length) {
+    const prominent = document.createElement("div");
+    prominent.className = "comparison-status-banner diagnostic";
+    prominent.textContent = "Derivative metadata/order diagnostics need attention before any stronger interpretation.";
+    statusEl.appendChild(prominent);
+  }
+  const issueRows = [];
+  const seenIssueKeys = new Set();
+  for (const row of [...(payload.prominent_issue_rows || []), ...(payload.issue_rows || [])]) {
+    const key = [row.model || "", row.code || "", row.sample || "", row.message || ""].join("|");
+    if (seenIssueKeys.has(key)) continue;
+    seenIssueKeys.add(key);
+    issueRows.push(row);
+  }
+  appendG2MDeepHTable(
+    summaryEl,
+    "Derivative status summary",
+    [
+      { key: "method", label: "Method" },
+      { key: "scientific_status", label: "Status" },
+      { key: "finite_difference_method", label: "finite_difference_method" },
+      { key: "delta_ang", label: "delta_ang (Ang)" },
+      { key: "derivative_units", label: "derivative_units" },
+      { key: "stencils_ok", label: "stencils ok", format: g2mDeephIntegerValue },
+      { key: "stencils_failed", label: "stencils failed", format: g2mDeephIntegerValue },
+    ],
+    payload.status_rows || [],
+    payload.not_computed ? "Derivative metrics not computed." : "No derivative status rows available.",
+  );
+  appendG2MDeepHTable(
+    comparisonEl,
+    "Model comparison table Graph2Mat vs DeepH",
+    [
+      { key: "method", label: "Method" },
+      { key: "dh_mae_union_eV_per_Ang", label: "dH MAE (eV/Ang)" },
+      { key: "dh_rmse_union_eV_per_Ang", label: "dH RMSE (eV/Ang)" },
+      { key: "dh_relative_frobenius_ref", label: "Relative Frobenius" },
+      { key: "dH_pred_hermiticity_defect", label: "Predicted hermiticity defect" },
+      { key: "dH_hermiticity_error_delta", label: "Hermiticity error delta" },
+    ],
+    payload.comparison_rows || [],
+    payload.not_computed ? "Derivative metrics not computed." : "No derivative model-comparison rows available.",
+  );
+  appendG2MDeepHTable(
+    issuesEl,
+    "Warning/fatal error table",
+    [
+      { key: "model", label: "Method" },
+      { key: "severity", label: "Severity" },
+      { key: "code", label: "Code" },
+      { key: "sample", label: "Sample" },
+      { key: "message", label: "Message" },
+    ],
+    issueRows,
+    payload.not_computed ? "Derivative metrics not computed." : "No derivative warnings or fatal errors.",
+  );
+  renderG2MDeepHDerivativePlotsPayload(payload);
+  renderG2MDeepHDerivativeArtifacts(payload);
+}
+
+async function loadG2MDeepHDerivativeMetrics({ runId = null } = {}) {
+  if (!state.g2mDeephPlotRuns?.length) {
+    await loadG2MDeepHPlotRuns({ preserveSelection: true });
+  }
+  renderG2MDeepHDerivativeRunSelector();
+  const selectedRunId = runId || preferredG2MDeepHDerivativeRunId();
+  state.g2mDeephDerivativeRunId = selectedRunId;
+  const query = selectedRunId ? `?run_id=${encodeURIComponent(selectedRunId)}` : "";
+  const payload = await request(`/api/g2m-deeph/derivative-metrics${query}`);
+  state.g2mDeephDerivativePayload = payload;
+  renderG2MDeepHDerivativeRunSelector();
+  renderG2MDeepHDerivativePayload(payload);
+  return payload;
 }
 
 const DATASET_MINIMUM_CRITERIA = {
@@ -3404,6 +3680,22 @@ function renderDatasetMinimumTable(output, axis) {
   const container = document.getElementById("dataset-minimum-table");
   if (!container) return;
   container.textContent = "";
+  const blockers = Array.isArray(output?.paper_level_blockers) ? output.paper_level_blockers.filter(Boolean) : [];
+  const claimModeActual = datasetMinimumOutputClaimModeActual(output);
+  const claimStatus = String(output?.scientific_claim_status || "diagnostic_only");
+  const paperReadyNominal =
+    claimModeActual === "paper_candidate" &&
+    claimStatus === "paper_candidate_nominal_with_n_eff_diagnostic" &&
+    !blockers.length;
+  const statusBanner = document.createElement("div");
+  statusBanner.className = "comparison-status-banner";
+  statusBanner.classList.toggle("diagnostic", !paperReadyNominal);
+  statusBanner.classList.toggle("invalid", !paperReadyNominal);
+  statusBanner.textContent = paperReadyNominal
+    ? "Paper-candidate nominal N_min under the audited protocol. Effective-N values remain diagnostic only and do not replace nominal N_min."
+    : `Diagnostic only: paper-ready N_min blocked${blockers.length ? ` (${blockers.slice(0, 4).join("; ")})` : ""}. Effective-N values remain diagnostic only and N_min_effective_diagnostic does not replace nominal N_min.`;
+  container.appendChild(statusBanner);
+
   const thresholds = output?.thresholds || {};
   const methods = Object.keys(thresholds).sort();
   if (!methods.length) {
@@ -3439,7 +3731,7 @@ function renderDatasetMinimumTable(output, axis) {
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_abs", axis)}</td>
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_rel_tol", axis)}</td>
       <td>${datasetMinimumFormatNMinWithCi(output, method, "N_min_plateau", axis)}</td>
-      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(no replicate-resampling CI)</span></td>
+      <td>${datasetMinimumFormatN(datasetMinimumDisplayN(output, method, row.N_min_cost_eff, axis))} <span class="muted-text">(diagnostic observed cost-error behavior; no replicate-resampling CI)</span></td>
     `;
     body.appendChild(tr);
   }
@@ -4607,7 +4899,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
   const requestedThreshold = datasetMinimumSelectedThreshold();
   const outputThreshold = finiteNumber(output.threshold_mev);
   const thresholdPolicyNote = output.threshold_basis
-    ? ` Threshold policy: basis=${output.threshold_basis}, reference=${output.threshold_reference || "n/a"}, family=${output.threshold_metric_family || "unknown"}, user_defined=${Boolean(output.threshold_is_user_defined)}.`
+    ? ` Threshold policy: basis=${output.threshold_basis}, reference=${output.threshold_reference || "n/a"}, reference_type=${output.threshold_protocol_reference_type || "n/a"}, family=${output.threshold_metric_family || "unknown"}, user_defined=${Boolean(output.threshold_is_user_defined)}.`
     : "";
   const thresholdWarningNote = output.threshold_is_user_defined
     ? " WARNING: manual threshold is user_defined_exploratory."
@@ -4678,7 +4970,7 @@ function renderDatasetMinimumStatus(output, payload, plotOutput = null) {
     ? ` Replicate-resampling CI warnings: ${bootstrap.warnings.slice(0, 4).join("; ")}.`
     : "";
   const costEffBootstrapNote = bootstrap.cost_eff_ci_available === false
-    ? ` N_min_cost_eff has no replicate-resampling CI (${bootstrap.cost_eff_ci_reason || "cost and metric are not jointly bootstrapped"}).`
+    ? ` N_min_cost_eff is diagnostic observed cost-error behavior only and has no replicate-resampling CI (${bootstrap.cost_eff_ci_reason || "cost and metric are not jointly bootstrapped"}).`
     : "";
   const hierarchical = datasetMinimumHierarchicalUncertainty(output);
   const hierarchicalLevels = hierarchical.levels || {};
@@ -5045,6 +5337,7 @@ async function loadG2MDeepHPlotRuns({ preserveSelection = true } = {}) {
     setG2MDeepHSelectedPlotRuns(state.g2mDeephSelectedPlotRunIds);
   }
   renderG2MDeepHPlotRunSelector();
+  renderG2MDeepHDerivativeRunSelector();
   return payload;
 }
 
@@ -5262,6 +5555,7 @@ async function pollG2MDeepHLogs() {
   if (wasRunning && !payload.status?.running) {
     await loadG2MDeepHResults();
     await loadG2MDeepHPlotRuns();
+    await loadG2MDeepHDerivativeMetrics();
   } else if (payload.status?.running) {
     await maybeRefreshG2MDeepHLivePlots(payload.status);
   }
@@ -11248,7 +11542,9 @@ function setupTabs() {
         pollG2MDeepHStatus().catch((error) => showToast(error.message));
         loadG2MDeepHDatasets().catch((error) => showToast(error.message));
         loadG2MDeepHResults().catch((error) => showToast(error.message));
-        loadG2MDeepHPlotRuns({ preserveSelection: true }).catch((error) => showToast(error.message));
+        loadG2MDeepHPlotRuns({ preserveSelection: true })
+          .then(() => loadG2MDeepHDerivativeMetrics())
+          .catch((error) => showToast(error.message));
         loadDatasetMinimum().catch((error) => showToast(error.message));
       }
     });
@@ -11436,9 +11732,20 @@ function setupEvents() {
     stopG2MDeepHBenchmark().catch((error) => showToast(error.message));
   });
   document.getElementById("g2m-deeph-refresh-results")?.addEventListener("click", () => {
-    Promise.all([loadG2MDeepHResults(), loadG2MDeepHPlotRuns().then(() => loadG2MDeepHPlots()), loadDatasetMinimum()])
+    Promise.all([
+      loadG2MDeepHResults(),
+      loadG2MDeepHPlotRuns().then(() => Promise.all([loadG2MDeepHPlots(), loadG2MDeepHDerivativeMetrics()])),
+      loadDatasetMinimum(),
+    ])
       .then(() => showToast("Graph2Mat vs DeepH refreshed"))
       .catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-derivative-refresh")?.addEventListener("click", () => {
+    loadG2MDeepHDerivativeMetrics().catch((error) => showToast(error.message));
+  });
+  document.getElementById("g2m-deeph-derivative-run-select")?.addEventListener("change", (event) => {
+    state.g2mDeephDerivativeRunId = event.target?.value || null;
+    loadG2MDeepHDerivativeMetrics({ runId: state.g2mDeephDerivativeRunId }).catch((error) => showToast(error.message));
   });
   document.getElementById("g2m-deeph-dataset-minimum-refresh")?.addEventListener("click", () => {
     loadDatasetMinimum()

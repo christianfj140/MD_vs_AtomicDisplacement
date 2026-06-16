@@ -257,6 +257,10 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
                         "threshold_mev": 10.0,
                         "physical_rationale": "Test-only documented H-MAE publication threshold.",
                         "reference": "internal_protocol_v1",
+                        "reference_type": "internal_protocol",
+                        "validation_scope": "documented_internal_paper_audit_protocol",
+                        "material_scope": ["graphene_w90"],
+                        "metric_scope": ["h_mae_eV_mean"],
                         "applies_to_metrics": ["h_mae_eV_mean"],
                         "recommended_sensitivity_thresholds_mev": [8.0, 10.0, 12.0],
                         "sensitivity_recommendation": "Audit nearby thresholds before paper-level use.",
@@ -275,7 +279,105 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
         self.assertEqual(metadata["threshold_basis"], minimum.THRESHOLD_BASIS_EXPLICIT_PROTOCOL)
         self.assertTrue(metadata["threshold_paper_justified"])
         self.assertEqual(metadata["threshold_protocol_reference"], "internal_protocol_v1")
+        self.assertEqual(metadata["threshold_protocol_reference_type"], "internal_protocol")
+        self.assertEqual(metadata["threshold_protocol_validation_scope"], "documented_internal_paper_audit_protocol")
+        self.assertEqual(metadata["threshold_protocol_material_scope"], ["graphene_w90"])
+        self.assertEqual(metadata["threshold_protocol_metric_scope"], ["h_mae_eV_mean"])
         self.assertEqual(metadata["threshold_protocol_sensitivity_thresholds_mev"], [8.0, 10.0, 12.0])
+        self.assertIn("not implied to be a universal external physical reference", metadata["threshold_interpretation"])
+
+    def test_threshold_metadata_for_explicit_protocol_defaults_reference_type_for_legacy_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol = Path(tmp) / "threshold_protocol.json"
+            protocol.write_text(
+                json.dumps(
+                    {
+                        "metric": "h_mae_eV_mean",
+                        "threshold_mev": 10.0,
+                        "physical_rationale": "Legacy documented threshold.",
+                        "reference": "legacy_protocol_v1",
+                        "applies_to_metrics": ["h_mae_eV_mean"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metadata = minimum.resolve_threshold_metadata(
+                primary_metric="h_mae_eV_mean",
+                threshold_mev=10.0,
+                threshold_protocol_file=str(protocol),
+            )
+
+        self.assertEqual(metadata["threshold_protocol_reference_type"], "unspecified_documented_protocol")
+        self.assertTrue(metadata["threshold_paper_justified"])
+        self.assertIn("not implied to be a universal physical rule", metadata["threshold_interpretation"])
+
+    def test_threshold_protocol_missing_reference_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol = Path(tmp) / "threshold_protocol.json"
+            protocol.write_text(
+                json.dumps(
+                    {
+                        "metric": "h_mae_eV_mean",
+                        "threshold_mev": 10.0,
+                        "physical_rationale": "Threshold without reference.",
+                        "applies_to_metrics": ["h_mae_eV_mean"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as exc:
+                minimum.resolve_threshold_metadata(
+                    primary_metric="h_mae_eV_mean",
+                    threshold_mev=10.0,
+                    threshold_protocol_file=str(protocol),
+                )
+        self.assertIn("threshold protocol missing reference", str(exc.exception))
+
+    def test_threshold_protocol_metric_mismatch_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol = Path(tmp) / "threshold_protocol.json"
+            protocol.write_text(
+                json.dumps(
+                    {
+                        "metric": "low_energy_rmse_eV",
+                        "threshold_mev": 10.0,
+                        "physical_rationale": "Wrong metric protocol.",
+                        "reference": "protocol_v1",
+                        "applies_to_metrics": ["low_energy_rmse_eV"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as exc:
+                minimum.resolve_threshold_metadata(
+                    primary_metric="h_mae_eV_mean",
+                    threshold_mev=10.0,
+                    threshold_protocol_file=str(protocol),
+                )
+        self.assertIn("threshold protocol metric mismatch", str(exc.exception))
+
+    def test_threshold_protocol_threshold_mismatch_fails_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            protocol = Path(tmp) / "threshold_protocol.json"
+            protocol.write_text(
+                json.dumps(
+                    {
+                        "metric": "h_mae_eV_mean",
+                        "threshold_mev": 12.0,
+                        "physical_rationale": "Wrong threshold protocol.",
+                        "reference": "protocol_v1",
+                        "applies_to_metrics": ["h_mae_eV_mean"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError) as exc:
+                minimum.resolve_threshold_metadata(
+                    primary_metric="h_mae_eV_mean",
+                    threshold_mev=10.0,
+                    threshold_protocol_file=str(protocol),
+                )
+        self.assertIn("threshold protocol threshold mismatch", str(exc.exception))
 
     def test_scientific_status_blocks_exploratory_threshold_basis(self) -> None:
         status = minimum.scientific_claim_status_payload(
@@ -1113,6 +1215,14 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             ("paper_candidate", "paper_candidate_only_if_config_selection_policy_is_locked"),
         )
 
+    def test_analysis_rows_for_aggregation_mode_rejects_unknown_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            minimum.analysis_rows_for_aggregation_mode(
+                [],
+                [],
+                aggregation_mode="median",
+            )
+
     def test_mean_by_method_size_averages_same_x_across_sources(self) -> None:
         rows = [
             {
@@ -1583,6 +1693,112 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             self.assertEqual(len(summary["aggregated_rows"]), 1)
             self.assertAlmostEqual(summary["aggregated_rows"][0]["primary_metric_mev_mean"], 10.0)
 
+    def test_analyze_supports_all_aggregation_modes_on_small_fixture(self) -> None:
+        payload = {
+            "metric_scaling_rows": [
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 10,
+                    "config_id": "policy_a-seed1",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.010,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 10,
+                    "config_id": "policy_a-seed2",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.012,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 10,
+                    "config_id": "policy_b-seed1",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.020,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 10,
+                    "config_id": "policy_b-seed2",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.022,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 20,
+                    "config_id": "policy_a-seed1",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.008,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 20,
+                    "config_id": "policy_a-seed2",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.009,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 20,
+                    "config_id": "policy_b-seed1",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.016,
+                },
+                {
+                    "run_id": "r",
+                    "method": "graph2mat",
+                    "dataset_size": 20,
+                    "config_id": "policy_b-seed2",
+                    "epoch_label": "10 epochs",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.017,
+                },
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            for aggregation_mode in minimum.AGGREGATION_MODES:
+                output_dir = base / f"out_{aggregation_mode}"
+                args = make_analyze_args(
+                    run_root=[str(root)],
+                    output_dir=str(output_dir),
+                    aggregation_mode=aggregation_mode,
+                    threshold_mev=15.0,
+                )
+
+                try:
+                    summary = minimum.analyze(args)
+                except NameError as exc:  # pragma: no cover - regression guard
+                    self.fail(f"analyze() raised NameError for aggregation_mode={aggregation_mode}: {exc}")
+
+                self.assertEqual(summary["status"], "ok")
+                self.assertEqual(summary["aggregation_mode"], aggregation_mode)
+                self.assertTrue(summary["aggregated_rows"], aggregation_mode)
+                self.assertTrue((output_dir / "dataset_size_minimum_summary.json").exists())
+
     def test_bootstrap_disabled_leaves_enabled_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1787,6 +2003,8 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertEqual(result["cost_eff_ci_policy"], "excluded_no_joint_metric_cost_resampling")
         self.assertIn("replicate_bootstrap_excludes_n_min_cost_eff", result["warnings"])
         self.assertNotIn("N_min_cost_eff", result["criteria"])
+        self.assertEqual(result["cost_eff_diagnostic_label"], "observed_cost_error_behavior_only")
+        self.assertIn("observed cost-error behavior", result["cost_eff_diagnostic_note"])
 
     def test_bootstrap_exposes_missing_cost_warning_for_selected_basis(self) -> None:
         rows = [
@@ -2790,8 +3008,13 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
 
             summary = response["summary"]
             self.assertEqual(summary["status"], "ok")
+            self.assertEqual(summary["aggregation_mode"], "mean_seeds_per_config")
+            self.assertIn(summary["claim_mode_requested"], {"diagnostic", "paper_candidate"})
+            self.assertIn(summary["claim_mode_actual"], {"diagnostic", "paper_candidate"})
             self.assertIn("graph2mat", summary["thresholds"])
             self.assertIn("N_min_rel_tol", summary["thresholds"]["graph2mat"])
+            self.assertIn("warnings", summary)
+            self.assertIn("outputs", summary)
             self.assertIn("replicate_bootstrap", summary)
             self.assertIn("scientific_claim_status", summary)
             self.assertIn("paper_level_blockers", summary)
@@ -2987,6 +3210,8 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                         },
                     )
                     self.assertEqual(analyzed["status"], "ok")
+                    self.assertIn("summary", analyzed)
+                    self.assertIn("outputs", analyzed["summary"])
                     self.assertTrue(recorded_commands)
                     command = recorded_commands[-1]
                     self.assertEqual(command[command.index("--primary-metric") + 1], "h_mae_eV_mean")
@@ -3013,16 +3238,23 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                         item for item in after["outputs"]
                         if Path(item["output_dir"]).resolve() == output_dir.resolve()
                     )
+                    self.assertEqual(latest["status"], "ok")
+                    self.assertEqual(latest["aggregation_mode"], "mean_seeds_per_config")
+                    self.assertEqual(latest["actual_aggregation_mode"], "mean_seeds_per_config")
                     self.assertIn("scientific_claim_status", latest)
                     self.assertIn("paper_level_blockers", latest)
                     self.assertIn("n_min_basis", latest)
+                    self.assertIn("thresholds", latest)
+                    self.assertIn("warnings", latest)
                     self.assertEqual(latest["threshold_preset_key"], "h_mae_relaxed_20")
                     self.assertEqual(latest["claim_mode_requested"], "paper_candidate")
                     self.assertIn(latest["claim_mode_actual"], {"diagnostic", "paper_candidate"})
+                    self.assertTrue(Path(latest["summary_path"]).exists())
                     self.assertTrue(Path(latest["report_path"]).exists())
                     self.assertTrue(latest["best_rows"])
                     self.assertTrue(latest["aggregated_rows"])
                     self.assertTrue(latest["artifact_outputs"])
+                    self.assertIn("graph2mat", latest["thresholds"])
 
                     artifact = latest["artifact_outputs"][0]
                     expected_mime = "image/png" if artifact["name"].endswith(".png") else "application/pdf"
@@ -4084,6 +4316,10 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         )
         self.assertEqual(protocol["metric"], "h_mae_eV_mean")
         self.assertEqual(protocol["threshold_mev"], 10.0)
+        self.assertEqual(protocol["reference_type"], "internal_protocol")
+        self.assertEqual(protocol["validation_scope"], "documented_internal_paper_audit_protocol")
+        self.assertEqual(protocol["material_scope"], ["graphene_w90"])
+        self.assertEqual(protocol["metric_scope"], ["h_mae_eV_mean"])
         self.assertEqual(protocol["recommended_sensitivity_thresholds_mev"], [8.0, 10.0, 12.0])
 
     def test_analyze_blocks_paper_claim_when_n_eff_much_smaller_than_nominal(self) -> None:
@@ -4464,6 +4700,344 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         self.assertEqual(status["claim_mode_requested"], "paper_candidate")
         self.assertEqual(status["claim_mode_actual"], "paper_candidate")
 
+    def test_scientific_status_paper_candidate_degrades_on_temporal_gap_blocker(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": ["temporal_gap_le_1_adjacent_frames_may_leak"],
+                "N_eff_by_dataset_size": {"20": 16.0, "30": 24.0, "40": 32.0, "50": 40.0, "60": 48.0},
+                "autocorrelation_available_by_dataset_size": {
+                    "20": True,
+                    "30": True,
+                    "40": True,
+                    "50": True,
+                    "60": True,
+                },
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20, "available_sizes": [20, 30, 40, 50, 60]}},
+            threshold_metadata={
+                "threshold_basis": "paper_protocol_locked_threshold",
+                "threshold_reference": "test_reference",
+                "threshold_interpretation": "test-only locked threshold protocol",
+                "threshold_metric_family": "hamiltonian_element_error_mev",
+                "threshold_is_user_defined": False,
+                "threshold_paper_justified": True,
+            },
+            claim_mode_requested="paper_candidate",
+            aggregation_mode="mean_seeds_per_config",
+            requested_aggregation_mode="mean_seeds_per_config",
+            actual_aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "minimum_fit_points_for_paper_candidate": minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE,
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fit_predictive_stability_by_left_out_N={
+                "status": "ok",
+                "methods": {"graph2mat": {"paper_level_blockers": []}},
+            },
+            hierarchical_uncertainty={
+                "status": "paper_ready_supporting_uncertainty_available",
+                "paper_ready": True,
+                "paper_level_blockers": [],
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertEqual(status["claim_mode_requested"], "paper_candidate")
+        self.assertEqual(status["claim_mode_actual"], "diagnostic")
+        self.assertIn("paper_blocked_if_temporal_gap_le_1", status["paper_level_blockers"])
+
+    def test_scientific_status_paper_candidate_degrades_when_n_eff_much_smaller_than_nominal(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 10.0,
+                "warnings": [],
+                "N_eff_by_dataset_size": {"20": 2.0, "30": 3.0, "40": 4.0, "50": 5.0, "60": 6.0},
+                "autocorrelation_available_by_dataset_size": {
+                    "20": True,
+                    "30": True,
+                    "40": True,
+                    "50": True,
+                    "60": True,
+                },
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20, "available_sizes": [20, 30, 40, 50, 60]}},
+            threshold_metadata={
+                "threshold_basis": "paper_protocol_locked_threshold",
+                "threshold_reference": "test_reference",
+                "threshold_interpretation": "test-only locked threshold protocol",
+                "threshold_metric_family": "hamiltonian_element_error_mev",
+                "threshold_is_user_defined": False,
+                "threshold_paper_justified": True,
+            },
+            claim_mode_requested="paper_candidate",
+            aggregation_mode="mean_seeds_per_config",
+            requested_aggregation_mode="mean_seeds_per_config",
+            actual_aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "minimum_fit_points_for_paper_candidate": minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE,
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fit_predictive_stability_by_left_out_N={
+                "status": "ok",
+                "methods": {"graph2mat": {"paper_level_blockers": []}},
+            },
+            hierarchical_uncertainty={
+                "status": "paper_ready_supporting_uncertainty_available",
+                "paper_ready": True,
+                "paper_level_blockers": [],
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertEqual(status["claim_mode_actual"], "diagnostic")
+        self.assertIn("paper_blocked_if_n_eff_much_smaller_than_nominal", status["paper_level_blockers"])
+        self.assertLess(status["N_eff_over_N_nominal"], minimum.N_EFF_MUCH_SMALLER_THAN_NOMINAL_RATIO)
+
+    def test_scientific_status_paper_candidate_degrades_on_missing_threshold_crossing_in_sensitivity(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": [],
+                "N_eff_by_dataset_size": {"20": 16.0, "30": 24.0, "40": 32.0, "50": 40.0, "60": 48.0},
+                "autocorrelation_available_by_dataset_size": {
+                    "20": True,
+                    "30": True,
+                    "40": True,
+                    "50": True,
+                    "60": True,
+                },
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20, "available_sizes": [20, 30, 40, 50, 60]}},
+            threshold_metadata={
+                "threshold_basis": "paper_protocol_locked_threshold",
+                "threshold_reference": "test_reference",
+                "threshold_interpretation": "test-only locked threshold protocol",
+                "threshold_metric_family": "hamiltonian_element_error_mev",
+                "threshold_is_user_defined": False,
+                "threshold_paper_justified": True,
+            },
+            claim_mode_requested="paper_candidate",
+            aggregation_mode="mean_seeds_per_config",
+            requested_aggregation_mode="mean_seeds_per_config",
+            actual_aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "minimum_fit_points_for_paper_candidate": minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE,
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fit_predictive_stability_by_left_out_N={
+                "status": "ok",
+                "methods": {"graph2mat": {"paper_level_blockers": []}},
+            },
+            hierarchical_uncertainty={
+                "status": "paper_ready_supporting_uncertainty_available",
+                "paper_ready": True,
+                "paper_level_blockers": [],
+            },
+            threshold_sensitivity={
+                "enabled": True,
+                "status": "ok",
+                "thresholds_mev": [8.0, 10.0, 12.0],
+                "by_method": {
+                    "graph2mat": {
+                        "paper_level_blockers": [
+                            "paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat"
+                        ]
+                    }
+                },
+                "paper_level_blockers": ["paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat"],
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertEqual(status["claim_mode_actual"], "diagnostic")
+        self.assertIn(
+            "paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat",
+            status["paper_level_blockers"],
+        )
+
+    def test_internal_threshold_protocol_does_not_override_sensitivity_or_temporal_blockers(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 80.0,
+                "warnings": ["temporal_gap_le_1_adjacent_frames_may_leak"],
+                "N_eff_by_dataset_size": {"20": 16.0, "30": 24.0, "40": 32.0, "50": 40.0, "60": 48.0},
+                "autocorrelation_available_by_dataset_size": {
+                    "20": True,
+                    "30": True,
+                    "40": True,
+                    "50": True,
+                    "60": True,
+                },
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20, "available_sizes": [20, 30, 40, 50, 60]}},
+            threshold_metadata={
+                "threshold_basis": minimum.THRESHOLD_BASIS_EXPLICIT_PROTOCOL,
+                "threshold_reference": "internal_protocol_v1",
+                "threshold_metric_family": "hamiltonian_element_error_mev",
+                "threshold_is_user_defined": False,
+                "threshold_paper_justified": True,
+                "threshold_protocol_reference_type": "internal_protocol",
+                "threshold_protocol_validation_scope": "documented_internal_paper_audit_protocol",
+            },
+            claim_mode_requested="paper_candidate",
+            aggregation_mode="mean_seeds_per_config",
+            requested_aggregation_mode="mean_seeds_per_config",
+            actual_aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "minimum_fit_points_for_paper_candidate": minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE,
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fit_predictive_stability_by_left_out_N={
+                "status": "ok",
+                "methods": {"graph2mat": {"paper_level_blockers": []}},
+            },
+            hierarchical_uncertainty={
+                "status": "paper_ready_supporting_uncertainty_available",
+                "paper_ready": True,
+                "paper_level_blockers": [],
+            },
+            threshold_sensitivity={
+                "enabled": True,
+                "status": "ok",
+                "thresholds_mev": [8.0, 10.0, 12.0],
+                "by_method": {
+                    "graph2mat": {
+                        "paper_level_blockers": [
+                            "paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat"
+                        ]
+                    }
+                },
+                "paper_level_blockers": ["paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat"],
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["claim_mode_actual"], "diagnostic")
+        self.assertEqual(status["scientific_claim_status"], "diagnostic_only")
+        self.assertIn("paper_blocked_if_temporal_gap_le_1", status["paper_level_blockers"])
+        self.assertIn(
+            "paper_blocked_if_threshold_sensitivity_missing_n_min_abs:graph2mat",
+            status["paper_level_blockers"],
+        )
+
+    def test_scientific_status_keeps_nominal_basis_when_effective_diagnostic_present(self) -> None:
+        status = minimum.scientific_claim_status_payload(
+            temporal_diagnostics={
+                "autocorrelation_available": True,
+                "nominal_n_train": 100,
+                "estimated_n_eff_train": 10.0,
+                "warnings": ["n_eff_much_smaller_than_nominal"],
+                "N_eff_by_dataset_size": {"20": 2.0, "30": 3.0, "40": 4.0, "50": 5.0, "60": 6.0},
+                "autocorrelation_available_by_dataset_size": {
+                    "20": True,
+                    "30": True,
+                    "40": True,
+                    "50": True,
+                    "60": True,
+                },
+            },
+            thresholds={"graph2mat": {"N_min_abs": 20, "available_sizes": [20, 30, 40, 50, 60]}},
+            threshold_metadata={
+                "threshold_basis": "paper_protocol_locked_threshold",
+                "threshold_reference": "test_reference",
+                "threshold_interpretation": "test-only locked threshold protocol",
+                "threshold_metric_family": "hamiltonian_element_error_mev",
+                "threshold_is_user_defined": False,
+                "threshold_paper_justified": True,
+            },
+            claim_mode_requested="paper_candidate",
+            aggregation_mode="mean_seeds_per_config",
+            requested_aggregation_mode="mean_seeds_per_config",
+            actual_aggregation_mode="mean_seeds_per_config",
+            requested_n_min_source="fit",
+            actual_n_min_source="fit",
+            requested_fit_model="power_law_floor",
+            actual_fit_model="power_law_floor",
+            fit_threshold_details={
+                "graph2mat": {
+                    "fit_policy": "paper_candidate",
+                    "paper_candidate": True,
+                    "fit_model": "power_law_floor",
+                    "status": "ok",
+                    "minimum_fit_points_for_paper_candidate": minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE,
+                    "enough_points_for_paper_candidate": True,
+                }
+            },
+            fit_predictive_stability_by_left_out_N={
+                "status": "ok",
+                "methods": {"graph2mat": {"paper_level_blockers": []}},
+            },
+            hierarchical_uncertainty={
+                "status": "paper_ready_supporting_uncertainty_available",
+                "paper_ready": True,
+                "paper_level_blockers": [],
+            },
+            fallback_used=False,
+            fallback_reason=None,
+        )
+
+        self.assertEqual(status["n_min_basis"], "nominal")
+        self.assertIn("N_min_effective_diagnostic", status)
+        self.assertIsNotNone(status["N_min_effective_diagnostic"]["graph2mat"]["N_min_abs"])
+        self.assertEqual(status["claim_mode_actual"], "diagnostic")
+        self.assertIn("paper_blocked_if_n_eff_much_smaller_than_nominal", status["paper_level_blockers"])
+
     def test_scientific_status_blocks_power_law_floor_with_lt_five_points(self) -> None:
         status = minimum.scientific_claim_status_payload(
             temporal_diagnostics={
@@ -4760,6 +5334,8 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 "enabled": True,
                 "display_label": "replicate-resampling CI",
                 "warnings": ["replicate_bootstrap_no_temporal_or_block_bootstrap"],
+                "cost_eff_diagnostic_label": "observed_cost_error_behavior_only",
+                "cost_eff_diagnostic_note": "N_min_cost_eff is a diagnostic based on observed cost-error behavior under the selected cost_basis; it is not a joint cost-error uncertainty estimate.",
             },
             cost_basis="protocol_total",
         )
@@ -4780,6 +5356,9 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
         self.assertIn("does not model dependence between dataset sizes", report)
         self.assertIn("N_min_cost_eff CI available: False", report)
         self.assertIn("N_min_cost_eff has no replicate-resampling CI", report)
+        self.assertIn("N_min_cost_eff diagnostic label", report)
+        self.assertIn("observed_cost_error_behavior_only", report)
+        self.assertIn("observed cost-error behavior", report)
         self.assertIn("true effective-N thresholding is not implemented", report)
         self.assertIn("Dataset size (nominal N_train)", report)
         self.assertIn("N_min_effective_diagnostic", report)
@@ -4834,11 +5413,15 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 "threshold_policy": {
                     "threshold_basis": minimum.THRESHOLD_BASIS_EXPLICIT_PROTOCOL,
                     "threshold_reference": "internal_protocol_v1",
+                    "threshold_protocol_reference_type": "internal_protocol",
                     "threshold_metric_family": "hamiltonian_element_error_mev",
                     "threshold_is_user_defined": False,
                     "threshold_interpretation": "Protocol-backed threshold.",
                     "threshold_protocol_file": "/tmp/threshold_protocol.json",
                     "threshold_protocol_physical_rationale": "Test-only documented rationale.",
+                    "threshold_protocol_validation_scope": "documented_internal_paper_audit_protocol",
+                    "threshold_protocol_material_scope": ["graphene_w90"],
+                    "threshold_protocol_metric_scope": ["h_mae_eV_mean"],
                     "threshold_protocol_applies_to_metrics": ["h_mae_eV_mean"],
                     "threshold_protocol_sensitivity_recommendation": "Audit nearby thresholds before paper-level use.",
                 },
@@ -4868,7 +5451,12 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             },
         )
         self.assertIn("Threshold protocol file", report)
+        self.assertIn("Threshold protocol reference", report)
+        self.assertIn("type `internal_protocol`", report)
         self.assertIn("Threshold physical rationale", report)
+        self.assertIn("Threshold validation scope", report)
+        self.assertIn("Threshold material scope", report)
+        self.assertIn("Threshold metric scope", report)
         self.assertIn("Threshold sensitivity", report)
         self.assertIn("paper_blocked_if_threshold_sensitivity_unstable:graph2mat", report)
 

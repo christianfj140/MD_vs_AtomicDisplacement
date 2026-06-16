@@ -54,6 +54,13 @@ The JSON protocol should document:
 - `threshold_mev`
 - `physical_rationale`
 - `reference`
+- `reference_type` (optional; for example `internal_protocol`,
+  `external_publication`, `experimental_validation`,
+  `other_documented_protocol`; old files default to
+  `unspecified_documented_protocol`)
+- `validation_scope` (optional)
+- `material_scope` (optional)
+- `metric_scope` (optional; defaults to the declared metric applicability)
 - `applies_to_metrics`
 - `recommended_sensitivity_thresholds_mev`
 - `sensitivity_recommendation`
@@ -66,6 +73,10 @@ Example:
   "threshold_mev": 10.0,
   "physical_rationale": "Documented internal publication threshold for Hamiltonian MAE under the locked benchmark protocol.",
   "reference": "internal_protocol_v1",
+  "reference_type": "internal_protocol",
+  "validation_scope": "documented_internal_paper_audit_protocol",
+  "material_scope": ["graphene_w90"],
+  "metric_scope": ["h_mae_eV_mean"],
   "applies_to_metrics": ["h_mae_eV_mean"],
   "recommended_sensitivity_thresholds_mev": [8.0, 10.0, 12.0],
   "sensitivity_recommendation": "Audit nearby thresholds before paper-level use."
@@ -79,12 +90,27 @@ The resulting summary records:
 - `threshold_protocol_threshold_mev`
 - `threshold_protocol_physical_rationale`
 - `threshold_protocol_reference`
+- `threshold_protocol_reference_type`
+- `threshold_protocol_validation_scope`
+- `threshold_protocol_material_scope`
+- `threshold_protocol_metric_scope`
 - `threshold_protocol_applies_to_metrics`
 - `threshold_protocol_sensitivity_recommendation`
 - `threshold_protocol_sensitivity_thresholds_mev`
 
 Manual thresholds remain `user_defined_exploratory` unless an explicit protocol
 file is supplied and validated.
+
+Important semantics:
+
+- an explicit internal protocol is acceptable as a documented protocol for this
+  analysis pipeline;
+- it is **not** automatically equivalent to an external publication or broad
+  experimental validation;
+- `threshold_paper_justified = true` means "documented under an explicit locked
+  protocol", not "universally validated outside this benchmark";
+- paper-candidate claims still depend on threshold sensitivity, temporal
+  diagnostics, uncertainty hierarchy, and every other blocker clearing.
 
 ## Threshold sensitivity
 
