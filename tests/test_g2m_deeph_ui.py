@@ -224,7 +224,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "SIESTA force constants are not treated as dH/dR",
             "finite difference method",
             "Default status: diagnostic-only unless all scientific gates pass",
-            "Derivative metrics not computed.",
+            "Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.",
+            "Technical internal diagnostic only. No winner claim comes from derivative metrics.",
             "diagnostic-only / no winner claim",
             "Derivative gate report",
             "Model comparison table Graph2Mat vs DeepH",
@@ -246,6 +247,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Reference: finite differences of SIESTA Hamiltonians",
             "SIESTA force constants are not treated as dH/dR",
             "Default status: diagnostic-only unless all scientific gates pass",
+            "Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.",
+            "technical internal diagnostic only",
             "Gate report",
         ):
             self.assertIn(text, derivative_html)
@@ -257,7 +260,10 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             1,
         )[0]
         self.assertNotIn("paper-ready", derivative_js.lower())
-        self.assertIn("Derivative metrics not computed.", derivative_js)
+        self.assertIn("G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING", derivative_js)
+        self.assertIn("G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY", derivative_js)
+        self.assertIn("Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.", self.app_js)
+        self.assertIn("Technical internal diagnostic only. No winner claim comes from derivative metrics.", self.app_js)
         self.assertIn("Derivative metadata/order diagnostics need attention", derivative_js)
 
     def test_plot_payload_renders_grouped_bar_plots(self) -> None:

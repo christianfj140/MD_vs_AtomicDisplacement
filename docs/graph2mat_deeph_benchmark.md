@@ -187,6 +187,50 @@ pretending the smoke passed.
 The dry-run checks runner wiring and writes local configs/manifests where the
 runner phase supports it, but it does not prove model accuracy.
 
+## Optional derivative post-processing
+
+Hamiltonian derivative diagnostics are optional post-processing outputs for
+technical internal diagnostic use. They do not replace the main H-vs-H
+benchmark, and if they are not computed the benchmark remains valid for the
+standard Hamiltonian metrics and winner logic.
+
+The offline evaluator and gate checker are intentionally separate from the
+training/inference runner:
+
+```bash
+python3 Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py \
+  --run-root <benchmark_run_root> \
+  --output-dir <benchmark_run_root>/common_metrics/graph2mat_eval/derivative_metrics
+
+python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
+  --run-root <benchmark_run_root> \
+  --output <benchmark_run_root>/common_metrics/summary/derivative_gate_report.json
+```
+
+Expected derivative artifacts live under `derivative_metrics/` and include:
+
+- `manifest.json`
+- `derivative_matrix_metrics.csv`
+- `derivative_hermiticity.csv`
+- `stencil_status.csv`
+- `derivative_summary.json`
+
+The valid derivative reference is finite differences of SIESTA Hamiltonians:
+
+```text
+(H_SIESTA(R + delta) - H_SIESTA(R - delta)) / (2 * delta)
+```
+
+No force-constants comparison is implemented. SIESTA force constants, phonons,
+dynamical matrices, and finite differences of forces are not treated as
+`dH/dR`.
+
+For presentation, explain the derivative gate report as a scientific status
+summary for these optional diagnostics: it says what evidence is present,
+whether the result should stay at `internal_diagnostic` or
+`technical_presentation`, and why no derivative winner claim is allowed by
+default.
+
 For the paper-ready control plane, use the synthetic staged workflow smoke:
 
 ```bash

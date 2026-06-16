@@ -1834,6 +1834,54 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertFalse(entry["has_training_sweep"])
             self.assertFalse(entry["has_metric_rows"])
 
+    def test_logs_and_status_attach_to_detached_running_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
+            run_root = output_root / "run_detached"
+            log_path = run_root / "sweep" / "deeph" / "dataset" / "cfg" / "deeph" / "train" / "result.txt"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("Epoch #12: Train loss: 0.1234. Val loss: 0.2345. Best val loss: 0.2000\n", encoding="utf-8")
+            (run_root / "runner_status.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "graph2mat_deeph_benchmark_runner_v1",
+                        "status": {
+                            "running": True,
+                            "stage": "training_sweep",
+                            "run_id": "run_detached",
+                            "run_root": str(run_root),
+                            "active_processes": 3,
+                            "training_sweep": {
+                                "enabled": True,
+                                "completed": 9,
+                                "failed": 0,
+                                "total": 20,
+                                "active_model": "deeph_parallel",
+                                "active_dataset": "graphene_5x2_scale_iid60",
+                            },
+                            "warnings": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner = Graph2MatDeepHBenchmarkRunner()
+            with mock.patch.object(runner, "_latest_detached_running_run_root", return_value=run_root):
+                status = runner.status()
+                logs = runner.logs()
+
+            self.assertTrue(status["running"])
+            self.assertEqual(status["run_id"], "run_detached")
+            self.assertEqual(status["stage"], "training_sweep")
+            self.assertEqual(status["training_sweep"]["completed"], 9)
+            self.assertTrue(
+                any("attached_to_detached_g2m_deeph_run" in warning for warning in status["warnings"])
+            )
+            self.assertTrue(logs["lines"])
+            joined = "".join(logs["lines"])
+            self.assertIn("Watching detached benchmark run", joined)
+            self.assertIn("Epoch #12", joined)
+
     def test_plots_endpoint_includes_live_metric_scaling_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"

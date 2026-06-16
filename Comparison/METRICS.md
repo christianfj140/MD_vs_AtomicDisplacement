@@ -315,6 +315,11 @@ The derivative evaluator writes:
 - `derivative_metrics/derivative_hermiticity.csv`
 - `derivative_metrics/derivative_summary.json`
 
+These outputs are optional post-processing diagnostics. If `derivative_metrics/`
+is absent, the benchmark remains valid for the standard H-vs-H metrics and
+winner logic. For the current repository scope, derivative outputs are intended
+for technical internal diagnostic use, not paper-level claims.
+
 The manifest records `force_constants_used: false`,
 `reference_definition: siesta_hamiltonian_finite_difference`, and
 `paper_level: false`. `scientific_status` defaults to `diagnostic_only` and is
@@ -354,6 +359,10 @@ Derivative scientific gate levels are:
 - `technical_presentation`
 - `paper_level_candidate`
 - `blocked`
+
+For internal presentations, the defensible claim scope is `internal_diagnostic`
+or `technical_presentation`. Derivative metrics remain diagnostic-only and do
+not define a Graph2Mat-vs-DeepH winner.
 
 Required blockers include:
 

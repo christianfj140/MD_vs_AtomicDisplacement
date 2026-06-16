@@ -7971,7 +7971,10 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "available": False,
             "status": "not_computed",
             "run_id": requested_run_id,
-            "message": "Derivative metrics not computed for this run.",
+            "message": (
+                "Derivative diagnostics are optional post-processing outputs. "
+                "If not computed, the benchmark remains valid for H-vs-H metrics."
+            ),
             "not_computed": True,
         }
     effective_run_id = run_root.name
@@ -7984,7 +7987,10 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "status": "not_computed",
             "run_id": effective_run_id,
             "run_root": str(run_root),
-            "message": "Derivative metrics not computed.",
+            "message": (
+                "Derivative diagnostics are optional post-processing outputs. "
+                "If not computed, the benchmark remains valid for H-vs-H metrics."
+            ),
             "not_computed": True,
             "title": "Hamiltonian derivative diagnostics",
             "gate_report": gate_report,
@@ -8062,7 +8068,10 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         "plot_payload": plot_payload,
         "artifact_rows": artifact_rows,
         "scientific_warnings": plot_payload.get("scientific_warnings") or [],
-        "message": "Derivative diagnostics are available for inspection only.",
+        "message": (
+            "Derivative diagnostics are available for technical internal diagnostic inspection only. "
+            "They do not change the H-vs-H benchmark winner."
+        ),
     }
 
 

@@ -2445,6 +2445,8 @@ const G2M_DEEPH_DERIVATIVE_TITLE = "Hamiltonian derivative diagnostics";
 const G2M_DEEPH_DERIVATIVE_REFERENCE = "Reference: finite differences of SIESTA Hamiltonians";
 const G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS = "SIESTA force constants are not treated as dH/dR";
 const G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS = "Default status: diagnostic-only unless all scientific gates pass";
+const G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING = "Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.";
+const G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY = "Technical internal diagnostic only. No winner claim comes from derivative metrics.";
 
 function renderG2MDeepHDerivativeRunSelector() {
   const select = document.getElementById("g2m-deeph-derivative-run-select");
@@ -2470,7 +2472,7 @@ function renderG2MDeepHDerivativeRunSelector() {
 }
 
 function g2mDeephDerivativeStatusText(payload = {}) {
-  if (payload.not_computed) return "Derivative metrics not computed.";
+  if (payload.not_computed) return payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING;
   const statuses = (payload.status_rows || []).map((row) => row.scientific_status).filter(Boolean);
   const distinct = Array.from(new Set(statuses));
   return distinct.length ? `Derivative status: ${distinct.join(", ")}` : "Derivative diagnostics loaded.";
@@ -2545,7 +2547,9 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
   if (!payload.available || !plotPayload.available || !(plotPayload.plots || []).length) {
     const placeholder = document.createElement("div");
     placeholder.className = "plot-card full placeholder-card";
-    placeholder.textContent = payload.not_computed ? "Derivative metrics not computed." : "No derivative plots available yet.";
+    placeholder.textContent = payload.not_computed
+      ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING)
+      : "No derivative plots available yet.";
     container.appendChild(placeholder);
     return;
   }
@@ -2572,7 +2576,9 @@ function renderG2MDeepHDerivativeArtifacts(payload = {}) {
   const rows = payload.artifact_rows || [];
   if (!rows.length) {
     container.className = "result-list muted-text";
-    container.textContent = payload.not_computed ? "Derivative metrics not computed." : "No derivative CSV or manifest links available.";
+    container.textContent = payload.not_computed
+      ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING)
+      : "No derivative CSV or manifest links available.";
     return;
   }
   container.className = "result-list g2m-deeph-derivative-artifact-list";
@@ -2602,7 +2608,9 @@ function renderG2MDeepHDerivativeGateReport(payload = {}) {
   const gateReport = payload.gate_report || {};
   if (!payload.available && !Object.keys(gateReport).length) {
     container.className = "result-list muted-text";
-    container.textContent = payload.not_computed ? "Derivative metrics not computed." : "No derivative gate report available.";
+    container.textContent = payload.not_computed
+      ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING)
+      : "No derivative gate report available.";
     return;
   }
   container.className = "result-list";
@@ -2662,13 +2670,15 @@ function renderG2MDeepHDerivativePayload(payload = null) {
   const banner = document.createElement("div");
   banner.className = "comparison-status-banner diagnostic";
   banner.textContent = payload.not_computed
-    ? "Derivative metrics not computed."
+    ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING)
     : `${g2mDeephDerivativeStatusText(payload)} diagnostic-only / no winner claim.`;
   statusEl.appendChild(banner);
   appendKeyValue(statusEl, "Panel", payload.title || G2M_DEEPH_DERIVATIVE_TITLE);
   appendKeyValue(statusEl, "Reference", payload.reference_label || G2M_DEEPH_DERIVATIVE_REFERENCE);
   appendKeyValue(statusEl, "Force constants", payload.force_constants_label || G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS);
   appendKeyValue(statusEl, "Default status", payload.default_status_text || G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS);
+  appendKeyValue(statusEl, "Post-processing", G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING);
+  appendKeyValue(statusEl, "Claim scope", payload.message || G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY);
   appendKeyValue(statusEl, "Run", payload.run_id || "-");
   appendKeyValue(statusEl, "finite difference method", (payload.status_rows || []).map((row) => row.finite_difference_method).filter(Boolean).join(" | ") || "-");
   appendKeyValue(statusEl, "delta_ang", (payload.status_rows || []).map((row) => row.delta_ang).filter(Boolean).join(" | ") || "-");
@@ -2700,7 +2710,7 @@ function renderG2MDeepHDerivativePayload(payload = null) {
       { key: "stencils_failed", label: "stencils failed", format: g2mDeephIntegerValue },
     ],
     payload.status_rows || [],
-    payload.not_computed ? "Derivative metrics not computed." : "No derivative status rows available.",
+    payload.not_computed ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING) : "No derivative status rows available.",
   );
   appendG2MDeepHTable(
     comparisonEl,
@@ -2714,7 +2724,7 @@ function renderG2MDeepHDerivativePayload(payload = null) {
       { key: "dH_hermiticity_error_delta", label: "Hermiticity error delta" },
     ],
     payload.comparison_rows || [],
-    payload.not_computed ? "Derivative metrics not computed." : "No derivative model-comparison rows available.",
+    payload.not_computed ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING) : "No derivative model-comparison rows available.",
   );
   appendG2MDeepHTable(
     issuesEl,
@@ -2727,7 +2737,7 @@ function renderG2MDeepHDerivativePayload(payload = null) {
       { key: "message", label: "Message" },
     ],
     issueRows,
-    payload.not_computed ? "Derivative metrics not computed." : "No derivative warnings or fatal errors.",
+    payload.not_computed ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING) : "No derivative warnings or fatal errors.",
   );
   renderG2MDeepHDerivativeGateReport(payload);
   renderG2MDeepHDerivativePlotsPayload(payload);

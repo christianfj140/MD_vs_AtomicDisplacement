@@ -98,6 +98,8 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertFalse(payload["available"])
         self.assertTrue(payload["not_computed"])
         self.assertEqual(payload["status"], "not_computed")
+        self.assertIn("optional post-processing", payload["message"])
+        self.assertIn("H-vs-H metrics", payload["message"])
 
     def test_not_computed_payload_can_still_include_gate_report_for_selected_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -124,6 +126,7 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertFalse(payload["available"])
         self.assertTrue(payload["not_computed"])
         self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
+        self.assertIn("optional post-processing", payload["message"])
 
     def test_derivative_payload_includes_status_warnings_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,6 +174,7 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
         self.assertEqual(payload["gate_report"]["ranking_status"], "no_robust_winner")
         self.assertTrue(payload["gate_report"]["gate_rows"])
+        self.assertIn("technical internal diagnostic", payload["message"])
 
 
 if __name__ == "__main__":

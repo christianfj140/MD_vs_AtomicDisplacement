@@ -1361,6 +1361,11 @@ class Graph2MatDeepHBenchmarkRunner:
         self._external_final_log_offsets: dict[str, int] = {}
         self._external_final_last_sync = 0.0
         self._external_final_run_root: Path | None = None
+        self._external_detached_log_offsets: dict[str, int] = {}
+        self._external_detached_last_sync = 0.0
+        self._external_detached_run_root: Path | None = None
+        self._external_detached_status: dict[str, Any] = {}
+        self._external_detached_status_signature = ""
 
     def _external_final_process_lines(self) -> list[str]:
         workflow_lines = _process_table_lines_for_text("paper_ready_final70")
@@ -1447,6 +1452,155 @@ class Graph2MatDeepHBenchmarkRunner:
             for line in chunk.splitlines():
                 if line.strip():
                     self._logs.append(f"[G2M-DEEPH][external][{rel}] {line}\n")
+
+    def _latest_detached_running_run_root(self) -> Path | None:
+        candidates: list[tuple[float, Path]] = []
+        search_root = REPO_ROOT / "Comparison" / "results"
+        patterns = (
+            "*/runner_status.json",
+            "*/*/runner_status.json",
+            "*/runs/*/runner_status.json",
+            "metric_archives_by_run/*/core/runner_status.json",
+        )
+        seen: set[str] = set()
+        current_root = self._external_detached_run_root
+        if current_root is not None:
+            status_path = current_root / "runner_status.json"
+            if status_path.exists():
+                seen.add(str(status_path.resolve(strict=False)))
+                try:
+                    payload = _load_json(status_path)
+                except Exception:
+                    payload = {}
+                status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+                if status and bool(status.get("running")):
+                    started_at = status.get("started_at")
+                    try:
+                        sort_key = float(started_at)
+                    except (TypeError, ValueError):
+                        try:
+                            sort_key = status_path.stat().st_mtime
+                        except OSError:
+                            sort_key = 0.0
+                    candidates.append((sort_key, current_root))
+        for pattern in patterns:
+            for status_path in search_root.glob(pattern):
+                resolved_key = str(status_path.resolve(strict=False))
+                if resolved_key in seen:
+                    continue
+                seen.add(resolved_key)
+                run_root = status_path.parent
+                try:
+                    payload = _load_json(status_path)
+                except Exception:
+                    continue
+                status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+                if not status or not bool(status.get("running")):
+                    continue
+                if self._state.run_root and Path(str(self._state.run_root)).resolve(strict=False) == run_root.resolve(strict=False):
+                    continue
+                started_at = status.get("started_at")
+                try:
+                    sort_key = float(started_at)
+                except (TypeError, ValueError):
+                    try:
+                        sort_key = status_path.stat().st_mtime
+                    except OSError:
+                        sort_key = 0.0
+                candidates.append((sort_key, run_root))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _sync_detached_external_run_locked(self, *, force: bool = False) -> bool:
+        now = time.time()
+        if not force and now - self._external_detached_last_sync < 5.0:
+            return self._external_detached_run_root is not None and bool(self._external_detached_status.get("running"))
+        self._external_detached_last_sync = now
+        run_root = self._latest_detached_running_run_root()
+        if run_root is None:
+            self._external_detached_run_root = None
+            self._external_detached_status = {}
+            self._external_detached_status_signature = ""
+            return False
+        try:
+            payload = _load_json(run_root / "runner_status.json")
+        except Exception:
+            return False
+        status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+        if not status or not bool(status.get("running")):
+            self._external_detached_run_root = None
+            self._external_detached_status = {}
+            self._external_detached_status_signature = ""
+            return False
+        self._external_detached_run_root = run_root
+        self._external_detached_status = dict(status)
+        training_sweep = status.get("training_sweep") if isinstance(status.get("training_sweep"), dict) else {}
+        signature = json.dumps(
+            {
+                "run_id": status.get("run_id") or run_root.name,
+                "stage": status.get("stage") or "",
+                "completed": training_sweep.get("completed"),
+                "failed": training_sweep.get("failed"),
+                "total": training_sweep.get("total"),
+                "active_model": training_sweep.get("active_model"),
+                "active_dataset": training_sweep.get("active_dataset"),
+            },
+            sort_keys=True,
+            default=str,
+        )
+        if signature != self._external_detached_status_signature:
+            self._external_detached_status_signature = signature
+            self._logs.append(
+                "[G2M-DEEPH][external] Watching detached benchmark run: "
+                f"{status.get('run_id') or run_root.name} | stage={status.get('stage') or 'unknown'} | "
+                f"progress={training_sweep.get('completed', 0)}/{training_sweep.get('total', 0)} | "
+                f"root={run_root}\n"
+            )
+        recent_files = sorted(
+            [
+                path
+                for pattern in (
+                    "sweep/**/train/result.txt",
+                    "sweep/**/train/stderr.txt",
+                    "sweep/**/inference/**/result.txt",
+                    "sweep/**/inference/**/stderr.txt",
+                    "sweep/**/stdout.txt",
+                    "sweep/**/stderr.txt",
+                )
+                for path in run_root.glob(pattern)
+                if path.is_file()
+            ],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:16]
+        for path in sorted(recent_files):
+            key = str(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            start = self._external_detached_log_offsets.get(key)
+            if start is None:
+                start = max(0, size - 4000)
+                if start > 0:
+                    self._logs.append(f"[G2M-DEEPH][external][tail] ... {path.relative_to(run_root)}\n")
+            if size <= start:
+                self._external_detached_log_offsets[key] = size
+                continue
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(start)
+                    chunk = handle.read(min(size - start, 8000)).decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            self._external_detached_log_offsets[key] = size
+            rel = path.relative_to(run_root)
+            for line in chunk.splitlines():
+                if line.strip():
+                    self._logs.append(f"[G2M-DEEPH][external][{rel}] {line}\n")
+        return True
 
     def validate_dataset_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         dataset_root = _resolve_optional_repo_path(payload.get("dataset_root"), DEFAULT_DATASET_ROOT)
@@ -4523,14 +4677,21 @@ class Graph2MatDeepHBenchmarkRunner:
             running = self._thread is not None and self._thread.is_alive()
             external_running = False
             external_run_root = None
+            detached_running = False
+            detached_run_root = None
+            detached_status: dict[str, Any] = {}
             if not running and self._external_final_active():
                 self._sync_external_final_run_locked()
                 external_running = True
                 external_run_root = self._external_final_run_root
+            if not running and not external_running:
+                detached_running = self._sync_detached_external_run_locked()
+                detached_run_root = self._external_detached_run_root
+                detached_status = dict(self._external_detached_status)
             self._state.running = running
             elapsed = None
             if self._state.started_at is not None:
-                end = time.time() if running or external_running else self._state.finished_at or time.time()
+                end = time.time() if running or external_running or detached_running else self._state.finished_at or time.time()
                 elapsed = end - self._state.started_at
             if external_running:
                 status_files = sorted(
@@ -4588,6 +4749,21 @@ class Graph2MatDeepHBenchmarkRunner:
                         "model_batch_start": status_values.get("model_batch_start", "deeph"),
                     },
                 }
+            if detached_running:
+                detached_payload = dict(detached_status)
+                detached_warnings = list(detached_payload.get("warnings") or [])
+                detached_warnings.append(
+                    "attached_to_detached_g2m_deeph_run: stop desde UI no matara este proceso externo"
+                )
+                detached_payload["warnings"] = detached_warnings
+                detached_payload["run_id"] = detached_payload.get("run_id") or (
+                    detached_run_root.name if detached_run_root is not None else "detached_g2m_deeph_run"
+                )
+                detached_payload["run_root"] = detached_payload.get("run_root") or (
+                    str(detached_run_root) if detached_run_root is not None else ""
+                )
+                detached_payload["log_size"] = len(self._logs)
+                return detached_payload
             return {
                 "running": running,
                 "stage": self._state.stage,
@@ -4620,6 +4796,7 @@ class Graph2MatDeepHBenchmarkRunner:
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
                 self._sync_external_final_run_locked()
+                self._sync_detached_external_run_locked()
             payload = _bounded_log_payload(self._logs, since=since, limit=limit)
             payload["status"] = self.status()
             return payload
