@@ -1,4 +1,5 @@
 import json
+import csv
 import importlib.util
 import os
 import sys
@@ -28,6 +29,8 @@ from g2m_deeph_runner import (  # noqa: E402
     METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY,
     METRIC_FAIL_POLICY_FAIL_CLOSED,
     Graph2MatDeepHBenchmarkRunner,
+    backfill_derivative_postprocess_from_training_sweep,
+    build_derivative_model_comparison_summary,
     _deeph_device_settings,
     _deeph_training_parallelism,
     _deeph_metric_command_args,
@@ -39,6 +42,8 @@ from g2m_deeph_runner import (  # noqa: E402
     _metric_allowed_returncodes,
     _metric_evaluation_split,
     _metric_fail_policy,
+    _normalized_modular_workflow_payload,
+    _write_csv,
 )
 
 
@@ -251,6 +256,317 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertIn("--overwrite", command)
         self.assertEqual(command[command.index("--source-model") + 1], "graph2mat")
         self.assertEqual(command[command.index("--max-stencils") + 1], "3")
+
+    def test_modular_workflow_defaults_preserve_existing_hamiltonian_path(self):
+        workflow = _normalized_modular_workflow_payload({})
+        stages = workflow["stages"]
+
+        self.assertEqual(workflow["workflow_mode"], "default")
+        self.assertTrue(stages["generate_or_validate_dataset"])
+        self.assertTrue(stages["freeze_splits"])
+        self.assertTrue(stages["train_graph2mat"])
+        self.assertTrue(stages["predict_graph2mat"])
+        self.assertTrue(stages["train_deeph"])
+        self.assertTrue(stages["predict_deeph"])
+        self.assertTrue(stages["hamiltonian_metrics"])
+        derivative_stage_values = [
+            value
+            for key, value in stages.items()
+            if key.startswith("derivative")
+            or key
+            in {
+                "build_derivative_stencils",
+                "validate_derivative_stencils",
+                "run_derivative_siesta_reference",
+                "predict_derivative_graph2mat",
+                "predict_derivative_deeph",
+            }
+        ]
+        self.assertFalse(any(derivative_stage_values))
+
+    def test_modular_hamiltonian_only_config_disables_derivative_stages(self):
+        workflow = _normalized_modular_workflow_payload({"workflow_mode": "hamiltonian_only"})
+        stages = workflow["stages"]
+
+        self.assertTrue(stages["hamiltonian_metrics"])
+        self.assertFalse(stages["build_derivative_stencils"])
+        self.assertFalse(stages["derivative_metrics_graph2mat"])
+        self.assertFalse(stages["derivative_metrics_deeph"])
+        self.assertFalse(stages["derivative_gate_check"])
+        self.assertFalse(stages["derivative_plots"])
+
+    def test_modular_derivative_metrics_only_does_not_require_training_config(self):
+        workflow = _normalized_modular_workflow_payload(
+            {
+                "workflow_mode": "derivative_metrics_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": "/tmp/existing_derivative_inputs",
+                    "method": "central",
+                },
+            }
+        )
+        stages = workflow["stages"]
+
+        self.assertFalse(stages["train_graph2mat"])
+        self.assertFalse(stages["train_deeph"])
+        self.assertFalse(stages["hamiltonian_metrics"])
+        self.assertTrue(stages["derivative_metrics_graph2mat"])
+        self.assertTrue(stages["derivative_metrics_deeph"])
+        self.assertEqual(workflow["derivative"]["method"], "central")
+
+    def test_modular_invalid_derivative_config_names_missing_field_and_stage(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "build_derivative_stencils.*derivative.source_dataset_root",
+        ):
+            _normalized_modular_workflow_payload(
+                {
+                    "stages": {"build_derivative_stencils": True},
+                    "derivative": {
+                        "enabled": True,
+                        "delta_ang": 0.01,
+                        "atoms": [0],
+                        "axes": ["x"],
+                    },
+                }
+            )
+
+    def test_modular_invalid_derivative_method_fails_clearly(self):
+        with self.assertRaisesRegex(RuntimeError, "derivative.method"):
+            _normalized_modular_workflow_payload(
+                {
+                    "workflow_mode": "derivative_metrics_only",
+                    "derivative": {
+                        "enabled": True,
+                        "result_dir": "/tmp/existing_derivative_inputs",
+                        "method": "md_snapshots",
+                    },
+                }
+            )
+
+    def test_modular_derivative_predictions_only_uses_separate_model_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "derivatives"
+            source = Path(tmp) / "source"
+            source.mkdir()
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                if "geometry validation" in label:
+                    root.mkdir(parents=True, exist_ok=True)
+                    (root / "derivative_geometry_validation.json").write_text(
+                        json.dumps({"errors": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "graph2mat" in label:
+                    output_root = Path(command[command.index("--output-root") + 1])
+                    output_root.mkdir(parents=True, exist_ok=True)
+                    (output_root / "derivative_graph2mat_prediction_manifest.json").write_text(
+                        json.dumps({"samples_failed": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "deeph" in label:
+                    output_root = Path(command[command.index("--output-root") + 1])
+                    output_root.mkdir(parents=True, exist_ok=True)
+                    (output_root / "derivative_deeph_prediction_manifest.json").write_text(
+                        json.dumps({"samples_failed": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "derivative_predictions_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(root),
+                    "source_dataset_root": str(source),
+                    "method": "central",
+                    "delta_ang": 0.01,
+                    "atoms": ["0"],
+                    "axes": ["x"],
+                    "graph2mat_existing_prediction_root": str(Path(tmp) / "g2m_existing"),
+                    "deeph_existing_prediction_root": str(Path(tmp) / "deeph_existing"),
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            labels = [label for label, _command in commands]
+            self.assertEqual(
+                labels,
+                [
+                    "Derivative stencil geometry validation",
+                    "Derivative graph2mat Hamiltonian predictions",
+                    "Derivative deeph Hamiltonian predictions",
+                ],
+            )
+            graph2mat_command = commands[1][1]
+            deeph_command = commands[2][1]
+            self.assertIn("graph2mat_derivative_result", graph2mat_command[graph2mat_command.index("--stencil-root") + 1])
+            self.assertIn("deeph_derivative_result", deeph_command[deeph_command.index("--stencil-root") + 1])
+            self.assertEqual(summary["stages"]["predict_derivative_graph2mat"]["status"], "completed")
+            self.assertEqual(summary["stages"]["predict_derivative_deeph"]["status"], "completed")
+
+    def test_modular_derivative_metrics_only_start_skips_dataset_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "existing_derivative_inputs"
+            root.mkdir()
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fail_dataset_validation(_payload):
+                raise AssertionError("derivative-only workflow should not validate the H benchmark dataset")
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "manifest.json").write_text(json.dumps({"status": "ok"}) + "\n", encoding="utf-8")
+                return {"label": label, "returncode": 0}
+
+            runner.validate_dataset_payload = fail_dataset_validation  # type: ignore[method-assign]
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            status = runner.start(
+                {
+                    "workflow_mode": "derivative_metrics_only",
+                    "run_id": "derivative_metrics_only_test",
+                    "derivative": {
+                        "enabled": True,
+                        "result_dir": str(root),
+                        "method": "central",
+                    },
+                    "stages": {
+                        "derivative_gate_check": False,
+                        "derivative_plots": False,
+                    },
+                }
+            )
+            self.assertTrue(status["running"])
+            runner._thread.join(timeout=5)
+            final_status = runner.status()
+
+            self.assertFalse(final_status["running"])
+            self.assertEqual(final_status["returncode"], 0)
+            self.assertIn("derivative_only_workflow", final_status["dataset_validation"]["warnings"][0])
+
+    def test_h_then_derivative_postprocess_uses_h_metric_inputs_when_result_dir_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "h_run"
+            (run_root / "common_metrics" / "graph2mat_eval").mkdir(parents=True)
+            (run_root / "common_metrics" / "deeph_eval").mkdir(parents=True)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            result_dirs = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                result_dirs.append(Path(command[2]))
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "manifest.json").write_text(json.dumps({"status": "ok"}) + "\n", encoding="utf-8")
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {
+                    "enabled": True,
+                    "method": "central",
+                },
+                "stages": {
+                    "derivative_gate_check": False,
+                    "derivative_plots": False,
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            summary = runner._run_modular_derivative_workflow(payload, run_root=run_root)
+
+            self.assertEqual(
+                result_dirs,
+                [
+                    run_root / "common_metrics" / "graph2mat_eval",
+                    run_root / "common_metrics" / "deeph_eval",
+                ],
+            )
+            self.assertEqual(summary["stages"]["derivative_metrics_graph2mat"]["status"], "completed")
+            self.assertEqual(summary["stages"]["derivative_metrics_deeph"]["status"], "completed")
+
+    def test_derivative_model_comparison_pairs_matching_stencils_without_winner_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            graph_root = root / "graph2mat" / "derivative_metrics"
+            deeph_root = root / "deeph" / "derivative_metrics"
+            for metric_root, sample, mae in (
+                (graph_root, "g2m_dH", "0.20"),
+                (deeph_root, "deeph_dH", "0.10"),
+            ):
+                _write_csv(
+                    metric_root / "derivative_matrix_metrics.csv",
+                    [
+                        {
+                            "sample": sample,
+                            "base_sample_id": "base_0",
+                            "atom_index_zero_based": "0",
+                            "axis": "x",
+                            "delta_ang": "0.01",
+                            "finite_difference_method": "central",
+                            "dh_mae_union_eV_per_Ang": mae,
+                            "dh_rmse_union_eV_per_Ang": mae,
+                            "comparison_status": "diagnostic_only",
+                        }
+                    ],
+                )
+
+            summary = build_derivative_model_comparison_summary(
+                graph2mat_root=graph_root,
+                deeph_root=deeph_root,
+                output_dir=root / "comparison",
+                gate_report={"scientific_status": "internal_diagnostic"},
+            )
+
+            self.assertEqual(summary["paired_count"], 1)
+            self.assertEqual(summary["claim_status"], "diagnostic_only")
+            self.assertFalse(summary["winner_claim_allowed"])
+            self.assertIsNone(summary["winner"])
+            self.assertEqual(summary["block_metrics"]["status"], "block_metrics_unavailable")
+            with (root / "comparison" / "derivative_model_paired_comparison.csv").open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["base_sample_id"], "base_0")
+            self.assertAlmostEqual(float(rows[0]["delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang"]), 0.10)
+
+    def test_derivative_model_comparison_handles_missing_model_gracefully(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            graph_root = root / "graph2mat" / "derivative_metrics"
+            _write_csv(
+                graph_root / "derivative_matrix_metrics.csv",
+                [
+                    {
+                        "sample": "g2m_dH",
+                        "base_sample_id": "base_0",
+                        "atom_index_zero_based": "0",
+                        "axis": "x",
+                        "delta_ang": "0.01",
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": "0.20",
+                    }
+                ],
+            )
+
+            summary = build_derivative_model_comparison_summary(
+                graph2mat_root=graph_root,
+                deeph_root=None,
+                output_dir=root / "comparison",
+                gate_report={"scientific_status": "blocked"},
+            )
+
+            self.assertEqual(summary["paired_count"], 0)
+            self.assertEqual(summary["missing_deeph_count"], 1)
+            self.assertEqual(summary["claim_status"], "blocked")
+            self.assertIsNone(summary["winner"])
+            self.assertTrue((root / "comparison" / "derivative_model_comparison_summary.json").exists())
 
     def test_deeph_metric_command_can_target_validation_split(self):
         command = _deeph_metric_command_args(
@@ -2167,6 +2483,28 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                 stack.enter_context(mock.patch("g2m_deeph_runner.aggregate_common_metrics", side_effect=fake_aggregate_common_metrics))
                 stack.enter_context(mock.patch("g2m_deeph_runner._force_diagnostic_metric_manifest"))
                 stack.enter_context(mock.patch("g2m_deeph_runner._has_derivative_stencils", return_value=derivative_stencils_exist))
+                stack.enter_context(
+                    mock.patch(
+                        "g2m_deeph_runner.write_derivative_plot_outputs",
+                        return_value={
+                            "payload": {"available": True, "plots": []},
+                            "manifest": {"available": True},
+                            "payload_path": graph_context.run_root / "common_metrics" / "summary" / "derivative_plots" / "derivative_plot_payload.json",
+                            "manifest_path": graph_context.run_root / "common_metrics" / "summary" / "derivative_plots" / "derivative_plot_manifest.json",
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch(
+                        "g2m_deeph_runner.build_derivative_gate_report",
+                        return_value={
+                            "schema_version": "graph2mat_deeph_derivative_gate_report_v1",
+                            "scientific_status": "internal_diagnostic",
+                            "blockers": [],
+                            "warnings": [],
+                        },
+                    )
+                )
                 runner._run_workflow(payload, validation, allow_repair=False)
 
             self.assertEqual(runner.status()["returncode"], 0)
@@ -2211,6 +2549,8 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertEqual(aggregate_calls[0]["deeph_derivative_root"], common_root / "deeph_eval" / "derivative_metrics")
         derivative_metrics = runner._last_results["common_metrics"]["derivative_metrics"]
         self.assertTrue(derivative_metrics["enabled"])
+        self.assertEqual(derivative_metrics["plot_outputs"]["status"], "completed")
+        self.assertEqual(derivative_metrics["gate_report"]["status"], "completed")
         self.assertFalse(derivative_metrics["winner_metric"])
         self.assertEqual(runner._last_results["common_metrics"]["recommendation"]["primary_metric"], "h_mae_eV_mean")
 
@@ -2249,6 +2589,69 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertEqual(common_metrics["derivative_metrics"]["execution"]["graph2mat"]["returncode"], 2)
         self.assertEqual(common_metrics["runs"]["derivative_metrics"]["graph2mat"]["returncode"], 2)
         self.assertIn("existing H metrics are preserved", "".join(runner.logs()["lines"]))
+
+    def test_backfill_derivative_postprocess_uses_only_completed_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            benchmark_run_root = root / "benchmark"
+            sweep_root = benchmark_run_root / "sweep"
+            summary_root = benchmark_run_root / "summary"
+            summary_root.mkdir(parents=True, exist_ok=True)
+            completed_graph = benchmark_run_root / "sweep" / "graph2mat" / "done_graph"
+            completed_deeph = benchmark_run_root / "sweep" / "deeph" / "done_deeph"
+            failed_root = benchmark_run_root / "sweep" / "deeph" / "failed_deeph"
+            (completed_graph / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True, exist_ok=True)
+            (completed_deeph / "metrics" / "deeph" / "eval").mkdir(parents=True, exist_ok=True)
+            training_sweep_manifest = sweep_root / "training_sweep_manifest.json"
+            training_sweep_manifest.parent.mkdir(parents=True, exist_ok=True)
+            training_sweep_manifest.write_text(
+                json.dumps(
+                    {
+                        "runs": [
+                            {"status": "completed", "run_root": str(completed_graph)},
+                            {"status": "completed", "run_root": str(completed_deeph)},
+                            {"status": "failed", "run_root": str(failed_root)},
+                            {"status": "completed"},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            processed: list[Path] = []
+
+            def fake_run_derivative_postprocess(**kwargs):
+                processed.append(Path(kwargs["run_root"]))
+                return {
+                    "enabled": True,
+                    "settings": kwargs["settings"],
+                    "execution": {
+                        "graph2mat": {"status": "completed" if "graph2mat" in str(kwargs["run_root"]) else "skipped_missing_input"},
+                        "deeph": {"status": "completed" if "deeph" in str(kwargs["run_root"]) else "skipped_missing_input"},
+                    },
+                    "plot_outputs": {"status": "completed"},
+                    "gate_report": {"status": "completed"},
+                    "roots": {"graph2mat": "", "deeph": ""},
+                }
+
+            with mock.patch("g2m_deeph_runner.run_derivative_postprocess", side_effect=fake_run_derivative_postprocess):
+                summary = backfill_derivative_postprocess_from_training_sweep(
+                    training_sweep_manifest_path=training_sweep_manifest,
+                    settings={
+                        "enabled": True,
+                        "finite_difference_method": "central",
+                        "split": "test",
+                        "require_central": True,
+                        "diagnostic_only": True,
+                        "support_threshold": 1e-12,
+                        "overwrite": True,
+                    },
+                    python_executable=sys.executable,
+                )
+
+            self.assertEqual(processed, [completed_graph.resolve(), completed_deeph.resolve()])
+            self.assertEqual(summary["processed_runs"], 2)
+            self.assertTrue((summary_root / "derivative_backfill_summary.json").exists())
 
 
 if __name__ == "__main__":

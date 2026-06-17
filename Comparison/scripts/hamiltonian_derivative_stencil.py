@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import json
+import sys
 from dataclasses import asdict, dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,12 @@ from typing import Any
 import numpy as np
 from scipy import sparse
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from fdf_materialization import extract_fdf_structure  # noqa: E402
 from reference_selection import choose_reference_matrix, file_sha256
 
 
@@ -24,6 +31,7 @@ EXPECTED_DERIVATIVE_UNITS = "eV/Ang"
 DERIVATIVE_SUPPORT_THRESHOLD = 1e-12
 DERIVATIVE_MATRIX_METRIC_TARGET_SPACE = "raw_global_hamiltonian_derivative"
 FORBIDDEN_SIESTA_REFERENCE_NAMES = {"ML_prediction.HSX"}
+DEFAULT_GEOMETRY_TOLERANCE_ANG = 1e-8
 DIAGNOSTIC_STATUSES = {"", "diagnostic", "diagnostic_only", "exploratory"}
 PAPER_LEVEL_STATUSES = {"paper_ready", "publication", "publicable", "final_publication"}
 REQUIRED_NON_DIAGNOSTIC_HASHES = ("material_compatibility_hash", "orbital_ordering_hash")
@@ -246,6 +254,136 @@ def stencil_is_valid(issues: list[DerivativeValidationIssue]) -> bool:
     return not validation_errors(issues)
 
 
+def validate_derivative_geometry(
+    discovery: DerivativeStencilDiscovery,
+    *,
+    tolerance_ang: float = DEFAULT_GEOMETRY_TOLERANCE_ANG,
+) -> list[DerivativeValidationIssue]:
+    """Validate that derivative stencil structures match the requested displacement."""
+
+    issues: list[DerivativeValidationIssue] = []
+    stencil = discovery.stencil
+    if stencil is None:
+        return [
+            DerivativeValidationIssue(
+                severity="error",
+                code="missing_geometry_stencil",
+                message="Derivative discovery did not produce a stencil to validate geometrically.",
+                details={"group_key": list(discovery.group_key)},
+            )
+        ]
+    metadata = stencil.metadata
+    method = str(metadata.method or discovery.method or "").strip().lower()
+    if method not in VALID_METHODS:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="invalid_geometry_method",
+                message="Geometry validation requires a supported finite-difference method.",
+                field="method",
+                sample_id=metadata.sample_id,
+                details={"method": method},
+            )
+        )
+        return issues
+    if metadata.delta_ang is None or metadata.delta_ang <= 0:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="invalid_geometry_delta",
+                message="Geometry validation requires a positive delta_ang.",
+                field="delta_ang",
+                sample_id=metadata.sample_id,
+            )
+        )
+        return issues
+    if metadata.atom_index_zero_based is None:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="missing_geometry_atom_index",
+                message="Geometry validation requires atom_index_zero_based.",
+                field="atom_index_zero_based",
+                sample_id=metadata.sample_id,
+            )
+        )
+        return issues
+    if metadata.axis_index is None or metadata.axis_index not in VALID_AXES.values():
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="missing_geometry_axis_index",
+                message="Geometry validation requires a valid axis_index.",
+                field="axis_index",
+                sample_id=metadata.sample_id,
+            )
+        )
+        return issues
+
+    structures = _load_geometry_structures(stencil)
+    issues.extend(structures.pop("issues"))
+    base = structures.get("base")
+    if base is None:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="missing_base_structure",
+                message="Geometry validation requires the base R0 structure for finite-displacement stencils.",
+                field="base_structure_path",
+                sample_id=metadata.sample_id,
+            )
+        )
+        return issues
+
+    roles = _required_geometry_roles(method)
+    for role in roles:
+        if structures.get(role) is None:
+            issues.append(
+                DerivativeValidationIssue(
+                    severity="error",
+                    code=f"missing_{role}_structure",
+                    message=f"Geometry validation requires the {role} displaced structure.",
+                    field=f"{role}_structure_path",
+                    sample_id=metadata.sample_id,
+                )
+            )
+    if validation_errors(issues):
+        return issues
+
+    for role in roles:
+        structure = structures.get(role)
+        if structure is None:
+            continue
+        issues.extend(_validate_structure_identity(base, structure, role=role, metadata=metadata, tolerance_ang=tolerance_ang))
+    if validation_errors(issues):
+        return issues
+
+    if "plus" in roles and structures.get("plus") is not None:
+        issues.extend(
+            _validate_displacement(
+                base,
+                structures["plus"],
+                role="plus",
+                sign=1,
+                metadata=metadata,
+                tolerance_ang=tolerance_ang,
+            )
+        )
+    if "minus" in roles and structures.get("minus") is not None:
+        issues.extend(
+            _validate_displacement(
+                base,
+                structures["minus"],
+                role="minus",
+                sign=-1,
+                metadata=metadata,
+                tolerance_ang=tolerance_ang,
+            )
+        )
+    issues.extend(_validate_geometry_metadata_family(discovery))
+    return issues
+
+
 def finite_difference_derivative(
     *,
     method: str,
@@ -465,6 +603,222 @@ def derivative_sparse_metrics(
     if ref_l1_union == 0.0 and not row["dh_relative_unavailable_reason"]:
         row["dh_relative_unavailable_reason"] = "reference_derivative_l1_norm_zero"
     return row
+
+
+def _required_geometry_roles(method: str) -> tuple[str, ...]:
+    if method == "central":
+        return ("plus", "minus")
+    if method == "forward":
+        return ("plus",)
+    if method == "backward":
+        return ("minus",)
+    return ()
+
+
+def _load_geometry_structures(stencil: DerivativeStencil) -> dict[str, Any]:
+    structures: dict[str, Any] = {"issues": []}
+    for role, path in (
+        ("base", stencil.base_structure_path),
+        ("plus", stencil.plus_structure_path),
+        ("minus", stencil.minus_structure_path),
+    ):
+        if path is None:
+            structures[role] = None
+            continue
+        try:
+            structures[role] = extract_fdf_structure(Path(path))
+        except Exception as exc:
+            structures[role] = None
+            structures["issues"].append(
+                DerivativeValidationIssue(
+                    severity="error",
+                    code=f"unreadable_{role}_structure",
+                    message=f"Could not read {role} RUN.fdf for derivative geometry validation: {exc}",
+                    field=f"{role}_structure_path",
+                    sample_id=stencil.metadata.sample_id,
+                    details={"path": str(path)},
+                )
+            )
+    return structures
+
+
+def _validate_structure_identity(
+    base: Any,
+    structure: Any,
+    *,
+    role: str,
+    metadata: DerivativeMetadata,
+    tolerance_ang: float,
+) -> list[DerivativeValidationIssue]:
+    issues: list[DerivativeValidationIssue] = []
+    if base.atom_count != structure.atom_count:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="atom_count_mismatch",
+                message=f"{role} structure atom count differs from base R0.",
+                sample_id=metadata.sample_id,
+                details={"role": role, "base_atom_count": base.atom_count, "role_atom_count": structure.atom_count},
+            )
+        )
+        return issues
+    if base.atom_species != structure.atom_species:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="atom_ordering_or_species_mismatch",
+                message=f"{role} structure species/order differs from base R0.",
+                sample_id=metadata.sample_id,
+                details={"role": role},
+            )
+        )
+    if [species.to_dict() for species in base.species] != [species.to_dict() for species in structure.species]:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="species_metadata_mismatch",
+                message=f"{role} ChemicalSpeciesLabel metadata differs from base R0.",
+                sample_id=metadata.sample_id,
+                details={"role": role},
+            )
+        )
+    if len(base.lattice_vectors_ang) != len(structure.lattice_vectors_ang):
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="cell_mismatch",
+                message=f"{role} lattice vector count differs from base R0.",
+                sample_id=metadata.sample_id,
+                details={"role": role},
+            )
+        )
+        return issues
+    for vector_index, (base_vector, role_vector) in enumerate(zip(base.lattice_vectors_ang, structure.lattice_vectors_ang)):
+        for component_index, (base_value, role_value) in enumerate(zip(base_vector, role_vector)):
+            if abs(float(role_value) - float(base_value)) > tolerance_ang:
+                issues.append(
+                    DerivativeValidationIssue(
+                        severity="error",
+                        code="cell_mismatch",
+                        message=f"{role} cell differs from base R0.",
+                        sample_id=metadata.sample_id,
+                        details={
+                            "role": role,
+                            "vector_index": vector_index,
+                            "component_index": component_index,
+                            "base_value_ang": float(base_value),
+                            "role_value_ang": float(role_value),
+                            "tolerance_ang": tolerance_ang,
+                        },
+                    )
+                )
+                return issues
+    return issues
+
+
+def _validate_displacement(
+    base: Any,
+    structure: Any,
+    *,
+    role: str,
+    sign: int,
+    metadata: DerivativeMetadata,
+    tolerance_ang: float,
+) -> list[DerivativeValidationIssue]:
+    issues: list[DerivativeValidationIssue] = []
+    target_atom = int(metadata.atom_index_zero_based)
+    axis_index = int(metadata.axis_index)
+    delta_ang = float(metadata.delta_ang)
+    if target_atom < 0 or target_atom >= base.atom_count:
+        return [
+            DerivativeValidationIssue(
+                severity="error",
+                code="atom_index_out_of_range",
+                message="Requested derivative atom index is outside the base R0 structure.",
+                field="atom_index_zero_based",
+                sample_id=metadata.sample_id,
+                details={"atom_index_zero_based": target_atom, "atom_count": base.atom_count},
+            )
+        ]
+    for atom_index, (base_position, role_position) in enumerate(zip(base.positions_ang, structure.positions_ang)):
+        for component_index, (base_value, role_value) in enumerate(zip(base_position, role_position)):
+            expected = sign * delta_ang if atom_index == target_atom and component_index == axis_index else 0.0
+            actual = float(role_value) - float(base_value)
+            if abs(actual - expected) <= tolerance_ang:
+                continue
+            code = "displacement_component_mismatch" if atom_index == target_atom and component_index == axis_index else "unexpected_coordinate_drift"
+            issues.append(
+                DerivativeValidationIssue(
+                    severity="error",
+                    code=code,
+                    message=f"{role} displacement does not match the requested finite-displacement stencil.",
+                    sample_id=metadata.sample_id,
+                    details={
+                        "role": role,
+                        "atom_index_zero_based": atom_index,
+                        "component_index": component_index,
+                        "expected_delta_ang": expected,
+                        "actual_delta_ang": actual,
+                        "tolerance_ang": tolerance_ang,
+                    },
+                )
+            )
+    return issues
+
+
+def _validate_geometry_metadata_family(discovery: DerivativeStencilDiscovery) -> list[DerivativeValidationIssue]:
+    issues: list[DerivativeValidationIssue] = []
+    metadata_by_role = discovery.details.get("sample_metadata_by_role")
+    if not isinstance(metadata_by_role, dict):
+        return issues
+    splits = {
+        role: _metadata_text(metadata, "split", "split_name", "dataset_split")
+        for role, metadata in metadata_by_role.items()
+        if isinstance(metadata, dict)
+    }
+    nonempty_splits = {role: split for role, split in splits.items() if split}
+    if len(set(nonempty_splits.values())) > 1:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="split_mismatch",
+                message="Derivative stencil operands belong to different dataset splits.",
+                field="split",
+                details={"splits": nonempty_splits},
+            )
+        )
+    families = {
+        role: _metadata_text(metadata, "base_sample_id", "reference_sample_id", "reference_group_id")
+        for role, metadata in metadata_by_role.items()
+        if isinstance(metadata, dict)
+    }
+    nonempty_families = {role: family for role, family in families.items() if family}
+    if len(set(nonempty_families.values())) > 1:
+        issues.append(
+            DerivativeValidationIssue(
+                severity="error",
+                code="family_mismatch",
+                message="Derivative stencil operands belong to different base/family metadata groups.",
+                details={"families": nonempty_families},
+            )
+        )
+    for field_name in ("basis_hash", "pseudopotential_hash", "orbital_ordering_hash", "material_compatibility_hash"):
+        values = {
+            role: str(metadata[field_name])
+            for role, metadata in metadata_by_role.items()
+            if isinstance(metadata, dict) and str(metadata.get(field_name) or "").strip()
+        }
+        if len(set(values.values())) > 1:
+            issues.append(
+                DerivativeValidationIssue(
+                    severity="error",
+                    code="geometry_metadata_hash_mismatch",
+                    message=f"{field_name} differs across derivative stencil structures.",
+                    field=field_name,
+                    details={"values": values},
+                )
+            )
+    return issues
 
 
 def discover_derivative_stencils(
@@ -752,7 +1106,14 @@ def _build_discovered_stencil(
         stencil=stencil,
         issues=tuple(issues),
         sample_ids=tuple(sample.sample_id for sample in (base, plus, minus) if sample is not None),
-        details={"source_model": source_model},
+        details={
+            "source_model": source_model,
+            "sample_metadata_by_role": {
+                role: sample.metadata
+                for role, sample in (("base", base), ("plus", plus), ("minus", minus))
+                if sample is not None and sample.metadata is not None
+            },
+        },
     )
 
 
@@ -1163,6 +1524,12 @@ def _discovery_status(issues: list[DerivativeValidationIssue]) -> str:
         if any(code.startswith("missing_") for code in codes):
             return "incomplete"
         return "invalid"
+    non_optional_warnings = [
+        issue for issue in issues
+        if issue.code not in {"missing_optional_base_structure"}
+    ]
+    if not non_optional_warnings:
+        return "valid"
     return "diagnostic_only" if issues else "valid"
 
 

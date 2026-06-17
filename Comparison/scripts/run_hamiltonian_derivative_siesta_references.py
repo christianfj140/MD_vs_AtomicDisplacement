@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Run or stage SIESTA Hamiltonian references for derivative stencil structures."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from reference_selection import choose_reference_matrix, file_sha256  # noqa: E402
+
+
+MATRIX_SUFFIXES = {".HSX", ".TSHS"}
+FORBIDDEN_REFERENCE_NAMES = {"ML_prediction.HSX"}
+STATUS_FIELDS = [
+    "sample_id",
+    "status",
+    "structure_dir",
+    "reference_dir",
+    "reference_matrix",
+    "reference_matrix_sha256",
+    "command",
+    "returncode",
+    "started_at",
+    "finished_at",
+    "error",
+]
+STRUCTURE_SKIP_SUFFIXES = {".HSX", ".TSHS", ".TSDE", ".nc", ".out", ".XV", ".STRUCT_OUT", ".ORB_INDX"}
+
+
+class DerivativeSiestaReferenceError(RuntimeError):
+    """Raised when derivative SIESTA reference staging fails closed."""
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=STATUS_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def discover_structure_samples(stencil_root: Path) -> list[Path]:
+    structures_root = stencil_root / "structures"
+    if not structures_root.exists():
+        raise DerivativeSiestaReferenceError(f"Missing derivative stencil structures directory: {structures_root}")
+    return sorted(path for path in structures_root.iterdir() if path.is_dir())
+
+
+def clean_reference_dir(reference_dir: Path, *, overwrite: bool) -> None:
+    if not reference_dir.exists():
+        return
+    if not overwrite:
+        return
+    shutil.rmtree(reference_dir)
+
+
+def copy_structure_inputs(structure_dir: Path, reference_dir: Path) -> None:
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    for source in sorted(structure_dir.iterdir()):
+        if not source.is_file():
+            continue
+        if source.name == "metadata.json":
+            continue
+        if source.name in FORBIDDEN_REFERENCE_NAMES:
+            continue
+        if source.suffix in STRUCTURE_SKIP_SUFFIXES:
+            continue
+        shutil.copy2(source, reference_dir / source.name)
+    run_fdf = structure_dir / "RUN.fdf"
+    if not run_fdf.exists():
+        raise DerivativeSiestaReferenceError(f"Missing RUN.fdf for derivative stencil sample: {structure_dir}")
+    shutil.copy2(run_fdf, reference_dir / "RUN.fdf")
+    metadata = structure_dir / "metadata.json"
+    if metadata.exists():
+        shutil.copy2(metadata, reference_dir / "metadata.json")
+
+
+def copy_existing_reference(sample_id: str, reference_dir: Path, existing_reference_root: Path | None) -> Path | None:
+    if existing_reference_root is None:
+        return None
+    source_dir = existing_reference_root / sample_id
+    selection = choose_reference_matrix(source_dir)
+    if not selection.ok or selection.path is None:
+        return None
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    target = reference_dir / selection.path.name
+    shutil.copy2(selection.path, target)
+    return target
+
+
+def run_siesta(reference_dir: Path, *, command: str) -> dict[str, Any]:
+    run_fdf = reference_dir / "RUN.fdf"
+    run_out = reference_dir / "RUN.out"
+    with run_fdf.open("r", encoding="utf-8") as stdin, run_out.open("w", encoding="utf-8") as stdout:
+        completed = subprocess.run(
+            command,
+            cwd=reference_dir,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            shell=True,
+            check=False,
+            text=True,
+        )
+    return {"command": command, "returncode": completed.returncode, "stdout_path": str(run_out)}
+
+
+def sample_row(
+    *,
+    sample_id: str,
+    status: str,
+    structure_dir: Path,
+    reference_dir: Path,
+    command: str | None = None,
+    returncode: int | None = None,
+    started_at: float | None = None,
+    finished_at: float | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    selection = choose_reference_matrix(reference_dir)
+    reference_matrix = selection.path if selection.ok else None
+    return {
+        "sample_id": sample_id,
+        "status": status,
+        "structure_dir": str(structure_dir),
+        "reference_dir": str(reference_dir),
+        "reference_matrix": str(reference_matrix) if reference_matrix else "",
+        "reference_matrix_sha256": file_sha256(reference_matrix),
+        "command": command or "",
+        "returncode": returncode,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "error": error,
+        "reference_selection": {
+            "ok": selection.ok,
+            "reason": selection.reason,
+            "candidates": list(selection.candidates),
+        },
+    }
+
+
+def run_derivative_siesta_references(
+    *,
+    stencil_root: Path,
+    output_reference_root: Path | None = None,
+    existing_reference_root: Path | None = None,
+    siesta_command: str = "siesta",
+    overwrite: bool = False,
+    skip_if_exists: bool = True,
+    diagnostic_only: bool = False,
+    max_jobs: int | None = None,
+) -> dict[str, Any]:
+    output_reference_root = output_reference_root or stencil_root / "siesta_hamiltonians"
+    structures = discover_structure_samples(stencil_root)
+    if max_jobs is not None:
+        structures = structures[: max(0, int(max_jobs))]
+    rows: list[dict[str, Any]] = []
+    for structure_dir in structures:
+        sample_id = structure_dir.name
+        reference_dir = output_reference_root / sample_id
+        started_at = time.time()
+        try:
+            if not (structure_dir / "RUN.fdf").exists():
+                rows.append(
+                    sample_row(
+                        sample_id=sample_id,
+                        status="error",
+                        structure_dir=structure_dir,
+                        reference_dir=reference_dir,
+                        started_at=started_at,
+                        finished_at=time.time(),
+                        error="missing_structure_run_fdf",
+                    )
+                )
+                continue
+            existing_selection = choose_reference_matrix(reference_dir)
+            if existing_selection.ok and skip_if_exists and not overwrite:
+                rows.append(
+                    sample_row(
+                        sample_id=sample_id,
+                        status="skipped_existing",
+                        structure_dir=structure_dir,
+                        reference_dir=reference_dir,
+                        started_at=started_at,
+                        finished_at=time.time(),
+                    )
+                )
+                continue
+            clean_reference_dir(reference_dir, overwrite=overwrite)
+            copy_structure_inputs(structure_dir, reference_dir)
+            staged = copy_existing_reference(sample_id, reference_dir, existing_reference_root)
+            if staged is not None:
+                rows.append(
+                    sample_row(
+                        sample_id=sample_id,
+                        status="staged",
+                        structure_dir=structure_dir,
+                        reference_dir=reference_dir,
+                        started_at=started_at,
+                        finished_at=time.time(),
+                    )
+                )
+                continue
+            run_record = run_siesta(reference_dir, command=siesta_command)
+            selection = choose_reference_matrix(reference_dir)
+            status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
+            error = "" if status == "ok" else selection.reason if run_record["returncode"] == 0 else "siesta_returncode_nonzero"
+            rows.append(
+                sample_row(
+                    sample_id=sample_id,
+                    status=status,
+                    structure_dir=structure_dir,
+                    reference_dir=reference_dir,
+                    command=str(run_record["command"]),
+                    returncode=int(run_record["returncode"]),
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    error=error,
+                )
+            )
+        except Exception as exc:
+            rows.append(
+                sample_row(
+                    sample_id=sample_id,
+                    status="error",
+                    structure_dir=structure_dir,
+                    reference_dir=reference_dir,
+                    command=siesta_command,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    error=str(exc),
+                )
+            )
+
+    failed = [row for row in rows if row["status"] == "error"]
+    manifest = {
+        "schema_version": "derivative_siesta_references_v1",
+        "stencil_root": str(stencil_root),
+        "structures_root": str(stencil_root / "structures"),
+        "output_reference_root": str(output_reference_root),
+        "existing_reference_root": str(existing_reference_root) if existing_reference_root else "",
+        "siesta_hamiltonians_root": str(output_reference_root),
+        "siesta_command": siesta_command if existing_reference_root is None else "",
+        "overwrite": overwrite,
+        "skip_if_exists": skip_if_exists,
+        "diagnostic_only": diagnostic_only,
+        "max_jobs": max_jobs,
+        "samples_total": len(rows),
+        "samples_ok": len([row for row in rows if row["status"] in {"ok", "staged", "skipped_existing"}]),
+        "samples_failed": len(failed),
+        "forbidden_reference_filenames": sorted(FORBIDDEN_REFERENCE_NAMES),
+        "force_constants_used": False,
+        "derivative_metrics_run": False,
+        "rows": rows,
+        "outputs": {
+            "status_csv": str(output_reference_root / "derivative_siesta_reference_status.csv"),
+            "manifest": str(output_reference_root / "derivative_siesta_reference_manifest.json"),
+        },
+    }
+    write_csv(output_reference_root / "derivative_siesta_reference_status.csv", rows)
+    write_json(output_reference_root / "derivative_siesta_reference_manifest.json", manifest)
+    if failed and not diagnostic_only:
+        raise DerivativeSiestaReferenceError(
+            f"Derivative SIESTA reference stage failed for {len(failed)} sample(s). "
+            f"See {output_reference_root / 'derivative_siesta_reference_manifest.json'}"
+        )
+    return manifest
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stencil-root", type=Path, required=True)
+    parser.add_argument("--output-reference-root", type=Path, default=None)
+    parser.add_argument("--existing-reference-root", type=Path, default=None)
+    parser.add_argument("--siesta-command", default="siesta")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--skip-if-exists", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--diagnostic-only", action="store_true")
+    parser.add_argument("--max-jobs", type=int, default=None)
+    return parser
+
+
+def main() -> int:
+    args = build_argument_parser().parse_args()
+    try:
+        manifest = run_derivative_siesta_references(
+            stencil_root=args.stencil_root,
+            output_reference_root=args.output_reference_root,
+            existing_reference_root=args.existing_reference_root,
+            siesta_command=args.siesta_command,
+            overwrite=args.overwrite,
+            skip_if_exists=args.skip_if_exists,
+            diagnostic_only=args.diagnostic_only,
+            max_jobs=args.max_jobs,
+        )
+    except DerivativeSiestaReferenceError as exc:
+        print(f"[DERIVATIVE-SIESTA][ERROR] {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps({"samples_total": manifest["samples_total"], "samples_ok": manifest["samples_ok"], "samples_failed": manifest["samples_failed"]}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

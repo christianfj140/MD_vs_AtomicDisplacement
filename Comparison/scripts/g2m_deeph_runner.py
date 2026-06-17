@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import csv
@@ -54,6 +55,7 @@ from g2m_deeph_metrics import (  # noqa: E402
     stage_deeph_metric_inputs,
     stage_graph2mat_metric_result,
 )
+from g2m_deeph_derivative_gate_check import build_derivative_gate_report  # noqa: E402
 from g2m_deeph_rank_runs import rank_graph2mat_deeph_runs  # noqa: E402
 from g2m_deeph_live_metrics import completed_metric_record, dedupe_metric_rows, live_metric_scaling_rows  # noqa: E402
 from g2m_deeph_telemetry import (  # noqa: E402
@@ -95,6 +97,7 @@ from dataset_recipe_helpers import (  # noqa: E402
     slugify_label,
     validate_split_sizes,
 )
+from plot_hamiltonian_derivative_metrics import write_derivative_plot_outputs  # noqa: E402
 
 
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
@@ -110,6 +113,10 @@ DEFAULT_MD_TRAINING_SCRIPT = REPO_ROOT / "MD" / "scripts" / "run_md_training.py"
 DEFAULT_MD_PREDICTION_SCRIPT = REPO_ROOT / "MD" / "scripts" / "run_md_prediction.py"
 DEFAULT_HAMILTONIAN_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_metrics.py"
 DEFAULT_DERIVATIVE_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_derivative_metrics.py"
+DEFAULT_DERIVATIVE_STENCIL_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "build_hamiltonian_derivative_stencils.py"
+DEFAULT_DERIVATIVE_GEOMETRY_VALIDATION_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "validate_hamiltonian_derivative_geometry.py"
+DEFAULT_DERIVATIVE_SIESTA_REFERENCE_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "run_hamiltonian_derivative_siesta_references.py"
+DEFAULT_DERIVATIVE_PREDICTION_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "run_hamiltonian_derivative_predictions.py"
 DEFAULT_DEEPH_KPOINT_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_deeph_kpoint_metrics.py"
 DEEPH_PACK_ROOT_ENV = "DEEPH_PACK_ROOT"
 DEEPH_CLI_NAMES = ("deeph-preprocess", "deeph-train", "deeph-inference")
@@ -121,6 +128,142 @@ METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY = "diagnostic_only"
 TEST_METRICS_LOCKED_MESSAGE = (
     "Final/publicable benchmark mode keeps test predictions and test metrics locked "
     "during search. Run the final_test stage only after validation-based top-k selection."
+)
+MODULAR_WORKFLOW_STAGE_NAMES = (
+    "generate_or_validate_dataset",
+    "freeze_splits",
+    "train_graph2mat",
+    "predict_graph2mat",
+    "train_deeph",
+    "predict_deeph",
+    "hamiltonian_metrics",
+    "build_derivative_stencils",
+    "validate_derivative_stencils",
+    "run_derivative_siesta_reference",
+    "predict_derivative_graph2mat",
+    "predict_derivative_deeph",
+    "derivative_metrics_graph2mat",
+    "derivative_metrics_deeph",
+    "derivative_gate_check",
+    "derivative_plots",
+)
+MODULAR_WORKFLOW_DEFAULT_STAGES = {
+    "generate_or_validate_dataset": True,
+    "freeze_splits": True,
+    "train_graph2mat": True,
+    "predict_graph2mat": True,
+    "train_deeph": True,
+    "predict_deeph": True,
+    "hamiltonian_metrics": True,
+    "build_derivative_stencils": False,
+    "validate_derivative_stencils": False,
+    "run_derivative_siesta_reference": False,
+    "predict_derivative_graph2mat": False,
+    "predict_derivative_deeph": False,
+    "derivative_metrics_graph2mat": False,
+    "derivative_metrics_deeph": False,
+    "derivative_gate_check": False,
+    "derivative_plots": False,
+}
+MODULAR_WORKFLOW_MODE_ALIASES = {
+    "h_only": "hamiltonian_only",
+    "h-only": "hamiltonian_only",
+    "hamiltonian": "hamiltonian_only",
+    "hamiltonian-only": "hamiltonian_only",
+    "hamiltonian_only": "hamiltonian_only",
+    "derivative-stencils-only": "derivative_stencils_only",
+    "derivative_stencils_only": "derivative_stencils_only",
+    "derivative-reference-only": "derivative_reference_only",
+    "derivative_reference_only": "derivative_reference_only",
+    "derivative-predictions-only": "derivative_predictions_only",
+    "derivative_predictions_only": "derivative_predictions_only",
+    "derivative-metrics-only": "derivative_metrics_only",
+    "derivative_metrics_only": "derivative_metrics_only",
+    "h_then_derivative_postprocess": "h_then_derivative_postprocess",
+    "h-then-derivative-postprocess": "h_then_derivative_postprocess",
+    "full-end-to-end": "full_end_to_end",
+    "full_end_to_end": "full_end_to_end",
+}
+MODULAR_WORKFLOW_MODE_OVERRIDES = {
+    "hamiltonian_only": {},
+    "derivative_stencils_only": {
+        "generate_or_validate_dataset": False,
+        "freeze_splits": False,
+        "train_graph2mat": False,
+        "predict_graph2mat": False,
+        "train_deeph": False,
+        "predict_deeph": False,
+        "hamiltonian_metrics": False,
+        "build_derivative_stencils": True,
+        "validate_derivative_stencils": True,
+    },
+    "derivative_reference_only": {
+        "generate_or_validate_dataset": False,
+        "freeze_splits": False,
+        "train_graph2mat": False,
+        "predict_graph2mat": False,
+        "train_deeph": False,
+        "predict_deeph": False,
+        "hamiltonian_metrics": False,
+        "validate_derivative_stencils": True,
+        "run_derivative_siesta_reference": True,
+    },
+    "derivative_predictions_only": {
+        "generate_or_validate_dataset": False,
+        "freeze_splits": False,
+        "train_graph2mat": False,
+        "predict_graph2mat": False,
+        "train_deeph": False,
+        "predict_deeph": False,
+        "hamiltonian_metrics": False,
+        "validate_derivative_stencils": True,
+        "predict_derivative_graph2mat": True,
+        "predict_derivative_deeph": True,
+    },
+    "derivative_metrics_only": {
+        "generate_or_validate_dataset": False,
+        "freeze_splits": False,
+        "train_graph2mat": False,
+        "predict_graph2mat": False,
+        "train_deeph": False,
+        "predict_deeph": False,
+        "hamiltonian_metrics": False,
+        "derivative_metrics_graph2mat": True,
+        "derivative_metrics_deeph": True,
+        "derivative_gate_check": True,
+        "derivative_plots": True,
+    },
+    "h_then_derivative_postprocess": {
+        "derivative_metrics_graph2mat": True,
+        "derivative_metrics_deeph": True,
+        "derivative_gate_check": True,
+        "derivative_plots": True,
+    },
+    "full_end_to_end": {
+        "build_derivative_stencils": True,
+        "validate_derivative_stencils": True,
+        "run_derivative_siesta_reference": True,
+        "predict_derivative_graph2mat": True,
+        "predict_derivative_deeph": True,
+        "derivative_metrics_graph2mat": True,
+        "derivative_metrics_deeph": True,
+        "derivative_gate_check": True,
+        "derivative_plots": True,
+    },
+}
+DERIVATIVE_STAGE_NAMES = {
+    "build_derivative_stencils",
+    "validate_derivative_stencils",
+    "run_derivative_siesta_reference",
+    "predict_derivative_graph2mat",
+    "predict_derivative_deeph",
+    "derivative_metrics_graph2mat",
+    "derivative_metrics_deeph",
+    "derivative_gate_check",
+    "derivative_plots",
+}
+HAMILTONIAN_STAGE_NAMES = tuple(
+    stage for stage in MODULAR_WORKFLOW_STAGE_NAMES if stage not in DERIVATIVE_STAGE_NAMES
 )
 DEEPH_TRAIN_OVERRIDE_KEYS = {
     "epochs",
@@ -1255,6 +1398,146 @@ def _normalized_derivative_metrics_payload(payload: dict[str, Any]) -> dict[str,
     return normalized
 
 
+def _normalize_modular_workflow_mode(payload: dict[str, Any]) -> str:
+    raw = str(payload.get("workflow_mode") or payload.get("benchmark_workflow") or "").strip().lower()
+    if not raw:
+        return ""
+    mode = MODULAR_WORKFLOW_MODE_ALIASES.get(raw)
+    if mode is None:
+        allowed = ", ".join(sorted(set(MODULAR_WORKFLOW_MODE_ALIASES.values())))
+        raise RuntimeError(f"Unsupported workflow_mode {raw!r}. Use one of: {allowed}.")
+    return mode
+
+
+def _normalize_modular_workflow_stages(payload: dict[str, Any]) -> dict[str, bool]:
+    stages = dict(MODULAR_WORKFLOW_DEFAULT_STAGES)
+    mode = _normalize_modular_workflow_mode(payload)
+    if mode:
+        stages.update(MODULAR_WORKFLOW_MODE_OVERRIDES[mode])
+    raw = payload.get("stages")
+    if raw is None:
+        raw = payload.get("workflow_stages")
+    if raw is not None:
+        if not isinstance(raw, dict):
+            raise RuntimeError("stages must be an object mapping stage names to booleans.")
+        for key, value in raw.items():
+            stage = str(key).strip()
+            if stage not in stages:
+                allowed = ", ".join(MODULAR_WORKFLOW_STAGE_NAMES)
+                raise RuntimeError(f"Unsupported workflow stage {stage!r}. Use one of: {allowed}.")
+            stages[stage] = _parse_bool(value, False)
+    return stages
+
+
+def _normalize_derivative_workflow_config(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("derivative") if isinstance(payload.get("derivative"), dict) else {}
+    config = dict(raw)
+    config["enabled"] = _parse_bool(raw.get("enabled"), False)
+    config["method"] = str(raw.get("method") or raw.get("finite_difference_method") or "central").strip().lower()
+    config["base_split"] = str(raw.get("base_split") or raw.get("split") or "test").strip().lower()
+    config["overwrite"] = _parse_bool(raw.get("overwrite"), False)
+    config["skip_if_exists"] = _parse_bool(raw.get("skip_if_exists"), True)
+    if raw.get("delta_ang") not in (None, ""):
+        try:
+            config["delta_ang"] = float(raw["delta_ang"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("derivative.delta_ang must be a positive number.") from exc
+    else:
+        config["delta_ang"] = None
+    if raw.get("max_base_snapshots") not in (None, ""):
+        config["max_base_snapshots"] = _optional_int_value(raw.get("max_base_snapshots"))
+    else:
+        config["max_base_snapshots"] = None
+    config["atoms"] = _normalize_optional_string_list(raw.get("atoms"), field="derivative.atoms")
+    config["axes"] = _normalize_optional_string_list(raw.get("axes"), field="derivative.axes")
+    return config
+
+
+def _normalize_optional_string_list(value: Any, *, field: str) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        items = [str(item).strip() for item in value]
+    else:
+        raise RuntimeError(f"{field} must be a list or comma-separated string.")
+    return [item for item in items if item]
+
+
+def _require_derivative_field(config: dict[str, Any], field: str, *, stage: str) -> None:
+    value = config.get(field)
+    if value in (None, "", []):
+        raise RuntimeError(f"derivative stage {stage!r} requires derivative.{field}.")
+
+
+def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[str, Any]) -> None:
+    enabled_derivative_stages = [stage for stage in MODULAR_WORKFLOW_STAGE_NAMES if stage in DERIVATIVE_STAGE_NAMES and stages.get(stage)]
+    if not enabled_derivative_stages:
+        return
+    if not config.get("enabled"):
+        raise RuntimeError(
+            "derivative.enabled must be true when derivative stages are enabled: "
+            + ", ".join(enabled_derivative_stages)
+        )
+    if config["method"] not in {"central", "forward", "backward"}:
+        raise RuntimeError("derivative.method must be one of: central, forward, backward.")
+    if config["base_split"] not in {"train", "validation", "test", "all"}:
+        raise RuntimeError("derivative.base_split must be one of: train, validation, test, all.")
+    if config.get("delta_ang") is not None and float(config["delta_ang"]) <= 0:
+        raise RuntimeError("derivative.delta_ang must be a positive number.")
+    if config.get("max_base_snapshots") is not None and int(config["max_base_snapshots"]) <= 0:
+        raise RuntimeError("derivative.max_base_snapshots must be positive when provided.")
+    invalid_axes = [axis for axis in config.get("axes", []) if axis not in {"x", "y", "z"}]
+    if invalid_axes:
+        raise RuntimeError(f"derivative.axes contains unsupported axes: {', '.join(invalid_axes)}.")
+
+    if stages.get("build_derivative_stencils"):
+        _require_derivative_field(config, "source_dataset_root", stage="build_derivative_stencils")
+        _require_derivative_field(config, "delta_ang", stage="build_derivative_stencils")
+        _require_derivative_field(config, "atoms", stage="build_derivative_stencils")
+        _require_derivative_field(config, "axes", stage="build_derivative_stencils")
+
+    result_consuming_stages = [
+        "validate_derivative_stencils",
+        "run_derivative_siesta_reference",
+        "predict_derivative_graph2mat",
+        "predict_derivative_deeph",
+        "derivative_metrics_graph2mat",
+        "derivative_metrics_deeph",
+        "derivative_gate_check",
+        "derivative_plots",
+    ]
+    h_benchmark_produces_metric_inputs = bool(stages.get("hamiltonian_metrics"))
+    for stage in result_consuming_stages:
+        if not stages.get(stage):
+            continue
+        if h_benchmark_produces_metric_inputs and stage in {
+            "derivative_metrics_graph2mat",
+            "derivative_metrics_deeph",
+            "derivative_gate_check",
+            "derivative_plots",
+        }:
+            continue
+        if config.get("result_dir") in (None, "") and config.get("output_root") in (None, ""):
+            raise RuntimeError(
+                f"derivative stage {stage!r} requires derivative.result_dir or derivative.output_root."
+            )
+
+
+def _normalized_modular_workflow_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = _normalize_modular_workflow_mode(payload)
+    stages = _normalize_modular_workflow_stages(payload)
+    derivative = _normalize_derivative_workflow_config(payload)
+    _validate_derivative_workflow_config(stages, derivative)
+    return {
+        "schema": "graph2mat_deeph_modular_workflow_config_v1",
+        "workflow_mode": mode or "default",
+        "stages": stages,
+        "derivative": derivative,
+    }
+
+
 def _has_derivative_stencils(
     *,
     result_dir: Path,
@@ -1304,6 +1587,522 @@ def _derivative_metric_command_args(
     if settings.get("max_stencils") is not None:
         command.extend(["--max-stencils", str(settings["max_stencils"])])
     return command
+
+
+def _logged_subprocess_run(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    label: str,
+    allowed_returncodes: tuple[int, ...] = (0,),
+) -> dict[str, Any]:
+    started_at = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    finished_at = time.time()
+    record = {
+        "label": label,
+        "command": list(command),
+        "cwd": str(cwd),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_seconds": finished_at - started_at,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+    if completed.returncode not in allowed_returncodes:
+        raise CommandRunError(f"{label} failed with exit code {completed.returncode}", record)
+    return record
+
+
+def _derivative_output_root(run_root: Path, method: str) -> Path:
+    return run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics"
+
+
+def _existing_derivative_root(run_root: Path, method: str) -> Path | None:
+    root = _derivative_output_root(run_root, method)
+    return root if (root / "manifest.json").exists() else None
+
+
+def _json_safe_payload(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_payload(item) for item in value]
+    return value
+
+
+def _run_status_label(record: dict[str, Any]) -> str:
+    status = str(record.get("status") or "").strip()
+    if status:
+        return status
+    return "completed" if int(record.get("returncode") or 0) in {0, 2} else "failed"
+
+
+DERIVATIVE_PAIR_KEY_FIELDS = (
+    "base_sample_id",
+    "atom_index_zero_based",
+    "axis",
+    "delta_ang",
+    "finite_difference_method",
+)
+DERIVATIVE_PAIR_METRICS = (
+    "dh_mae_union_eV_per_Ang",
+    "dh_rmse_union_eV_per_Ang",
+    "dh_max_abs_error_union_eV_per_Ang",
+    "dh_relative_frobenius_ref",
+    "dh_relative_l1_union",
+    "dh_cosine_similarity_union",
+    "dh_support_precision",
+    "dh_support_recall",
+    "dh_support_f1",
+    "dh_false_zero_rate",
+    "dh_false_nonzero_rate",
+    "dh_hermiticity_error_delta",
+)
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _derivative_pair_key(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(str(row.get(field) or "").strip() for field in DERIVATIVE_PAIR_KEY_FIELDS)
+
+
+def _derivative_comparison_claim_status(gate_report: dict[str, Any] | None) -> str:
+    status = str((gate_report or {}).get("scientific_status") or "").strip()
+    if status == "blocked":
+        return "blocked"
+    if status in {"technical_presentation", "paper_level_candidate"}:
+        return "presentation_ready"
+    return "diagnostic_only"
+
+
+def _derivative_winner_claim_allowed(gate_report: dict[str, Any] | None) -> bool:
+    status = str((gate_report or {}).get("scientific_status") or "").strip()
+    if status not in {"technical_presentation", "paper_level_candidate"}:
+        return False
+    blocked_claims = " ".join(str(item) for item in (gate_report or {}).get("blocked_claims") or [])
+    return "winner" not in blocked_claims.lower()
+
+
+def _winner_from_delta(delta: float | None) -> str | None:
+    if delta is None:
+        return None
+    if abs(delta) <= 1e-15:
+        return "tie"
+    return "graph2mat" if delta < 0 else "deeph"
+
+
+def _mean_delta(rows: list[dict[str, Any]], field: str) -> float | None:
+    values = [_finite_float(row.get(field)) for row in rows]
+    values = [value for value in values if value is not None]
+    return sum(values) / len(values) if values else None
+
+
+def build_derivative_model_comparison_summary(
+    *,
+    graph2mat_root: Path | None,
+    deeph_root: Path | None,
+    output_dir: Path,
+    gate_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    output_dir = Path(output_dir)
+    graph2mat_metric_path = Path(graph2mat_root) / "derivative_matrix_metrics.csv" if graph2mat_root is not None else None
+    deeph_metric_path = Path(deeph_root) / "derivative_matrix_metrics.csv" if deeph_root is not None else None
+    graph_rows = _read_csv_rows(graph2mat_metric_path) if graph2mat_metric_path is not None else []
+    deeph_rows = _read_csv_rows(deeph_metric_path) if deeph_metric_path is not None else []
+    graph_by_key = {_derivative_pair_key(row): row for row in graph_rows if any(_derivative_pair_key(row))}
+    deeph_by_key = {_derivative_pair_key(row): row for row in deeph_rows if any(_derivative_pair_key(row))}
+    paired_keys = sorted(set(graph_by_key) & set(deeph_by_key))
+    paired_rows: list[dict[str, Any]] = []
+    for key in paired_keys:
+        graph_row = graph_by_key[key]
+        deeph_row = deeph_by_key[key]
+        row: dict[str, Any] = {field: key[index] for index, field in enumerate(DERIVATIVE_PAIR_KEY_FIELDS)}
+        row.update(
+            {
+                "graph2mat_sample": graph_row.get("sample"),
+                "deeph_sample": deeph_row.get("sample"),
+                "graph2mat_comparison_status": graph_row.get("comparison_status"),
+                "deeph_comparison_status": deeph_row.get("comparison_status"),
+            }
+        )
+        for metric in DERIVATIVE_PAIR_METRICS:
+            graph_value = _finite_float(graph_row.get(metric))
+            deeph_value = _finite_float(deeph_row.get(metric))
+            row[f"graph2mat_{metric}"] = graph_value
+            row[f"deeph_{metric}"] = deeph_value
+            row[f"delta_graph2mat_minus_deeph_{metric}"] = (
+                None if graph_value is None or deeph_value is None else graph_value - deeph_value
+            )
+        paired_rows.append(row)
+
+    missing_graph2mat = sorted(set(deeph_by_key) - set(graph_by_key))
+    missing_deeph = sorted(set(graph_by_key) - set(deeph_by_key))
+    claim_status = _derivative_comparison_claim_status(gate_report)
+    winner_allowed = _derivative_winner_claim_allowed(gate_report)
+    mean_mae_delta = _mean_delta(paired_rows, "delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang")
+    winner = _winner_from_delta(mean_mae_delta) if winner_allowed and paired_rows else None
+    block_metrics = {
+        "status": "block_metrics_unavailable",
+        "reason": "No verified orbital-to-atom block mapping is present in derivative metric rows.",
+    }
+    summary = {
+        "schema": "graph2mat_deeph_derivative_model_comparison_v1",
+        "claim_status": claim_status,
+        "winner_claim_allowed": winner_allowed,
+        "winner": winner,
+        "winner_metric": "mean_delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang" if winner_allowed else None,
+        "paired_count": len(paired_rows),
+        "graph2mat_rows": len(graph_rows),
+        "deeph_rows": len(deeph_rows),
+        "missing_graph2mat_count": len(missing_graph2mat),
+        "missing_deeph_count": len(missing_deeph),
+        "mean_delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang": mean_mae_delta,
+        "block_metrics": block_metrics,
+        "outputs": {
+            "paired_comparison_csv": str(output_dir / "derivative_model_paired_comparison.csv"),
+            "summary_json": str(output_dir / "derivative_model_comparison_summary.json"),
+        },
+        "inputs": {
+            "graph2mat_root": str(graph2mat_root) if graph2mat_root is not None else "",
+            "deeph_root": str(deeph_root) if deeph_root is not None else "",
+            "gate_scientific_status": str((gate_report or {}).get("scientific_status") or ""),
+        },
+        "missing_pairs": {
+            "graph2mat": [dict(zip(DERIVATIVE_PAIR_KEY_FIELDS, key)) for key in missing_graph2mat],
+            "deeph": [dict(zip(DERIVATIVE_PAIR_KEY_FIELDS, key)) for key in missing_deeph],
+        },
+    }
+    _write_csv(output_dir / "derivative_model_paired_comparison.csv", paired_rows)
+    _write_json(output_dir / "derivative_model_comparison_summary.json", summary)
+    return summary
+
+
+def run_derivative_postprocess(
+    *,
+    run_root: Path,
+    graph2mat_result_dir: Path | None,
+    deeph_result_dir: Path | None,
+    settings: dict[str, Any],
+    overwrite: bool = True,
+    diagnostic_only: bool = True,
+    python_executable: str,
+    command_runner: Any | None = None,
+    plot_writer: Any | None = None,
+    gate_report_builder: Any | None = None,
+    json_writer: Any | None = None,
+    log: Any | None = None,
+) -> dict[str, Any]:
+    run_root = Path(run_root)
+    common_summary_root = run_root / "common_metrics" / "summary"
+    normalized_settings = {
+        "enabled": bool(settings.get("enabled", True)),
+        "finite_difference_method": str(settings.get("finite_difference_method") or "central"),
+        "split": str(settings.get("split") or "test"),
+        "require_central": bool(settings.get("require_central", True)),
+        "diagnostic_only": bool(settings.get("diagnostic_only", diagnostic_only)),
+        "support_threshold": float(settings.get("support_threshold", 1e-12) or 1e-12),
+        "max_stencils": _optional_int_value(settings.get("max_stencils")),
+        "overwrite": bool(settings.get("overwrite", overwrite)),
+    }
+    summary: dict[str, Any] = {
+        "enabled": normalized_settings["enabled"],
+        "settings": dict(normalized_settings),
+        "execution": {},
+        "plot_outputs": {"status": "skipped_disabled"},
+        "gate_report": {"status": "skipped_disabled"},
+        "model_comparison": {"status": "skipped_disabled"},
+        "roots": {"graph2mat": "", "deeph": ""},
+    }
+    if not normalized_settings["enabled"]:
+        return summary
+
+    runner = command_runner or _logged_subprocess_run
+    plot_writer = plot_writer or write_derivative_plot_outputs
+    gate_report_builder = gate_report_builder or build_derivative_gate_report
+    json_writer = json_writer or _write_json
+    logger = log or (lambda _message: None)
+    method_inputs = (
+        ("graph2mat", graph2mat_result_dir),
+        ("deeph", deeph_result_dir),
+    )
+    derivative_roots: list[Path] = []
+    for method_name, raw_result_dir in method_inputs:
+        output_dir = _derivative_output_root(run_root, method_name)
+        record: dict[str, Any] = {
+            "label": f"{method_name} derivative metrics",
+            "status": "skipped_missing_input",
+            "result_dir": str(raw_result_dir) if raw_result_dir is not None else "",
+            "output_dir": str(output_dir),
+            "enabled": True,
+        }
+        result_dir = Path(raw_result_dir) if raw_result_dir is not None else None
+        if result_dir is None or not result_dir.exists():
+            logger(
+                "[G2M-DEEPH] derivative_metrics: skipped for "
+                f"{method_name} because result_dir is missing.\n"
+            )
+            summary["execution"][method_name] = record
+            continue
+        if not _has_derivative_stencils(
+            result_dir=result_dir,
+            source_model=method_name,
+            settings=normalized_settings,
+        ):
+            record["status"] = "skipped_no_stencils"
+            logger(
+                "[G2M-DEEPH] derivative_metrics: skipped for "
+                f"{method_name} because no derivative stencils were discovered.\n"
+            )
+            summary["execution"][method_name] = record
+            continue
+        command = _derivative_metric_command_args(
+            python_executable=python_executable,
+            result_dir=result_dir,
+            output_dir=output_dir,
+            source_model=method_name,
+            settings=normalized_settings,
+        )
+        try:
+            command_record = runner(
+                command,
+                cwd=REPO_ROOT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                label=f"{method_name} derivative metrics",
+                allowed_returncodes=(0, 2),
+            )
+            record = {
+                **record,
+                **_json_safe_payload(command_record),
+                "status": "completed",
+            }
+            derivative_roots.append(output_dir)
+            summary["roots"][method_name] = str(output_dir)
+            logger(
+                "[G2M-DEEPH] derivative_metrics: completed for "
+                f"{method_name} -> {output_dir}\n"
+            )
+        except CommandRunError as exc:
+            record = {
+                **record,
+                **_json_safe_payload(exc.run_record),
+                "status": "failed",
+            }
+            logger(
+                "[G2M-DEEPH][WARN] Derivative metric postprocess failed "
+                f"for {method_name}; existing H metrics are preserved.\n"
+            )
+        summary["execution"][method_name] = record
+
+    graph2mat_root = _existing_derivative_root(run_root, "graph2mat")
+    deeph_root = _existing_derivative_root(run_root, "deeph")
+    if graph2mat_root is None and summary["roots"]["graph2mat"]:
+        graph2mat_root = Path(summary["roots"]["graph2mat"])
+    if deeph_root is None and summary["roots"]["deeph"]:
+        deeph_root = Path(summary["roots"]["deeph"])
+
+    if graph2mat_root is None and deeph_root is None:
+        summary["plot_outputs"] = {"status": "skipped_no_stencils", "output_dir": str(common_summary_root / "derivative_plots")}
+        summary["gate_report"] = {"status": "skipped_no_stencils", "output_path": str(common_summary_root / "derivative_gate_report.json")}
+        return summary
+
+    try:
+        plot_result = plot_writer(
+            derivative_roots=[],
+            graph2mat_root=graph2mat_root,
+            deeph_root=deeph_root,
+            output_dir=common_summary_root / "derivative_plots",
+        )
+        summary["plot_outputs"] = {
+            "status": "completed",
+            "output_dir": str(common_summary_root / "derivative_plots"),
+            "payload_path": str(plot_result["payload_path"]),
+            "manifest_path": str(plot_result["manifest_path"]),
+            "available": bool(plot_result["payload"].get("available")),
+        }
+        logger(
+            "[G2M-DEEPH] derivative_metrics: plots updated -> "
+            f"{common_summary_root / 'derivative_plots'}\n"
+        )
+    except Exception as exc:
+        summary["plot_outputs"] = {
+            "status": "failed",
+            "output_dir": str(common_summary_root / "derivative_plots"),
+            "error": str(exc),
+        }
+        logger(f"[G2M-DEEPH][WARN] Derivative plot postprocess failed: {exc}\n")
+
+    try:
+        roots_for_gate = [root for root in (graph2mat_root, deeph_root) if root is not None]
+        report = gate_report_builder(
+            derivative_roots=roots_for_gate,
+            run_root=run_root,
+        )
+        gate_report_path = common_summary_root / "derivative_gate_report.json"
+        json_writer(gate_report_path, report)
+        summary["gate_report"] = {
+            "status": "completed",
+            "output_path": str(gate_report_path),
+            "scientific_status": str(report.get("scientific_status") or ""),
+            "blockers": len(report.get("blockers") or []),
+            "warnings": len(report.get("warnings") or []),
+        }
+        logger(
+            "[G2M-DEEPH] derivative_metrics: gate report updated -> "
+            f"{gate_report_path}\n"
+        )
+    except Exception as exc:
+        summary["gate_report"] = {
+            "status": "failed",
+            "output_path": str(common_summary_root / "derivative_gate_report.json"),
+            "error": str(exc),
+        }
+        logger(f"[G2M-DEEPH][WARN] Derivative gate report generation failed: {exc}\n")
+        report = None
+
+    try:
+        comparison = build_derivative_model_comparison_summary(
+            graph2mat_root=graph2mat_root,
+            deeph_root=deeph_root,
+            output_dir=common_summary_root / "derivative_model_comparison",
+            gate_report=report,
+        )
+        summary["model_comparison"] = {
+            "status": "completed",
+            "output_dir": str(common_summary_root / "derivative_model_comparison"),
+            "paired_count": comparison["paired_count"],
+            "claim_status": comparison["claim_status"],
+            "winner_claim_allowed": comparison["winner_claim_allowed"],
+            "winner": comparison["winner"],
+        }
+        logger(
+            "[G2M-DEEPH] derivative_metrics: model comparison updated -> "
+            f"{common_summary_root / 'derivative_model_comparison'}\n"
+        )
+    except Exception as exc:
+        summary["model_comparison"] = {
+            "status": "failed",
+            "output_dir": str(common_summary_root / "derivative_model_comparison"),
+            "error": str(exc),
+        }
+        logger(f"[G2M-DEEPH][WARN] Derivative model comparison failed: {exc}\n")
+    return summary
+
+
+def _backfill_result_dir(run_root: Path, method: str) -> Path | None:
+    candidates = {
+        "graph2mat": (
+            run_root / "common_metrics" / "graph2mat_eval",
+            run_root / "metrics" / "graph2mat" / "eval_input",
+        ),
+        "deeph": (
+            run_root / "common_metrics" / "deeph_eval",
+            run_root / "metrics" / "deeph" / "eval",
+        ),
+    }
+    for candidate in candidates[method]:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def backfill_derivative_postprocess_from_training_sweep(
+    *,
+    training_sweep_manifest_path: Path,
+    settings: dict[str, Any],
+    python_executable: str,
+    command_runner: Any | None = None,
+    plot_writer: Any | None = None,
+    gate_report_builder: Any | None = None,
+    json_writer: Any | None = None,
+    log: Any | None = None,
+) -> dict[str, Any]:
+    manifest_path = Path(training_sweep_manifest_path)
+    manifest = _load_json(manifest_path)
+    benchmark_run_root = manifest_path.parent.parent
+    logger = log or (lambda _message: None)
+    plot_writer = plot_writer or write_derivative_plot_outputs
+    gate_report_builder = gate_report_builder or build_derivative_gate_report
+    json_writer = json_writer or _write_json
+    runs = manifest.get("runs") if isinstance(manifest.get("runs"), list) else []
+    summary_runs: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for entry in runs:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status") or "").strip().lower() != "completed":
+            continue
+        raw_run_root = str(entry.get("run_root") or "").strip()
+        if not raw_run_root:
+            continue
+        child_run_root = Path(raw_run_root).expanduser().resolve(strict=False)
+        if not child_run_root.exists():
+            continue
+        logger(f"[G2M-DEEPH][backfill] Processing derivative postprocess for {child_run_root}\n")
+        derivative_summary = run_derivative_postprocess(
+            run_root=child_run_root,
+            graph2mat_result_dir=_backfill_result_dir(child_run_root, "graph2mat"),
+            deeph_result_dir=_backfill_result_dir(child_run_root, "deeph"),
+            settings=settings,
+            overwrite=bool(settings.get("overwrite", True)),
+            diagnostic_only=bool(settings.get("diagnostic_only", True)),
+            python_executable=python_executable,
+            command_runner=command_runner,
+            plot_writer=plot_writer,
+            gate_report_builder=gate_report_builder,
+            json_writer=json_writer,
+            log=logger,
+        )
+        method_statuses = {
+            method: _run_status_label(record)
+            for method, record in derivative_summary.get("execution", {}).items()
+            if isinstance(record, dict)
+        }
+        overall_status = "completed" if any(status == "completed" for status in method_statuses.values()) else "skipped_no_stencils"
+        if any(status == "failed" for status in method_statuses.values()):
+            overall_status = "failed"
+        counts[overall_status] = counts.get(overall_status, 0) + 1
+        summary_runs.append(
+            {
+                "run_root": str(child_run_root),
+                "run_id": child_run_root.name,
+                "overall_status": overall_status,
+                "method_statuses": method_statuses,
+                "plot_status": str((derivative_summary.get("plot_outputs") or {}).get("status") or ""),
+                "gate_status": str((derivative_summary.get("gate_report") or {}).get("status") or ""),
+                "summary": derivative_summary,
+            }
+        )
+    backfill_summary = {
+        "schema": "graph2mat_deeph_derivative_backfill_summary_v1",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "training_sweep_manifest_path": str(manifest_path),
+        "benchmark_run_root": str(benchmark_run_root),
+        "settings": _json_safe_payload(settings),
+        "processed_runs": len(summary_runs),
+        "counts": counts,
+        "runs": summary_runs,
+    }
+    output_path = benchmark_run_root / "summary" / "derivative_backfill_summary.json"
+    json_writer(output_path, backfill_summary)
+    return backfill_summary
 
 
 def _strict_dataset_validation_kwargs(
@@ -4507,6 +5306,11 @@ class Graph2MatDeepHBenchmarkRunner:
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload or {})
         payload["derivative_metrics"] = _normalized_derivative_metrics_payload(payload)
+        payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+        workflow = payload["modular_workflow"]
+        workflow_stages = workflow["stages"]
+        derivative_stages_requested = any(workflow_stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES)
+        hamiltonian_stages_requested = any(workflow_stages.get(stage) for stage in HAMILTONIAN_STAGE_NAMES)
         dataset_mode = str(payload.get("dataset_mode") or "reuse_validated").strip() or "reuse_validated"
         run_mode = str(payload.get("run_mode") or "").strip()
         precomputed_training_sweep_plan = payload.get("_training_sweep_plan")
@@ -4547,7 +5351,39 @@ class Graph2MatDeepHBenchmarkRunner:
                 "dataset_sweep v1 solo se puede ejecutar con run_mode='generate_datasets_only' "
                 "o 'full_strict_pipeline'."
             )
+        derivative_only = derivative_stages_requested and not hamiltonian_stages_requested
+        derivative_result_root = _resolve_optional_repo_path(
+            workflow["derivative"].get("result_dir") or workflow["derivative"].get("output_root"),
+            DEFAULT_OUTPUT_ROOT / "derivative_workflows",
+        )
         validation = (
+            {
+                "contract_name": CONTRACT_NAME,
+                "benchmark_ready": True,
+                "repair_required": False,
+                "dataset_root": str(
+                    _resolve_optional_repo_path(
+                        workflow["derivative"].get("source_dataset_root")
+                        or workflow["derivative"].get("result_dir")
+                        or workflow["derivative"].get("output_root"),
+                        derivative_result_root,
+                    )
+                ),
+                "snapshot_root": str(derivative_result_root),
+                "artifact_summary": {
+                    "total_snapshots": 0,
+                    "valid_snapshots": 0,
+                    "invalid_snapshots": 0,
+                    "repair_required_snapshots": 0,
+                    "missing_required_counts": {},
+                },
+                "errors": [],
+                "warnings": ["derivative_only_workflow: skipped H benchmark dataset validation"],
+                "manifest_paths": {},
+                "dataset_sweep": dataset_sweep_info,
+            }
+            if derivative_only
+            else
             {
                 "contract_name": CONTRACT_NAME,
                 "benchmark_ready": True,
@@ -4625,11 +5461,13 @@ class Graph2MatDeepHBenchmarkRunner:
                 benchmark_manifest_path=(
                     str(run_root / "benchmark_manifest.yaml")
                     if generate_datasets_only or full_strict_pipeline
+                    else None
+                    if derivative_only
                     else validation["manifest_paths"]["benchmark_dataset_manifest"]["path"]
                 ),
                 frozen_split_manifest_path=(
                     None
-                    if generate_datasets_only or full_strict_pipeline
+                    if generate_datasets_only or full_strict_pipeline or derivative_only
                     else validation["manifest_paths"]["frozen_split_manifest"]["path"]
                 ),
                 training_sweep_status=(
@@ -4652,8 +5490,8 @@ class Graph2MatDeepHBenchmarkRunner:
             self._dataset_validation = validation
             self._last_results = None
             self._thread = threading.Thread(
-                target=self._run_workflow,
-                args=(payload, validation, allow_repair),
+                target=self._run_derivative_only_workflow if derivative_only else self._run_workflow,
+                args=(payload,) if derivative_only else (payload, validation, allow_repair),
                 daemon=True,
             )
             self._thread.start()
@@ -5934,6 +6772,377 @@ class Graph2MatDeepHBenchmarkRunner:
                 self._logs.append(f"[G2M-DEEPH][ERROR] {error}\n")
             self._logs.append(f"[G2M-DEEPH] Finalizado con codigo {returncode}.\n")
 
+    def _derivative_path(self, config: dict[str, Any], key: str) -> Path | None:
+        value = config.get(key)
+        if value in (None, ""):
+            return None
+        return _resolve_optional_repo_path(value, Path(str(value)))
+
+    def _derivative_root(self, payload: dict[str, Any], run_root: Path | None = None) -> Path:
+        config = payload["modular_workflow"]["derivative"]
+        raw = config.get("result_dir") or config.get("output_root")
+        if raw not in (None, ""):
+            return _resolve_optional_repo_path(raw, Path(str(raw)))
+        if run_root is not None:
+            return run_root / "derivative_workflow"
+        return DEFAULT_OUTPUT_ROOT / "derivative_workflows" / str(payload.get("run_id") or time.strftime("derivative_%Y%m%d_%H%M%S"))
+
+    def _derivative_model_root(
+        self,
+        common_root: Path,
+        model: str,
+        config: dict[str, Any],
+        *,
+        separate_models: bool,
+    ) -> Path:
+        explicit = self._derivative_path(config, f"{model}_result_dir")
+        if explicit is not None:
+            return explicit
+        return common_root / f"{model}_derivative_result" if separate_models else common_root
+
+    def _materialize_derivative_model_root(self, common_root: Path, model_root: Path) -> None:
+        if model_root.resolve(strict=False) == common_root.resolve(strict=False):
+            return
+        model_root.mkdir(parents=True, exist_ok=True)
+        for dirname in ("structures", "siesta_hamiltonians"):
+            source = common_root / dirname
+            if not source.exists():
+                continue
+            target = model_root / dirname
+            if target.exists():
+                continue
+            shutil.copytree(source, target)
+        manifest = common_root / "derivative_stencil_manifest.json"
+        if manifest.exists():
+            target = model_root / "derivative_stencil_manifest.json"
+            if not target.exists():
+                _link_or_copy_file(manifest, target)
+
+    def _check_derivative_manifest(self, path: Path, *, stage: str, fail_on_samples_failed: bool = False) -> dict[str, Any]:
+        if not path.exists():
+            raise RuntimeError(f"derivative stage {stage!r} did not produce expected manifest: {path}")
+        manifest = _load_json(path)
+        if fail_on_samples_failed and int(manifest.get("samples_failed") or 0) > 0:
+            raise RuntimeError(f"derivative stage {stage!r} reported failed samples in {path}")
+        return manifest
+
+    def _run_derivative_stage_command(
+        self,
+        command: list[str],
+        *,
+        payload: dict[str, Any],
+        label: str,
+        allowed_returncodes: tuple[int, ...] = (0,),
+    ) -> dict[str, Any]:
+        return self._run_command(
+            command,
+            cwd=REPO_ROOT,
+            env=self._python_command_env(self._graph2mat_python(payload), PYTHONUNBUFFERED="1"),
+            label=label,
+            allowed_returncodes=allowed_returncodes,
+        )
+
+    def _run_modular_derivative_workflow(self, payload: dict[str, Any], *, run_root: Path | None = None) -> dict[str, Any]:
+        workflow = payload["modular_workflow"]
+        stages = workflow["stages"]
+        config = workflow["derivative"]
+        common_root = self._derivative_root(payload, run_root=run_root)
+        method = str(config.get("method") or "central")
+        split = str(config.get("base_split") or "test")
+        overwrite = _parse_bool(config.get("overwrite"), False)
+        skip_if_exists = _parse_bool(config.get("skip_if_exists"), True)
+        diagnostic_only = _parse_bool(config.get("diagnostic_only"), False)
+        python_executable = self._graph2mat_python(payload)
+        summary: dict[str, Any] = {
+            "schema": "graph2mat_deeph_modular_derivative_workflow_v1",
+            "workflow_mode": workflow.get("workflow_mode"),
+            "result_dir": str(common_root),
+            "stages": {},
+        }
+
+        def mark(stage: str, record: dict[str, Any]) -> None:
+            summary["stages"][stage] = _json_safe_payload(record)
+
+        if stages.get("build_derivative_stencils"):
+            manifest_path = common_root / "derivative_stencil_manifest.json"
+            if skip_if_exists and not overwrite and manifest_path.exists():
+                mark("build_derivative_stencils", {"status": "skipped_existing", "manifest": str(manifest_path)})
+            else:
+                command = [
+                    python_executable,
+                    str(DEFAULT_DERIVATIVE_STENCIL_SCRIPT),
+                    "--source-dataset-root",
+                    str(self._derivative_path(config, "source_dataset_root")),
+                    "--output-stencil-root",
+                    str(common_root),
+                    "--method",
+                    method,
+                    "--delta-ang",
+                    str(config.get("delta_ang")),
+                    "--split",
+                    split,
+                    "--atoms",
+                    ",".join(str(item) for item in config.get("atoms") or []),
+                    "--axes",
+                    ",".join(str(item) for item in config.get("axes") or []),
+                ]
+                frozen_split = self._derivative_path(config, "frozen_split")
+                if frozen_split is not None:
+                    command.extend(["--frozen-split", str(frozen_split)])
+                raw_sample_ids = config.get("base_sample_ids") or config.get("base_sample_id") or []
+                if isinstance(raw_sample_ids, str):
+                    raw_sample_ids = [item.strip() for item in raw_sample_ids.split(",") if item.strip()]
+                for sample_id in raw_sample_ids:
+                    command.extend(["--base-sample-id", str(sample_id)])
+                if config.get("max_base_snapshots") is not None:
+                    command.extend(["--max-base-snapshots", str(config["max_base_snapshots"])])
+                include_base = config.get("include_base")
+                if include_base is not None:
+                    command.append("--include-base" if _parse_bool(include_base, True) else "--no-include-base")
+                if overwrite:
+                    command.append("--overwrite")
+                record = self._run_derivative_stage_command(command, payload=payload, label="Derivative stencil builder")
+                manifest = self._check_derivative_manifest(manifest_path, stage="build_derivative_stencils")
+                mark("build_derivative_stencils", {**record, "status": "completed", "manifest": manifest})
+
+        if stages.get("validate_derivative_stencils"):
+            output_json = common_root / "derivative_geometry_validation.json"
+            if skip_if_exists and not overwrite and output_json.exists():
+                validation_summary = _load_json(output_json)
+                if int(validation_summary.get("errors") or 0) > 0 and not diagnostic_only:
+                    raise RuntimeError(f"derivative stage 'validate_derivative_stencils' found geometry errors in {output_json}")
+                mark("validate_derivative_stencils", {"status": "skipped_existing", "manifest": str(output_json)})
+            else:
+                command = [
+                    python_executable,
+                    str(DEFAULT_DERIVATIVE_GEOMETRY_VALIDATION_SCRIPT),
+                    str(common_root),
+                    "--output-dir",
+                    str(common_root),
+                    "--method",
+                    method,
+                    "--split",
+                    split,
+                ]
+                if method == "central" or _parse_bool(config.get("require_central"), method == "central"):
+                    command.append("--require-central")
+                tolerance = config.get("tolerance_ang")
+                if tolerance not in (None, ""):
+                    command.extend(["--tolerance-ang", str(tolerance)])
+                record = self._run_derivative_stage_command(
+                    command,
+                    payload=payload,
+                    label="Derivative stencil geometry validation",
+                    allowed_returncodes=(0, 1) if diagnostic_only else (0,),
+                )
+                validation_summary = self._check_derivative_manifest(output_json, stage="validate_derivative_stencils")
+                if int(validation_summary.get("errors") or 0) > 0 and not diagnostic_only:
+                    raise RuntimeError(f"derivative stage 'validate_derivative_stencils' found geometry errors in {output_json}")
+                mark("validate_derivative_stencils", {**record, "status": "completed", "manifest": validation_summary})
+
+        if stages.get("run_derivative_siesta_reference"):
+            reference_root = self._derivative_path(config, "reference_root") or (common_root / "siesta_hamiltonians")
+            manifest_path = reference_root / "derivative_siesta_reference_manifest.json"
+            if skip_if_exists and not overwrite and manifest_path.exists():
+                self._check_derivative_manifest(manifest_path, stage="run_derivative_siesta_reference", fail_on_samples_failed=not diagnostic_only)
+                mark("run_derivative_siesta_reference", {"status": "skipped_existing", "manifest": str(manifest_path)})
+            else:
+                command = [
+                    python_executable,
+                    str(DEFAULT_DERIVATIVE_SIESTA_REFERENCE_SCRIPT),
+                    "--stencil-root",
+                    str(common_root),
+                    "--output-reference-root",
+                    str(reference_root),
+                    "--siesta-command",
+                    str(config.get("siesta_command") or "siesta"),
+                ]
+                existing_reference_root = self._derivative_path(config, "existing_reference_root")
+                if existing_reference_root is not None:
+                    command.extend(["--existing-reference-root", str(existing_reference_root)])
+                if overwrite:
+                    command.append("--overwrite")
+                command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
+                if diagnostic_only:
+                    command.append("--diagnostic-only")
+                if config.get("max_jobs") not in (None, ""):
+                    command.extend(["--max-jobs", str(config["max_jobs"])])
+                record = self._run_derivative_stage_command(
+                    command,
+                    payload=payload,
+                    label="Derivative SIESTA reference Hamiltonians",
+                    allowed_returncodes=(0, 2) if diagnostic_only else (0,),
+                )
+                manifest = self._check_derivative_manifest(
+                    manifest_path,
+                    stage="run_derivative_siesta_reference",
+                    fail_on_samples_failed=not diagnostic_only,
+                )
+                mark("run_derivative_siesta_reference", {**record, "status": "completed", "manifest": manifest})
+
+        prediction_models = [model for model in ("graph2mat", "deeph") if stages.get(f"predict_derivative_{model}") or stages.get(f"derivative_metrics_{model}")]
+        separate_models = len(prediction_models) > 1 and any(stages.get(f"predict_derivative_{model}") for model in prediction_models)
+        model_roots = {
+            model: self._derivative_model_root(common_root, model, config, separate_models=separate_models)
+            for model in ("graph2mat", "deeph")
+        }
+
+        for model in ("graph2mat", "deeph"):
+            if not stages.get(f"predict_derivative_{model}"):
+                continue
+            model_root = model_roots[model]
+            self._materialize_derivative_model_root(common_root, model_root)
+            output_root = self._derivative_path(config, f"{model}_prediction_root") or (model_root / "predicted_hamiltonians")
+            manifest_path = output_root / f"derivative_{model}_prediction_manifest.json"
+            if skip_if_exists and not overwrite and manifest_path.exists():
+                self._check_derivative_manifest(manifest_path, stage=f"predict_derivative_{model}", fail_on_samples_failed=not diagnostic_only)
+                mark(f"predict_derivative_{model}", {"status": "skipped_existing", "manifest": str(manifest_path)})
+                continue
+            command = [
+                python_executable,
+                str(DEFAULT_DERIVATIVE_PREDICTION_SCRIPT),
+                "--stencil-root",
+                str(model_root),
+                "--model",
+                model,
+                "--output-root",
+                str(output_root),
+            ]
+            for config_key, flag in (
+                (f"{model}_checkpoint", "--checkpoint"),
+                (f"{model}_model_dir", "--model-dir"),
+                (f"{model}_existing_prediction_root", "--existing-prediction-root"),
+            ):
+                value = self._derivative_path(config, config_key)
+                if value is not None:
+                    command.extend([flag, str(value)])
+            if overwrite:
+                command.append("--overwrite")
+            command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
+            if diagnostic_only:
+                command.append("--diagnostic-only")
+            if config.get("max_jobs") not in (None, ""):
+                command.extend(["--max-jobs", str(config["max_jobs"])])
+            if model == "graph2mat":
+                for key, flag in (
+                    ("basis_files", "--basis-files"),
+                    ("accelerator", "--accelerator"),
+                    ("matrix_component_policy", "--matrix-component-policy"),
+                    ("n_matrix_components", "--n-matrix-components"),
+                    ("loader_threads", "--loader-threads"),
+                ):
+                    if config.get(key) not in (None, ""):
+                        command.extend([flag, str(config[key])])
+            else:
+                deeph_command = config.get("deeph_command")
+                if deeph_command not in (None, ""):
+                    command.extend(["--deeph-command", str(deeph_command)])
+            record = self._run_derivative_stage_command(
+                command,
+                payload=payload,
+                label=f"Derivative {model} Hamiltonian predictions",
+                allowed_returncodes=(0, 2) if diagnostic_only else (0,),
+            )
+            manifest = self._check_derivative_manifest(
+                manifest_path,
+                stage=f"predict_derivative_{model}",
+                fail_on_samples_failed=not diagnostic_only,
+            )
+            mark(f"predict_derivative_{model}", {**record, "status": "completed", "manifest": manifest})
+
+        metric_roots: dict[str, Path | None] = {"graph2mat": None, "deeph": None}
+        for model in ("graph2mat", "deeph"):
+            if not stages.get(f"derivative_metrics_{model}"):
+                continue
+            result_dir = self._derivative_path(config, f"{model}_result_dir")
+            if result_dir is None and config.get("result_dir") in (None, "") and config.get("output_root") in (None, "") and run_root is not None:
+                result_dir = run_root / "common_metrics" / f"{model}_eval"
+            if result_dir is None:
+                result_dir = model_roots[model]
+            output_dir = self._derivative_path(config, f"{model}_metrics_output_dir") or (common_root / "derivative_metrics" / model)
+            manifest_path = output_dir / "manifest.json"
+            settings = {
+                "finite_difference_method": method,
+                "split": split,
+                "require_central": _parse_bool(config.get("require_central"), method == "central"),
+                "diagnostic_only": diagnostic_only,
+                "overwrite": overwrite,
+                "support_threshold": float(config.get("support_threshold", 1e-12) or 1e-12),
+                "max_stencils": _optional_int_value(config.get("max_stencils")),
+            }
+            if skip_if_exists and not overwrite and manifest_path.exists():
+                metric_roots[model] = output_dir
+                mark(f"derivative_metrics_{model}", {"status": "skipped_existing", "manifest": str(manifest_path)})
+                continue
+            command = _derivative_metric_command_args(
+                python_executable=python_executable,
+                result_dir=result_dir,
+                output_dir=output_dir,
+                source_model=model,
+                settings=settings,
+            )
+            record = self._run_derivative_stage_command(
+                command,
+                payload=payload,
+                label=f"Derivative {model} finite-difference metrics",
+                allowed_returncodes=(0, 2) if diagnostic_only else (0,),
+            )
+            manifest = self._check_derivative_manifest(manifest_path, stage=f"derivative_metrics_{model}")
+            metric_roots[model] = output_dir
+            mark(f"derivative_metrics_{model}", {**record, "status": "completed", "manifest": manifest})
+
+        gate_report: dict[str, Any] | None = None
+        if stages.get("derivative_plots"):
+            roots = [root for root in metric_roots.values() if root is not None]
+            output_dir = self._derivative_path(config, "plots_output_dir") or (common_root / "derivative_metrics" / "summary" / "derivative_plots")
+            if not roots:
+                raise RuntimeError("derivative stage 'derivative_plots' requires at least one completed derivative metrics output.")
+            plot_result = write_derivative_plot_outputs(
+                derivative_roots=roots,
+                graph2mat_root=metric_roots["graph2mat"],
+                deeph_root=metric_roots["deeph"],
+                output_dir=output_dir,
+            )
+            mark("derivative_plots", {"status": "completed", "outputs": plot_result})
+
+        if stages.get("derivative_gate_check"):
+            roots = [root for root in metric_roots.values() if root is not None]
+            if not roots:
+                raise RuntimeError("derivative stage 'derivative_gate_check' requires at least one completed derivative metrics output.")
+            gate_report = build_derivative_gate_report(derivative_roots=roots, run_root=run_root or common_root)
+            output_path = self._derivative_path(config, "gate_report_path") or (common_root / "derivative_metrics" / "summary" / "derivative_gate_report.json")
+            _write_json(output_path, gate_report)
+            mark("derivative_gate_check", {"status": "completed", "output_path": str(output_path), "report": gate_report})
+
+        if metric_roots["graph2mat"] is not None or metric_roots["deeph"] is not None:
+            comparison = build_derivative_model_comparison_summary(
+                graph2mat_root=metric_roots["graph2mat"],
+                deeph_root=metric_roots["deeph"],
+                output_dir=common_root / "derivative_metrics" / "summary" / "derivative_model_comparison",
+                gate_report=gate_report,
+            )
+            mark("derivative_model_comparison", {"status": "completed", "summary": comparison})
+
+        _write_json(common_root / "derivative_workflow_manifest.json", summary)
+        return summary
+
+    def _run_derivative_only_workflow(self, payload: dict[str, Any]) -> None:
+        try:
+            self._set_stage("derivative_workflow")
+            summary = self._run_modular_derivative_workflow(payload)
+            with self._lock:
+                self._last_results = {
+                    "dry_run": False,
+                    "contract_name": CONTRACT_NAME,
+                    "dataset_validation": self._dataset_validation,
+                    "derivative_workflow": summary,
+                    "phase_timings": list(self._phase_timings),
+                    "message": "Derivative workflow completed from configured stencil/Hamiltonian artifacts.",
+                }
+            self._finish(returncode=0)
+        except Exception as exc:
+            self._finish(returncode=1, error=str(exc))
+
     def _run_workflow(
         self,
         payload: dict[str, Any],
@@ -5954,6 +7163,7 @@ class Graph2MatDeepHBenchmarkRunner:
         graph2mat_early_stopping: dict[str, Any] | None = None
         deeph_early_stopping: dict[str, Any] | None = None
         test_blindness_manifest: dict[str, Any] | None = None
+        derivative_workflow_summary: dict[str, Any] | None = None
         try:
             final_mode = is_final_benchmark_mode(payload)
             sweep_info = self.dataset_sweep_info_from_payload(payload)
@@ -6209,54 +7419,27 @@ class Graph2MatDeepHBenchmarkRunner:
                             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
                         )
                         derivative_settings = _derivative_metrics_settings(payload)
-                        derivative_runs: dict[str, Any] = {}
-                        graph2mat_derivative_root = None
-                        deeph_derivative_root = None
-                        if derivative_settings["enabled"]:
-                            graph2mat_derivative_root = common_root / "graph2mat_eval" / "derivative_metrics"
-                            deeph_derivative_root = common_root / "deeph_eval" / "derivative_metrics"
-                            for derivative_method, derivative_result_dir, derivative_output_dir in (
-                                ("graph2mat", staged_graph2mat.result_dir, graph2mat_derivative_root),
-                                ("deeph", common_root / "deeph_eval", deeph_derivative_root),
-                            ):
-                                if not _has_derivative_stencils(
-                                    result_dir=derivative_result_dir,
-                                    source_model=derivative_method,
-                                    settings=derivative_settings,
-                                ):
-                                    derivative_runs[derivative_method] = {
-                                        "label": f"{derivative_method} derivative metrics",
-                                        "status": "skipped_no_stencils",
-                                        "result_dir": str(derivative_result_dir),
-                                        "output_dir": str(derivative_output_dir),
-                                        "enabled": True,
-                                    }
-                                    self._logs.append(
-                                        "[G2M-DEEPH] derivative_metrics: skipped for "
-                                        f"{derivative_method} because no derivative stencils were discovered.\n"
-                                    )
-                                    continue
-                                command = _derivative_metric_command_args(
-                                    python_executable=self._graph2mat_python(payload),
-                                    result_dir=derivative_result_dir,
-                                    output_dir=derivative_output_dir,
-                                    source_model=derivative_method,
-                                    settings=derivative_settings,
-                                )
-                                try:
-                                    derivative_runs[derivative_method] = self._run_command(
-                                        command,
-                                        cwd=REPO_ROOT,
-                                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
-                                        label=f"{derivative_method} derivative metrics",
-                                        allowed_returncodes=(0, 2),
-                                    )
-                                except CommandRunError as exc:
-                                    derivative_runs[derivative_method] = exc.run_record
-                                    self._logs.append(
-                                        "[G2M-DEEPH][WARN] Derivative metric postprocess failed "
-                                        f"for {derivative_method}; existing H metrics are preserved.\n"
-                                    )
+                        derivative_summary = run_derivative_postprocess(
+                            run_root=context.run_root,
+                            graph2mat_result_dir=staged_graph2mat.result_dir,
+                            deeph_result_dir=common_root / "deeph_eval",
+                            settings=derivative_settings,
+                            overwrite=True,
+                            diagnostic_only=bool(derivative_settings.get("diagnostic_only", True)),
+                            python_executable=self._graph2mat_python(payload),
+                            command_runner=self._run_command,
+                            log=self._logs.append,
+                        )
+                        graph2mat_derivative_root = (
+                            Path(str(derivative_summary["roots"]["graph2mat"]))
+                            if derivative_summary["roots"]["graph2mat"]
+                            else None
+                        )
+                        deeph_derivative_root = (
+                            Path(str(derivative_summary["roots"]["deeph"]))
+                            if derivative_summary["roots"]["deeph"]
+                            else None
+                        )
                         common_metrics_manifest = aggregate_common_metrics(
                             graph2mat_metrics_root=staged_graph2mat.result_dir / "metrics",
                             deeph_metrics_root=common_root / "deeph_eval" / "metrics",
@@ -6269,13 +7452,18 @@ class Graph2MatDeepHBenchmarkRunner:
                         common_metrics_manifest["runs"] = {
                             "graph2mat_eval": graph2mat_eval_run,
                             "deeph_eval": deeph_eval_run,
-                            "derivative_metrics": derivative_runs,
+                            "derivative_metrics": derivative_summary.get("execution", {}),
                         }
                         common_metrics_manifest.setdefault("derivative_metrics", {})
                         common_metrics_manifest["derivative_metrics"].update(
                             {
-                                "enabled": bool(derivative_settings["enabled"]),
-                                "execution": derivative_runs,
+                                "enabled": bool(derivative_summary.get("enabled")),
+                                "settings": derivative_summary.get("settings") or {},
+                                "execution": derivative_summary.get("execution") or {},
+                                "plot_outputs": derivative_summary.get("plot_outputs") or {},
+                                "gate_report": derivative_summary.get("gate_report") or {},
+                                "model_comparison": derivative_summary.get("model_comparison") or {},
+                                "roots": derivative_summary.get("roots") or {},
                             }
                         )
                         graph2mat_telemetry = self._write_run_cost_telemetry(
@@ -6393,6 +7581,11 @@ class Graph2MatDeepHBenchmarkRunner:
                         }
                     )
                 time.sleep(float(payload.get("phase_delay_seconds", 0) or 0))
+            workflow = payload.get("modular_workflow") or {}
+            workflow_stages = workflow.get("stages") if isinstance(workflow.get("stages"), dict) else {}
+            if context is not None and any(workflow_stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES):
+                self._set_stage("derivative_workflow")
+                derivative_workflow_summary = self._run_modular_derivative_workflow(payload, run_root=context.run_root)
             with self._lock:
                 self._last_results = {
                     "dry_run": bool(context.dry_run) if context is not None else None,
@@ -6402,6 +7595,7 @@ class Graph2MatDeepHBenchmarkRunner:
                     "deeph": deeph_context.to_dict() if deeph_context is not None else None,
                     "common_metrics": common_metrics_manifest,
                     "ranking": ranking_manifest,
+                    "derivative_workflow": derivative_workflow_summary,
                     "test_blindness": test_blindness_manifest,
                     "phase_timings": list(self._phase_timings),
                     "message": (
@@ -6426,3 +7620,54 @@ class Graph2MatDeepHBenchmarkRunner:
             "results": self._last_results,
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _cli_derivative_settings(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "finite_difference_method": str(args.method or "central"),
+        "split": str(args.split or "test"),
+        "require_central": bool(args.require_central),
+        "diagnostic_only": bool(args.diagnostic_only),
+        "support_threshold": float(args.support_threshold),
+        "max_stencils": None,
+        "overwrite": bool(args.overwrite),
+    }
+
+
+def _parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backfill-derivatives-from-training-sweep", type=Path, default=None)
+    parser.add_argument("--run-root", type=Path, default=None)
+    parser.add_argument("--python-executable", default=sys.executable)
+    parser.add_argument("--overwrite", action="store_true", default=True)
+    parser.add_argument("--diagnostic-only", action="store_true", default=True)
+    parser.add_argument("--split", default="test")
+    parser.add_argument("--method", default="central")
+    parser.add_argument("--require-central", action="store_true", default=True)
+    parser.add_argument("--support-threshold", type=float, default=1e-12)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_cli_args()
+    training_sweep_manifest_path = args.backfill_derivatives_from_training_sweep
+    if training_sweep_manifest_path is None and args.run_root is not None:
+        training_sweep_manifest_path = args.run_root / "sweep" / "training_sweep_manifest.json"
+    if training_sweep_manifest_path is None:
+        raise SystemExit(
+            "Provide --backfill-derivatives-from-training-sweep <training_sweep_manifest.json> "
+            "or --run-root <benchmark_run_root>."
+        )
+    summary = backfill_derivative_postprocess_from_training_sweep(
+        training_sweep_manifest_path=training_sweep_manifest_path,
+        settings=_cli_derivative_settings(args),
+        python_executable=str(args.python_executable),
+        log=lambda message: sys.stdout.write(message),
+    )
+    sys.stdout.write(json.dumps(_json_safe_payload(summary), indent=2, ensure_ascii=False) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

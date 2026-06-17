@@ -2615,7 +2615,7 @@ function renderG2MDeepHDerivativeGateReport(payload = {}) {
   }
   container.className = "result-list";
   const banner = document.createElement("div");
-  banner.className = "comparison-status-banner diagnostic";
+  banner.className = `comparison-status-banner ${gateReport.scientific_status === "blocked" ? "invalid" : "diagnostic"}`;
   banner.textContent = gateReport.message || "diagnostic-only / no winner claim";
   container.appendChild(banner);
   appendG2MDeepHTable(
@@ -2626,6 +2626,7 @@ function renderG2MDeepHDerivativeGateReport(payload = {}) {
       { key: "common_recommendation_status", label: "Common recommendation" },
       { key: "ranking_status", label: "Ranking status" },
       { key: "ranking_scientific_status", label: "Scientific status" },
+      { key: "scientific_status", label: "Derivative gate status" },
       { key: "winner", label: "Benchmark winner", format: (value) => (value ? methodDisplayLabel(value) : "none") },
       { key: "primary_metric", label: "Primary metric" },
       { key: "derivative_winner_claim", label: "Derivative winner claim" },
@@ -2640,6 +2641,8 @@ function renderG2MDeepHDerivativeGateReport(payload = {}) {
     [
       { key: "gate", label: "Gate" },
       { key: "status", label: "Status" },
+      { key: "severity", label: "Severity" },
+      { key: "message", label: "Message" },
     ],
     gateReport.gate_rows || [],
     "No gate information available.",

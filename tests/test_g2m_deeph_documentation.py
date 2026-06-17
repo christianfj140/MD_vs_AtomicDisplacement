@@ -11,6 +11,7 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
         self.doc = DOC_PATH.read_text(encoding="utf-8")
         self.readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.metrics = (REPO_ROOT / "Comparison" / "METRICS.md").read_text(encoding="utf-8")
+        self.workflows = (REPO_ROOT / "docs" / "workflows.md").read_text(encoding="utf-8")
         self.readme_flat = " ".join(self.readme.split())
 
     def test_required_deeph_artifacts_are_documented(self) -> None:
@@ -59,6 +60,37 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
         ):
             self.assertIn(text, self.doc)
             self.assertIn(text, self.metrics)
+
+    def test_modular_derivative_workflow_examples_are_documented(self) -> None:
+        for text in (
+            "workflow_mode",
+            "hamiltonian_only",
+            "derivative_stencils_only",
+            "derivative_metrics_only",
+            "h_then_derivative_postprocess",
+            "/api/g2m-deeph/run",
+            "source_dataset_root",
+            "result_dir",
+            "delta_ang",
+            "atoms",
+            "axes",
+        ):
+            self.assertIn(text, self.workflows)
+        for text in (
+            "A stencil is the set of displaced geometries",
+            "Finite differences are the formula applied to Hamiltonians",
+            "central stencil with `R+` and `R-`",
+            "MD snapshots are base geometries `R0`",
+            "not derivative stencils",
+            "force constants",
+            "not used as `dH/dR` references",
+            "derivative_matrix_metrics.csv",
+            "derivative_support_sweep.csv",
+            "derivative_hermiticity.csv",
+            "derivative_model_comparison_summary.json",
+            "derivative_model_paired_comparison.csv",
+        ):
+            self.assertIn(text, self.workflows)
 
     def test_readme_links_to_dedicated_guide(self) -> None:
         self.assertIn("docs/graph2mat_deeph_benchmark.md", self.readme)

@@ -134,6 +134,16 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
             self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat", fatal_error=True)
             self.write_derivative_tree(run_root, "deeph", source_model="deeph")
             write_json(
+                run_root / "common_metrics" / "summary" / "derivative_gate_report.json",
+                {
+                    "scientific_status": "internal_diagnostic",
+                    "derivative_winner_claim": "none",
+                    "message": "Persisted derivative gate report.",
+                    "blockers": [],
+                    "warnings": [],
+                },
+            )
+            write_json(
                 run_root / "common_metrics" / "summary" / "common_summary.json",
                 {
                     "status": "diagnostic_only",
@@ -172,9 +182,89 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(payload["reference_label"], "Reference: finite differences of SIESTA Hamiltonians")
         self.assertEqual(payload["force_constants_label"], "SIESTA force constants are not treated as dH/dR")
         self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
-        self.assertEqual(payload["gate_report"]["ranking_status"], "no_robust_winner")
-        self.assertTrue(payload["gate_report"]["gate_rows"])
+        self.assertEqual(payload["gate_report"]["scientific_status"], "internal_diagnostic")
+        self.assertTrue(any(row["kind"] == "gate_report" for row in payload["artifact_rows"]))
         self.assertIn("technical internal diagnostic", payload["message"])
+        self.assertFalse((run_root / "common_metrics" / "summary" / "derivative_plots" / "derivative_plot_payload.json").exists())
+        self.assertTrue(payload["comparison_rows"])
+
+    def test_blocked_gate_report_renders_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run_blocked"
+            self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat")
+            write_json(
+                run_root / "common_metrics" / "summary" / "derivative_gate_report.json",
+                {
+                    "scientific_status": "blocked",
+                    "blockers": [
+                        {
+                            "gate_id": "derivative_geometry_validation_failed",
+                            "severity": "blocker",
+                            "status": "fail",
+                            "message": "Wrong atom was displaced.",
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_blocked")
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["gate_report"]["scientific_status"], "blocked")
+        self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
+        self.assertTrue(payload["gate_report"]["gate_rows"])
+        self.assertIn("Wrong atom", payload["gate_report"]["gate_rows"][0]["message"])
+
+    def test_existing_model_comparison_artifacts_are_linked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run_comparison"
+            self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat")
+            self.write_derivative_tree(run_root, "deeph", source_model="deeph")
+            comparison_root = run_root / "common_metrics" / "summary" / "derivative_model_comparison"
+            write_json(
+                comparison_root / "derivative_model_comparison_summary.json",
+                {"claim_status": "diagnostic_only", "winner": None},
+            )
+            write_csv(
+                comparison_root / "derivative_model_paired_comparison.csv",
+                [
+                    {
+                        "base_sample_id": "base",
+                        "atom_index_zero_based": "0",
+                        "axis": "x",
+                        "delta_ang": "0.01",
+                        "finite_difference_method": "central",
+                        "delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang": "0.1",
+                    }
+                ],
+            )
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_comparison")
+
+        kinds = {row["kind"]: row for row in payload["artifact_rows"]}
+        self.assertTrue(kinds["model_comparison_summary"]["exists"])
+        self.assertTrue(kinds["model_paired_comparison"]["exists"])
+        self.assertEqual(payload["paired_comparison_rows"][0]["base_sample_id"], "base")
+
+    def test_technical_presentation_gate_maps_to_presentation_ready_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run_presentation"
+            self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat")
+            write_json(
+                run_root / "common_metrics" / "summary" / "derivative_gate_report.json",
+                {
+                    "scientific_status": "technical_presentation",
+                    "derivative_winner_claim": "none",
+                    "blockers": [],
+                    "warnings": [],
+                },
+            )
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_presentation")
+
+        self.assertEqual(payload["status"], "presentation_ready")
+        self.assertIsNone(payload["winner"])
 
 
 if __name__ == "__main__":

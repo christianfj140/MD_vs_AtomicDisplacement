@@ -32,6 +32,7 @@ from hamiltonian_derivative_stencil import (  # noqa: E402
     derivative_sparse_metrics,
     discover_derivative_stencils,
     finite_difference_derivative_pair,
+    validate_derivative_geometry,
     validate_derivative_stencil,
     validation_errors,
 )
@@ -63,6 +64,20 @@ HERMITICITY_FIELDS = [
     "dH_pred_hermiticity_defect",
     "dH_hermiticity_error_delta",
     "finite_values",
+]
+GEOMETRY_VALIDATION_FIELDS = [
+    "sample",
+    "status",
+    "finite_difference_method",
+    "base_sample_id",
+    "plus_sample_id",
+    "minus_sample_id",
+    "atom_index_zero_based",
+    "axis",
+    "axis_index",
+    "delta_ang",
+    "issue_codes",
+    "issue_messages",
 ]
 
 
@@ -163,11 +178,12 @@ def evaluate_derivative_metrics(
     metric_rows: list[dict[str, Any]] = []
     sweep_rows: list[dict[str, Any]] = []
     hermiticity_rows: list[dict[str, Any]] = []
+    geometry_rows: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     fatal_errors: list[dict[str, Any]] = []
 
     for discovery in discoveries:
-        row, metrics, sweep, hermiticity, warning_rows, error_rows = _evaluate_discovery(
+        row, metrics, sweep, hermiticity, geometry, warning_rows, error_rows = _evaluate_discovery(
             discovery,
             method=method,
             source_model=source_model,
@@ -178,6 +194,7 @@ def evaluate_derivative_metrics(
         metric_rows.extend(metrics)
         sweep_rows.extend(sweep)
         hermiticity_rows.extend(hermiticity)
+        geometry_rows.append(geometry)
         warnings.extend(warning_rows)
         fatal_errors.extend(error_rows)
 
@@ -201,6 +218,8 @@ def evaluate_derivative_metrics(
         "derivative_matrix_metrics": str(output_dir / "derivative_matrix_metrics.csv"),
         "derivative_support_sweep": str(output_dir / "derivative_support_sweep.csv"),
         "derivative_hermiticity": str(output_dir / "derivative_hermiticity.csv"),
+        "derivative_geometry_validation": str(output_dir / "derivative_geometry_validation.csv"),
+        "derivative_geometry_validation_json": str(output_dir / "derivative_geometry_validation.json"),
         "derivative_summary": str(output_dir / "derivative_summary.json"),
     }
     manifest = {
@@ -220,6 +239,7 @@ def evaluate_derivative_metrics(
         "stencils_total": stencils_total,
         "stencils_ok": stencils_ok,
         "stencils_failed": stencils_failed,
+        "geometry_validation": _geometry_validation_summary(geometry_rows),
         "warnings": warnings,
         "fatal_errors": fatal_errors,
         "outputs": outputs,
@@ -229,6 +249,8 @@ def evaluate_derivative_metrics(
     write_csv(output_dir / "derivative_matrix_metrics.csv", _metric_fieldnames(metric_rows), metric_rows)
     write_csv(output_dir / "derivative_support_sweep.csv", _metric_fieldnames(sweep_rows), sweep_rows)
     write_csv(output_dir / "derivative_hermiticity.csv", HERMITICITY_FIELDS, hermiticity_rows)
+    write_csv(output_dir / "derivative_geometry_validation.csv", GEOMETRY_VALIDATION_FIELDS, geometry_rows)
+    write_json(output_dir / "derivative_geometry_validation.json", _geometry_validation_summary(geometry_rows, include_rows=True))
     write_json(output_dir / "derivative_summary.json", summary)
     write_json(output_dir / "manifest.json", manifest)
     return manifest
@@ -241,16 +263,50 @@ def _evaluate_discovery(
     source_model: str,
     support_threshold: float,
     diagnostic_only: bool,
-) -> tuple[list[Any] | dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[Any] | dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     warnings: list[dict[str, Any]] = []
     fatal_errors: list[dict[str, Any]] = []
     metric_rows: list[dict[str, Any]] = []
     sweep_rows: list[dict[str, Any]] = []
     hermiticity_rows: list[dict[str, Any]] = []
     status_row = _stencil_status_row(discovery, status=discovery.status)
+    geometry_issues = validate_derivative_geometry(discovery)
+    geometry_row = _geometry_validation_row(discovery, geometry_issues)
+    geometry_errors = validation_errors(geometry_issues)
     if discovery.stencil is None:
         fatal_errors.append(_discovery_error(discovery, "missing_stencil", "Discovery did not produce a complete stencil."))
-        return status_row, metric_rows, sweep_rows, hermiticity_rows, warnings, fatal_errors
+        return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+    if geometry_errors and not diagnostic_only:
+        status_row = _stencil_status_row(
+            replace(discovery, issues=tuple([*discovery.issues, *geometry_issues])),
+            status="failed",
+        )
+        fatal_errors.append(
+            _discovery_error(
+                discovery,
+                "derivative_geometry_validation_failed",
+                "Derivative geometry validation failed before metric evaluation.",
+                issue_codes=[issue.code for issue in geometry_errors],
+            )
+        )
+        return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+    if geometry_errors:
+        warnings.append(
+            _discovery_error(
+                discovery,
+                "derivative_geometry_validation_diagnostic_only",
+                "Derivative geometry validation failed, but diagnostic-only mode allowed metric evaluation to continue.",
+                issue_codes=[issue.code for issue in geometry_errors],
+            )
+        )
 
     try:
         loaded = _load_stencil_matrices(discovery.stencil)
@@ -270,7 +326,7 @@ def _evaluate_discovery(
                     issue_codes=[issue.code for issue in errors],
                 )
             )
-            return status_row, metric_rows, sweep_rows, hermiticity_rows, warnings, fatal_errors
+            return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
         metadata = _metadata_for_status(stencil.metadata, diagnostic_only=diagnostic_only)
         pair = finite_difference_derivative_pair(
             method=method,
@@ -341,7 +397,7 @@ def _evaluate_discovery(
     except Exception as exc:  # Backend-specific sisl readers raise heterogeneous exceptions.
         status_row = _stencil_status_row(discovery, status="failed")
         fatal_errors.append(_discovery_error(discovery, "derivative_metric_evaluation_failed", str(exc)))
-    return status_row, metric_rows, sweep_rows, hermiticity_rows, warnings, fatal_errors
+    return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
 
 
 def _load_stencil_matrices(stencil: DerivativeStencil) -> dict[str, sparse.csr_matrix]:
@@ -399,6 +455,44 @@ def _stencil_status_row(discovery: DerivativeStencilDiscovery, *, status: str) -
         "issue_codes": ";".join(issue_codes),
         "issue_messages": "; ".join(issue_messages),
     }
+
+
+def _geometry_validation_row(discovery: DerivativeStencilDiscovery, issues: list[Any]) -> dict[str, Any]:
+    metadata = discovery.stencil.metadata if discovery.stencil else None
+    errors = validation_errors(issues)
+    warnings = [issue for issue in issues if not issue.is_error]
+    if errors:
+        status = "error"
+    elif warnings:
+        status = "warning"
+    else:
+        status = "ok"
+    return {
+        "sample": metadata.sample_id if metadata else "|".join(discovery.sample_ids),
+        "status": status,
+        "finite_difference_method": discovery.method,
+        "base_sample_id": metadata.base_sample_id if metadata else None,
+        "plus_sample_id": metadata.plus_sample_id if metadata else None,
+        "minus_sample_id": metadata.minus_sample_id if metadata else None,
+        "atom_index_zero_based": metadata.atom_index_zero_based if metadata else None,
+        "axis": metadata.axis if metadata else None,
+        "axis_index": metadata.axis_index if metadata else None,
+        "delta_ang": metadata.delta_ang if metadata else None,
+        "issue_codes": ";".join(issue.code for issue in issues),
+        "issue_messages": "; ".join(issue.message for issue in issues),
+    }
+
+
+def _geometry_validation_summary(rows: list[dict[str, Any]], *, include_rows: bool = False) -> dict[str, Any]:
+    summary = {
+        "total": len(rows),
+        "ok": len([row for row in rows if row.get("status") == "ok"]),
+        "warnings": len([row for row in rows if row.get("status") == "warning"]),
+        "errors": len([row for row in rows if row.get("status") == "error"]),
+    }
+    if include_rows:
+        summary["rows"] = rows
+    return summary
 
 
 def _discovery_error(discovery: DerivativeStencilDiscovery, kind: str, message: str, **extra: Any) -> dict[str, Any]:

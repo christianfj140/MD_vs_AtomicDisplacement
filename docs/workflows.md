@@ -202,6 +202,123 @@ audited later.
 - aggregated metrics and final-statistics JSON files
 - gate status and selection artifacts for the final/publicable run
 
+### Modular Hamiltonian And Derivative Modes
+
+The Graph2Mat-vs-DeepH runner accepts modular workflow payloads through the
+existing UI/API route:
+
+```bash
+python3 Comparison/scripts/pipeline_ui.py
+curl -X POST http://127.0.0.1:8770/api/g2m-deeph/run \
+  -H 'Content-Type: application/json' \
+  --data @payload.json
+```
+
+The examples below are minimal payload fragments. Add the same dataset,
+training, DeepH, Python, and output settings used by your normal benchmark
+payload when a mode includes Hamiltonian training or prediction.
+
+H-only benchmark, with derivative stages disabled:
+
+```json
+{
+  "workflow_mode": "hamiltonian_only",
+  "dataset_root": "Comparison/datasets/graphene_w90_joint",
+  "output_root": "Comparison/results/graphene_w90_g2m_deeph_benchmark"
+}
+```
+
+Derivative-stencils-only, starting from MD/base snapshots. MD snapshots are base geometries `R0`; they are not derivative stencils until this stage writes explicit displaced geometries:
+
+```json
+{
+  "workflow_mode": "derivative_stencils_only",
+  "derivative": {
+    "enabled": true,
+    "source_dataset_root": "Comparison/datasets/graphene_w90_joint",
+    "output_root": "Comparison/results/derivative_stencils_demo",
+    "method": "central",
+    "delta_ang": 0.01,
+    "base_split": "test",
+    "max_base_snapshots": 2,
+    "atoms": ["0"],
+    "axes": ["x", "y", "z"],
+    "overwrite": false,
+    "skip_if_exists": true
+  }
+}
+```
+
+Derivative-metrics-only, using existing finite-displacement stencil artifacts
+and Hamiltonians:
+
+```json
+{
+  "workflow_mode": "derivative_metrics_only",
+  "derivative": {
+    "enabled": true,
+    "result_dir": "Comparison/results/derivative_stencils_demo",
+    "method": "central",
+    "base_split": "test",
+    "skip_if_exists": true
+  }
+}
+```
+
+Hamiltonian benchmark followed by derivative postprocess:
+
+```json
+{
+  "workflow_mode": "h_then_derivative_postprocess",
+  "dataset_root": "Comparison/datasets/graphene_w90_joint",
+  "output_root": "Comparison/results/graphene_w90_g2m_deeph_benchmark",
+  "derivative": {
+    "enabled": true,
+    "method": "central",
+    "base_split": "test",
+    "skip_if_exists": true
+  }
+}
+```
+
+A stencil is the set of displaced geometries around a base geometry. Finite differences are the formula applied to Hamiltonians evaluated on that stencil.
+The recommended benchmark method is a central stencil with `R+` and `R-` and
+the central finite difference:
+
+```text
+dH/dR ~= (H(R+) - H(R-)) / (2 * delta)
+```
+
+Forward or backward finite differences are supported only as fallback or
+diagnostic modes. SIESTA force constants, `.FC` files, phonons, dynamical
+matrices, and finite differences of forces are not used as `dH/dR` references.
+The derivative reference is finite differences of SIESTA Hamiltonians.
+
+Expected derivative artifact layout:
+
+```text
+<derivative-result-root>/
+  derivative_stencil_manifest.json
+  derivative_geometry_validation.csv
+  derivative_geometry_validation.json
+  structures/<sample>/RUN.fdf
+  structures/<sample>/metadata.json
+  siesta_hamiltonians/<sample>/*.HSX or *.TSHS
+  siesta_hamiltonians/derivative_siesta_reference_manifest.json
+  predicted_hamiltonians/<sample>/ML_prediction.HSX
+  predicted_hamiltonians/derivative_graph2mat_prediction_manifest.json
+  predicted_hamiltonians/derivative_deeph_prediction_manifest.json
+  derivative_metrics/<model>/manifest.json
+  derivative_metrics/<model>/derivative_matrix_metrics.csv
+  derivative_metrics/<model>/derivative_support_sweep.csv
+  derivative_metrics/<model>/derivative_hermiticity.csv
+  derivative_metrics/<model>/derivative_summary.json
+  derivative_metrics/summary/derivative_gate_report.json
+  derivative_metrics/summary/derivative_model_comparison/
+    derivative_model_comparison_summary.json
+    derivative_model_paired_comparison.csv
+```
+
 ### Common Failure Points
 
 - The protocol does not validate.

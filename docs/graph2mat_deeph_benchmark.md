@@ -194,8 +194,12 @@ technical internal diagnostic use. They do not replace the main H-vs-H
 benchmark, and if they are not computed the benchmark remains valid for the
 standard Hamiltonian metrics and winner logic.
 
-The offline evaluator and gate checker are intentionally separate from the
-training/inference runner:
+The derivative evaluator remains optional and diagnostic-only, but the
+benchmark runner can now invoke it automatically at the end of
+`common_metrics` when `derivative_metrics.enabled=true`. The same logic is
+also available as a reusable backfill CLI for already completed sweeps.
+
+Manual/offline execution is still supported:
 
 ```bash
 python3 Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py \
@@ -205,6 +209,15 @@ python3 Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py \
 python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
   --run-root <benchmark_run_root> \
   --output <benchmark_run_root>/common_metrics/summary/derivative_gate_report.json
+
+python3 Comparison/scripts/g2m_deeph_runner.py \
+  --backfill-derivatives-from-training-sweep <benchmark_run_root>/sweep/training_sweep_manifest.json \
+  --overwrite \
+  --diagnostic-only \
+  --split test \
+  --method central \
+  --require-central \
+  --support-threshold 1e-12
 ```
 
 Expected derivative artifacts live under `derivative_metrics/` and include:
@@ -214,6 +227,12 @@ Expected derivative artifacts live under `derivative_metrics/` and include:
 - `derivative_hermiticity.csv`
 - `stencil_status.csv`
 - `derivative_summary.json`
+
+The benchmark UI also expects:
+
+- `common_metrics/summary/derivative_plots/derivative_plot_payload.json`
+- `common_metrics/summary/derivative_plots/derivative_plot_manifest.json`
+- `common_metrics/summary/derivative_gate_report.json`
 
 The valid derivative reference is finite differences of SIESTA Hamiltonians:
 

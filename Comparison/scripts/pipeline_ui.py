@@ -57,7 +57,6 @@ from material_provenance import (
     read_json_file,
 )
 from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner
-from plot_hamiltonian_derivative_metrics import write_derivative_plot_outputs
 
 try:
     import pty
@@ -7741,6 +7740,21 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
         "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_hermiticity.csv"),
         "mime_type": "text/csv; charset=utf-8",
     },
+    "graph2mat_support_sweep": {
+        "label": "Graph2Mat derivative support sweep CSV",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_support_sweep.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "graph2mat_summary": {
+        "label": "Graph2Mat derivative summary JSON",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_summary.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "graph2mat_geometry_validation": {
+        "label": "Graph2Mat derivative geometry validation JSON",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_geometry_validation.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
     "graph2mat_stencil_status": {
         "label": "Graph2Mat derivative stencil status CSV",
         "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/stencil_status.csv"),
@@ -7761,6 +7775,21 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
         "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_hermiticity.csv"),
         "mime_type": "text/csv; charset=utf-8",
     },
+    "deeph_support_sweep": {
+        "label": "DeepH derivative support sweep CSV",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_support_sweep.csv"),
+        "mime_type": "text/csv; charset=utf-8",
+    },
+    "deeph_summary": {
+        "label": "DeepH derivative summary JSON",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_summary.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "deeph_geometry_validation": {
+        "label": "DeepH derivative geometry validation JSON",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_geometry_validation.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
     "deeph_stencil_status": {
         "label": "DeepH derivative stencil status CSV",
         "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/stencil_status.csv"),
@@ -7775,6 +7804,21 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
         "label": "Derivative plot manifest JSON",
         "relative_path": Path("common_metrics/summary/derivative_plots/derivative_plot_manifest.json"),
         "mime_type": "application/json; charset=utf-8",
+    },
+    "gate_report": {
+        "label": "Derivative gate report JSON",
+        "relative_path": Path("common_metrics/summary/derivative_gate_report.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "model_comparison_summary": {
+        "label": "Derivative model comparison summary JSON",
+        "relative_path": Path("common_metrics/summary/derivative_model_comparison/derivative_model_comparison_summary.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
+    "model_paired_comparison": {
+        "label": "Derivative model paired comparison CSV",
+        "relative_path": Path("common_metrics/summary/derivative_model_comparison/derivative_model_paired_comparison.csv"),
+        "mime_type": "text/csv; charset=utf-8",
     },
 }
 
@@ -7938,7 +7982,96 @@ def _g2m_deeph_derivative_comparison_rows(plot_payload: dict[str, Any]) -> list[
     ]
 
 
+def _g2m_deeph_derivative_metric_summary_rows(
+    graph2mat_root: Path | None,
+    deeph_root: Path | None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for method, root in (("Graph2Mat", graph2mat_root), ("DeepH", deeph_root)):
+        if root is None:
+            continue
+        metric_rows = read_csv_rows(root / "derivative_matrix_metrics.csv")
+        hermiticity_rows = read_csv_rows(root / "derivative_hermiticity.csv")
+        rows.append(
+            {
+                "method": method,
+                "dh_mae_union_eV_per_Ang": _g2m_deeph_derivative_mean(metric_rows, "dh_mae_union_eV_per_Ang"),
+                "dh_rmse_union_eV_per_Ang": _g2m_deeph_derivative_mean(metric_rows, "dh_rmse_union_eV_per_Ang"),
+                "dh_relative_frobenius_ref": _g2m_deeph_derivative_mean(metric_rows, "dh_relative_frobenius_ref"),
+                "dH_pred_hermiticity_defect": _g2m_deeph_derivative_mean(hermiticity_rows, "dH_pred_hermiticity_defect"),
+                "dH_hermiticity_error_delta": _g2m_deeph_derivative_mean(hermiticity_rows, "dH_hermiticity_error_delta"),
+            }
+        )
+    return rows
+
+
+def _g2m_deeph_derivative_paired_comparison_rows(run_root: Path) -> list[dict[str, Any]]:
+    rows = read_csv_rows(
+        run_root
+        / "common_metrics"
+        / "summary"
+        / "derivative_model_comparison"
+        / "derivative_model_paired_comparison.csv"
+    )
+    return rows[:25]
+
+
+def _g2m_deeph_derivative_mean(rows: list[dict[str, Any]], field: str) -> float | None:
+    values: list[float] = []
+    for row in rows:
+        try:
+            value = float(row.get(field))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return sum(values) / len(values) if values else None
+
+
+def _g2m_deeph_derivative_status_from_gate(gate_report: dict[str, Any], status_rows: list[dict[str, Any]]) -> str:
+    gate_status = str(gate_report.get("scientific_status") or "").strip()
+    if gate_status == "blocked":
+        return "blocked"
+    if gate_status in {"technical_presentation", "paper_level_candidate"}:
+        return "presentation_ready"
+    if status_rows and all(str(row.get("scientific_status") or "") == "presentation_ready" for row in status_rows):
+        return "presentation_ready"
+    return "diagnostic_only"
+
+
 def _g2m_deeph_derivative_gate_report(run_root: Path) -> dict[str, Any]:
+    persisted = load_json_object(run_root / "common_metrics" / "summary" / "derivative_gate_report.json")
+    if persisted:
+        payload = dict(persisted)
+        gate_rows = payload.get("gate_rows") if isinstance(payload.get("gate_rows"), list) else []
+        if not gate_rows:
+            gate_rows = []
+            for item in payload.get("blockers") or []:
+                if not isinstance(item, dict):
+                    continue
+                gate_rows.append(
+                    {
+                        "gate": item.get("gate_id") or item.get("gate") or item.get("code") or "derivative_gate",
+                        "status": item.get("status") or "blocked",
+                        "severity": item.get("severity") or "blocker",
+                        "message": item.get("message") or "",
+                    }
+                )
+            for item in payload.get("warnings") or []:
+                if not isinstance(item, dict):
+                    continue
+                gate_rows.append(
+                    {
+                        "gate": item.get("gate_id") or item.get("gate") or item.get("code") or "derivative_warning",
+                        "status": item.get("status") or "warning",
+                        "severity": item.get("severity") or "warning",
+                        "message": item.get("message") or "",
+                    }
+                )
+        payload["gate_rows"] = gate_rows
+        payload.setdefault("derivative_winner_claim", "none")
+        payload.setdefault("message", "Derivative gate report loaded. No winner claim is shown unless the gate explicitly permits it.")
+        return payload
     common_summary = load_json_object(run_root / "common_metrics" / "summary" / "common_summary.json")
     ranking_summary = load_json_object(run_root / "summary" / "ranking" / "ranking_summary.json")
     common_recommendation = common_summary.get("recommendation") if isinstance(common_summary.get("recommendation"), dict) else {}
@@ -7996,13 +8129,11 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "gate_report": gate_report,
         }
     output_dir = run_root / "common_metrics" / "summary" / "derivative_plots"
-    plot_result = write_derivative_plot_outputs(
-        derivative_roots=[],
-        output_dir=output_dir,
-        graph2mat_root=graph2mat_root,
-        deeph_root=deeph_root,
-    )
-    plot_payload = plot_result["payload"]
+    plot_payload_path = output_dir / "derivative_plot_payload.json"
+    if plot_payload_path.exists():
+        plot_payload = load_json_object(plot_payload_path)
+    else:
+        plot_payload = {"available": False, "plots": [], "status": "not_computed"}
     status_rows: list[dict[str, Any]] = []
     issue_rows: list[dict[str, Any]] = []
     artifact_rows: list[dict[str, Any]] = []
@@ -8028,7 +8159,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
                     "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path.exists() else "",
                 }
             )
-    for artifact_kind in ("plot_payload", "plot_manifest"):
+    for artifact_kind in ("plot_payload", "plot_manifest", "gate_report", "model_comparison_summary", "model_paired_comparison"):
         meta = G2M_DEEPH_DERIVATIVE_ARTIFACTS[artifact_kind]
         path = run_root / meta["relative_path"]
         artifact_rows.append(
@@ -8044,11 +8175,12 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         row for row in issue_rows
         if any(token in f"{row.get('code', '')} {row.get('message', '')}".lower() for token in ("gauge", "orbital", "order", "metadata", "hash"))
     ]
-    overall_status = (
-        "presentation_ready"
-        if status_rows and all(str(row.get("scientific_status") or "") == "presentation_ready" for row in status_rows)
-        else "diagnostic_only"
+    paired_rows = _g2m_deeph_derivative_paired_comparison_rows(run_root)
+    comparison_rows = paired_rows or _g2m_deeph_derivative_comparison_rows(plot_payload) or _g2m_deeph_derivative_metric_summary_rows(
+        graph2mat_root,
+        deeph_root,
     )
+    overall_status = _g2m_deeph_derivative_status_from_gate(gate_report, status_rows)
     return {
         "available": True,
         "status": overall_status,
@@ -8064,7 +8196,8 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         "status_rows": status_rows,
         "issue_rows": issue_rows,
         "prominent_issue_rows": prominent,
-        "comparison_rows": _g2m_deeph_derivative_comparison_rows(plot_payload),
+        "comparison_rows": comparison_rows,
+        "paired_comparison_rows": paired_rows,
         "plot_payload": plot_payload,
         "artifact_rows": artifact_rows,
         "scientific_warnings": plot_payload.get("scientific_warnings") or [],

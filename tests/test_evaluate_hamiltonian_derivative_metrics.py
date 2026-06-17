@@ -43,7 +43,33 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
     ) -> None:
         structure_dir = self.result_dir / "structures" / sample_id
         structure_dir.mkdir(parents=True, exist_ok=True)
-        (structure_dir / "RUN.fdf").write_text("SystemLabel fixture\n", encoding="utf-8")
+        displacement = sign * amplitude_ang if sign else 0.0
+        (structure_dir / "RUN.fdf").write_text(
+            "\n".join(
+                [
+                    "SystemName fixture",
+                    "SystemLabel fixture",
+                    "NumberOfSpecies 1",
+                    "NumberOfAtoms 2",
+                    "%block ChemicalSpeciesLabel",
+                    " 1 6 C",
+                    "%endblock ChemicalSpeciesLabel",
+                    "LatticeConstant 1.0 Ang",
+                    "%block LatticeVectors",
+                    " 8.0 0.0 0.0",
+                    " 0.0 8.0 0.0",
+                    " 0.0 0.0 8.0",
+                    "%endblock LatticeVectors",
+                    "AtomicCoordinatesFormat Ang",
+                    "%block AtomicCoordinatesAndAtomicSpecies",
+                    f" {displacement:.12g} 0.0 0.0 1",
+                    " 1.0 0.0 0.0 1",
+                    "%endblock AtomicCoordinatesAndAtomicSpecies",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         if include_metadata:
             metadata = {
                 "sample_id": sample_id,
@@ -98,6 +124,7 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         zero = sparse.csr_matrix((2, 2))
         ref_plus = sparse.csr_matrix([[2.0, 0.0], [0.0, 2.0]])
         pred_plus = sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]])
+        self.write_sample("base", sign=0, reference=zero, prediction=zero, claim_status=claim_status)
         self.write_sample("plus", sign=1, reference=ref_plus, prediction=pred_plus, claim_status=claim_status)
         self.write_sample("minus", sign=-1, reference=zero, prediction=zero, claim_status=claim_status)
 
@@ -182,11 +209,15 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
             status_fields = next(csv.reader(handle))
         with (metrics_root / "derivative_support_sweep.csv").open(encoding="utf-8") as handle:
             sweep_fields = next(csv.reader(handle))
+        with (metrics_root / "derivative_geometry_validation.csv").open(encoding="utf-8") as handle:
+            geometry_fields = next(csv.reader(handle))
 
         self.assertIn("dh_mae_ref_eV_per_Ang", matrix_fields)
         self.assertIn("comparison_status", matrix_fields)
         self.assertIn("issue_codes", status_fields)
         self.assertIn("dh_support_f1", sweep_fields)
+        self.assertIn("status", geometry_fields)
+        self.assertTrue((metrics_root / "derivative_geometry_validation.json").exists())
 
     def test_cli_manifest_status_rules(self) -> None:
         self.write_central_fixture(claim_status="robust")
