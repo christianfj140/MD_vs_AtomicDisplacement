@@ -281,18 +281,60 @@ Hamiltonian benchmark followed by derivative postprocess:
 }
 ```
 
+Hamiltonian benchmark followed by the full derivative workflow:
+
+```json
+{
+  "workflow_mode": "h_then_derivative_full",
+  "dataset_root": "Comparison/datasets/graphene_w90_joint",
+  "output_root": "Comparison/results/graphene_w90_g2m_deeph_benchmark",
+  "derivative": {
+    "enabled": true,
+    "source_dataset_root": "Comparison/datasets/graphene_w90_joint",
+    "output_root": "Comparison/results/graphene_w90_g2m_deeph_benchmark/derivative_workflow",
+    "method": "central",
+    "delta_ang": [0.005, 0.01, 0.02],
+    "base_split": "test",
+    "max_base_snapshots": 2,
+    "atoms": ["0"],
+    "axes": ["x", "y", "z"],
+    "skip_if_exists": true
+  }
+}
+```
+
+`full_end_to_end` is also accepted for the full Hamiltonian plus derivative
+workflow. `derivative` is the canonical payload key; `derivatives` is accepted
+as a backward-compatible alias when it contains the same object.
+
 A stencil is the set of displaced geometries around a base geometry. Finite differences are the formula applied to Hamiltonians evaluated on that stencil.
-The recommended benchmark method is a central stencil with `R+` and `R-` and
-the central finite difference:
+The recommended benchmark method is a central stencil with `R0`, `R+`, and
+`R-`, using the central finite difference:
 
 ```text
 dH/dR ~= (H(R+) - H(R-)) / (2 * delta)
 ```
 
+For compatibility with older examples: a central stencil with `R+` and `R-`
+also keeps the matching base geometry `R0` when geometry validation is part of
+the workflow. `delta_ang` may be one numeric value, a numeric string, a list
+such as `[0.005, 0.01, 0.02]`, or a comma-separated string such as
+`"0.005,0.01,0.02"`. A delta sweep is the preferred way to check whether the
+finite difference is stable.
+
 Forward or backward finite differences are supported only as fallback or
 diagnostic modes. SIESTA force constants, `.FC` files, phonons, dynamical
 matrices, and finite differences of forces are not used as `dH/dR` references.
 The derivative reference is finite differences of SIESTA Hamiltonians.
+
+Keep every `R0`/`R+`/`R-` family in the same split. MD snapshots are valid base
+geometries, but arbitrary MD snapshots from different splits or unrelated
+families are not valid derivative stencils for one another.
+
+Paper-level derivative claims require more evidence than these modular stages
+produce by default: delta stability, basis/gauge/orbital-order compatibility,
+and reference-noise checks should be documented before treating results as
+paper-level conclusions.
 
 Expected derivative artifact layout:
 
@@ -303,7 +345,7 @@ Expected derivative artifact layout:
   derivative_geometry_validation.json
   structures/<sample>/RUN.fdf
   structures/<sample>/metadata.json
-  siesta_hamiltonians/<sample>/*.HSX or *.TSHS
+  siesta_hamiltonians/<sample>/*.HSX|*.TSHS
   siesta_hamiltonians/derivative_siesta_reference_manifest.json
   predicted_hamiltonians/<sample>/ML_prediction.HSX
   predicted_hamiltonians/derivative_graph2mat_prediction_manifest.json

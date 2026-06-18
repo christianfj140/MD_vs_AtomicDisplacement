@@ -181,6 +181,8 @@ MODULAR_WORKFLOW_MODE_ALIASES = {
     "derivative_metrics_only": "derivative_metrics_only",
     "h_then_derivative_postprocess": "h_then_derivative_postprocess",
     "h-then-derivative-postprocess": "h_then_derivative_postprocess",
+    "h_then_derivative_full": "h_then_derivative_full",
+    "h-then-derivative-full": "h_then_derivative_full",
     "full-end-to-end": "full_end_to_end",
     "full_end_to_end": "full_end_to_end",
 }
@@ -234,6 +236,17 @@ MODULAR_WORKFLOW_MODE_OVERRIDES = {
         "derivative_plots": True,
     },
     "h_then_derivative_postprocess": {
+        "derivative_metrics_graph2mat": True,
+        "derivative_metrics_deeph": True,
+        "derivative_gate_check": True,
+        "derivative_plots": True,
+    },
+    "h_then_derivative_full": {
+        "build_derivative_stencils": True,
+        "validate_derivative_stencils": True,
+        "run_derivative_siesta_reference": True,
+        "predict_derivative_graph2mat": True,
+        "predict_derivative_deeph": True,
         "derivative_metrics_graph2mat": True,
         "derivative_metrics_deeph": True,
         "derivative_gate_check": True,
@@ -1430,20 +1443,15 @@ def _normalize_modular_workflow_stages(payload: dict[str, Any]) -> dict[str, boo
 
 
 def _normalize_derivative_workflow_config(payload: dict[str, Any]) -> dict[str, Any]:
-    raw = payload.get("derivative") if isinstance(payload.get("derivative"), dict) else {}
+    raw = _raw_derivative_workflow_config(payload)
     config = dict(raw)
     config["enabled"] = _parse_bool(raw.get("enabled"), False)
     config["method"] = str(raw.get("method") or raw.get("finite_difference_method") or "central").strip().lower()
     config["base_split"] = str(raw.get("base_split") or raw.get("split") or "test").strip().lower()
     config["overwrite"] = _parse_bool(raw.get("overwrite"), False)
     config["skip_if_exists"] = _parse_bool(raw.get("skip_if_exists"), True)
-    if raw.get("delta_ang") not in (None, ""):
-        try:
-            config["delta_ang"] = float(raw["delta_ang"])
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("derivative.delta_ang must be a positive number.") from exc
-    else:
-        config["delta_ang"] = None
+    config["delta_ang_values"] = _normalize_derivative_delta_values(raw.get("delta_ang"))
+    config["delta_ang"] = config["delta_ang_values"][0] if config["delta_ang_values"] else None
     if raw.get("max_base_snapshots") not in (None, ""):
         config["max_base_snapshots"] = _optional_int_value(raw.get("max_base_snapshots"))
     else:
@@ -1451,6 +1459,64 @@ def _normalize_derivative_workflow_config(payload: dict[str, Any]) -> dict[str, 
     config["atoms"] = _normalize_optional_string_list(raw.get("atoms"), field="derivative.atoms")
     config["axes"] = _normalize_optional_string_list(raw.get("axes"), field="derivative.axes")
     return config
+
+
+def _raw_derivative_workflow_config(payload: dict[str, Any]) -> dict[str, Any]:
+    derivative_present = "derivative" in payload and payload.get("derivative") is not None
+    derivatives_present = "derivatives" in payload and payload.get("derivatives") is not None
+    derivative = payload.get("derivative")
+    derivatives = payload.get("derivatives")
+    if derivative_present and not isinstance(derivative, dict):
+        raise RuntimeError("derivative must be an object.")
+    if derivatives_present and not isinstance(derivatives, dict):
+        raise RuntimeError("derivatives must be an object.")
+    if derivative_present and derivatives_present:
+        derivative_payload = dict(derivative)
+        derivatives_payload = dict(derivatives)
+        if _canonical_derivative_alias_payload(derivative_payload) != _canonical_derivative_alias_payload(derivatives_payload):
+            raise RuntimeError("derivative and derivatives configs conflict; use one canonical derivative object.")
+        return derivative_payload
+    if derivative_present:
+        return dict(derivative)
+    if derivatives_present:
+        return dict(derivatives)
+    return {}
+
+
+def _canonical_derivative_alias_payload(config: dict[str, Any]) -> Any:
+    canonical = dict(config)
+    if "delta_ang" in canonical:
+        canonical["delta_ang"] = _normalize_derivative_delta_values(canonical.get("delta_ang"))
+    return _json_safe_payload(canonical)
+
+
+def _normalize_derivative_delta_values(value: Any) -> list[float]:
+    if value in (None, ""):
+        return []
+    raw_values: list[Any]
+    if isinstance(value, str):
+        raw_values = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list):
+        raw_values = []
+        for item in value:
+            if isinstance(item, str) and "," in item:
+                raw_values.extend(part.strip() for part in item.split(","))
+            else:
+                raw_values.append(item)
+    else:
+        raw_values = [value]
+    parsed: list[float] = []
+    for raw in raw_values:
+        if raw in (None, ""):
+            continue
+        try:
+            delta = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("derivative.delta_ang must contain positive numeric Ang values.") from exc
+        if delta <= 0:
+            raise RuntimeError("derivative.delta_ang must contain positive numeric Ang values.")
+        parsed.append(delta)
+    return parsed
 
 
 def _normalize_optional_string_list(value: Any, *, field: str) -> list[str]:
@@ -1468,7 +1534,8 @@ def _normalize_optional_string_list(value: Any, *, field: str) -> list[str]:
 def _require_derivative_field(config: dict[str, Any], field: str, *, stage: str) -> None:
     value = config.get(field)
     if value in (None, "", []):
-        raise RuntimeError(f"derivative stage {stage!r} requires derivative.{field}.")
+        display_field = "delta_ang" if field == "delta_ang_values" else field
+        raise RuntimeError(f"derivative stage {stage!r} requires derivative.{display_field}.")
 
 
 def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[str, Any]) -> None:
@@ -1484,8 +1551,6 @@ def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[s
         raise RuntimeError("derivative.method must be one of: central, forward, backward.")
     if config["base_split"] not in {"train", "validation", "test", "all"}:
         raise RuntimeError("derivative.base_split must be one of: train, validation, test, all.")
-    if config.get("delta_ang") is not None and float(config["delta_ang"]) <= 0:
-        raise RuntimeError("derivative.delta_ang must be a positive number.")
     if config.get("max_base_snapshots") is not None and int(config["max_base_snapshots"]) <= 0:
         raise RuntimeError("derivative.max_base_snapshots must be positive when provided.")
     invalid_axes = [axis for axis in config.get("axes", []) if axis not in {"x", "y", "z"}]
@@ -1494,7 +1559,7 @@ def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[s
 
     if stages.get("build_derivative_stencils"):
         _require_derivative_field(config, "source_dataset_root", stage="build_derivative_stencils")
-        _require_derivative_field(config, "delta_ang", stage="build_derivative_stencils")
+        _require_derivative_field(config, "delta_ang_values", stage="build_derivative_stencils")
         _require_derivative_field(config, "atoms", stage="build_derivative_stencils")
         _require_derivative_field(config, "axes", stage="build_derivative_stencils")
 
@@ -1509,8 +1574,11 @@ def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[s
         "derivative_plots",
     ]
     h_benchmark_produces_metric_inputs = bool(stages.get("hamiltonian_metrics"))
+    derivative_workflow_produces_inputs = bool(stages.get("build_derivative_stencils"))
     for stage in result_consuming_stages:
         if not stages.get(stage):
+            continue
+        if derivative_workflow_produces_inputs:
             continue
         if h_benchmark_produces_metric_inputs and stage in {
             "derivative_metrics_graph2mat",
@@ -6878,7 +6946,7 @@ class Graph2MatDeepHBenchmarkRunner:
                     "--method",
                     method,
                     "--delta-ang",
-                    str(config.get("delta_ang")),
+                    *[str(delta) for delta in config.get("delta_ang_values") or []],
                     "--split",
                     split,
                     "--atoms",
@@ -6899,6 +6967,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 include_base = config.get("include_base")
                 if include_base is not None:
                     command.append("--include-base" if _parse_bool(include_base, True) else "--no-include-base")
+                elif method == "central" and stages.get("validate_derivative_stencils"):
+                    command.append("--include-base")
                 if overwrite:
                     command.append("--overwrite")
                 record = self._run_derivative_stage_command(command, payload=payload, label="Derivative stencil builder")
@@ -6965,8 +7035,11 @@ class Graph2MatDeepHBenchmarkRunner:
                 command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
                 if diagnostic_only:
                     command.append("--diagnostic-only")
-                if config.get("max_jobs") not in (None, ""):
-                    command.extend(["--max-jobs", str(config["max_jobs"])])
+                max_samples = config.get("max_samples") if config.get("max_samples") not in (None, "") else config.get("max_jobs")
+                if max_samples not in (None, ""):
+                    command.extend(["--max-samples", str(max_samples)])
+                if _parse_bool(config.get("siesta_shell"), False):
+                    command.append("--siesta-shell")
                 record = self._run_derivative_stage_command(
                     command,
                     payload=payload,
@@ -7021,9 +7094,11 @@ class Graph2MatDeepHBenchmarkRunner:
             command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
             if diagnostic_only:
                 command.append("--diagnostic-only")
-            if config.get("max_jobs") not in (None, ""):
-                command.extend(["--max-jobs", str(config["max_jobs"])])
+            max_samples = config.get("max_samples") if config.get("max_samples") not in (None, "") else config.get("max_jobs")
+            if max_samples not in (None, ""):
+                command.extend(["--max-samples", str(max_samples)])
             if model == "graph2mat":
+                command.extend(["--python-executable", python_executable])
                 for key, flag in (
                     ("basis_files", "--basis-files"),
                     ("accelerator", "--accelerator"),
@@ -7037,6 +7112,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 deeph_command = config.get("deeph_command")
                 if deeph_command not in (None, ""):
                     command.extend(["--deeph-command", str(deeph_command)])
+                if _parse_bool(config.get("deeph_shell"), False):
+                    command.append("--deeph-shell")
             record = self._run_derivative_stage_command(
                 command,
                 payload=payload,

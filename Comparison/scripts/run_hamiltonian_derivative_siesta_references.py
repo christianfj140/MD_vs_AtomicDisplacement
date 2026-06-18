@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -105,21 +106,27 @@ def copy_existing_reference(sample_id: str, reference_dir: Path, existing_refere
     return target
 
 
-def run_siesta(reference_dir: Path, *, command: str) -> dict[str, Any]:
+def run_siesta(reference_dir: Path, *, command: str, use_shell: bool = False) -> dict[str, Any]:
     run_fdf = reference_dir / "RUN.fdf"
     run_out = reference_dir / "RUN.out"
+    command_args: str | list[str] = command if use_shell else shlex.split(command)
     with run_fdf.open("r", encoding="utf-8") as stdin, run_out.open("w", encoding="utf-8") as stdout:
         completed = subprocess.run(
-            command,
+            command_args,
             cwd=reference_dir,
             stdin=stdin,
             stdout=stdout,
             stderr=subprocess.STDOUT,
-            shell=True,
+            shell=use_shell,
             check=False,
             text=True,
         )
-    return {"command": command, "returncode": completed.returncode, "stdout_path": str(run_out)}
+    return {
+        "command": command if use_shell else command_args,
+        "shell": use_shell,
+        "returncode": completed.returncode,
+        "stdout_path": str(run_out),
+    }
 
 
 def sample_row(
@@ -165,12 +172,16 @@ def run_derivative_siesta_references(
     overwrite: bool = False,
     skip_if_exists: bool = True,
     diagnostic_only: bool = False,
+    max_samples: int | None = None,
     max_jobs: int | None = None,
+    max_jobs_alias_used: bool = False,
+    siesta_shell: bool = False,
 ) -> dict[str, Any]:
     output_reference_root = output_reference_root or stencil_root / "siesta_hamiltonians"
     structures = discover_structure_samples(stencil_root)
-    if max_jobs is not None:
-        structures = structures[: max(0, int(max_jobs))]
+    effective_max_samples = _effective_max_samples(max_samples=max_samples, max_jobs=max_jobs)
+    if effective_max_samples is not None:
+        structures = structures[: max(0, int(effective_max_samples))]
     rows: list[dict[str, Any]] = []
     for structure_dir in structures:
         sample_id = structure_dir.name
@@ -218,7 +229,7 @@ def run_derivative_siesta_references(
                     )
                 )
                 continue
-            run_record = run_siesta(reference_dir, command=siesta_command)
+            run_record = run_siesta(reference_dir, command=siesta_command, use_shell=siesta_shell)
             selection = choose_reference_matrix(reference_dir)
             status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
             error = "" if status == "ok" else selection.reason if run_record["returncode"] == 0 else "siesta_returncode_nonzero"
@@ -228,7 +239,7 @@ def run_derivative_siesta_references(
                     status=status,
                     structure_dir=structure_dir,
                     reference_dir=reference_dir,
-                    command=str(run_record["command"]),
+                    command=_command_display(run_record["command"]),
                     returncode=int(run_record["returncode"]),
                     started_at=started_at,
                     finished_at=time.time(),
@@ -261,7 +272,10 @@ def run_derivative_siesta_references(
         "overwrite": overwrite,
         "skip_if_exists": skip_if_exists,
         "diagnostic_only": diagnostic_only,
+        "max_samples": effective_max_samples,
         "max_jobs": max_jobs,
+        "max_jobs_alias_used": max_jobs_alias_used,
+        "siesta_shell": siesta_shell,
         "samples_total": len(rows),
         "samples_ok": len([row for row in rows if row["status"] in {"ok", "staged", "skipped_existing"}]),
         "samples_failed": len(failed),
@@ -284,6 +298,17 @@ def run_derivative_siesta_references(
     return manifest
 
 
+def _effective_max_samples(*, max_samples: int | None, max_jobs: int | None) -> int | None:
+    if max_samples is not None and max_jobs is not None and int(max_samples) != int(max_jobs):
+        raise DerivativeSiestaReferenceError("--max-samples and deprecated --max-jobs disagree.")
+    value = max_samples if max_samples is not None else max_jobs
+    return int(value) if value is not None else None
+
+
+def _command_display(command: str | list[str]) -> str:
+    return " ".join(command) if isinstance(command, list) else command
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stencil-root", type=Path, required=True)
@@ -293,7 +318,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-if-exists", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--diagnostic-only", action="store_true")
-    parser.add_argument("--max-jobs", type=int, default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--max-jobs", type=int, default=None, help="Deprecated alias for --max-samples.")
+    parser.add_argument("--siesta-shell", action="store_true", help="Run --siesta-command through the shell. Default is argv execution.")
     return parser
 
 
@@ -308,7 +335,10 @@ def main() -> int:
             overwrite=args.overwrite,
             skip_if_exists=args.skip_if_exists,
             diagnostic_only=args.diagnostic_only,
+            max_samples=args.max_samples,
             max_jobs=args.max_jobs,
+            max_jobs_alias_used=args.max_jobs is not None,
+            siesta_shell=args.siesta_shell,
         )
     except DerivativeSiestaReferenceError as exc:
         print(f"[DERIVATIVE-SIESTA][ERROR] {exc}", file=sys.stderr)

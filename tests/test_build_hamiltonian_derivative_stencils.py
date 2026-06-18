@@ -16,7 +16,7 @@ for directory in (SCRIPTS_DIR, SHARED_DIR):
 
 from build_hamiltonian_derivative_stencils import build_derivative_stencils  # noqa: E402
 from fdf_materialization import extract_fdf_structure  # noqa: E402
-from hamiltonian_derivative_stencil import discover_derivative_stencils  # noqa: E402
+from hamiltonian_derivative_stencil import discover_derivative_stencils, validate_derivative_geometry  # noqa: E402
 
 
 def synthetic_base_fdf() -> str:
@@ -87,7 +87,7 @@ class HamiltonianDerivativeStencilBuilderTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_central_builder_writes_plus_minus_structures_and_discoverable_metadata(self) -> None:
+    def test_central_builder_writes_base_plus_minus_structures_and_discoverable_metadata(self) -> None:
         output_root = self.root / "stencils"
 
         manifest = build_derivative_stencils(
@@ -100,15 +100,19 @@ class HamiltonianDerivativeStencilBuilderTests(unittest.TestCase):
             axes=["y"],
         )
 
-        self.assertEqual(manifest["sample_count"], 2)
+        self.assertEqual(manifest["sample_count"], 3)
         self.assertEqual(manifest["stencil_count"], 1)
+        self.assertTrue(manifest["include_base"])
         self.assertFalse(manifest["siesta_run"])
         self.assertFalse(manifest["ml_predictions_run"])
         self.assertFalse(manifest["derivative_metrics_run"])
 
         records_by_sign = {record["sign_label"]: record for record in manifest["samples"]}
+        base = records_by_sign["0"]
         plus = records_by_sign["+"]
         minus = records_by_sign["-"]
+        self.assertEqual(base["sample_id"], "base_0_base")
+        self.assertEqual(base["delta_ang"], 0.0)
         self.assertEqual(plus["atom_index_zero_based"], 1)
         self.assertEqual(plus["axis"], "y")
         self.assertEqual(plus["delta_ang"], 0.1)
@@ -147,6 +151,8 @@ class HamiltonianDerivativeStencilBuilderTests(unittest.TestCase):
         self.assertIsNotNone(discoveries[0].stencil)
         self.assertEqual(discoveries[0].stencil.metadata.plus_sample_id, plus["sample_id"])
         self.assertEqual(discoveries[0].stencil.metadata.minus_sample_id, minus["sample_id"])
+        self.assertEqual(discoveries[0].stencil.base_structure_path.parent.name, base["sample_id"])
+        self.assertEqual(validate_derivative_geometry(discoveries[0]), [])
 
 
 if __name__ == "__main__":

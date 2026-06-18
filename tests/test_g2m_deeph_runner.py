@@ -315,6 +315,126 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertTrue(stages["derivative_metrics_deeph"])
         self.assertEqual(workflow["derivative"]["method"], "central")
 
+    def test_modular_derivatives_alias_is_normalized_to_derivative_key(self):
+        workflow = _normalized_modular_workflow_payload(
+            {
+                "workflow_mode": "derivative_metrics_only",
+                "derivatives": {
+                    "enabled": True,
+                    "result_dir": "/tmp/existing_derivative_inputs",
+                    "method": "central",
+                },
+            }
+        )
+
+        self.assertIn("derivative", workflow)
+        self.assertNotIn("derivatives", workflow)
+        self.assertEqual(workflow["derivative"]["result_dir"], "/tmp/existing_derivative_inputs")
+        self.assertTrue(workflow["stages"]["derivative_metrics_graph2mat"])
+
+    def test_modular_conflicting_derivative_aliases_fail_clearly(self):
+        with self.assertRaisesRegex(RuntimeError, "derivative and derivatives configs conflict"):
+            _normalized_modular_workflow_payload(
+                {
+                    "workflow_mode": "derivative_metrics_only",
+                    "derivative": {
+                        "enabled": True,
+                        "result_dir": "/tmp/one",
+                        "method": "central",
+                    },
+                    "derivatives": {
+                        "enabled": True,
+                        "result_dir": "/tmp/two",
+                        "method": "central",
+                    },
+                }
+            )
+
+    def test_modular_delta_ang_accepts_single_float_and_string_forms(self):
+        for value in (0.01, "0.01"):
+            workflow = _normalized_modular_workflow_payload(
+                {
+                    "stages": {"build_derivative_stencils": True},
+                    "derivative": {
+                        "enabled": True,
+                        "source_dataset_root": "/tmp/source",
+                        "delta_ang": value,
+                        "atoms": [0],
+                        "axes": ["x"],
+                    },
+                }
+            )
+
+            self.assertEqual(workflow["derivative"]["delta_ang"], 0.01)
+            self.assertEqual(workflow["derivative"]["delta_ang_values"], [0.01])
+
+    def test_modular_delta_ang_accepts_comma_separated_sweep(self):
+        workflow = _normalized_modular_workflow_payload(
+            {
+                "stages": {"build_derivative_stencils": True},
+                "derivative": {
+                    "enabled": True,
+                    "source_dataset_root": "/tmp/source",
+                    "delta_ang": "0.005,0.01,0.02",
+                    "atoms": [0],
+                    "axes": ["x"],
+                },
+            }
+        )
+
+        self.assertEqual(workflow["derivative"]["delta_ang_values"], [0.005, 0.01, 0.02])
+
+    def test_modular_h_then_derivative_full_enables_full_derivative_stage_set(self):
+        workflow = _normalized_modular_workflow_payload(
+            {
+                "workflow_mode": "h_then_derivative_full",
+                "derivative": {
+                    "enabled": True,
+                    "source_dataset_root": "/tmp/source",
+                    "delta_ang": 0.01,
+                    "atoms": [0],
+                    "axes": ["x"],
+                },
+            }
+        )
+        stages = workflow["stages"]
+
+        self.assertTrue(stages["hamiltonian_metrics"])
+        for stage in (
+            "build_derivative_stencils",
+            "validate_derivative_stencils",
+            "run_derivative_siesta_reference",
+            "predict_derivative_graph2mat",
+            "predict_derivative_deeph",
+            "derivative_metrics_graph2mat",
+            "derivative_metrics_deeph",
+            "derivative_gate_check",
+            "derivative_plots",
+        ):
+            self.assertTrue(stages[stage], stage)
+
+    def test_modular_h_then_derivative_postprocess_remains_metrics_only(self):
+        workflow = _normalized_modular_workflow_payload(
+            {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {
+                    "enabled": True,
+                    "method": "central",
+                },
+            }
+        )
+        stages = workflow["stages"]
+
+        self.assertFalse(stages["build_derivative_stencils"])
+        self.assertFalse(stages["validate_derivative_stencils"])
+        self.assertFalse(stages["run_derivative_siesta_reference"])
+        self.assertFalse(stages["predict_derivative_graph2mat"])
+        self.assertFalse(stages["predict_derivative_deeph"])
+        self.assertTrue(stages["derivative_metrics_graph2mat"])
+        self.assertTrue(stages["derivative_metrics_deeph"])
+        self.assertTrue(stages["derivative_gate_check"])
+        self.assertTrue(stages["derivative_plots"])
+
     def test_modular_invalid_derivative_config_names_missing_field_and_stage(self):
         with self.assertRaisesRegex(
             RuntimeError,
@@ -390,6 +510,8 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                     "axes": ["x"],
                     "graph2mat_existing_prediction_root": str(Path(tmp) / "g2m_existing"),
                     "deeph_existing_prediction_root": str(Path(tmp) / "deeph_existing"),
+                    "max_samples": 2,
+                    "deeph_shell": True,
                 },
             }
             payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
@@ -409,8 +531,104 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             deeph_command = commands[2][1]
             self.assertIn("graph2mat_derivative_result", graph2mat_command[graph2mat_command.index("--stencil-root") + 1])
             self.assertIn("deeph_derivative_result", deeph_command[deeph_command.index("--stencil-root") + 1])
+            self.assertEqual(graph2mat_command[graph2mat_command.index("--max-samples") + 1], "2")
+            self.assertIn("--python-executable", graph2mat_command)
+            self.assertEqual(deeph_command[deeph_command.index("--max-samples") + 1], "2")
+            self.assertIn("--deeph-shell", deeph_command)
             self.assertEqual(summary["stages"]["predict_derivative_graph2mat"]["status"], "completed")
             self.assertEqual(summary["stages"]["predict_derivative_deeph"]["status"], "completed")
+
+    def test_modular_stencil_builder_receives_delta_sweep_and_include_base_for_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "derivatives"
+            source = Path(tmp) / "source"
+            source.mkdir()
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                if "stencil builder" in label:
+                    root.mkdir(parents=True, exist_ok=True)
+                    (root / "derivative_stencil_manifest.json").write_text(
+                        json.dumps({"sample_count": 3, "stencil_count": 3}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "geometry validation" in label:
+                    (root / "derivative_geometry_validation.json").write_text(
+                        json.dumps({"errors": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "derivative_stencils_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(root),
+                    "source_dataset_root": str(source),
+                    "method": "central",
+                    "delta_ang": [0.005, 0.01, 0.02],
+                    "atoms": ["0"],
+                    "axes": ["x"],
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            builder_command = commands[0][1]
+            delta_start = builder_command.index("--delta-ang") + 1
+            delta_end = builder_command.index("--split")
+            self.assertEqual(builder_command[delta_start:delta_end], ["0.005", "0.01", "0.02"])
+            self.assertIn("--include-base", builder_command)
+            self.assertEqual(summary["stages"]["build_derivative_stencils"]["status"], "completed")
+            self.assertEqual(summary["stages"]["validate_derivative_stencils"]["status"], "completed")
+
+    def test_modular_reference_stage_uses_max_samples_and_explicit_siesta_shell_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "derivatives"
+            root.mkdir()
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                if "geometry validation" in label:
+                    (root / "derivative_geometry_validation.json").write_text(
+                        json.dumps({"errors": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "SIESTA reference" in label:
+                    reference_root = Path(command[command.index("--output-reference-root") + 1])
+                    reference_root.mkdir(parents=True, exist_ok=True)
+                    (reference_root / "derivative_siesta_reference_manifest.json").write_text(
+                        json.dumps({"samples_failed": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "derivative_reference_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(root),
+                    "method": "central",
+                    "siesta_command": "siesta",
+                    "max_samples": 2,
+                    "siesta_shell": True,
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            reference_command = commands[1][1]
+            self.assertEqual(reference_command[reference_command.index("--max-samples") + 1], "2")
+            self.assertIn("--siesta-shell", reference_command)
+            self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["status"], "completed")
 
     def test_modular_derivative_metrics_only_start_skips_dataset_validation(self):
         with tempfile.TemporaryDirectory() as tmp:

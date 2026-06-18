@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -102,7 +103,37 @@ class DerivativePredictionStageTests(unittest.TestCase):
             sample_dir.mkdir(parents=True)
             (sample_dir / "ML_prediction.HSX").write_bytes(f"prediction {sample_id}".encode("utf-8"))
 
-    def test_graph2mat_prediction_stage_rejects_missing_checkpoint(self) -> None:
+    def test_staging_graph2mat_predictions_without_checkpoint_succeeds(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+        existing_root = self.root / "existing"
+        self.write_existing_predictions(existing_root, [path.name for path in (stencil_root / "structures").iterdir()])
+
+        result = run_derivative_predictions(
+            stencil_root=stencil_root,
+            model="graph2mat",
+            existing_prediction_root=existing_root,
+        )
+
+        self.assertEqual(result["samples_failed"], 0)
+        self.assertEqual(result["checkpoint"], "")
+        self.assertTrue(all(row["status"] == "staged" for row in result["rows"]))
+
+    def test_staging_deeph_predictions_without_model_dir_succeeds(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+        existing_root = self.root / "existing_deeph"
+        self.write_existing_predictions(existing_root, [path.name for path in (stencil_root / "structures").iterdir()])
+
+        result = run_derivative_predictions(
+            stencil_root=stencil_root,
+            model="deeph",
+            existing_prediction_root=existing_root,
+        )
+
+        self.assertEqual(result["samples_failed"], 0)
+        self.assertEqual(result["model_dir"], "")
+        self.assertTrue(all(row["status"] == "staged" for row in result["rows"]))
+
+    def test_graph2mat_prediction_stage_rejects_missing_checkpoint_when_running(self) -> None:
         stencil_root, _manifest = self.build_stencil()
 
         with self.assertRaisesRegex(DerivativePredictionStageError, "Graph2Mat prediction requires"):
@@ -110,18 +141,16 @@ class DerivativePredictionStageTests(unittest.TestCase):
                 stencil_root=stencil_root,
                 model="graph2mat",
                 checkpoint=self.root / "missing.ckpt",
-                existing_prediction_root=self.root / "existing",
             )
 
-    def test_deeph_prediction_stage_rejects_missing_model_dir(self) -> None:
+    def test_deeph_prediction_stage_rejects_missing_model_dir_when_running(self) -> None:
         stencil_root, _manifest = self.build_stencil()
 
         with self.assertRaisesRegex(DerivativePredictionStageError, "DeepH prediction requires"):
             run_derivative_predictions(
                 stencil_root=stencil_root,
                 model="deeph",
-                model_dir=self.root / "missing_model",
-                existing_prediction_root=self.root / "existing",
+                deeph_command=f"{sys.executable} -c \"print('unused')\"",
             )
 
     def test_skip_if_exists_avoids_prediction_command(self) -> None:
@@ -168,6 +197,70 @@ class DerivativePredictionStageTests(unittest.TestCase):
         self.assertIsNotNone(discoveries[0].stencil.ml_plus)
         self.assertIsNotNone(discoveries[0].stencil.ml_minus)
         self.assertEqual(discoveries[0].stencil.ml_plus.matrix_path.name, "ML_prediction.HSX")
+
+    def test_max_samples_limits_staged_prediction_samples(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+        existing_root = self.root / "existing_limited"
+        self.write_existing_predictions(existing_root, [path.name for path in (stencil_root / "structures").iterdir()])
+
+        result = run_derivative_predictions(
+            stencil_root=stencil_root,
+            model="graph2mat",
+            existing_prediction_root=existing_root,
+            max_samples=1,
+        )
+
+        self.assertEqual(result["samples_total"], 1)
+        self.assertEqual(result["max_samples"], 1)
+        self.assertIsNone(result["max_jobs"])
+
+    def test_max_jobs_alias_limits_samples_and_is_recorded(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+        existing_root = self.root / "existing_alias"
+        self.write_existing_predictions(existing_root, [path.name for path in (stencil_root / "structures").iterdir()])
+
+        result = run_derivative_predictions(
+            stencil_root=stencil_root,
+            model="graph2mat",
+            existing_prediction_root=existing_root,
+            max_jobs=1,
+            max_jobs_alias_used=True,
+        )
+
+        self.assertEqual(result["samples_total"], 1)
+        self.assertEqual(result["max_samples"], 1)
+        self.assertEqual(result["max_jobs"], 1)
+        self.assertTrue(result["max_jobs_alias_used"])
+
+    def test_deeph_command_template_runs_as_argv_by_default(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+        model_dir = self.root / "deeph_model"
+        model_dir.mkdir()
+        output_root = self.root / "deeph_predictions"
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["shell"] = kwargs.get("shell")
+            for structure in sorted((stencil_root / "structures").iterdir()):
+                prediction_dir = output_root / structure.name
+                prediction_dir.mkdir(parents=True, exist_ok=True)
+                (prediction_dir / "ML_prediction.HSX").write_bytes(b"deeph")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("run_hamiltonian_derivative_predictions.subprocess.run", side_effect=fake_run):
+            result = run_derivative_predictions(
+                stencil_root=stencil_root,
+                model="deeph",
+                output_root=output_root,
+                model_dir=model_dir,
+                deeph_command=f"{sys.executable} -c \"print('deeph')\"",
+            )
+
+        self.assertIsInstance(captured["command"], list)
+        self.assertFalse(captured["shell"])
+        self.assertEqual(result["samples_failed"], 0)
+        self.assertFalse(result["deeph_shell"])
 
 
 if __name__ == "__main__":

@@ -318,7 +318,7 @@ def build_derivative_stencils(
         raise DerivativeStencilBuildError("At least one zero-based atom index is required.")
     if not axes:
         raise DerivativeStencilBuildError("At least one axis is required.")
-    include_base = method != "central" if include_base is None else bool(include_base)
+    include_base = True if include_base is None else bool(include_base)
     if output_stencil_root.exists() and any(output_stencil_root.iterdir()):
         if not overwrite:
             raise DerivativeStencilBuildError(

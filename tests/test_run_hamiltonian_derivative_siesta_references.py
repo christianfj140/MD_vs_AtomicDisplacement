@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -139,6 +140,58 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         self.assertEqual(manifest["samples_failed"], 1)
         self.assertEqual(manifest["rows"][0]["returncode"], 3)
         self.assertEqual(manifest["rows"][0]["error"], "siesta_returncode_nonzero")
+
+    def test_max_samples_limits_reference_samples(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+
+        result = run_derivative_siesta_references(
+            stencil_root=stencil_root,
+            siesta_command=f"{sys.executable} -c \"from pathlib import Path; Path('siesta.TSHS').write_bytes(b'h')\"",
+            max_samples=1,
+        )
+
+        self.assertEqual(result["samples_total"], 1)
+        self.assertEqual(result["samples_ok"], 1)
+        self.assertEqual(result["max_samples"], 1)
+        self.assertIsNone(result["max_jobs"])
+
+    def test_max_jobs_alias_limits_reference_samples_and_is_recorded(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+
+        result = run_derivative_siesta_references(
+            stencil_root=stencil_root,
+            siesta_command=f"{sys.executable} -c \"from pathlib import Path; Path('siesta.TSHS').write_bytes(b'h')\"",
+            max_jobs=1,
+            max_jobs_alias_used=True,
+        )
+
+        self.assertEqual(result["samples_total"], 1)
+        self.assertEqual(result["samples_ok"], 1)
+        self.assertEqual(result["max_samples"], 1)
+        self.assertEqual(result["max_jobs"], 1)
+        self.assertTrue(result["max_jobs_alias_used"])
+
+    def test_siesta_command_runs_as_argv_by_default(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["shell"] = kwargs.get("shell")
+            (Path(kwargs["cwd"]) / "siesta.TSHS").write_bytes(b"reference")
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                siesta_command=f"{sys.executable} -c \"print('siesta')\"",
+                max_samples=1,
+            )
+
+        self.assertIsInstance(captured["command"], list)
+        self.assertFalse(captured["shell"])
+        self.assertEqual(result["samples_failed"], 0)
+        self.assertFalse(result["siesta_shell"])
 
     def test_staged_reference_artifacts_are_discoverable(self) -> None:
         stencil_root, manifest = self.build_stencil()

@@ -184,6 +184,30 @@ class HamiltonianDerivativeGeometryValidationTests(unittest.TestCase):
 
         self.assertIn("missing_base_structure", self.issue_codes(output_root))
 
+    def test_unmatched_reference_base_does_not_satisfy_geometry_validation(self) -> None:
+        output_root, _manifest = self.build_stencil(include_base=False)
+        unrelated_base = output_root / "structures" / "unrelated_base"
+        unrelated_base.mkdir(parents=True)
+        (unrelated_base / "RUN.fdf").write_text((self.sample_dir / "RUN.fdf").read_text(encoding="utf-8"), encoding="utf-8")
+        metadata = json.loads((self.sample_dir / "metadata.json").read_text(encoding="utf-8"))
+        metadata.update(
+            {
+                "sample_id": "unrelated_base",
+                "is_reference": True,
+                "sign": 0,
+                "sign_label": "0",
+                "amplitude_ang": 0.0,
+                "delta_ang": 0.0,
+                "split": "test",
+            }
+        )
+        (unrelated_base / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+        discovery = self.discovery(output_root)
+
+        self.assertIsNone(discovery.stencil.base_structure_path)
+        self.assertIn("missing_base_structure", {issue.code for issue in validate_derivative_geometry(discovery)})
+
 
 if __name__ == "__main__":
     unittest.main()

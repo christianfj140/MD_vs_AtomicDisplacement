@@ -63,6 +63,9 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         forbidden_reference: bool = False,
         include_prediction: bool = True,
         metadata_split: str | None = None,
+        base_sample_id: str | None = None,
+        source_base_sample_id: str | None = None,
+        reference_sample_id: str | None = None,
     ) -> None:
         structures = self.root / "result" / "structures" / sample_id
         structures.mkdir(parents=True, exist_ok=True)
@@ -97,6 +100,12 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
             }
             if metadata_split is not None:
                 metadata["split"] = metadata_split
+            if base_sample_id is not None:
+                metadata["base_sample_id"] = base_sample_id
+            if source_base_sample_id is not None:
+                metadata["source_base_sample_id"] = source_base_sample_id
+            if reference_sample_id is not None:
+                metadata["reference_sample_id"] = reference_sample_id
             (structures / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         if include_reference or forbidden_reference:
             ref_dir = self.root / "result" / "siesta_hamiltonians" / sample_id
@@ -646,6 +655,23 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertIn(discoveries[0].status, {"valid", "diagnostic_only"})
         self.assertIsNotNone(discoveries[0].stencil)
         self.assertNotIn("ambiguous_base_sample", {issue.code for issue in discoveries[0].issues})
+
+    def test_discovery_chooses_base_by_displaced_base_sample_id(self) -> None:
+        self.write_result_sample("base_a", sign=0, is_reference=True)
+        self.write_result_sample("base_b", sign=0, is_reference=True)
+        self.write_result_sample("plus", sign=1, base_sample_id="base_b")
+        self.write_result_sample("minus", sign=-1, base_sample_id="base_b")
+
+        discoveries = discover_derivative_stencils(
+            self.root / "result",
+            finite_difference_method="central",
+        )
+
+        self.assertEqual(len(discoveries), 1)
+        discovery = discoveries[0]
+        self.assertIsNotNone(discovery.stencil)
+        self.assertEqual(discovery.stencil.base_structure_path.parent.name, "base_b")
+        self.assertNotIn("ambiguous_base_sample", {issue.code for issue in discovery.issues})
 
     def test_discovery_forbidden_reference_candidate_is_reported(self) -> None:
         self.write_result_sample("plus", sign=1, include_reference=False, forbidden_reference=True)

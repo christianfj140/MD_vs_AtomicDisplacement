@@ -890,14 +890,14 @@ def discover_derivative_stencils(
     for group_key, by_sign in sorted(groups.items(), key=lambda item: str(item[0])):
         plus_samples = by_sign.get(1, [])
         minus_samples = by_sign.get(-1, [])
-        base_matches = _matching_base_samples(group_key, base_samples)
-        base_match = base_matches[0] if len(base_matches) == 1 else None
         if len(plus_samples) > 1 or len(minus_samples) > 1:
             discoveries.append(_ambiguous_discovery(group_key, plus_samples, minus_samples, requested_method))
             continue
 
         plus = plus_samples[0] if plus_samples else None
         minus = minus_samples[0] if minus_samples else None
+        base_matches = _matching_base_samples(group_key, base_samples, plus=plus, minus=minus)
+        base_match = base_matches[0] if len(base_matches) == 1 else None
         if _base_ambiguity_blocks_discovery(
             requested_method=requested_method,
             require_central=require_central,
@@ -1444,9 +1444,47 @@ def _rounded_delta(delta_ang: float | None) -> float | None:
     return round(float(delta_ang), 12) if delta_ang is not None else None
 
 
-def _matching_base_samples(group_key: tuple[Any, ...], bases: list[_DiscoveredDerivativeSample]) -> list[_DiscoveredDerivativeSample]:
+def _matching_base_samples(
+    group_key: tuple[Any, ...],
+    bases: list[_DiscoveredDerivativeSample],
+    *,
+    plus: _DiscoveredDerivativeSample | None,
+    minus: _DiscoveredDerivativeSample | None,
+) -> list[_DiscoveredDerivativeSample]:
+    requested_ids = {
+        base_id
+        for sample in (plus, minus)
+        for base_id in _requested_base_identity(sample)
+    }
+    if requested_ids:
+        return [sample for sample in bases if requested_ids.intersection(_base_sample_identity(sample))]
     group_base_key = (group_key[1], group_key[2], group_key[7], group_key[8], group_key[9], group_key[10], group_key[11], group_key[12])
     return [sample for sample in bases if sample.base_key == group_base_key]
+
+
+def _requested_base_identity(sample: _DiscoveredDerivativeSample | None) -> set[str]:
+    if sample is None:
+        return set()
+    return _metadata_identity_values(sample.metadata, "base_sample_id", "source_base_sample_id", "reference_sample_id")
+
+
+def _base_sample_identity(sample: _DiscoveredDerivativeSample) -> set[str]:
+    identities = set(
+        _metadata_identity_values(sample.metadata, "sample_id", "id")
+    )
+    identities.update(
+        _metadata_identity_values(sample.metadata, "base_sample_id", "source_base_sample_id", "reference_sample_id")
+    )
+    identities.add(sample.sample_id)
+    return {identity for identity in identities if identity}
+
+
+def _metadata_identity_values(metadata: dict[str, Any] | None, *keys: str) -> set[str]:
+    return {
+        str((metadata or {}).get(key)).strip()
+        for key in keys
+        if str((metadata or {}).get(key) or "").strip()
+    }
 
 
 def _base_ambiguity_blocks_discovery(

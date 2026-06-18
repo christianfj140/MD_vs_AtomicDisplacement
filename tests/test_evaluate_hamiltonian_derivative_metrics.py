@@ -39,6 +39,7 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         atom_index_zero_based: int = 0,
         amplitude_ang: float = 0.5,
         include_metadata: bool = True,
+        include_matrix_shape: bool = True,
         claim_status: str = "diagnostic_only",
     ) -> None:
         structure_dir = self.result_dir / "structures" / sample_id
@@ -86,7 +87,6 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
                 "split_group_id": "generic_cartesian_displacement:graphene:reference"
                 if sign == 0
                 else "generic_cartesian_displacement:graphene:atom_0001",
-                "matrix_shape": [2, 2],
                 "claim_status": claim_status,
                 "material_compatibility_hash": "material-hash",
                 "orbital_ordering_hash": "orbital-hash",
@@ -95,6 +95,8 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
                 "basis_hash": "basis-hash",
                 "pseudopotential_hash": "pseudo-hash",
             }
+            if include_matrix_shape:
+                metadata["matrix_shape"] = [2, 2]
             (structure_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         if reference is not None:
             self.write_sparse_payload(
@@ -128,6 +130,20 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.write_sample("plus", sign=1, reference=ref_plus, prediction=pred_plus, claim_status=claim_status)
         self.write_sample("minus", sign=-1, reference=zero, prediction=zero, claim_status=claim_status)
 
+    def write_central_fixture_without_matrix_shape(
+        self,
+        *,
+        minus_prediction: sparse.spmatrix | None = None,
+        include_minus_prediction: bool = True,
+    ) -> None:
+        zero = sparse.csr_matrix((2, 2))
+        ref_plus = sparse.csr_matrix([[2.0, 0.0], [0.0, 2.0]])
+        pred_plus = sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]])
+        minus_prediction = zero if minus_prediction is None and include_minus_prediction else minus_prediction
+        self.write_sample("base", sign=0, reference=zero, prediction=zero, include_matrix_shape=False)
+        self.write_sample("plus", sign=1, reference=ref_plus, prediction=pred_plus, include_matrix_shape=False)
+        self.write_sample("minus", sign=-1, reference=zero, prediction=minus_prediction, include_matrix_shape=False)
+
     def test_cli_happy_path_with_synthetic_sparse_matrices(self) -> None:
         self.write_central_fixture()
 
@@ -144,6 +160,49 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertEqual(manifest["stencils_ok"], 1)
         self.assertEqual(rows[0]["derivative_units"], "eV/Ang")
         self.assertAlmostEqual(float(rows[0]["dh_mae_union_eV_per_Ang"]), 1.0)
+
+    def test_cli_infers_matrix_shape_from_sparse_files_when_metadata_omits_shape(self) -> None:
+        self.write_central_fixture_without_matrix_shape()
+
+        self.run_cli("--method", "central", "--overwrite")
+
+        metrics_root = self.result_dir / "derivative_metrics"
+        manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
+        geometry = json.loads((metrics_root / "derivative_geometry_validation.json").read_text(encoding="utf-8"))
+        with (metrics_root / "stencil_status.csv").open(encoding="utf-8") as handle:
+            status_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(manifest["stencils_ok"], 1)
+        self.assertEqual(manifest["stencils_failed"], 0)
+        self.assertEqual(manifest["geometry_validation"]["ok"], 1)
+        self.assertEqual(geometry["ok"], 1)
+        self.assertEqual(status_rows[0]["status"], "ok")
+
+    def test_cli_mismatched_loaded_matrix_shapes_fail_clearly(self) -> None:
+        self.write_central_fixture_without_matrix_shape(
+            minus_prediction=sparse.csr_matrix((3, 3)),
+        )
+
+        completed = self.run_cli("--method", "central", "--overwrite", check=False)
+
+        self.assertEqual(completed.returncode, 2)
+        manifest = json.loads((self.result_dir / "derivative_metrics" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["stencils_ok"], 0)
+        self.assertEqual(manifest["stencils_failed"], 1)
+        self.assertEqual(manifest["fatal_errors"][0]["kind"], "stencil_validation_failed")
+        self.assertIn("matrix_shape_mismatch", manifest["fatal_errors"][0]["issue_codes"])
+
+    def test_cli_missing_matrix_still_fails_closed_without_metadata_shape(self) -> None:
+        self.write_central_fixture_without_matrix_shape(include_minus_prediction=False)
+
+        completed = self.run_cli("--method", "central", "--overwrite", check=False)
+
+        self.assertEqual(completed.returncode, 2)
+        manifest = json.loads((self.result_dir / "derivative_metrics" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["stencils_ok"], 0)
+        self.assertEqual(manifest["stencils_failed"], 1)
+        self.assertTrue(manifest["fatal_errors"])
+        self.assertIn("missing", json.dumps(manifest["fatal_errors"]))
 
     def test_cli_refuses_overwrite_without_flag(self) -> None:
         self.write_central_fixture()
