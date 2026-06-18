@@ -307,6 +307,10 @@ Hamiltonian benchmark followed by the full derivative workflow:
 workflow. `derivative` is the canonical payload key; `derivatives` is accepted
 as a backward-compatible alias when it contains the same object.
 
+In training sweeps and `full_strict_pipeline` runs, derivative stencil
+generation uses each completed child run's dataset root, not a global
+`derivative.source_dataset_root` shared across all children.
+
 For `h_then_derivative_full` and `full_end_to_end`, derivative prediction stages
 can use explicit model artifacts such as `derivative.graph2mat_checkpoint` and
 `derivative.deeph_model_dir`. When the normal H workflow has just completed,
@@ -315,6 +319,10 @@ and the DeepH save directory. To reuse already-produced derivative
 predictions instead of running prediction commands, provide
 `derivative.graph2mat_existing_prediction_root` and/or
 `derivative.deeph_existing_prediction_root`.
+
+`derivative.siesta_command` defaults to `"siesta"` for derivative SIESTA
+reference Hamiltonian staging and can be overridden when the executable needs a
+different command line.
 
 When both Graph2Mat and DeepH derivative prediction stages are enabled, the
 runner may materialize separate model-specific derivative result roots, such as

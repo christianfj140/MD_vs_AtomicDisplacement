@@ -109,6 +109,7 @@ def path_map(root: Path) -> dict[str, Path]:
         "matrix_metrics": root / "derivative_matrix_metrics.csv",
         "stencil_status": root / "stencil_status.csv",
         "hermiticity": root / "derivative_hermiticity.csv",
+        "delta_stability": root / "derivative_delta_stability.json",
     }
 
 
@@ -116,11 +117,13 @@ def load_dataset(root: Path) -> dict[str, Any]:
     root = normalize_root(root)
     paths = path_map(root)
     manifest = read_json(paths["manifest"])
+    delta_stability = read_json(paths["delta_stability"]) if paths["delta_stability"].exists() else {}
     return {
         "root": root,
         "model": infer_model(root),
         "paths": paths,
         "manifest": manifest,
+        "delta_stability": delta_stability,
         "matrix_rows": read_csv_rows(paths["matrix_metrics"]),
         "stencil_rows": read_csv_rows(paths["stencil_status"]),
         "hermiticity_rows": read_csv_rows(paths["hermiticity"]),
@@ -244,13 +247,20 @@ def explicit_issue(dataset: dict[str, Any], terms: tuple[str, ...]) -> bool:
 def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     manifest = dataset["manifest"]
     matrix_rows = dataset["matrix_rows"]
+    delta_stability = dataset.get("delta_stability") if isinstance(dataset.get("delta_stability"), dict) else {}
+    manifest_delta_stability = manifest.get("delta_stability") if isinstance(manifest.get("delta_stability"), dict) else {}
+    delta_status = str(delta_stability.get("status") or manifest_delta_stability.get("status") or "").strip().lower()
+    reference_noise = manifest.get("reference_noise") if isinstance(manifest.get("reference_noise"), dict) else {}
+    reference_noise_status = str(reference_noise.get("status") or manifest.get("reference_noise_status") or "").strip().lower()
     comparison_statuses = unique_nonempty([row.get("comparison_status") for row in matrix_rows])
     return {
         "has_non_diagnostic_comparison_rows": bool(comparison_statuses) and all(status != "diagnostic_only" for status in comparison_statuses),
         "basis_gauge_verified": truthy(manifest.get("basis_gauge_verified")) or truthy(manifest.get("basis_gauge_evidence")),
         "orbital_ordering_verified": truthy(manifest.get("orbital_ordering_verified")) or truthy(manifest.get("orbital_ordering_evidence")),
-        "delta_sensitivity_study": truthy(manifest.get("delta_sensitivity_study_passed"))
-        or len({number(row.get("delta_ang")) for row in matrix_rows if number(row.get("delta_ang")) is not None}) >= 2,
+        "delta_sensitivity_study": delta_status == "available",
+        "reference_noise_evidence": truthy(manifest.get("reference_noise_verified"))
+        or truthy(manifest.get("reference_noise_evidence"))
+        or reference_noise_status == "available",
         "independent_dataset_metadata": truthy(manifest.get("independent_dataset_metadata"))
         or truthy(manifest.get("dataset_split_evidence"))
         or (str(manifest.get("split") or "").strip().lower() == "test" and truthy(manifest.get("split_metadata_verified"))),
@@ -503,6 +513,7 @@ def overall_status(
         not info["basis_gauge_verified"]
         or not info["orbital_ordering_verified"]
         or not info["delta_sensitivity_study"]
+        or not info["reference_noise_evidence"]
         or not info["independent_dataset_metadata"]
         for info in paper_evidence.values()
     ]
@@ -578,6 +589,8 @@ def recommended_next_steps(
                 steps.append(f"{model}: add orbital-ordering evidence before paper-level use.")
             if not info["delta_sensitivity_study"]:
                 steps.append(f"{model}: run or record a delta sensitivity study for paper-level gating.")
+            if not info["reference_noise_evidence"]:
+                steps.append(f"{model}: add repeated-reference noise evidence before paper-level use.")
             if not info["independent_dataset_metadata"]:
                 steps.append(f"{model}: add independent dataset/split metadata for paper-level gating.")
             if multiple_models and not info["cross_model_equivalence_proven"]:
@@ -672,6 +685,19 @@ def build_derivative_gate_report(
                     evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
                 )
             )
+        if not info["reference_noise_evidence"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_reference_noise_missing",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level candidate status requires repeated-reference/noise evidence.",
+                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                )
+            )
         if not info["independent_dataset_metadata"]:
             blockers.append(
                 gate_row(
@@ -706,6 +732,7 @@ def build_derivative_gate_report(
             "matrix_metrics": [str(dataset["paths"]["matrix_metrics"]) for dataset in datasets],
             "stencil_status": [str(dataset["paths"]["stencil_status"]) for dataset in datasets],
             "hermiticity": [str(dataset["paths"]["hermiticity"]) for dataset in datasets],
+            "delta_stability": [str(dataset["paths"]["delta_stability"]) for dataset in datasets],
         },
         "datasets": [
             {

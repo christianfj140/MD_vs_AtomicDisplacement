@@ -47,6 +47,7 @@ class DerivativeGateCheckTests(unittest.TestCase):
         metric_rows: list[dict[str, object]] | None = None,
         stencil_rows: list[dict[str, object]] | None = None,
         hermiticity_rows: list[dict[str, object]] | None = None,
+        delta_stability: dict | None = None,
     ) -> Path:
         manifest = {
             "schema_version": "hamiltonian_derivative_metrics_v1",
@@ -174,6 +175,8 @@ class DerivativeGateCheckTests(unittest.TestCase):
                 }
             ],
         )
+        if delta_stability is not None:
+            write_json(self.derivative_root / "derivative_delta_stability.json", delta_stability)
         return self.derivative_root
 
     def build_report(self) -> dict:
@@ -307,6 +310,7 @@ class DerivativeGateCheckTests(unittest.TestCase):
                 "orbital_ordering_verified": True,
                 "independent_dataset_metadata": True,
             },
+            delta_stability={"status": "available", "rows": [{"delta_count": 2}]},
             metric_rows=[
                 {
                     "sample": "sample_a",
@@ -358,6 +362,83 @@ class DerivativeGateCheckTests(unittest.TestCase):
         self.assertEqual(report["scientific_status"], "technical_presentation")
         self.assertNotIn("paper_level_delta_sweep_missing", {row["id"] for row in report["blockers"]})
         self.assertIn("No paper-level or winner claim is allowed", " ".join(report["allowed_claims"]))
+
+    def test_paper_level_blocked_without_explicit_delta_stability(self) -> None:
+        self.write_fixture(
+            manifest_overrides={
+                "basis_gauge_verified": True,
+                "orbital_ordering_verified": True,
+                "independent_dataset_metadata": True,
+                "reference_noise_verified": True,
+                "paper_level_candidate_requested": True,
+            },
+            metric_rows=[
+                {
+                    "sample": "sample_a",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+                {
+                    "sample": "sample_b",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.02,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+            ],
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "technical_presentation")
+        self.assertIn("paper_level_delta_sweep_missing", {row["id"] for row in report["blockers"]})
+
+    def test_paper_level_blocked_without_reference_noise_evidence(self) -> None:
+        self.write_fixture(
+            manifest_overrides={
+                "basis_gauge_verified": True,
+                "orbital_ordering_verified": True,
+                "independent_dataset_metadata": True,
+                "paper_level_candidate_requested": True,
+            },
+            delta_stability={"status": "available", "rows": [{"delta_count": 2}]},
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "technical_presentation")
+        blocker_ids = {row["id"] for row in report["blockers"]}
+        self.assertIn("paper_level_reference_noise_missing", blocker_ids)
 
     def test_cli_writes_gate_report(self) -> None:
         self.write_fixture(manifest_overrides={"scientific_status": "diagnostic_only", "diagnostic_only_requested": True})

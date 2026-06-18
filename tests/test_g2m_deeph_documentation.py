@@ -95,6 +95,8 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
             "reference-noise checks",
             "Graph2Mat checkpoint manifest",
             "DeepH save directory",
+            "each completed child run's dataset root",
+            "not a global",
             "model-specific derivative result roots",
             "graph2mat_derivative_result",
             "deeph_derivative_result",

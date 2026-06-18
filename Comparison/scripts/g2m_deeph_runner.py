@@ -4572,10 +4572,20 @@ class Graph2MatDeepHBenchmarkRunner:
         payload: dict[str, Any],
         *,
         child_run_root: Path,
+        entry: dict[str, Any],
     ) -> dict[str, Any]:
         workflow = payload["modular_workflow"]
         stages = dict(workflow["stages"])
         derivative = dict(workflow["derivative"])
+        if stages.get("build_derivative_stencils"):
+            dataset_root = entry.get("dataset_root")
+            if dataset_root in (None, ""):
+                raise RuntimeError(
+                    "missing dataset_root for completed training sweep child run with "
+                    "build_derivative_stencils enabled."
+                )
+            child_dataset_root = _resolve_optional_repo_path(dataset_root, Path(str(dataset_root)))
+            derivative["source_dataset_root"] = str(child_dataset_root)
         if not any(
             stages.get(stage)
             for stage in (
@@ -4642,6 +4652,7 @@ class Graph2MatDeepHBenchmarkRunner:
                 child_payload = self._training_sweep_derivative_child_payload(
                     payload,
                     child_run_root=child_run_root,
+                    entry=entry,
                 )
                 derivative_summary = self._run_modular_derivative_workflow(
                     child_payload,
@@ -7161,11 +7172,6 @@ class Graph2MatDeepHBenchmarkRunner:
                         "run_derivative_siesta_reference",
                         "derivative.existing_reference_root does not exist; provide an existing reference root.",
                     )
-            elif config.get("siesta_command") in (None, ""):
-                fail(
-                    "run_derivative_siesta_reference",
-                    "missing derivative.siesta_command; alternatively provide derivative.existing_reference_root.",
-                )
 
         for model, enabled in (("graph2mat", predict_graph2mat), ("deeph", predict_deeph)):
             if not enabled:

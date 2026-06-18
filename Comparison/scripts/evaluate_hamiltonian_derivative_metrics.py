@@ -79,6 +79,26 @@ GEOMETRY_VALIDATION_FIELDS = [
     "issue_codes",
     "issue_messages",
 ]
+DELTA_STABILITY_FIELDS = [
+    "source_model",
+    "base_sample_id",
+    "atom_index_zero_based",
+    "axis",
+    "finite_difference_method",
+    "delta_count",
+    "delta_min_ang",
+    "delta_max_ang",
+    "dh_mae_union_eV_per_Ang_min",
+    "dh_mae_union_eV_per_Ang_max",
+    "dh_mae_union_eV_per_Ang_range",
+    "dh_rmse_union_eV_per_Ang_min",
+    "dh_rmse_union_eV_per_Ang_max",
+    "dh_rmse_union_eV_per_Ang_range",
+    "dh_relative_frobenius_ref_min",
+    "dh_relative_frobenius_ref_max",
+    "dh_relative_frobenius_ref_range",
+    "status",
+]
 
 
 class DerivativeMetricEvaluationError(RuntimeError):
@@ -210,7 +230,11 @@ def evaluate_derivative_metrics(
         metric_rows=metric_rows,
         fatal_errors=fatal_errors,
     )
+    delta_stability = _delta_stability_summary(metric_rows)
+    reference_noise = _reference_noise_summary(metric_rows)
     summary = _summary(metric_rows, stencil_rows, hermiticity_rows)
+    summary["delta_stability"] = delta_stability
+    summary["reference_noise"] = reference_noise
     outputs = {
         "output_dir": str(output_dir),
         "manifest": str(output_dir / "manifest.json"),
@@ -218,6 +242,8 @@ def evaluate_derivative_metrics(
         "derivative_matrix_metrics": str(output_dir / "derivative_matrix_metrics.csv"),
         "derivative_support_sweep": str(output_dir / "derivative_support_sweep.csv"),
         "derivative_hermiticity": str(output_dir / "derivative_hermiticity.csv"),
+        "derivative_delta_stability": str(output_dir / "derivative_delta_stability.csv"),
+        "derivative_delta_stability_json": str(output_dir / "derivative_delta_stability.json"),
         "derivative_geometry_validation": str(output_dir / "derivative_geometry_validation.csv"),
         "derivative_geometry_validation_json": str(output_dir / "derivative_geometry_validation.json"),
         "derivative_summary": str(output_dir / "derivative_summary.json"),
@@ -240,6 +266,10 @@ def evaluate_derivative_metrics(
         "stencils_ok": stencils_ok,
         "stencils_failed": stencils_failed,
         "geometry_validation": _geometry_validation_summary(geometry_rows),
+        "delta_stability": delta_stability,
+        "delta_sensitivity_study_passed": delta_stability["status"] == "available",
+        "reference_noise": reference_noise,
+        "reference_noise_status": reference_noise["status"],
         "warnings": warnings,
         "fatal_errors": fatal_errors,
         "outputs": outputs,
@@ -249,6 +279,8 @@ def evaluate_derivative_metrics(
     write_csv(output_dir / "derivative_matrix_metrics.csv", _metric_fieldnames(metric_rows), metric_rows)
     write_csv(output_dir / "derivative_support_sweep.csv", _metric_fieldnames(sweep_rows), sweep_rows)
     write_csv(output_dir / "derivative_hermiticity.csv", HERMITICITY_FIELDS, hermiticity_rows)
+    write_csv(output_dir / "derivative_delta_stability.csv", DELTA_STABILITY_FIELDS, delta_stability["rows"])
+    write_json(output_dir / "derivative_delta_stability.json", delta_stability)
     write_csv(output_dir / "derivative_geometry_validation.csv", GEOMETRY_VALIDATION_FIELDS, geometry_rows)
     write_json(output_dir / "derivative_geometry_validation.json", _geometry_validation_summary(geometry_rows, include_rows=True))
     write_json(output_dir / "derivative_summary.json", summary)
@@ -555,6 +587,107 @@ def _summary(
         "max_dh_hermiticity_pred": _max(row.get("dH_pred_hermiticity_defect") for row in hermiticity_rows),
         "force_constants_used": False,
         "reference_definition": REFERENCE_DEFINITION,
+    }
+
+
+def _delta_stability_group_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("source_model") or ""),
+        str(row.get("base_sample_id") or ""),
+        str(row.get("atom_index_zero_based") or ""),
+        str(row.get("axis") or ""),
+        str(row.get("finite_difference_method") or ""),
+    )
+
+
+def _finite_values(rows: list[dict[str, Any]], field: str) -> list[float]:
+    values = [_finite_or_nan(row.get(field)) for row in rows]
+    return [value for value in values if math.isfinite(value)]
+
+
+def _range_payload(rows: list[dict[str, Any]], field: str, prefix: str) -> dict[str, float | None]:
+    values = _finite_values(rows, field)
+    if not values:
+        return {
+            f"{prefix}_min": None,
+            f"{prefix}_max": None,
+            f"{prefix}_range": None,
+        }
+    minimum = min(values)
+    maximum = max(values)
+    return {
+        f"{prefix}_min": minimum,
+        f"{prefix}_max": maximum,
+        f"{prefix}_range": maximum - minimum,
+    }
+
+
+def _delta_stability_summary(metric_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
+    for row in metric_rows:
+        delta = _finite_or_nan(row.get("delta_ang"))
+        if not math.isfinite(delta):
+            continue
+        groups.setdefault(_delta_stability_group_key(row), []).append(row)
+
+    rows: list[dict[str, Any]] = []
+    for key, group_rows in sorted(groups.items(), key=lambda item: item[0]):
+        deltas = sorted({float(row.get("delta_ang")) for row in group_rows if math.isfinite(_finite_or_nan(row.get("delta_ang")))})
+        if len(deltas) < 2:
+            continue
+        source_model, base_sample_id, atom_index_zero_based, axis, method = key
+        row = {
+            "source_model": source_model,
+            "base_sample_id": base_sample_id,
+            "atom_index_zero_based": atom_index_zero_based,
+            "axis": axis,
+            "finite_difference_method": method,
+            "delta_count": len(deltas),
+            "delta_min_ang": min(deltas),
+            "delta_max_ang": max(deltas),
+            "status": "available",
+        }
+        row.update(_range_payload(group_rows, "dh_mae_union_eV_per_Ang", "dh_mae_union_eV_per_Ang"))
+        row.update(_range_payload(group_rows, "dh_rmse_union_eV_per_Ang", "dh_rmse_union_eV_per_Ang"))
+        row.update(_range_payload(group_rows, "dh_relative_frobenius_ref", "dh_relative_frobenius_ref"))
+        rows.append(row)
+
+    unique_deltas = sorted({float(row.get("delta_ang")) for row in metric_rows if math.isfinite(_finite_or_nan(row.get("delta_ang")))})
+    if not rows:
+        status = "unavailable_single_delta" if len(unique_deltas) < 2 else "unavailable_no_matched_delta_groups"
+        reason = (
+            "At least two delta_ang values for the same source_model/base_sample_id/atom/axis/method are required."
+            if len(unique_deltas) >= 2
+            else "Fewer than two delta_ang values were found in derivative metric rows."
+        )
+    else:
+        status = "available"
+        reason = ""
+    return {
+        "status": status,
+        "reason": reason,
+        "groups_total": len(rows),
+        "unique_delta_ang": unique_deltas,
+        "rows": rows,
+    }
+
+
+def _reference_noise_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    noise_rows = [
+        {key: value for key, value in row.items() if str(key).startswith("reference_noise")}
+        for row in rows
+        if any(str(key).startswith("reference_noise") for key in row)
+    ]
+    if not noise_rows:
+        return {
+            "status": "reference_noise_unavailable",
+            "reason": "No repeated SIESTA reference/noise evidence was found in derivative metric manifests.",
+            "rows": [],
+        }
+    return {
+        "status": "available",
+        "reason": "",
+        "rows": noise_rows,
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import subprocess
 import sys
@@ -13,6 +14,11 @@ from scipy import sparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_derivative_metrics.py"
+SPEC = importlib.util.spec_from_file_location("evaluate_hamiltonian_derivative_metrics", SCRIPT)
+metrics_module = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+sys.modules[SPEC.name] = metrics_module
+SPEC.loader.exec_module(metrics_module)
 
 
 class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
@@ -160,6 +166,61 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertEqual(manifest["stencils_ok"], 1)
         self.assertEqual(rows[0]["derivative_units"], "eV/Ang")
         self.assertAlmostEqual(float(rows[0]["dh_mae_union_eV_per_Ang"]), 1.0)
+        self.assertTrue((metrics_root / "derivative_delta_stability.csv").exists())
+        self.assertTrue((metrics_root / "derivative_delta_stability.json").exists())
+        self.assertEqual(manifest["delta_stability"]["status"], "unavailable_single_delta")
+        self.assertEqual(manifest["reference_noise"]["status"], "reference_noise_unavailable")
+
+    def test_delta_stability_summary_aggregates_matching_delta_sweep_rows(self) -> None:
+        rows = [
+            {
+                "source_model": "graph2mat",
+                "base_sample_id": "base_0",
+                "atom_index_zero_based": 0,
+                "axis": "x",
+                "finite_difference_method": "central",
+                "delta_ang": 0.005,
+                "dh_mae_union_eV_per_Ang": 0.4,
+                "dh_rmse_union_eV_per_Ang": 0.5,
+                "dh_relative_frobenius_ref": 0.1,
+            },
+            {
+                "source_model": "graph2mat",
+                "base_sample_id": "base_0",
+                "atom_index_zero_based": 0,
+                "axis": "x",
+                "finite_difference_method": "central",
+                "delta_ang": 0.01,
+                "dh_mae_union_eV_per_Ang": 0.6,
+                "dh_rmse_union_eV_per_Ang": 0.7,
+                "dh_relative_frobenius_ref": 0.15,
+            },
+        ]
+
+        summary = metrics_module._delta_stability_summary(rows)
+
+        self.assertEqual(summary["status"], "available")
+        self.assertEqual(summary["groups_total"], 1)
+        self.assertEqual(summary["rows"][0]["delta_count"], 2)
+        self.assertAlmostEqual(summary["rows"][0]["dh_mae_union_eV_per_Ang_range"], 0.2)
+
+    def test_delta_stability_summary_reports_single_delta_unavailable(self) -> None:
+        summary = metrics_module._delta_stability_summary(
+            [
+                {
+                    "source_model": "graph2mat",
+                    "base_sample_id": "base_0",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "finite_difference_method": "central",
+                    "delta_ang": 0.01,
+                    "dh_mae_union_eV_per_Ang": 0.6,
+                }
+            ]
+        )
+
+        self.assertEqual(summary["status"], "unavailable_single_delta")
+        self.assertIn("Fewer than two", summary["reason"])
 
     def test_cli_infers_matrix_shape_from_sparse_files_when_metadata_omits_shape(self) -> None:
         self.write_central_fixture_without_matrix_shape()
