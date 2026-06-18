@@ -307,6 +307,20 @@ Hamiltonian benchmark followed by the full derivative workflow:
 workflow. `derivative` is the canonical payload key; `derivatives` is accepted
 as a backward-compatible alias when it contains the same object.
 
+For `h_then_derivative_full` and `full_end_to_end`, derivative prediction stages
+can use explicit model artifacts such as `derivative.graph2mat_checkpoint` and
+`derivative.deeph_model_dir`. When the normal H workflow has just completed,
+the runner can infer those model artifacts from the Graph2Mat checkpoint manifest
+and the DeepH save directory. To reuse already-produced derivative
+predictions instead of running prediction commands, provide
+`derivative.graph2mat_existing_prediction_root` and/or
+`derivative.deeph_existing_prediction_root`.
+
+When both Graph2Mat and DeepH derivative prediction stages are enabled, the
+runner may materialize separate model-specific derivative result roots, such as
+`graph2mat_derivative_result/` and `deeph_derivative_result/`, so that each
+model's predicted Hamiltonians and metrics remain unambiguous.
+
 A stencil is the set of displaced geometries around a base geometry. Finite differences are the formula applied to Hamiltonians evaluated on that stencil.
 The recommended benchmark method is a central stencil with `R0`, `R+`, and
 `R-`, using the central finite difference:
@@ -359,6 +373,23 @@ Expected derivative artifact layout:
   derivative_metrics/summary/derivative_model_comparison/
     derivative_model_comparison_summary.json
     derivative_model_paired_comparison.csv
+```
+
+If model-specific derivative roots are used, treat the generic layout above as
+the layout inside each model-specific derivative result root. For example:
+
+```text
+<derivative-result-root>/
+  graph2mat_derivative_result/
+    structures/<sample>/metadata.json
+    siesta_hamiltonians/<sample>/*.HSX|*.TSHS
+    predicted_hamiltonians/<sample>/ML_prediction.HSX
+    derivative_metrics/graph2mat/manifest.json
+  deeph_derivative_result/
+    structures/<sample>/metadata.json
+    siesta_hamiltonians/<sample>/*.HSX|*.TSHS
+    predicted_hamiltonians/<sample>/ML_prediction.HSX
+    derivative_metrics/deeph/manifest.json
 ```
 
 ### Common Failure Points

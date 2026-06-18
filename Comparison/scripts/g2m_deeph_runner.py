@@ -4567,6 +4567,107 @@ class Graph2MatDeepHBenchmarkRunner:
             writer.writeheader()
             writer.writerows(rows)
 
+    def _training_sweep_derivative_child_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        child_run_root: Path,
+    ) -> dict[str, Any]:
+        workflow = payload["modular_workflow"]
+        stages = dict(workflow["stages"])
+        derivative = dict(workflow["derivative"])
+        if not any(
+            stages.get(stage)
+            for stage in (
+                "build_derivative_stencils",
+                "validate_derivative_stencils",
+                "run_derivative_siesta_reference",
+                "predict_derivative_graph2mat",
+                "predict_derivative_deeph",
+            )
+        ):
+            graph2mat_result_dir = _backfill_result_dir(child_run_root, "graph2mat")
+            deeph_result_dir = _backfill_result_dir(child_run_root, "deeph")
+            if graph2mat_result_dir is not None and derivative.get("graph2mat_result_dir") in (None, ""):
+                derivative["graph2mat_result_dir"] = str(graph2mat_result_dir)
+            if deeph_result_dir is not None and derivative.get("deeph_result_dir") in (None, ""):
+                derivative["deeph_result_dir"] = str(deeph_result_dir)
+        child = dict(payload)
+        child["modular_workflow"] = {
+            **workflow,
+            "stages": stages,
+            "derivative": derivative,
+        }
+        return child
+
+    def _training_sweep_derivative_contexts(
+        self,
+        record: dict[str, Any],
+    ) -> tuple[Graph2MatBenchmarkContext | None, DeepHBenchmarkContext | None]:
+        graph_manifest = self._manifest_path_value(record.get("graph2mat_manifest_path"), base_dir=REPO_ROOT)
+        deeph_manifest = self._manifest_path_value(record.get("deeph_manifest_path"), base_dir=REPO_ROOT)
+        return (
+            self._graph2mat_context_from_manifest_path(graph_manifest),
+            self._deeph_context_from_manifest_path(deeph_manifest),
+        )
+
+    def _run_training_sweep_derivative_workflows(
+        self,
+        payload: dict[str, Any],
+        *,
+        run_root: Path,
+        summary: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        workflow = payload.get("modular_workflow") if isinstance(payload.get("modular_workflow"), dict) else {}
+        stages = workflow.get("stages") if isinstance(workflow.get("stages"), dict) else {}
+        if not any(stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES):
+            return []
+        records: list[dict[str, Any]] = []
+        for entry in list(summary.get("runs") or []):
+            if not isinstance(entry, dict) or str(entry.get("status") or "") != "completed":
+                continue
+            raw_run_root = str(entry.get("run_root") or "").strip()
+            if not raw_run_root:
+                continue
+            child_run_root = Path(raw_run_root).expanduser().resolve(strict=False)
+            record: dict[str, Any] = {
+                "run_id": str(entry.get("config_id") or child_run_root.name),
+                "child_result_dir": str(child_run_root),
+                "derivative_workflow_status": "pending",
+                "derivative_workflow_manifest_path": "",
+                "failure_reason": "",
+            }
+            try:
+                graph2mat_context, deeph_context = self._training_sweep_derivative_contexts(entry)
+                child_payload = self._training_sweep_derivative_child_payload(
+                    payload,
+                    child_run_root=child_run_root,
+                )
+                derivative_summary = self._run_modular_derivative_workflow(
+                    child_payload,
+                    run_root=child_run_root,
+                    graph2mat_context=graph2mat_context,
+                    deeph_context=deeph_context,
+                )
+                manifest_path = Path(str(derivative_summary["result_dir"])) / "derivative_workflow_manifest.json"
+                record.update(
+                    {
+                        "derivative_workflow_status": "completed",
+                        "derivative_workflow_manifest_path": str(manifest_path),
+                    }
+                )
+            except Exception as exc:
+                record.update(
+                    {
+                        "derivative_workflow_status": "failed",
+                        "failure_reason": str(exc),
+                    }
+                )
+            records.append(record)
+            summary["derivative_workflows"] = records
+            self._write_training_sweep_summary(run_root, summary)
+        return records
+
     def _write_training_search_plan(self, run_root: Path, plan: dict[str, Any]) -> None:
         search_plan = plan.get("search_plan") if isinstance(plan.get("search_plan"), dict) else None
         if search_plan is None:
@@ -5177,6 +5278,18 @@ class Graph2MatDeepHBenchmarkRunner:
         summary["status"] = "completed" if not summary["failed_runs"] else "completed_with_failures"
         summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
         self._write_training_sweep_summary(run_root, summary)
+        derivative_workflows = self._run_training_sweep_derivative_workflows(
+            payload,
+            run_root=run_root,
+            summary=summary,
+        )
+        derivative_failed = any(
+            record.get("derivative_workflow_status") == "failed"
+            for record in derivative_workflows
+        )
+        if derivative_failed:
+            summary["status"] = "completed_with_derivative_failures"
+            self._write_training_sweep_summary(run_root, summary)
         if final_mode:
             test_blindness = build_search_stage_manifest(run_root=run_root, summary=summary, payload=payload)
             dry_run = _parse_bool(payload.get("dry_run"), False)
@@ -5250,7 +5363,34 @@ class Graph2MatDeepHBenchmarkRunner:
                     "ranking": None,
                     "message": message,
                 }
-            self._finish(returncode=0 if not summary["failed_runs"] else 1)
+            self._finish(returncode=0 if not summary["failed_runs"] and not derivative_failed else 1)
+            return
+        if derivative_failed:
+            message = (
+                "Training sweep completed, but one or more requested derivative workflows failed. "
+                "See sweep/training_sweep_manifest.json derivative_workflows."
+            )
+            with self._lock:
+                self._state.training_sweep_status.update(
+                    {
+                        "active_model": None,
+                        "active_dataset": None,
+                        "active_config_id": None,
+                        "active_runs": [],
+                        "active_started_at": None,
+                        "status": summary["status"],
+                    }
+                )
+                self._last_results = {
+                    "dry_run": _parse_bool(payload.get("dry_run"), False),
+                    "contract_name": CONTRACT_NAME,
+                    "dataset_validation": validation,
+                    "dataset_sweep": payload.get("_dataset_sweep_manifest"),
+                    "training_sweep": summary,
+                    "ranking": None,
+                    "message": message,
+                }
+            self._finish(returncode=1, error=message)
             return
         self._set_stage("ranking")
         ranking = self._run_ranking(
@@ -6846,6 +6986,262 @@ class Graph2MatDeepHBenchmarkRunner:
             return None
         return _resolve_optional_repo_path(value, Path(str(value)))
 
+    def _manifest_path_value(self, value: Any, *, base_dir: Path) -> Path | None:
+        if value in (None, ""):
+            return None
+        path = Path(str(value))
+        return path if path.is_absolute() else base_dir / path
+
+    def _infer_graph2mat_derivative_checkpoint(self, context: Graph2MatBenchmarkContext | None) -> Path | None:
+        if context is None:
+            return None
+        manifest_path = context.training_dir / "checkpoint_manifest.json"
+        if manifest_path.exists():
+            manifest = _load_json(manifest_path)
+            for key in ("checkpoint_path", "path"):
+                checkpoint = self._manifest_path_value(manifest.get(key), base_dir=context.training_dir)
+                if checkpoint is not None and checkpoint.exists():
+                    return checkpoint
+        checkpoints = sorted(
+            context.training_dir.rglob("*.ckpt"),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        )
+        return checkpoints[-1] if checkpoints else None
+
+    def _infer_deeph_derivative_model_dir(self, context: DeepHBenchmarkContext | None) -> Path | None:
+        if context is None:
+            return None
+        return context.save_dir if context.save_dir.exists() else None
+
+    def _graph2mat_context_from_manifest_path(self, manifest_path: Path | None) -> Graph2MatBenchmarkContext | None:
+        if manifest_path is None or not manifest_path.exists():
+            return None
+        manifest = _load_json(manifest_path)
+        raw = manifest.get("context") if isinstance(manifest.get("context"), dict) else {}
+        if not raw:
+            return None
+        return Graph2MatBenchmarkContext(
+            dataset_root=Path(str(raw["dataset_root"])),
+            run_root=Path(str(raw["run_root"])),
+            graph2mat_root=Path(str(raw["graph2mat_root"])),
+            training_dir=Path(str(raw["training_dir"])),
+            prediction_structs_dir=Path(str(raw["prediction_structs_dir"])),
+            config_path=Path(str(raw["config_path"])),
+            graph2mat_config_path=Path(str(raw["graph2mat_config_path"])),
+            graph2mat_manifest_path=Path(str(raw["graph2mat_manifest_path"])),
+            frozen_split_manifest_path=Path(str(raw["frozen_split_manifest_path"])),
+            benchmark_dataset_manifest_path=Path(str(raw["benchmark_dataset_manifest_path"])),
+            runs_json_path=Path(str(raw["runs_json_path"])),
+            runs_json_counts=dict(raw.get("runs_json_counts") or {}),
+            train_glob=str(raw.get("train_glob") or ""),
+            validation_glob=str(raw.get("validation_glob") or ""),
+            predict_glob=str(raw.get("predict_glob") or ""),
+            output_file=str(raw.get("output_file") or "ML_prediction.HSX"),
+            test_sample_ids=[str(item) for item in raw.get("test_sample_ids") or []],
+            split_hash=raw.get("split_hash"),
+            prediction_split=str(raw.get("prediction_split") or "test"),
+            dry_run=_parse_bool(raw.get("dry_run"), False),
+        )
+
+    def _deeph_context_from_manifest_path(self, manifest_path: Path | None) -> DeepHBenchmarkContext | None:
+        if manifest_path is None or not manifest_path.exists():
+            return None
+        manifest = _load_json(manifest_path)
+        raw = manifest.get("context") if isinstance(manifest.get("context"), dict) else {}
+        if not raw:
+            return None
+        return DeepHBenchmarkContext(
+            root=Path(str(raw["root"])),
+            raw_dir=Path(str(raw["raw_dir"])),
+            processed_dir=Path(str(raw["processed_dir"])),
+            graph_dir=Path(str(raw["graph_dir"])),
+            save_dir=Path(str(raw["save_dir"])),
+            inference_dir=Path(str(raw["inference_dir"])),
+            preprocess_config=Path(str(raw["preprocess_config"])),
+            train_config=Path(str(raw["train_config"])),
+            inference_configs=[Path(str(path)) for path in raw.get("inference_configs") or []],
+            inference_work_dirs=[Path(str(path)) for path in raw.get("inference_work_dirs") or []],
+            manifest_path=Path(str(raw["manifest_path"])),
+            deeph_discovery=manifest.get("deeph_discovery") if isinstance(manifest.get("deeph_discovery"), dict) else {},
+            split_audit_path=Path(str(raw["split_audit_path"])),
+            split_audit_csv_path=Path(str(raw["split_audit_csv_path"])),
+            split_hash=raw.get("split_hash"),
+            raw_mirror=raw.get("raw_mirror") if isinstance(raw.get("raw_mirror"), dict) else {},
+            inference_split=str(raw.get("inference_split") or "test"),
+            dry_run=_parse_bool(raw.get("dry_run"), False),
+        )
+
+    def _require_inferred_derivative_model_artifact(
+        self,
+        model: str,
+        *,
+        graph2mat_context: Graph2MatBenchmarkContext | None,
+        deeph_context: DeepHBenchmarkContext | None,
+    ) -> Path:
+        if model == "graph2mat":
+            checkpoint = self._infer_graph2mat_derivative_checkpoint(graph2mat_context)
+            if checkpoint is None:
+                raise RuntimeError(
+                    "derivative stage 'predict_derivative_graph2mat' requires "
+                    "derivative.graph2mat_checkpoint or derivative.graph2mat_existing_prediction_root; "
+                    "no Graph2Mat checkpoint could be inferred from the completed H workflow context/manifest."
+                )
+            return checkpoint
+        if model == "deeph":
+            model_dir = self._infer_deeph_derivative_model_dir(deeph_context)
+            if model_dir is None:
+                raise RuntimeError(
+                    "derivative stage 'predict_derivative_deeph' requires "
+                    "derivative.deeph_model_dir or derivative.deeph_existing_prediction_root; "
+                    "no DeepH model directory could be inferred from the completed H workflow context."
+                )
+            return model_dir
+        raise RuntimeError(f"Unsupported derivative prediction model: {model}")
+
+    def _preflight_derivative_workflow(
+        self,
+        payload: dict[str, Any],
+        *,
+        stages: dict[str, bool],
+        config: dict[str, Any],
+        common_root: Path,
+        run_root: Path | None,
+        graph2mat_context: Graph2MatBenchmarkContext | None,
+        deeph_context: DeepHBenchmarkContext | None,
+    ) -> None:
+        def fail(stage: str, message: str) -> None:
+            raise RuntimeError(f"derivative preflight for stage {stage!r} failed: {message}")
+
+        build_stencils = bool(stages.get("build_derivative_stencils"))
+        predict_graph2mat = bool(stages.get("predict_derivative_graph2mat"))
+        predict_deeph = bool(stages.get("predict_derivative_deeph"))
+        enabled_derivative_stages = [stage for stage in DERIVATIVE_STAGE_NAMES if stages.get(stage)]
+        if not enabled_derivative_stages:
+            return
+
+        if build_stencils:
+            source_dataset_root = self._derivative_path(config, "source_dataset_root")
+            if source_dataset_root is None or not source_dataset_root.exists():
+                fail(
+                    "build_derivative_stencils",
+                    "missing or nonexistent derivative.source_dataset_root; provide an existing source dataset root.",
+                )
+            if str(config.get("method") or "central") == "central" and not config.get("delta_ang_values"):
+                fail(
+                    "build_derivative_stencils",
+                    "missing derivative.delta_ang; central finite differences require positive delta_ang values.",
+                )
+            if not config.get("atoms"):
+                fail("build_derivative_stencils", "missing derivative.atoms; provide one or more atom indices.")
+            if not config.get("axes"):
+                fail("build_derivative_stencils", "missing derivative.axes; provide one or more Cartesian axes.")
+
+        common_root_created_by_workflow = build_stencils
+        needs_existing_common_root = any(
+            stages.get(stage)
+            for stage in (
+                "validate_derivative_stencils",
+                "run_derivative_siesta_reference",
+                "predict_derivative_graph2mat",
+                "predict_derivative_deeph",
+            )
+        ) and not common_root_created_by_workflow
+        if needs_existing_common_root and not common_root.exists():
+            fail(
+                "derivative_artifact_root",
+                "missing derivative.result_dir or derivative.output_root artifact root; "
+                "provide an existing root or enable build_derivative_stencils.",
+            )
+
+        if stages.get("run_derivative_siesta_reference"):
+            existing_reference_root = self._derivative_path(config, "existing_reference_root")
+            if existing_reference_root is not None:
+                if not existing_reference_root.exists():
+                    fail(
+                        "run_derivative_siesta_reference",
+                        "derivative.existing_reference_root does not exist; provide an existing reference root.",
+                    )
+            elif config.get("siesta_command") in (None, ""):
+                fail(
+                    "run_derivative_siesta_reference",
+                    "missing derivative.siesta_command; alternatively provide derivative.existing_reference_root.",
+                )
+
+        for model, enabled in (("graph2mat", predict_graph2mat), ("deeph", predict_deeph)):
+            if not enabled:
+                continue
+            existing_prediction_root = self._derivative_path(config, f"{model}_existing_prediction_root")
+            if existing_prediction_root is not None:
+                if not existing_prediction_root.exists():
+                    fail(
+                        f"predict_derivative_{model}",
+                        f"derivative.{model}_existing_prediction_root does not exist; "
+                        f"provide an existing prediction root or configure model artifacts.",
+                    )
+                continue
+            if model == "graph2mat":
+                checkpoint = self._derivative_path(config, "graph2mat_checkpoint")
+                if checkpoint is not None:
+                    if not checkpoint.exists():
+                        fail(
+                            "predict_derivative_graph2mat",
+                            "derivative.graph2mat_checkpoint does not exist; "
+                            "alternatively provide derivative.graph2mat_existing_prediction_root "
+                            "or run after an H workflow with an inferable Graph2Mat checkpoint.",
+                        )
+                elif self._infer_graph2mat_derivative_checkpoint(graph2mat_context) is None:
+                    fail(
+                        "predict_derivative_graph2mat",
+                        "missing derivative.graph2mat_checkpoint; alternatively provide "
+                        "derivative.graph2mat_existing_prediction_root or run after an H workflow "
+                        "with an inferable Graph2Mat checkpoint.",
+                    )
+            else:
+                model_dir = self._derivative_path(config, "deeph_model_dir")
+                if model_dir is not None:
+                    if not model_dir.exists():
+                        fail(
+                            "predict_derivative_deeph",
+                            "derivative.deeph_model_dir does not exist; alternatively provide "
+                            "derivative.deeph_existing_prediction_root.",
+                        )
+                elif self._infer_deeph_derivative_model_dir(deeph_context) is None:
+                    fail(
+                        "predict_derivative_deeph",
+                        "missing derivative.deeph_model_dir; alternatively provide "
+                        "derivative.deeph_existing_prediction_root or run after an H workflow "
+                        "with an inferable DeepH save_dir.",
+                    )
+                if config.get("deeph_command") in (None, ""):
+                    fail(
+                        "predict_derivative_deeph",
+                        "missing derivative.deeph_command; alternatively provide "
+                        "derivative.deeph_existing_prediction_root.",
+                    )
+
+        metrics_created_by_predictions = predict_graph2mat or predict_deeph
+        h_metric_fallback = run_root is not None and bool(stages.get("hamiltonian_metrics"))
+        if not build_stencils and not metrics_created_by_predictions and not h_metric_fallback:
+            for model in ("graph2mat", "deeph"):
+                stage = f"derivative_metrics_{model}"
+                if not stages.get(stage):
+                    continue
+                model_result_dir = self._derivative_path(config, f"{model}_result_dir")
+                if model_result_dir is not None:
+                    if not model_result_dir.exists():
+                        fail(
+                            stage,
+                            f"derivative.{model}_result_dir does not exist; alternatively provide "
+                            "derivative.result_dir or derivative.output_root.",
+                        )
+                    continue
+                if not common_root.exists():
+                    fail(
+                        stage,
+                        "missing derivative.result_dir or derivative.output_root; provide an existing artifact root "
+                        f"or derivative.{model}_result_dir.",
+                    )
+
     def _derivative_root(self, payload: dict[str, Any], run_root: Path | None = None) -> Path:
         config = payload["modular_workflow"]["derivative"]
         raw = config.get("result_dir") or config.get("output_root")
@@ -6910,7 +7306,14 @@ class Graph2MatDeepHBenchmarkRunner:
             allowed_returncodes=allowed_returncodes,
         )
 
-    def _run_modular_derivative_workflow(self, payload: dict[str, Any], *, run_root: Path | None = None) -> dict[str, Any]:
+    def _run_modular_derivative_workflow(
+        self,
+        payload: dict[str, Any],
+        *,
+        run_root: Path | None = None,
+        graph2mat_context: Graph2MatBenchmarkContext | None = None,
+        deeph_context: DeepHBenchmarkContext | None = None,
+    ) -> dict[str, Any]:
         workflow = payload["modular_workflow"]
         stages = workflow["stages"]
         config = workflow["derivative"]
@@ -6927,6 +7330,15 @@ class Graph2MatDeepHBenchmarkRunner:
             "result_dir": str(common_root),
             "stages": {},
         }
+        self._preflight_derivative_workflow(
+            payload,
+            stages=stages,
+            config=config,
+            common_root=common_root,
+            run_root=run_root,
+            graph2mat_context=graph2mat_context,
+            deeph_context=deeph_context,
+        )
 
         def mark(stage: str, record: dict[str, Any]) -> None:
             summary["stages"][stage] = _json_safe_payload(record)
@@ -7081,14 +7493,51 @@ class Graph2MatDeepHBenchmarkRunner:
                 "--output-root",
                 str(output_root),
             ]
-            for config_key, flag in (
-                (f"{model}_checkpoint", "--checkpoint"),
-                (f"{model}_model_dir", "--model-dir"),
-                (f"{model}_existing_prediction_root", "--existing-prediction-root"),
-            ):
-                value = self._derivative_path(config, config_key)
-                if value is not None:
-                    command.extend([flag, str(value)])
+            model_artifact: dict[str, Any] = {"model": model}
+            existing_prediction_root = self._derivative_path(config, f"{model}_existing_prediction_root")
+            explicit_checkpoint = self._derivative_path(config, f"{model}_checkpoint")
+            explicit_model_dir = self._derivative_path(config, f"{model}_model_dir")
+            if existing_prediction_root is not None:
+                command.extend(["--existing-prediction-root", str(existing_prediction_root)])
+                model_artifact.update(
+                    {
+                        "source": "configured_existing_prediction_root",
+                        "existing_prediction_root": str(existing_prediction_root),
+                    }
+                )
+                if explicit_checkpoint is not None:
+                    command.extend(["--checkpoint", str(explicit_checkpoint)])
+                if explicit_model_dir is not None:
+                    command.extend(["--model-dir", str(explicit_model_dir)])
+            else:
+                if model == "graph2mat":
+                    checkpoint = explicit_checkpoint
+                    source = "configured_graph2mat_checkpoint"
+                    if checkpoint is None:
+                        checkpoint = self._require_inferred_derivative_model_artifact(
+                            model,
+                            graph2mat_context=graph2mat_context,
+                            deeph_context=deeph_context,
+                        )
+                        source = "inferred_h_workflow_checkpoint"
+                    command.extend(["--checkpoint", str(checkpoint)])
+                    model_artifact.update({"source": source, "checkpoint": str(checkpoint)})
+                    if explicit_model_dir is not None:
+                        command.extend(["--model-dir", str(explicit_model_dir)])
+                else:
+                    if explicit_checkpoint is not None:
+                        command.extend(["--checkpoint", str(explicit_checkpoint)])
+                    model_dir = explicit_model_dir
+                    source = "configured_deeph_model_dir"
+                    if model_dir is None:
+                        model_dir = self._require_inferred_derivative_model_artifact(
+                            model,
+                            graph2mat_context=graph2mat_context,
+                            deeph_context=deeph_context,
+                        )
+                        source = "inferred_h_workflow_model_dir"
+                    command.extend(["--model-dir", str(model_dir)])
+                    model_artifact.update({"source": source, "model_dir": str(model_dir)})
             if overwrite:
                 command.append("--overwrite")
             command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
@@ -7125,7 +7574,10 @@ class Graph2MatDeepHBenchmarkRunner:
                 stage=f"predict_derivative_{model}",
                 fail_on_samples_failed=not diagnostic_only,
             )
-            mark(f"predict_derivative_{model}", {**record, "status": "completed", "manifest": manifest})
+            mark(
+                f"predict_derivative_{model}",
+                {**record, "status": "completed", "manifest": manifest, "model_artifact": model_artifact},
+            )
 
         metric_roots: dict[str, Path | None] = {"graph2mat": None, "deeph": None}
         for model in ("graph2mat", "deeph"):
@@ -7662,7 +8114,12 @@ class Graph2MatDeepHBenchmarkRunner:
             workflow_stages = workflow.get("stages") if isinstance(workflow.get("stages"), dict) else {}
             if context is not None and any(workflow_stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES):
                 self._set_stage("derivative_workflow")
-                derivative_workflow_summary = self._run_modular_derivative_workflow(payload, run_root=context.run_root)
+                derivative_workflow_summary = self._run_modular_derivative_workflow(
+                    payload,
+                    run_root=context.run_root,
+                    graph2mat_context=context,
+                    deeph_context=deeph_context,
+                )
             with self._lock:
                 self._last_results = {
                     "dry_run": bool(context.dry_run) if context is not None else None,

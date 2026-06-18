@@ -77,6 +77,10 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
             "[0.005, 0.01, 0.02]",
             "atoms",
             "axes",
+            "graph2mat_checkpoint",
+            "deeph_model_dir",
+            "graph2mat_existing_prediction_root",
+            "deeph_existing_prediction_root",
         ):
             self.assertIn(text, self.workflows)
         for text in (
@@ -89,6 +93,12 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
             "delta stability",
             "basis/gauge/orbital-order compatibility",
             "reference-noise checks",
+            "Graph2Mat checkpoint manifest",
+            "DeepH save directory",
+            "model-specific derivative result roots",
+            "graph2mat_derivative_result",
+            "deeph_derivative_result",
+            "inside each model-specific derivative result root",
             "force constants",
             "not used as `dH/dR` references",
             "siesta_hamiltonians/<sample>/*.HSX|*.TSHS",
