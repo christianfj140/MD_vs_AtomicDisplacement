@@ -250,6 +250,18 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     delta_stability = dataset.get("delta_stability") if isinstance(dataset.get("delta_stability"), dict) else {}
     manifest_delta_stability = manifest.get("delta_stability") if isinstance(manifest.get("delta_stability"), dict) else {}
     delta_status = str(delta_stability.get("status") or manifest_delta_stability.get("status") or "").strip().lower()
+    delta_available = truthy(manifest.get("delta_sensitivity_study_available")) or truthy(manifest.get("delta_sensitivity_study_passed"))
+    if not delta_available:
+        delta_available = delta_status == "available"
+    convergence_status = str(
+        manifest.get("delta_stability_convergence_status")
+        or delta_stability.get("delta_stability_convergence_status")
+        or ""
+    ).strip().lower()
+    converged_value = manifest.get("delta_stability_converged")
+    if converged_value is None:
+        converged_value = delta_stability.get("delta_stability_converged")
+    delta_converged = bool(converged_value) if converged_value is not None else False
     reference_noise = manifest.get("reference_noise") if isinstance(manifest.get("reference_noise"), dict) else {}
     reference_noise_status = str(reference_noise.get("status") or manifest.get("reference_noise_status") or "").strip().lower()
     comparison_statuses = unique_nonempty([row.get("comparison_status") for row in matrix_rows])
@@ -257,7 +269,10 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
         "has_non_diagnostic_comparison_rows": bool(comparison_statuses) and all(status != "diagnostic_only" for status in comparison_statuses),
         "basis_gauge_verified": truthy(manifest.get("basis_gauge_verified")) or truthy(manifest.get("basis_gauge_evidence")),
         "orbital_ordering_verified": truthy(manifest.get("orbital_ordering_verified")) or truthy(manifest.get("orbital_ordering_evidence")),
-        "delta_sensitivity_study": delta_status == "available",
+        "delta_sensitivity_study_available": delta_available,
+        "delta_sensitivity_study_passed": delta_available,
+        "delta_stability_converged": delta_converged,
+        "delta_stability_convergence_status": convergence_status or "not_evaluated_without_thresholds",
         "reference_noise_evidence": truthy(manifest.get("reference_noise_verified"))
         or truthy(manifest.get("reference_noise_evidence"))
         or reference_noise_status == "available",
@@ -512,7 +527,7 @@ def overall_status(
     paper_blocked = [
         not info["basis_gauge_verified"]
         or not info["orbital_ordering_verified"]
-        or not info["delta_sensitivity_study"]
+        or not info["delta_stability_converged"]
         or not info["reference_noise_evidence"]
         or not info["independent_dataset_metadata"]
         for info in paper_evidence.values()
@@ -587,8 +602,10 @@ def recommended_next_steps(
                 steps.append(f"{model}: add explicit basis/gauge evidence before paper-level use.")
             if not info["orbital_ordering_verified"]:
                 steps.append(f"{model}: add orbital-ordering evidence before paper-level use.")
-            if not info["delta_sensitivity_study"]:
+            if not info["delta_sensitivity_study_available"]:
                 steps.append(f"{model}: run or record a delta sensitivity study for paper-level gating.")
+            elif not info["delta_stability_converged"]:
+                steps.append(f"{model}: document delta stability convergence thresholds before paper-level use.")
             if not info["reference_noise_evidence"]:
                 steps.append(f"{model}: add repeated-reference noise evidence before paper-level use.")
             if not info["independent_dataset_metadata"]:
@@ -659,7 +676,7 @@ def build_derivative_gate_report(
             )
         )
     for model, info in paper_evidence.items():
-        if not info["delta_sensitivity_study"]:
+        if not info["delta_sensitivity_study_available"]:
             blockers.append(
                 gate_row(
                     "paper_level_delta_sweep_missing",
@@ -669,6 +686,19 @@ def build_derivative_gate_report(
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
                     message="Paper-level candidate status requires a delta sensitivity study.",
+                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                )
+            )
+        elif not info["delta_stability_converged"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_delta_stability_not_converged",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level candidate status requires documented delta stability convergence thresholds and convergence evidence.",
                     evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
                 )
             )

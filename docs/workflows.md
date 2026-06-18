@@ -308,8 +308,8 @@ workflow. `derivative` is the canonical payload key; `derivatives` is accepted
 as a backward-compatible alias when it contains the same object.
 
 In training sweeps and `full_strict_pipeline` runs, derivative stencil
-generation uses each completed child run's dataset root, not a global
-`derivative.source_dataset_root` shared across all children.
+generation uses each completed child run's dataset root. It does not fall back
+to one shared global `derivative.source_dataset_root` across all children.
 
 For `h_then_derivative_full` and `full_end_to_end`, derivative prediction stages
 can use explicit model artifacts such as `derivative.graph2mat_checkpoint` and
@@ -321,8 +321,8 @@ predictions instead of running prediction commands, provide
 `derivative.deeph_existing_prediction_root`.
 
 `derivative.siesta_command` defaults to `"siesta"` for derivative SIESTA
-reference Hamiltonian staging and can be overridden when the executable needs a
-different command line.
+reference Hamiltonian staging. Override it only when the reference command
+itself needs to change.
 
 When both Graph2Mat and DeepH derivative prediction stages are enabled, the
 runner may materialize separate model-specific derivative result roots, such as
@@ -389,15 +389,23 @@ the layout inside each model-specific derivative result root. For example:
 ```text
 <derivative-result-root>/
   graph2mat_derivative_result/
+    derivative_stencil_manifest.json
     structures/<sample>/metadata.json
+    structures/<sample>/RUN.fdf
     siesta_hamiltonians/<sample>/*.HSX|*.TSHS
     predicted_hamiltonians/<sample>/ML_prediction.HSX
     derivative_metrics/graph2mat/manifest.json
+    derivative_metrics/graph2mat/derivative_delta_stability.json
+    derivative_metrics/summary/derivative_gate_report.json
   deeph_derivative_result/
+    derivative_stencil_manifest.json
     structures/<sample>/metadata.json
+    structures/<sample>/RUN.fdf
     siesta_hamiltonians/<sample>/*.HSX|*.TSHS
     predicted_hamiltonians/<sample>/ML_prediction.HSX
     derivative_metrics/deeph/manifest.json
+    derivative_metrics/deeph/derivative_delta_stability.json
+    derivative_metrics/summary/derivative_gate_report.json
 ```
 
 ### Common Failure Points
@@ -421,3 +429,108 @@ python3 -m unittest tests/test_comparison_workflow.py
 
 The smoke scripts are useful for plumbing validation, but they do not prove
 scientific accuracy by themselves.
+
+### Minimal Derivative Smoke Check
+
+Use these checks for a lightweight derivative workflow sanity pass. This smoke
+validates plumbing and artifact layout, not paper-level science.
+
+```bash
+python3 -m unittest tests/test_validate_derivative_workflow_artifacts.py
+python3 -m unittest tests/test_g2m_deeph_documentation.py
+python3 Comparison/scripts/validate_derivative_workflow_artifacts.py \
+  <derivative_result_root> \
+  --output-json <summary.json>
+```
+
+Golden payload examples live in `Comparison/config/`:
+
+- `derivative_stencils_only_minimal.json`
+- `derivative_metrics_only_existing_artifacts.json`
+- `h_then_derivative_full_smoke.json`
+
+For a minimal staged smoke path, use one base snapshot, one atom, one axis,
+and two deltas. In this layout, `graph2mat_derivative_result/` is the active
+smoke root and `deeph_derivative_result/` is the staged DeepH prediction root:
+
+```bash
+SMOKE_ROOT=Comparison/results/derivative_smoke
+STENCIL_ROOT="$SMOKE_ROOT/graph2mat_derivative_result"
+DEEPH_ROOT="$SMOKE_ROOT/deeph_derivative_result"
+
+python3 Comparison/scripts/build_hamiltonian_derivative_stencils.py \
+  --source-dataset-root Comparison/datasets/PLACEHOLDER_joint_dataset \
+  --output-stencil-root "$STENCIL_ROOT" \
+  --method central \
+  --delta-ang 0.005 0.01 \
+  --split test \
+  --max-base-snapshots 1 \
+  --atoms 0 \
+  --axes x \
+  --overwrite
+
+python3 Comparison/scripts/validate_hamiltonian_derivative_geometry.py \
+  "$STENCIL_ROOT" \
+  --output-dir "$STENCIL_ROOT" \
+  --method central \
+  --source-model graph2mat \
+  --split test \
+  --require-central
+
+python3 Comparison/scripts/run_hamiltonian_derivative_siesta_references.py \
+  --stencil-root "$STENCIL_ROOT" \
+  --output-reference-root "$STENCIL_ROOT/siesta_hamiltonians" \
+  --existing-reference-root <existing_reference_root>
+
+python3 Comparison/scripts/run_hamiltonian_derivative_predictions.py \
+  --stencil-root "$STENCIL_ROOT" \
+  --model graph2mat \
+  --output-root "$STENCIL_ROOT/predicted_hamiltonians" \
+  --existing-prediction-root <existing_graph2mat_prediction_root>
+
+python3 Comparison/scripts/run_hamiltonian_derivative_predictions.py \
+  --stencil-root "$STENCIL_ROOT" \
+  --model deeph \
+  --output-root "$DEEPH_ROOT/predicted_hamiltonians" \
+  --existing-prediction-root <existing_deeph_prediction_root>
+
+python3 Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py \
+  "$STENCIL_ROOT" \
+  --method central \
+  --split test \
+  --require-central \
+  --diagnostic-only \
+  --support-threshold 1e-12 \
+  --max-stencils 1 \
+  --source-model graph2mat \
+  --output-dir "$STENCIL_ROOT/derivative_metrics/graph2mat"
+
+python3 Comparison/scripts/g2m_deeph_derivative_gate_check.py \
+  --derivative-root "$STENCIL_ROOT/derivative_metrics/graph2mat" \
+  --output "$STENCIL_ROOT/derivative_metrics/graph2mat/summary/derivative_gate_report.json"
+
+python3 Comparison/scripts/validate_derivative_workflow_artifacts.py \
+  "$SMOKE_ROOT" \
+  --output-json "$SMOKE_ROOT/derivative_artifact_validation.json"
+```
+
+If real SIESTA is available, omit `--existing-reference-root` and let the
+default `siesta_command="siesta"` run. If real Graph2Mat or DeepH predictions
+are available, omit `--existing-prediction-root` and use the normal checkpoint
+or model-dir path required by that backend. The staged smoke above is the
+preferred path when expensive runs are unavailable.
+
+The expected key outputs are:
+
+- `derivative_stencil_manifest.json`
+- `derivative_geometry_validation.json`
+- `structures/<sample>/RUN.fdf`
+- `structures/<sample>/metadata.json`
+- `siesta_hamiltonians/derivative_siesta_reference_manifest.json`
+- `predicted_hamiltonians/derivative_graph2mat_prediction_manifest.json`
+- `predicted_hamiltonians/derivative_deeph_prediction_manifest.json`
+- `derivative_metrics/graph2mat/manifest.json`
+- `derivative_metrics/graph2mat/derivative_matrix_metrics.csv`
+- `derivative_metrics/graph2mat/derivative_delta_stability.json`
+- `derivative_metrics/graph2mat/summary/derivative_gate_report.json`
+- `derivative_artifact_validation.json`

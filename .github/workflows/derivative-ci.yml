@@ -1,0 +1,37 @@
+name: Derivative Workflow CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  derivative-lightweight-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lightweight test dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install numpy scipy PyYAML sisl
+
+      - name: Run derivative workflow tests
+        run: |
+          python -m unittest discover -s tests -p 'test_g2m_deeph_runner.py'
+          python -m unittest discover -s tests -p 'test_evaluate_hamiltonian_derivative_metrics.py'
+          python -m unittest discover -s tests -p 'test_g2m_deeph_derivative_gate_check.py'
+          python -m unittest discover -s tests -p 'test_hamiltonian_derivative_stencil.py'
+          python -m unittest discover -s tests -p 'test_run_hamiltonian_derivative_predictions.py'
+          python -m unittest discover -s tests -p 'test_run_hamiltonian_derivative_siesta_references.py'
+          python -m unittest discover -s tests -p 'test_g2m_deeph_documentation.py'

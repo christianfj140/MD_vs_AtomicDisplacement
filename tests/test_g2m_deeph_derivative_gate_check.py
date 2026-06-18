@@ -438,7 +438,11 @@ class DerivativeGateCheckTests(unittest.TestCase):
 
         self.assertEqual(report["scientific_status"], "technical_presentation")
         blocker_ids = {row["id"] for row in report["blockers"]}
-        self.assertIn("paper_level_reference_noise_missing", blocker_ids)
+        self.assertIn("paper_level_delta_stability_not_converged", blocker_ids)
+        evidence = report["datasets"][0]["paper_evidence"]
+        self.assertTrue(evidence["delta_sensitivity_study_available"])
+        self.assertFalse(evidence["delta_stability_converged"])
+        self.assertEqual(evidence["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
 
     def test_cli_writes_gate_report(self) -> None:
         self.write_fixture(manifest_overrides={"scientific_status": "diagnostic_only", "diagnostic_only_requested": True})

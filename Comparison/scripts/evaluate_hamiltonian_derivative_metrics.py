@@ -231,9 +231,11 @@ def evaluate_derivative_metrics(
         fatal_errors=fatal_errors,
     )
     delta_stability = _delta_stability_summary(metric_rows)
+    delta_stability_convergence = _delta_stability_convergence_summary(delta_stability)
     reference_noise = _reference_noise_summary(metric_rows)
     summary = _summary(metric_rows, stencil_rows, hermiticity_rows)
-    summary["delta_stability"] = delta_stability
+    summary["delta_stability"] = {**delta_stability, **delta_stability_convergence}
+    summary.update(delta_stability_convergence)
     summary["reference_noise"] = reference_noise
     outputs = {
         "output_dir": str(output_dir),
@@ -267,7 +269,10 @@ def evaluate_derivative_metrics(
         "stencils_failed": stencils_failed,
         "geometry_validation": _geometry_validation_summary(geometry_rows),
         "delta_stability": delta_stability,
-        "delta_sensitivity_study_passed": delta_stability["status"] == "available",
+        "delta_sensitivity_study_available": delta_stability_convergence["delta_sensitivity_study_available"],
+        "delta_sensitivity_study_passed": delta_stability_convergence["delta_sensitivity_study_passed"],
+        "delta_stability_converged": delta_stability_convergence["delta_stability_converged"],
+        "delta_stability_convergence_status": delta_stability_convergence["delta_stability_convergence_status"],
         "reference_noise": reference_noise,
         "reference_noise_status": reference_noise["status"],
         "warnings": warnings,
@@ -279,8 +284,9 @@ def evaluate_derivative_metrics(
     write_csv(output_dir / "derivative_matrix_metrics.csv", _metric_fieldnames(metric_rows), metric_rows)
     write_csv(output_dir / "derivative_support_sweep.csv", _metric_fieldnames(sweep_rows), sweep_rows)
     write_csv(output_dir / "derivative_hermiticity.csv", HERMITICITY_FIELDS, hermiticity_rows)
+    delta_stability_json = {**delta_stability, **delta_stability_convergence}
     write_csv(output_dir / "derivative_delta_stability.csv", DELTA_STABILITY_FIELDS, delta_stability["rows"])
-    write_json(output_dir / "derivative_delta_stability.json", delta_stability)
+    write_json(output_dir / "derivative_delta_stability.json", delta_stability_json)
     write_csv(output_dir / "derivative_geometry_validation.csv", GEOMETRY_VALIDATION_FIELDS, geometry_rows)
     write_json(output_dir / "derivative_geometry_validation.json", _geometry_validation_summary(geometry_rows, include_rows=True))
     write_json(output_dir / "derivative_summary.json", summary)
@@ -669,6 +675,34 @@ def _delta_stability_summary(metric_rows: list[dict[str, Any]]) -> dict[str, Any
         "groups_total": len(rows),
         "unique_delta_ang": unique_deltas,
         "rows": rows,
+    }
+
+
+def _delta_stability_convergence_summary(
+    delta_stability: dict[str, Any],
+    *,
+    convergence_thresholds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    available = str(delta_stability.get("status") or "").strip().lower() == "available"
+    thresholds_present = bool(convergence_thresholds)
+    if not thresholds_present:
+        return {
+            "delta_sensitivity_study_available": available,
+            "delta_sensitivity_study_passed": available,
+            "delta_stability_converged": None,
+            "delta_stability_convergence_status": "not_evaluated_without_thresholds",
+        }
+    converged = delta_stability.get("converged")
+    if converged is None:
+        converged = str(delta_stability.get("convergence_status") or "").strip().lower() == "converged"
+    convergence_status = str(delta_stability.get("convergence_status") or "").strip() or (
+        "converged" if bool(converged) else "not_converged"
+    )
+    return {
+        "delta_sensitivity_study_available": available,
+        "delta_sensitivity_study_passed": available,
+        "delta_stability_converged": bool(converged) if converged is not None else None,
+        "delta_stability_convergence_status": convergence_status,
     }
 
 

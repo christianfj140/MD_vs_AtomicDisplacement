@@ -1,0 +1,23 @@
+{
+  "workflow_mode": "derivative_stencils_only",
+  "derivative": {
+    "enabled": true,
+    "source_dataset_root": "Comparison/datasets/PLACEHOLDER_joint_dataset",
+    "output_root": "Comparison/results/PLACEHOLDER_derivative_stencils_only",
+    "method": "central",
+    "delta_ang": [
+      0.005,
+      0.01
+    ],
+    "base_split": "test",
+    "max_base_snapshots": 1,
+    "atoms": [
+      "0"
+    ],
+    "axes": [
+      "x"
+    ],
+    "overwrite": false,
+    "skip_if_exists": true
+  }
+}

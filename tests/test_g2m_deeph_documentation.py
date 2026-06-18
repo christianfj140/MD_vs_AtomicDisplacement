@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -81,6 +82,7 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
             "deeph_model_dir",
             "graph2mat_existing_prediction_root",
             "deeph_existing_prediction_root",
+            "siesta_command",
         ):
             self.assertIn(text, self.workflows)
         for text in (
@@ -96,7 +98,7 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
             "Graph2Mat checkpoint manifest",
             "DeepH save directory",
             "each completed child run's dataset root",
-            "not a global",
+            "one shared global",
             "model-specific derivative result roots",
             "graph2mat_derivative_result",
             "deeph_derivative_result",
@@ -113,8 +115,51 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
         ):
             self.assertIn(text, self.workflows)
 
+    def test_minimal_derivative_smoke_check_is_documented(self) -> None:
+        for text in (
+            "validate_derivative_workflow_artifacts.py",
+            "derivative_stencils_only_minimal.json",
+            "derivative_metrics_only_existing_artifacts.json",
+            "h_then_derivative_full_smoke.json",
+            "derivative_delta_stability.json",
+            "derivative_graph2mat_prediction_manifest.json",
+            "derivative_deeph_prediction_manifest.json",
+        ):
+            self.assertIn(text, self.workflows)
+
     def test_readme_links_to_dedicated_guide(self) -> None:
         self.assertIn("docs/graph2mat_deeph_benchmark.md", self.readme)
+
+    def test_minimal_derivative_example_payloads_are_checked_in(self) -> None:
+        config_root = REPO_ROOT / "Comparison" / "config"
+        examples = {
+            "derivative_stencils_only_minimal.json": {
+                "workflow_mode": "derivative_stencils_only",
+                "top_level": (),
+            },
+            "derivative_metrics_only_existing_artifacts.json": {
+                "workflow_mode": "derivative_metrics_only",
+                "top_level": (),
+            },
+            "h_then_derivative_full_smoke.json": {
+                "workflow_mode": "h_then_derivative_full",
+                "top_level": ("dataset_root", "output_root"),
+            },
+        }
+        for filename, expectation in examples.items():
+            payload = json.loads((config_root / filename).read_text(encoding="utf-8"))
+            self.assertEqual(payload["workflow_mode"], expectation["workflow_mode"])
+            self.assertTrue(payload["derivative"]["enabled"])
+            self.assertEqual(payload["derivative"]["method"], "central")
+            self.assertIsInstance(payload["derivative"]["delta_ang"], list)
+            self.assertGreaterEqual(len(payload["derivative"]["atoms"]), 1)
+            self.assertGreaterEqual(len(payload["derivative"]["axes"]), 1)
+            for key in expectation["top_level"]:
+                self.assertIn(key, payload)
+                self.assertFalse(Path(str(payload[key])).is_absolute())
+            for key in ("source_dataset_root", "output_root", "result_dir"):
+                if key in payload["derivative"]:
+                    self.assertFalse(Path(str(payload["derivative"][key])).is_absolute())
 
 
 if __name__ == "__main__":

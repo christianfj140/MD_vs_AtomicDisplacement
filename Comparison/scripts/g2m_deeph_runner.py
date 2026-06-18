@@ -5860,7 +5860,14 @@ class Graph2MatDeepHBenchmarkRunner:
 
     def results(self) -> dict[str, Any]:
         with self._lock:
-            plot_payload = self._build_plot_payload_locked()
+            # `results()` is used heavily by dry-run and summary tests; avoid
+            # rescanning the whole archived results tree unless callers ask for
+            # the broader plots view explicitly.
+            selected_run_ids = {Path(str(self._state.run_root)).name} if self._state.run_root else set()
+            plot_payload = self._build_plot_payload_locked(
+                selected_run_ids=selected_run_ids if selected_run_ids else None,
+                include_archive_roots=False,
+            )
             return {
                 "available": self._last_results is not None,
                 "results": self._last_results,
@@ -6274,10 +6281,13 @@ class Graph2MatDeepHBenchmarkRunner:
             "metric_archives_by_run/*/core/summary/ranking/normalized_run_metrics.json",
             "metric_archives_by_run/*/core/common_metrics/summary/common_summary.json",
         )
-        search_roots = [
-            DEFAULT_OUTPUT_ROOT,
-            REPO_ROOT / "Comparison" / "results",
-        ]
+        search_roots: list[Path] = []
+        if self._state.run_root:
+            # Prefer the active output tree when a run is in progress or has
+            # just completed; it is the only archive the current session needs.
+            search_roots.append(Path(str(self._state.run_root)).parent)
+        else:
+            search_roots.append(DEFAULT_OUTPUT_ROOT)
         if self._state.run_root:
             run_root = Path(str(self._state.run_root))
             roots[str(run_root.resolve())] = run_root
@@ -6286,6 +6296,7 @@ class Graph2MatDeepHBenchmarkRunner:
         if self._external_final_run_root is not None:
             run_root = self._external_final_run_root
             roots[str(run_root.resolve())] = run_root
+            search_roots.append(run_root.parent)
         for base in search_roots:
             if not base.exists():
                 continue
@@ -6516,7 +6527,12 @@ class Graph2MatDeepHBenchmarkRunner:
             "default_selected_run_ids": [],
         }
 
-    def _archive_plot_rows_locked(self, selected_run_ids: set[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    def _archive_plot_rows_locked(
+        self,
+        selected_run_ids: set[str] | None = None,
+        *,
+        include_archive_roots: bool = True,
+    ) -> dict[str, list[dict[str, Any]]]:
         timing_scaling_rows: list[dict[str, Any]] = []
         metric_scaling_rows: list[dict[str, Any]] = []
         if selected_run_ids is not None and not selected_run_ids:
@@ -6524,7 +6540,17 @@ class Graph2MatDeepHBenchmarkRunner:
                 "timing_scaling_rows": timing_scaling_rows,
                 "metric_scaling_rows": metric_scaling_rows,
             }
-        for run_root in self._discover_plot_run_roots_locked():
+        if include_archive_roots:
+            run_roots = self._discover_plot_run_roots_locked()
+        else:
+            # Keep summary calls fast by limiting the scan to the active run and
+            # the detached final run, if present.
+            run_roots = []
+            if self._state.run_root:
+                run_roots.append(Path(str(self._state.run_root)))
+            if self._external_final_run_root is not None:
+                run_roots.append(self._external_final_run_root)
+        for run_root in run_roots:
             entry = self._plot_run_entry_locked(run_root)
             if selected_run_ids is not None and entry["id"] not in selected_run_ids:
                 continue
@@ -6924,13 +6950,21 @@ class Graph2MatDeepHBenchmarkRunner:
             )
         return rows
 
-    def _build_plot_payload_locked(self, selected_run_ids: set[str] | None = None) -> dict[str, Any]:
+    def _build_plot_payload_locked(
+        self,
+        selected_run_ids: set[str] | None = None,
+        *,
+        include_archive_roots: bool = True,
+    ) -> dict[str, Any]:
         results = self._last_results or {}
         common_metrics = results.get("common_metrics") if isinstance(results, dict) else None
         artifact_summary = {}
         if self._dataset_validation:
             artifact_summary = dict(self._dataset_validation.get("artifact_summary") or {})
-        archive_rows = self._archive_plot_rows_locked(selected_run_ids=selected_run_ids)
+        archive_rows = self._archive_plot_rows_locked(
+            selected_run_ids=selected_run_ids,
+            include_archive_roots=include_archive_roots,
+        )
         current_timing_scaling = [] if selected_run_ids is not None else self._timing_scaling_rows_locked()
         timing_scaling_rows = [
             *current_timing_scaling,

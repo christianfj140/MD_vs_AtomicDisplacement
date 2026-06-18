@@ -1,0 +1,21 @@
+{
+  "workflow_mode": "derivative_metrics_only",
+  "derivative": {
+    "enabled": true,
+    "result_dir": "Comparison/results/PLACEHOLDER_derivative_workflow",
+    "method": "central",
+    "delta_ang": [
+      0.005,
+      0.01
+    ],
+    "base_split": "test",
+    "max_base_snapshots": 1,
+    "atoms": [
+      "0"
+    ],
+    "axes": [
+      "x"
+    ],
+    "skip_if_exists": true
+  }
+}

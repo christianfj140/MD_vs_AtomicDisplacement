@@ -169,6 +169,10 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertTrue((metrics_root / "derivative_delta_stability.csv").exists())
         self.assertTrue((metrics_root / "derivative_delta_stability.json").exists())
         self.assertEqual(manifest["delta_stability"]["status"], "unavailable_single_delta")
+        self.assertIn("delta_sensitivity_study_available", manifest)
+        self.assertFalse(manifest["delta_sensitivity_study_available"])
+        self.assertIsNone(manifest["delta_stability_converged"])
+        self.assertEqual(manifest["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
         self.assertEqual(manifest["reference_noise"]["status"], "reference_noise_unavailable")
 
     def test_delta_stability_summary_aggregates_matching_delta_sweep_rows(self) -> None:
@@ -221,6 +225,41 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "unavailable_single_delta")
         self.assertIn("Fewer than two", summary["reason"])
+
+    def test_delta_stability_convergence_summary_marks_availability_without_convergence_claim(self) -> None:
+        summary = metrics_module._delta_stability_summary(
+            [
+                {
+                    "source_model": "graph2mat",
+                    "base_sample_id": "base_0",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "finite_difference_method": "central",
+                    "delta_ang": 0.005,
+                    "dh_mae_union_eV_per_Ang": 0.4,
+                    "dh_rmse_union_eV_per_Ang": 0.5,
+                    "dh_relative_frobenius_ref": 0.1,
+                },
+                {
+                    "source_model": "graph2mat",
+                    "base_sample_id": "base_0",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "finite_difference_method": "central",
+                    "delta_ang": 0.01,
+                    "dh_mae_union_eV_per_Ang": 0.6,
+                    "dh_rmse_union_eV_per_Ang": 0.7,
+                    "dh_relative_frobenius_ref": 0.15,
+                },
+            ]
+        )
+        convergence = metrics_module._delta_stability_convergence_summary(summary)
+
+        self.assertEqual(summary["status"], "available")
+        self.assertTrue(convergence["delta_sensitivity_study_available"])
+        self.assertTrue(convergence["delta_sensitivity_study_passed"])
+        self.assertIsNone(convergence["delta_stability_converged"])
+        self.assertEqual(convergence["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
 
     def test_cli_infers_matrix_shape_from_sparse_files_when_metadata_omits_shape(self) -> None:
         self.write_central_fixture_without_matrix_shape()

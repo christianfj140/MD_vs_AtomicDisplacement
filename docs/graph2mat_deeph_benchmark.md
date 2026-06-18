@@ -1032,7 +1032,9 @@ must not hide or rewrite existing H metric outputs. Aggregation preserves the
 `graph2mat` and `deeph` method labels, adds derivative rows only when
 `derivative_metrics/*.csv` outputs exist, and adds recommendation notes only as
 diagnostics. Derivative metrics are not winner metrics and do not enable
-paper-level claims.
+paper-level claims. `derivative_delta_stability.json` only documents that a
+delta sweep was run; it does not prove convergence unless the thresholds used
+for the sweep are documented.
 
 ### Required derivative artifacts
 
@@ -1145,10 +1147,11 @@ Fail-closed blockers include:
 
 Paper-level candidate status is additionally blocked without:
 
+- documented delta thresholds
 - basis/gauge evidence
 - orbital-ordering evidence
-- delta sensitivity study
 - independent dataset/split metadata
+- split leakage audit
 - proven Graph2Mat/DeepH equivalence when both methods are compared
 
 ### Derivative limitations
