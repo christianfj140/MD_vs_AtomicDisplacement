@@ -189,7 +189,7 @@ def write_prediction_manifest(root: Path, model: str, *, include_file: bool = Tr
 
 
 def write_metrics_manifest(root: Path, model: str, *, include_delta_stability: bool = True) -> None:
-    metrics_root = root / f"{model}_eval" / "derivative_metrics"
+    metrics_root = root / "derivative_metrics" / model
     metrics_root.mkdir(parents=True, exist_ok=True)
     write_json(
         metrics_root / "manifest.json",
@@ -205,6 +205,14 @@ def write_metrics_manifest(root: Path, model: str, *, include_delta_stability: b
     )
     if include_delta_stability:
         write_json(metrics_root / "derivative_delta_stability.json", {"status": "available", "rows": []})
+
+
+def build_valid_scope(root: Path, *, model: str = "graph2mat") -> Path:
+    write_sample(root, "base_0", base_sample_id="base_0", sign=0, sign_label="0", delta_ang=0.0)
+    write_sample(root, "plus_0", base_sample_id="base_0", sign=1, sign_label="+", delta_ang=0.1)
+    write_sample(root, "minus_0", base_sample_id="base_0", sign=-1, sign_label="-", delta_ang=0.1)
+    write_stencil_manifest(root)
+    return root
 
 
 class DerivativeWorkflowArtifactValidatorTests(unittest.TestCase):
@@ -229,6 +237,57 @@ class DerivativeWorkflowArtifactValidatorTests(unittest.TestCase):
         self.assertEqual(summary["status"], "ok")
         self.assertEqual(summary["errors"], [])
         self.assertIn("stencil_manifest:", " ".join(summary["checked"]))
+
+    def test_parent_smoke_root_with_graph2mat_child_validates_child_scope(self) -> None:
+        parent_root = self.root / "derivative_smoke"
+        graph2mat_root = parent_root / "graph2mat_derivative_result"
+        build_valid_scope(graph2mat_root)
+
+        summary = validate_derivative_workflow_artifacts(parent_root)
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertIn(str(graph2mat_root), summary["checked_roots"])
+        self.assertIn(str(graph2mat_root / "derivative_stencil_manifest.json"), summary["checked_paths"])
+
+    def test_parent_smoke_root_missing_child_metadata_fails(self) -> None:
+        parent_root = self.root / "derivative_smoke"
+        graph2mat_root = parent_root / "graph2mat_derivative_result"
+        write_sample(graph2mat_root, "base_0", base_sample_id="base_0", sign=0, sign_label="0", delta_ang=0.0)
+        write_sample(graph2mat_root, "plus_0", base_sample_id="base_0", sign=1, sign_label="+", delta_ang=0.1, include_metadata=False)
+        write_sample(graph2mat_root, "minus_0", base_sample_id="base_0", sign=-1, sign_label="-", delta_ang=0.1)
+        write_stencil_manifest(graph2mat_root)
+
+        summary = validate_derivative_workflow_artifacts(parent_root)
+
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(any("Missing metadata.json" in error for error in summary["errors"]))
+
+    def test_parent_smoke_root_with_graph2mat_and_deeph_children_validates_both(self) -> None:
+        parent_root = self.root / "derivative_smoke"
+        graph2mat_root = parent_root / "graph2mat_derivative_result"
+        deeph_root = parent_root / "deeph_derivative_result"
+        build_valid_scope(graph2mat_root)
+        build_valid_scope(deeph_root)
+
+        summary = validate_derivative_workflow_artifacts(parent_root)
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertIn(str(graph2mat_root), summary["checked_roots"])
+        self.assertIn(str(deeph_root), summary["checked_roots"])
+
+    def test_model_graph2mat_ignores_deeph_only_prediction_checks(self) -> None:
+        parent_root = self.root / "derivative_smoke"
+        graph2mat_root = parent_root / "graph2mat_derivative_result"
+        deeph_root = parent_root / "deeph_derivative_result"
+        build_valid_scope(graph2mat_root)
+        build_valid_scope(deeph_root)
+        write_prediction_manifest(deeph_root, "deeph", include_file=False)
+
+        summary = validate_derivative_workflow_artifacts(parent_root, model="graph2mat")
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertIn(str(graph2mat_root), summary["checked_roots"])
+        self.assertNotIn(str(deeph_root), summary["checked_roots"])
 
     def test_missing_metadata_fails(self) -> None:
         write_sample(self.root, "base_0", base_sample_id="base_0", sign=0, sign_label="0", delta_ang=0.0)
@@ -285,6 +344,27 @@ class DerivativeWorkflowArtifactValidatorTests(unittest.TestCase):
         written = json.loads(output_json.read_text(encoding="utf-8"))
         self.assertEqual(written["status"], "ok")
         self.assertEqual(written["root"], str(self.root))
+        self.assertIn("checked_roots", written)
+        self.assertIn("checked_paths", written)
+
+    def test_cli_json_output_includes_checked_subroot_paths(self) -> None:
+        parent_root = self.root / "derivative_smoke"
+        graph2mat_root = parent_root / "graph2mat_derivative_result"
+        build_valid_scope(graph2mat_root)
+        output_json = parent_root / "summary.json"
+
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), str(parent_root), "--output-json", str(output_json)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}")
+        written = json.loads(output_json.read_text(encoding="utf-8"))
+        self.assertIn(str(graph2mat_root), written["checked_roots"])
+        self.assertIn(str(graph2mat_root / "derivative_stencil_manifest.json"), written["checked_paths"])
 
 
 if __name__ == "__main__":

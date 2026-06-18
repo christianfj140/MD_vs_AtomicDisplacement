@@ -444,6 +444,199 @@ class DerivativeGateCheckTests(unittest.TestCase):
         self.assertFalse(evidence["delta_stability_converged"])
         self.assertEqual(evidence["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
 
+    def test_string_false_delta_stability_converged_blocks_paper_level(self) -> None:
+        self.write_fixture(
+            manifest_overrides={
+                "basis_gauge_verified": True,
+                "orbital_ordering_verified": True,
+                "reference_noise_verified": True,
+                "independent_dataset_metadata": True,
+                "paper_level_candidate_requested": True,
+                "delta_stability_converged": "false",
+            },
+            metric_rows=[
+                {
+                    "sample": "sample_a",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+                {
+                    "sample": "sample_b",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.02,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+            ],
+            delta_stability={"status": "available", "delta_stability_converged": "false", "rows": [{"delta_count": 2}]},
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "technical_presentation")
+        self.assertIn("paper_level_delta_stability_not_converged", {row["id"] for row in report["blockers"]})
+        evidence = report["datasets"][0]["paper_evidence"]
+        self.assertFalse(evidence["delta_stability_converged"])
+
+    def test_boolean_false_delta_stability_converged_blocks_paper_level(self) -> None:
+        self.write_fixture(
+            manifest_overrides={
+                "basis_gauge_verified": True,
+                "orbital_ordering_verified": True,
+                "reference_noise_verified": True,
+                "independent_dataset_metadata": True,
+                "paper_level_candidate_requested": True,
+                "delta_stability_converged": False,
+            },
+            metric_rows=[
+                {
+                    "sample": "sample_a",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+                {
+                    "sample": "sample_b",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.02,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+            ],
+            delta_stability={"status": "available", "delta_stability_converged": False, "rows": [{"delta_count": 2}]},
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "technical_presentation")
+        self.assertIn("paper_level_delta_stability_not_converged", {row["id"] for row in report["blockers"]})
+        evidence = report["datasets"][0]["paper_evidence"]
+        self.assertFalse(evidence["delta_stability_converged"])
+
+    def test_boolean_true_delta_stability_converged_allows_paper_level_candidate_when_other_evidence_is_present(self) -> None:
+        self.write_fixture(
+            manifest_overrides={
+                "basis_gauge_verified": True,
+                "orbital_ordering_verified": True,
+                "reference_noise_verified": True,
+                "independent_dataset_metadata": True,
+                "paper_level_candidate_requested": True,
+                "delta_stability_converged": True,
+            },
+            metric_rows=[
+                {
+                    "sample": "sample_a",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+                {
+                    "sample": "sample_b",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.02,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+            ],
+            delta_stability={"status": "available", "delta_stability_converged": True, "rows": [{"delta_count": 2}]},
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "paper_level_candidate")
+        blocker_ids = {row["id"] for row in report["blockers"]}
+        self.assertNotIn("paper_level_delta_stability_not_converged", blocker_ids)
+        evidence = report["datasets"][0]["paper_evidence"]
+        self.assertTrue(evidence["delta_stability_converged"])
+
     def test_cli_writes_gate_report(self) -> None:
         self.write_fixture(manifest_overrides={"scientific_status": "diagnostic_only", "diagnostic_only_requested": True})
         output = self.root / "derivative_gate_report.json"

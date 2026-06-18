@@ -3075,6 +3075,65 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertEqual(train_row["dataset_size"], 10)
         self.assertEqual(train_row["elapsed_seconds"], 20.0)
 
+    def test_results_endpoint_uses_current_run_plot_payload_without_archive_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "dataset"
+            dataset.mkdir(parents=True, exist_ok=True)
+            (dataset / "benchmark_dataset_manifest.json").write_text(
+                json.dumps({"samples": ["s0"]}),
+                encoding="utf-8",
+            )
+
+            run_root = Path(tmp) / "results" / "current_run"
+            metrics_dir = run_root / "metrics" / "graph2mat" / "eval_input" / "metrics"
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps({"summary": {"kpoint_matrix": {"h_mae_eV": {"mean": 0.123}}}}),
+                encoding="utf-8",
+            )
+            (run_root / "sweep").mkdir(parents=True, exist_ok=True)
+            (run_root / "sweep" / "training_sweep_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "runs": [
+                            {
+                                "status": "completed",
+                                "model": "graph2mat",
+                                "dataset_id": "dataset",
+                                "dataset_root": str(dataset),
+                                "run_root": str(run_root),
+                                "config_id": "cfg",
+                                "metrics_run": {"returncode": 0},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runner = Graph2MatDeepHBenchmarkRunner()
+            runner._state.run_root = str(run_root)
+            runner._last_results = {}
+
+            with mock.patch.object(
+                runner,
+                "_discover_plot_run_roots_locked",
+                side_effect=AssertionError("results() should not scan archive roots"),
+            ):
+                payload = runner.results()
+
+            self.assertTrue(payload["available"])
+            self.assertTrue(payload["plot_payload"]["available"])
+            self.assertEqual(payload["plot_payload"]["live_metric_rows"], 0)
+            self.assertTrue(payload["plot_payload"]["metric_scaling_rows"])
+            self.assertTrue(
+                any(
+                    row.get("run_id") == "current_run"
+                    for row in payload["plot_payload"]["metric_scaling_rows"]
+                )
+            )
+            self.assertEqual(payload["plot_payload"]["archived_timing_runs"], 0)
+
     def test_plots_endpoint_excludes_running_training_sweep_timing_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = Path(tmp) / "dataset"

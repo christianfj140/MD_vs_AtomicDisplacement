@@ -5862,8 +5862,13 @@ class Graph2MatDeepHBenchmarkRunner:
         with self._lock:
             # `results()` is used heavily by dry-run and summary tests; avoid
             # rescanning the whole archived results tree unless callers ask for
-            # the broader plots view explicitly.
-            selected_run_ids = {Path(str(self._state.run_root)).name} if self._state.run_root else set()
+            # the broader plots view explicitly. Reuse the plot-entry ID so the
+            # current run still matches the archive-row filter.
+            selected_run_ids = (
+                {self._plot_run_entry_locked(Path(str(self._state.run_root)))["id"]}
+                if self._state.run_root
+                else set()
+            )
             plot_payload = self._build_plot_payload_locked(
                 selected_run_ids=selected_run_ids if selected_run_ids else None,
                 include_archive_roots=False,

@@ -261,7 +261,7 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     converged_value = manifest.get("delta_stability_converged")
     if converged_value is None:
         converged_value = delta_stability.get("delta_stability_converged")
-    delta_converged = bool(converged_value) if converged_value is not None else False
+    delta_converged = truthy(converged_value)
     reference_noise = manifest.get("reference_noise") if isinstance(manifest.get("reference_noise"), dict) else {}
     reference_noise_status = str(reference_noise.get("status") or manifest.get("reference_noise_status") or "").strip().lower()
     comparison_statuses = unique_nonempty([row.get("comparison_status") for row in matrix_rows])

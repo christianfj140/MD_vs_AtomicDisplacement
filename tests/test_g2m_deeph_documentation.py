@@ -151,9 +151,15 @@ class Graph2MatDeepHDocumentationTests(unittest.TestCase):
             self.assertEqual(payload["workflow_mode"], expectation["workflow_mode"])
             self.assertTrue(payload["derivative"]["enabled"])
             self.assertEqual(payload["derivative"]["method"], "central")
-            self.assertIsInstance(payload["derivative"]["delta_ang"], list)
-            self.assertGreaterEqual(len(payload["derivative"]["atoms"]), 1)
-            self.assertGreaterEqual(len(payload["derivative"]["axes"]), 1)
+            if filename != "derivative_metrics_only_existing_artifacts.json":
+                self.assertIsInstance(payload["derivative"]["delta_ang"], list)
+                self.assertGreaterEqual(len(payload["derivative"]["atoms"]), 1)
+                self.assertGreaterEqual(len(payload["derivative"]["axes"]), 1)
+            else:
+                self.assertNotIn("delta_ang", payload["derivative"])
+                self.assertNotIn("atoms", payload["derivative"])
+                self.assertNotIn("axes", payload["derivative"])
+                self.assertNotIn("max_base_snapshots", payload["derivative"])
             for key in expectation["top_level"]:
                 self.assertIn(key, payload)
                 self.assertFalse(Path(str(payload[key])).is_absolute())

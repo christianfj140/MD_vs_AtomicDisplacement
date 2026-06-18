@@ -28,6 +28,7 @@ jobs:
 
       - name: Run derivative workflow tests
         run: |
+          python -m unittest discover -s tests -p 'test_validate_derivative_workflow_artifacts.py'
           python -m unittest discover -s tests -p 'test_g2m_deeph_runner.py'
           python -m unittest discover -s tests -p 'test_evaluate_hamiltonian_derivative_metrics.py'
           python -m unittest discover -s tests -p 'test_g2m_deeph_derivative_gate_check.py'
