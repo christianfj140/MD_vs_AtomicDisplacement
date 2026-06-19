@@ -373,10 +373,16 @@ def build_derivative_stencils(
         )
         if include_base:
             base_sample = safe_sample_id(base_id, "base")
+            # The shared base sample is part of the derivative family metadata, so
+            # expose the first requested atom/axis/delta tuple on the base record.
+            base_atom_index = atom_indices_zero_based[0]
+            base_axis = axes[0]
+            base_axis_index = AXES[base_axis]
+            base_delta_ang = delta_ang_values[0]
             metadata = {
                 "id": base_sample,
                 "sample_id": base_sample,
-                "base_sample_id": base_id,
+                "base_sample_id": base_sample,
                 "source_base_sample_id": base_id,
                 "source_sample_dir": str(source_sample_dir),
                 "generation_mode": "hamiltonian_derivative_stencil",
@@ -384,11 +390,16 @@ def build_derivative_stencils(
                 "material_label": material_label,
                 "base_system_label": base_system_label,
                 "is_reference": True,
+                "atom_index": base_atom_index + 1,
+                "atom_index_zero_based": base_atom_index,
+                "axis": base_axis,
+                "axis_index": base_axis_index,
                 "sign": 0,
                 "sign_label": "0",
-                "amplitude_ang": 0.0,
-                "delta_ang": 0.0,
+                "amplitude_ang": base_delta_ang,
+                "delta_ang": base_delta_ang,
                 "displacement_ang": [0.0, 0.0, 0.0],
+                "split_group_id": safe_sample_id("dH", base_id, f"atom{base_atom_index:04d}", base_axis, f"delta{base_delta_ang:g}"),
                 "split": split,
                 "claim_status": "diagnostic_only",
                 "hamiltonian_units": "eV",
@@ -429,7 +440,7 @@ def build_derivative_stencils(
                         metadata = {
                             "id": sample_id,
                             "sample_id": sample_id,
-                            "base_sample_id": base_id,
+                            "base_sample_id": base_sample,
                             "source_base_sample_id": base_id,
                             "source_sample_dir": str(source_sample_dir),
                             "generation_mode": "hamiltonian_derivative_stencil",
@@ -469,7 +480,7 @@ def build_derivative_stencils(
                         generated_samples["plus_sample_id" if sign > 0 else "minus_sample_id"] = sample_id
                     stencil_records.append(
                         {
-                            "base_sample_id": base_id,
+                            "base_sample_id": base_sample,
                             "atom_index_zero_based": atom_index,
                             "axis": axis,
                             "axis_index": axis_index,

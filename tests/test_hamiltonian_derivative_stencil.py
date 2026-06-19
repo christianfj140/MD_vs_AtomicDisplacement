@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 from scipy import sparse
@@ -15,6 +17,7 @@ SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import build_hamiltonian_derivative_stencils as stencil_builder  # noqa: E402
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DERIVATIVE_MATRIX_METRIC_TARGET_SPACE,
     DerivativeMatrixInput,
@@ -764,6 +767,76 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertEqual(len(discoveries), 1)
         self.assertIsNotNone(discoveries[0].stencil)
         self.assertNotIn("missing_split_metadata", {issue.code for issue in discoveries[0].issues})
+
+    def test_builder_assigns_derivative_metadata_to_shared_base_sample(self) -> None:
+        source_root = self.root / "source_dataset"
+        sample_dir = source_root / "splits" / "test" / "md_270"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        (sample_dir / "RUN.fdf").write_text("SystemLabel test\n", encoding="utf-8")
+        (sample_dir / "metadata.json").write_text(
+            json.dumps({"structure_type": "cartesian", "material_label": "graphene"}),
+            encoding="utf-8",
+        )
+        output_root = self.root / "derivative_result"
+        captured_calls: list[dict[str, object]] = []
+
+        def fake_write_structure_sample(**kwargs):
+            captured_calls.append(kwargs)
+            output_sample_dir = Path(kwargs["output_sample_dir"])
+            return {
+                "sample_id": kwargs["sample_id"],
+                "sample_dir": str(output_sample_dir),
+                "run_fdf": str(output_sample_dir / "RUN.fdf"),
+                "metadata_path": str(output_sample_dir / "metadata.json"),
+                "sign": kwargs["metadata"].get("sign"),
+                "sign_label": kwargs["metadata"].get("sign_label"),
+                "atom_index_zero_based": kwargs["metadata"].get("atom_index_zero_based"),
+                "axis": kwargs["metadata"].get("axis"),
+                "delta_ang": kwargs["metadata"].get("delta_ang"),
+            }
+
+        with (
+            mock.patch.object(
+                stencil_builder,
+                "load_base_rows",
+                return_value=[{"sample_id": "md_270", "sample_dir": str(sample_dir)}],
+            ),
+            mock.patch.object(
+                stencil_builder,
+                "extract_fdf_structure",
+                return_value=SimpleNamespace(
+                    positions_ang=[[0.0, 0.0, 0.0]],
+                    atom_species=["C"],
+                    lattice_vectors_ang=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    structure_type="cartesian",
+                ),
+            ),
+            mock.patch.object(stencil_builder, "write_structure_sample", side_effect=fake_write_structure_sample),
+        ):
+            manifest = stencil_builder.build_derivative_stencils(
+                source_dataset_root=source_root,
+                output_stencil_root=output_root,
+                split="test",
+                method="central",
+                delta_ang_values=[0.005, 0.01],
+                atom_indices_zero_based=[0],
+                axes=["x"],
+                base_sample_ids=["md_270"],
+                max_base_snapshots=1,
+                include_base=True,
+                overwrite=True,
+            )
+
+        base_call = next(call for call in captured_calls if call["sample_id"] == "md_270_base")
+        self.assertEqual(base_call["metadata"]["atom_index_zero_based"], 0)
+        self.assertEqual(base_call["metadata"]["axis"], "x")
+        self.assertEqual(base_call["metadata"]["axis_index"], 0)
+        self.assertEqual(base_call["metadata"]["sign"], 0)
+        self.assertEqual(base_call["metadata"]["base_sample_id"], "md_270_base")
+        self.assertEqual(base_call["metadata"]["source_base_sample_id"], "md_270")
+        self.assertEqual(manifest["stencils"][0]["base_sample_id"], "md_270_base")
+        self.assertEqual(manifest["stencils"][0]["plus_sample_id"], "md_270_atom0000_x_d0.005_plus")
+        self.assertEqual(manifest["stencils"][0]["minus_sample_id"], "md_270_atom0000_x_d0.005_minus")
 
 
 if __name__ == "__main__":
