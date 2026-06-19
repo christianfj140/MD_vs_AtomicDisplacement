@@ -389,6 +389,10 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertGreater(non_hermitian.metadata["dH_hermiticity_defect"], 0.0)
         self.assertEqual(sparse_hermiticity_defect(hermitian.matrix), 0.0)
 
+    def test_sparse_hermiticity_defect_returns_nan_for_rectangular_matrix(self) -> None:
+        defect = sparse_hermiticity_defect(sparse.csr_matrix([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+        self.assertTrue(np.isnan(defect))
+
     def test_support_change_diagnostic(self) -> None:
         result = finite_difference_derivative(
             method="central",

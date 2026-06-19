@@ -7755,6 +7755,11 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
         "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_geometry_validation.json"),
         "mime_type": "application/json; charset=utf-8",
     },
+    "graph2mat_delta_stability": {
+        "label": "Graph2Mat derivative delta stability JSON",
+        "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/derivative_delta_stability.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
     "graph2mat_stencil_status": {
         "label": "Graph2Mat derivative stencil status CSV",
         "relative_path": Path("common_metrics/graph2mat_eval/derivative_metrics/stencil_status.csv"),
@@ -7790,6 +7795,11 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
         "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_geometry_validation.json"),
         "mime_type": "application/json; charset=utf-8",
     },
+    "deeph_delta_stability": {
+        "label": "DeepH derivative delta stability JSON",
+        "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/derivative_delta_stability.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
     "deeph_stencil_status": {
         "label": "DeepH derivative stencil status CSV",
         "relative_path": Path("common_metrics/deeph_eval/derivative_metrics/stencil_status.csv"),
@@ -7820,11 +7830,104 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
         "relative_path": Path("common_metrics/summary/derivative_model_comparison/derivative_model_paired_comparison.csv"),
         "mime_type": "text/csv; charset=utf-8",
     },
+    "artifact_validation": {
+        "label": "Derivative artifact validation JSON",
+        "relative_path": Path("derivative_artifact_validation.json"),
+        "mime_type": "application/json; charset=utf-8",
+    },
 }
 
 
-def _g2m_deeph_plot_run_entries() -> list[dict[str, Any]]:
+def _g2m_deeph_standalone_derivative_summary_path(run_root: Path, filename: str) -> Path | None:
+    candidates = [
+        run_root / "derivative_metrics" / "summary" / filename,
+        run_root / "derivative_metrics" / "graph2mat" / "summary" / filename,
+        run_root / "derivative_metrics" / "deeph" / "summary" / filename,
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _is_standalone_derivative_run_root(run_root: Path) -> bool:
+    derivative_root = run_root / "derivative_metrics"
+    if not derivative_root.exists():
+        return False
+    if any((derivative_root / method / "manifest.json").exists() for method in ("graph2mat", "deeph")):
+        return True
+    return derivative_root.joinpath("manifest.json").exists() and run_root.joinpath("derivative_stencil_manifest.json").exists()
+
+
+def _g2m_deeph_standalone_derivative_run_roots() -> list[Path]:
+    smoke_root = RESULTS_ROOT / "derivative_smoke"
+    if not smoke_root.exists():
+        return []
+    roots: list[Path] = []
+    for candidate in sorted(smoke_root.iterdir()):
+        if not candidate.is_dir():
+            continue
+        if _is_standalone_derivative_run_root(candidate):
+            roots.append(candidate)
+    return roots
+
+
+def _g2m_deeph_standalone_derivative_run_entry(run_root: Path) -> dict[str, Any]:
+    models = [method for method in ("graph2mat", "deeph") if (run_root / "derivative_metrics" / method / "manifest.json").exists()]
+    gate_report_path = _g2m_deeph_standalone_derivative_summary_path(run_root, "derivative_gate_report.json")
+    gate_report = load_json_object(gate_report_path) if gate_report_path is not None else {}
+    manifest_status = ""
+    for method in models:
+        manifest = load_json_object(run_root / "derivative_metrics" / method / "manifest.json")
+        manifest_status = str(manifest.get("scientific_status") or "").strip()
+        if manifest_status:
+            break
+    try:
+        modified_at = run_root.stat().st_mtime
+    except OSError:
+        modified_at = None
+    return {
+        "id": hashlib.sha256(str(run_root.resolve()).encode("utf-8")).hexdigest()[:16],
+        "run_id": run_root.name,
+        "run_root": str(run_root),
+        "label": f"{run_root.name} (derivative smoke)",
+        "status": str(gate_report.get("scientific_status") or manifest_status or "derivative_only"),
+        "dataset_ids": [],
+        "models": models,
+        "completed_runs": len(models),
+        "failed_runs": 0,
+        "planned_runs": len(models),
+        "has_training_sweep": False,
+        "has_metric_rows": False,
+        "modified_at": modified_at,
+        "derivative_only": True,
+    }
+
+
+def _g2m_deeph_plot_runs_payload() -> dict[str, Any]:
     payload = G2M_DEEPH_RUNNER.plot_runs()
+    runs = [dict(item) for item in payload.get("runs") or [] if isinstance(item, dict)]
+    known_roots = {
+        str(Path(str(item.get("run_root") or "")).expanduser().resolve())
+        for item in runs
+        if item.get("run_root")
+    }
+    for run_root in _g2m_deeph_standalone_derivative_run_roots():
+        root_key = str(run_root.resolve())
+        if root_key in known_roots:
+            continue
+        runs.append(_g2m_deeph_standalone_derivative_run_entry(run_root))
+        known_roots.add(root_key)
+    runs.sort(key=lambda item: float(item.get("modified_at") or 0.0), reverse=True)
+    return {
+        "schema": str(payload.get("schema") or "graph2mat_deeph_plot_runs_v1"),
+        "runs": runs,
+        "default_selected_run_ids": payload.get("default_selected_run_ids") or [],
+    }
+
+
+def _g2m_deeph_plot_run_entries() -> list[dict[str, Any]]:
+    payload = _g2m_deeph_plot_runs_payload()
     runs = payload.get("runs")
     return [dict(item) for item in runs] if isinstance(runs, list) else []
 
@@ -7852,8 +7955,89 @@ def resolve_g2m_deeph_run_root(run_id: str | None = None) -> Path | None:
 
 
 def _g2m_deeph_derivative_root(run_root: Path, method: str) -> Path | None:
-    root = run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics"
-    return root if root.exists() else None
+    benchmark_root = run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics"
+    if benchmark_root.exists():
+        return benchmark_root
+    standalone_root = run_root / "derivative_metrics" / method
+    if standalone_root.exists():
+        return standalone_root
+    return None
+
+
+def _g2m_deeph_derivative_summary_path(run_root: Path, filename: str) -> Path | None:
+    candidates = [
+        run_root / "common_metrics" / "summary" / filename,
+        _g2m_deeph_standalone_derivative_summary_path(run_root, filename),
+    ]
+    for path in candidates:
+        if path is not None and path.exists():
+            return path
+    return None
+
+
+def _g2m_deeph_derivative_artifact_path(run_root: Path, kind: str) -> Path | None:
+    if kind.startswith("graph2mat_"):
+        method_root = _g2m_deeph_derivative_root(run_root, "graph2mat")
+        if method_root is None:
+            return None
+        name = kind.removeprefix("graph2mat_")
+        filenames = {
+            "manifest": "manifest.json",
+            "matrix_metrics": "derivative_matrix_metrics.csv",
+            "hermiticity": "derivative_hermiticity.csv",
+            "support_sweep": "derivative_support_sweep.csv",
+            "summary": "derivative_summary.json",
+            "geometry_validation": "derivative_geometry_validation.json",
+            "delta_stability": "derivative_delta_stability.json",
+            "stencil_status": "stencil_status.csv",
+        }
+        filename = filenames.get(name)
+        return method_root / filename if filename else None
+    if kind.startswith("deeph_"):
+        method_root = _g2m_deeph_derivative_root(run_root, "deeph")
+        if method_root is None:
+            return None
+        name = kind.removeprefix("deeph_")
+        filenames = {
+            "manifest": "manifest.json",
+            "matrix_metrics": "derivative_matrix_metrics.csv",
+            "hermiticity": "derivative_hermiticity.csv",
+            "support_sweep": "derivative_support_sweep.csv",
+            "summary": "derivative_summary.json",
+            "geometry_validation": "derivative_geometry_validation.json",
+            "delta_stability": "derivative_delta_stability.json",
+            "stencil_status": "stencil_status.csv",
+        }
+        filename = filenames.get(name)
+        return method_root / filename if filename else None
+    if kind == "plot_payload":
+        return _g2m_deeph_derivative_summary_path(run_root, "derivative_plot_payload.json")
+    if kind == "plot_manifest":
+        return _g2m_deeph_derivative_summary_path(run_root, "derivative_plot_manifest.json")
+    if kind == "gate_report":
+        return _g2m_deeph_derivative_summary_path(run_root, "derivative_gate_report.json")
+    if kind == "model_comparison_summary":
+        candidates = [
+            run_root / "common_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_comparison_summary.json",
+            run_root / "derivative_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_comparison_summary.json",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+    if kind == "model_paired_comparison":
+        candidates = [
+            run_root / "common_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_paired_comparison.csv",
+            run_root / "derivative_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_paired_comparison.csv",
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+    if kind == "artifact_validation":
+        path = run_root / "derivative_artifact_validation.json"
+        return path if path.exists() else None
+    return None
 
 
 def _g2m_deeph_derivative_artifact_url(run_id: str, kind: str) -> str:
@@ -8040,7 +8224,8 @@ def _g2m_deeph_derivative_status_from_gate(gate_report: dict[str, Any], status_r
 
 
 def _g2m_deeph_derivative_gate_report(run_root: Path) -> dict[str, Any]:
-    persisted = load_json_object(run_root / "common_metrics" / "summary" / "derivative_gate_report.json")
+    persisted_path = _g2m_deeph_derivative_summary_path(run_root, "derivative_gate_report.json")
+    persisted = load_json_object(persisted_path) if persisted_path is not None else {}
     if persisted:
         payload = dict(persisted)
         gate_rows = payload.get("gate_rows") if isinstance(payload.get("gate_rows"), list) else []
@@ -8051,7 +8236,7 @@ def _g2m_deeph_derivative_gate_report(run_root: Path) -> dict[str, Any]:
                     continue
                 gate_rows.append(
                     {
-                        "gate": item.get("gate_id") or item.get("gate") or item.get("code") or "derivative_gate",
+                        "gate": item.get("gate_id") or item.get("id") or item.get("gate") or item.get("code") or "derivative_gate",
                         "status": item.get("status") or "blocked",
                         "severity": item.get("severity") or "blocker",
                         "message": item.get("message") or "",
@@ -8062,7 +8247,7 @@ def _g2m_deeph_derivative_gate_report(run_root: Path) -> dict[str, Any]:
                     continue
                 gate_rows.append(
                     {
-                        "gate": item.get("gate_id") or item.get("gate") or item.get("code") or "derivative_warning",
+                        "gate": item.get("gate_id") or item.get("id") or item.get("gate") or item.get("code") or "derivative_warning",
                         "status": item.get("status") or "warning",
                         "severity": item.get("severity") or "warning",
                         "message": item.get("message") or "",
@@ -8128,9 +8313,8 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "title": "Hamiltonian derivative diagnostics",
             "gate_report": gate_report,
         }
-    output_dir = run_root / "common_metrics" / "summary" / "derivative_plots"
-    plot_payload_path = output_dir / "derivative_plot_payload.json"
-    if plot_payload_path.exists():
+    plot_payload_path = _g2m_deeph_derivative_summary_path(run_root, "derivative_plot_payload.json")
+    if plot_payload_path is not None and plot_payload_path.exists():
         plot_payload = load_json_object(plot_payload_path)
     else:
         plot_payload = {"available": False, "plots": [], "status": "not_computed"}
@@ -8149,26 +8333,33 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         for artifact_kind, meta in G2M_DEEPH_DERIVATIVE_ARTIFACTS.items():
             if not artifact_kind.startswith(method_key):
                 continue
-            path = run_root / meta["relative_path"]
+            path = _g2m_deeph_derivative_artifact_path(run_root, artifact_kind)
             artifact_rows.append(
                 {
                     "label": meta["label"],
                     "kind": artifact_kind,
-                    "exists": path.exists(),
-                    "path": str(path),
-                    "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path.exists() else "",
+                    "exists": bool(path and path.exists()),
+                    "path": str(path) if path is not None else "",
+                    "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path and path.exists() else "",
                 }
             )
-    for artifact_kind in ("plot_payload", "plot_manifest", "gate_report", "model_comparison_summary", "model_paired_comparison"):
+    for artifact_kind in (
+        "plot_payload",
+        "plot_manifest",
+        "gate_report",
+        "model_comparison_summary",
+        "model_paired_comparison",
+        "artifact_validation",
+    ):
         meta = G2M_DEEPH_DERIVATIVE_ARTIFACTS[artifact_kind]
-        path = run_root / meta["relative_path"]
+        path = _g2m_deeph_derivative_artifact_path(run_root, artifact_kind)
         artifact_rows.append(
             {
                 "label": meta["label"],
                 "kind": artifact_kind,
-                "exists": path.exists(),
-                "path": str(path),
-                "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path.exists() else "",
+                "exists": bool(path and path.exists()),
+                "path": str(path) if path is not None else "",
+                "url": _g2m_deeph_derivative_artifact_url(effective_run_id, artifact_kind) if path and path.exists() else "",
             }
         )
     prominent = [
@@ -15572,7 +15763,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/g2m-deeph/results":
                 json_response(self, G2M_DEEPH_RUNNER.results())
             elif path == "/api/g2m-deeph/plot-runs":
-                json_response(self, G2M_DEEPH_RUNNER.plot_runs())
+                json_response(self, _g2m_deeph_plot_runs_payload())
             elif path == "/api/g2m-deeph/plots":
                 query = parse_qs(parsed_url.query, keep_blank_values=True)
                 selected_run_ids = None
@@ -15602,7 +15793,9 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 run_root = resolve_g2m_deeph_run_root(run_id)
                 if run_root is None:
                     raise RuntimeError("run_id derivative no encontrado.")
-                artifact_path = run_root / artifact_meta["relative_path"]
+                artifact_path = _g2m_deeph_derivative_artifact_path(run_root, kind)
+                if artifact_path is None:
+                    raise FileNotFoundError(kind)
                 self._serve_file(artifact_path, content_type=str(artifact_meta["mime_type"]))
             elif path == "/api/g2m-deeph/dataset-size-minimum":
                 json_response(self, dataset_size_minimum_payload())

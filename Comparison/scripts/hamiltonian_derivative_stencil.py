@@ -1721,6 +1721,9 @@ def sparse_frobenius_norm(matrix: sparse.spmatrix) -> float:
 
 def sparse_hermiticity_defect(matrix: sparse.spmatrix) -> float:
     matrix = matrix.tocsr()
+    rows, cols = matrix.shape
+    if rows != cols:
+        return math.nan
     denominator = sparse_frobenius_norm(matrix)
     if denominator == 0.0:
         return math.nan
