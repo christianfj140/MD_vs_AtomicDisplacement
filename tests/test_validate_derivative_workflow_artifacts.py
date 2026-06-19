@@ -238,6 +238,32 @@ class DerivativeWorkflowArtifactValidatorTests(unittest.TestCase):
         self.assertEqual(summary["errors"], [])
         self.assertIn("stencil_manifest:", " ".join(summary["checked"]))
 
+    def test_empty_root_fails_with_scope_error(self) -> None:
+        empty_root = self.root / "empty_root"
+        empty_root.mkdir()
+
+        summary = validate_derivative_workflow_artifacts(empty_root)
+
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(any("No derivative artifact scope found" in error for error in summary["errors"]))
+
+    def test_cli_empty_root_returns_exit_code_two(self) -> None:
+        empty_root = self.root / "empty_root"
+        empty_root.mkdir()
+
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), str(empty_root)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2, msg=f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}")
+        summary = json.loads(completed.stdout)
+        self.assertEqual(summary["status"], "failed")
+        self.assertTrue(any("No derivative artifact scope found" in error for error in summary["errors"]))
+
     def test_parent_smoke_root_with_graph2mat_child_validates_child_scope(self) -> None:
         parent_root = self.root / "derivative_smoke"
         graph2mat_root = parent_root / "graph2mat_derivative_result"

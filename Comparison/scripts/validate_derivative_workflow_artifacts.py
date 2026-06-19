@@ -406,6 +406,13 @@ def validate_derivative_workflow_artifacts(
             checked.append(f"workflow_manifest:{workflow_manifest_path}")
 
     scopes = discover_validation_scopes(root, model=model)
+    if not scopes:
+        errors.append(
+            "No derivative artifact scope found under "
+            f"{root}; expected direct artifacts (structures/, derivative_stencil_manifest.json, "
+            "siesta_hamiltonians/, predicted_hamiltonians/, derivative_metrics/) or model subroots "
+            "graph2mat_derivative_result/ and deeph_derivative_result/."
+        )
     for scope_root in scopes:
         checked_roots.append(str(scope_root))
         validate_stencil_manifest(scope_root, checked=checked, checked_paths=checked_paths, warnings=warnings, errors=errors)
