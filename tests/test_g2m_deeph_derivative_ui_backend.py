@@ -194,6 +194,67 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         write_json(run_root / "derivative_artifact_validation.json", {"ok": True})
         write_json(run_root / "derivative_stencil_manifest.json", {"schema": "smoke"})
 
+    def write_standalone_derivative_method(self, run_root: Path, method: str, *, mae: float, rmse: float, frob: float) -> None:
+        root = run_root / "derivative_metrics" / method
+        write_json(
+            root / "manifest.json",
+            {
+                "scientific_status": "diagnostic_only",
+                "finite_difference_method": "central",
+                "derivative_units": "eV/Ang",
+                "stencils_ok": 2,
+                "stencils_failed": 0,
+                "warnings": [],
+                "fatal_errors": [],
+            },
+        )
+        write_csv(
+            root / "derivative_matrix_metrics.csv",
+            [
+                {
+                    "sample": "smoke",
+                    "source_model": method,
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "derivative_units": "eV/Ang",
+                    "dh_mae_union_eV_per_Ang": mae,
+                    "dh_rmse_union_eV_per_Ang": rmse,
+                    "dh_relative_frobenius_ref": frob,
+                    "dh_false_zero_rate": 0.1,
+                    "dh_false_nonzero_rate": 0.05,
+                }
+            ],
+        )
+        write_csv(
+            root / "derivative_hermiticity.csv",
+            [
+                {
+                    "sample": "smoke",
+                    "finite_difference_method": "central",
+                    "dH_ref_hermiticity_defect": 0.0,
+                    "dH_pred_hermiticity_defect": 0.02,
+                    "dH_hermiticity_error_delta": 0.02,
+                }
+            ],
+        )
+        write_csv(
+            root / "stencil_status.csv",
+            [
+                {
+                    "sample": "smoke",
+                    "status": "ok",
+                    "issue_codes": "",
+                    "issue_messages": "",
+                }
+            ],
+        )
+        write_json(root / "derivative_delta_stability.json", {"status": "available"})
+        write_json(root / "derivative_summary.json", {"scientific_status": "diagnostic_only"})
+        write_json(root / "derivative_geometry_validation.json", {"errors": 0})
+        write_csv(root / "derivative_support_sweep.csv", [{"threshold": "1e-12", "f1": "0.9"}])
+
     def test_missing_metrics_returns_not_computed(self) -> None:
         with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=None):
             payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("missing-run")
@@ -391,6 +452,52 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertTrue(payload["plot_payload"]["available"])
         self.assertTrue(payload["plot_payload"]["plots"])
         self.assertTrue(any(row["kind"] == "artifact_validation" and row["exists"] for row in payload["artifact_rows"]))
+
+    def test_standalone_derivative_smoke_paired_comparison_rows_are_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            run_root = results_root / "derivative_smoke" / "deeph_derivative_result"
+            self.write_standalone_derivative_method(run_root, "graph2mat", mae=0.2, rmse=0.3, frob=0.4)
+            self.write_standalone_derivative_method(run_root, "deeph", mae=0.1, rmse=0.2, frob=0.3)
+            write_json(
+                run_root / "derivative_metrics" / "summary" / "derivative_gate_report.json",
+                {
+                    "scientific_status": "blocked",
+                    "derivative_winner_claim": "none",
+                    "blockers": [],
+                    "warnings": [],
+                },
+            )
+            write_json(
+                run_root / "derivative_metrics" / "summary" / "derivative_plot_payload.json",
+                {
+                    "available": True,
+                    "plots": [],
+                },
+            )
+            write_csv(
+                run_root / "derivative_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_paired_comparison.csv",
+                [
+                    {
+                        "base_sample_id": "base",
+                        "atom_index_zero_based": "0",
+                        "axis": "x",
+                        "delta_ang": "0.01",
+                        "finite_difference_method": "central",
+                        "delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang": "0.1",
+                    }
+                ],
+            )
+            write_json(run_root / "derivative_artifact_validation.json", {"ok": True})
+            write_json(run_root / "derivative_stencil_manifest.json", {"schema": "smoke"})
+            with patch.object(pipeline_ui, "RESULTS_ROOT", results_root), \
+                 patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "plot_runs", return_value={"runs": [], "default_selected_run_ids": []}), \
+                 patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "status", return_value={"run_root": ""}):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("deeph_derivative_result")
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(len(payload["paired_comparison_rows"]), 1)
+        self.assertEqual(payload["paired_comparison_rows"][0]["base_sample_id"], "base")
 
 
 if __name__ == "__main__":

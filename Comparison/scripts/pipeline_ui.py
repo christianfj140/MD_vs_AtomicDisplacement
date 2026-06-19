@@ -8190,14 +8190,23 @@ def _g2m_deeph_derivative_metric_summary_rows(
 
 
 def _g2m_deeph_derivative_paired_comparison_rows(run_root: Path) -> list[dict[str, Any]]:
-    rows = read_csv_rows(
+    candidates = [
         run_root
         / "common_metrics"
         / "summary"
         / "derivative_model_comparison"
-        / "derivative_model_paired_comparison.csv"
-    )
-    return rows[:25]
+        / "derivative_model_paired_comparison.csv",
+        run_root
+        / "derivative_metrics"
+        / "summary"
+        / "derivative_model_comparison"
+        / "derivative_model_paired_comparison.csv",
+    ]
+    for path in candidates:
+        rows = read_csv_rows(path)
+        if rows:
+            return rows[:25]
+    return []
 
 
 def _g2m_deeph_derivative_mean(rows: list[dict[str, Any]], field: str) -> float | None:
