@@ -453,6 +453,131 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertTrue(payload["plot_payload"]["plots"])
         self.assertTrue(any(row["kind"] == "artifact_validation" and row["exists"] for row in payload["artifact_rows"]))
 
+    def test_nested_derivative_postprocess_root_is_discoverable_and_renderable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            run_root = results_root / "e2e_smoke" / "e2e_smoke" / "derivative_postprocess"
+            self.write_standalone_derivative_smoke(run_root)
+            plot_payload_path = run_root / "derivative_metrics" / "graph2mat" / "summary" / "derivative_plot_payload.json"
+            plot_payload = json.loads(plot_payload_path.read_text(encoding="utf-8"))
+            plot_payload_path.unlink()
+            write_json(run_root / "derivative_metrics" / "summary" / "derivative_plots" / "derivative_plot_payload.json", plot_payload)
+            with patch.object(pipeline_ui, "RESULTS_ROOT", results_root), \
+                 patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "plot_runs", return_value={"runs": [], "default_selected_run_ids": []}), \
+                 patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "status", return_value={"run_root": ""}):
+                selector_payload = pipeline_ui._g2m_deeph_plot_runs_payload()
+                resolved = pipeline_ui.resolve_g2m_deeph_run_root("derivative_postprocess")
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("derivative_postprocess")
+
+        self.assertEqual(selector_payload["runs"][0]["run_id"], "derivative_postprocess")
+        self.assertEqual(resolved, run_root)
+        self.assertTrue(payload["available"])
+        self.assertTrue(payload["plot_payload"]["available"])
+        self.assertTrue(any(row["kind"] == "artifact_validation" and row["exists"] for row in payload["artifact_rows"]))
+
+    def test_training_sweep_derivative_workflow_root_is_renderable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            run_root = results_root / "e2e_smoke_12snap_20ep" / "e2e_smoke_12snap_20ep"
+            derivative_root = run_root / "sweep" / "derivative_workflows" / "graphene_w90_scale_iid12"
+            self.write_standalone_derivative_method(derivative_root, "graph2mat", mae=0.2, rmse=0.3, frob=0.4)
+            self.write_standalone_derivative_method(derivative_root, "deeph", mae=0.1, rmse=0.2, frob=0.3)
+            write_json(
+                derivative_root / "derivative_metrics" / "summary" / "derivative_gate_report.json",
+                {
+                    "scientific_status": "blocked",
+                    "derivative_winner_claim": "none",
+                    "blockers": [
+                        {
+                            "id": "support_pattern_discontinuity",
+                            "severity": "blocker",
+                            "status": "fail",
+                            "message": "Support pattern changes across the stencil.",
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+            write_json(
+                derivative_root / "derivative_metrics" / "summary" / "derivative_plots" / "derivative_plot_payload.json",
+                {
+                    "available": True,
+                    "plots": [{"id": "paired_graph2mat_vs_deeph", "rows": [{"model": "Graph2Mat"}]}],
+                },
+            )
+            write_json(
+                derivative_root / "derivative_metrics" / "summary" / "derivative_plots" / "derivative_plot_manifest.json",
+                {"available": True},
+            )
+            write_csv(
+                derivative_root
+                / "derivative_metrics"
+                / "summary"
+                / "derivative_model_comparison"
+                / "derivative_model_paired_comparison.csv",
+                [
+                    {
+                        "base_sample_id": "base",
+                        "atom_index_zero_based": "0",
+                        "axis": "x",
+                        "delta_ang": "0.01",
+                        "finite_difference_method": "central",
+                        "delta_graph2mat_minus_deeph_dh_mae_union_eV_per_Ang": "0.1",
+                    }
+                ],
+            )
+            write_json(
+                derivative_root
+                / "derivative_metrics"
+                / "summary"
+                / "derivative_model_comparison"
+                / "derivative_model_comparison_summary.json",
+                {"paired_count": 1},
+            )
+            write_json(derivative_root / "derivative_artifact_validation.json", {"status": "ok"})
+            write_json(derivative_root / "derivative_stencil_manifest.json", {"schema": "smoke"})
+            write_json(derivative_root / "derivative_workflow_manifest.json", {"status": "completed"})
+            write_json(
+                run_root / "sweep" / "training_sweep_manifest.json",
+                {
+                    "derivative_workflows": [
+                        {
+                            "run_id": "graphene_w90_scale_iid12",
+                            "derivative_workflow_status": "completed",
+                            "derivative_workflow_manifest_path": str(derivative_root / "derivative_workflow_manifest.json"),
+                        }
+                    ]
+                },
+            )
+            with patch.object(pipeline_ui, "RESULTS_ROOT", results_root), \
+                 patch.object(
+                     pipeline_ui.G2M_DEEPH_RUNNER,
+                     "plot_runs",
+                     return_value={
+                         "runs": [
+                             {
+                                 "run_id": "e2e_smoke_12snap_20ep",
+                                 "run_root": str(run_root),
+                                 "status": "completed",
+                             }
+                         ],
+                         "default_selected_run_ids": [],
+                     },
+                 ), \
+                 patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "status", return_value={"run_root": ""}):
+                selector_payload = pipeline_ui._g2m_deeph_plot_runs_payload()
+                resolved = pipeline_ui.resolve_g2m_deeph_run_root("e2e_smoke_12snap_20ep")
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("e2e_smoke_12snap_20ep")
+
+        self.assertEqual(selector_payload["runs"][0]["run_id"], "e2e_smoke_12snap_20ep")
+        self.assertEqual(resolved, run_root)
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(len(payload["status_rows"]), 2)
+        self.assertEqual(len(payload["paired_comparison_rows"]), 1)
+        self.assertTrue(payload["plot_payload"]["available"])
+        self.assertTrue(any(row["kind"] == "artifact_validation" and row["exists"] for row in payload["artifact_rows"]))
+
     def test_standalone_derivative_smoke_paired_comparison_rows_are_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             results_root = Path(tmp) / "results"

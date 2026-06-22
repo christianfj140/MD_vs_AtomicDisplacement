@@ -108,6 +108,13 @@ def scope_model_for(root: Path, *, model: str) -> str:
     return model
 
 
+def model_for_scope_name(root: Path) -> str | None:
+    for model, subroot_name in MODEL_SUBROOTS.items():
+        if root.name == subroot_name:
+            return model
+    return None
+
+
 def path_mentions_model(path: Path, model: str) -> bool:
     if model == "auto":
         return True
@@ -137,6 +144,47 @@ def load_sample_metadata(sample_dir: Path) -> dict[str, Any]:
 def record_checked(*, checked: list[str], checked_paths: list[str], label: str, path: Path) -> None:
     checked.append(f"{label}:{path}")
     checked_paths.append(str(path))
+
+
+def existing_path(candidates: list[Path]) -> Path | None:
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def prediction_manifest_candidates(root: Path, target_model: str) -> list[Path]:
+    filename = PREDICTION_MANIFESTS[target_model]
+    candidates = [root / "predicted_hamiltonians" / filename]
+    subroot = root / MODEL_SUBROOTS[target_model]
+    if subroot.exists():
+        candidates.append(subroot / "predicted_hamiltonians" / filename)
+    return candidates
+
+
+def metrics_manifest_candidates(root: Path, target_model: str) -> list[Path]:
+    candidates = [
+        root / METRICS_ROOT_NAME / target_model / "manifest.json",
+    ]
+    if model_for_scope_name(root) == target_model:
+        candidates.append(root / METRICS_ROOT_NAME / "manifest.json")
+        candidates.append(root.parent / METRICS_ROOT_NAME / target_model / "manifest.json")
+    return candidates
+
+
+def gate_report_candidates(root: Path, target_model: str) -> list[Path]:
+    candidates = [
+        root / METRICS_ROOT_NAME / "summary" / GATE_REPORT_NAME,
+        root / METRICS_ROOT_NAME / target_model / "summary" / GATE_REPORT_NAME,
+    ]
+    if model_for_scope_name(root) == target_model:
+        candidates.extend(
+            [
+                root.parent / METRICS_ROOT_NAME / "summary" / GATE_REPORT_NAME,
+                root.parent / METRICS_ROOT_NAME / target_model / "summary" / GATE_REPORT_NAME,
+            ]
+        )
+    return candidates
 
 
 def validate_stencil_manifest(root: Path, *, checked: list[str], checked_paths: list[str], warnings: list[str], errors: list[str]) -> None:
@@ -279,8 +327,8 @@ def validate_reference_manifests(root: Path, *, checked: list[str], checked_path
 def validate_prediction_manifests(root: Path, *, model: str, checked: list[str], checked_paths: list[str], warnings: list[str], errors: list[str]) -> None:
     target_models = ("graph2mat", "deeph") if model == "auto" else (model,)
     for target_model in target_models:
-        manifest_path = root / "predicted_hamiltonians" / PREDICTION_MANIFESTS[target_model]
-        if not manifest_path.exists():
+        manifest_path = existing_path(prediction_manifest_candidates(root, target_model))
+        if manifest_path is None or not manifest_path.exists():
             continue
         record_checked(checked=checked, checked_paths=checked_paths, label="prediction_manifest", path=manifest_path)
         manifest = read_json_or_error(manifest_path, errors=errors)
@@ -308,13 +356,10 @@ def validate_prediction_manifests(root: Path, *, model: str, checked: list[str],
 
 
 def validate_metrics_manifests(root: Path, *, model: str, checked: list[str], checked_paths: list[str], warnings: list[str], errors: list[str]) -> None:
-    metrics_root = root / METRICS_ROOT_NAME
-    if not metrics_root.exists():
-        return
     target_models = ("graph2mat", "deeph") if model == "auto" else (model,)
     for target_model in target_models:
-        manifest_path = metrics_root / target_model / "manifest.json"
-        if not manifest_path.exists():
+        manifest_path = existing_path(metrics_manifest_candidates(root, target_model))
+        if manifest_path is None or not manifest_path.exists():
             continue
         record_checked(checked=checked, checked_paths=checked_paths, label="metrics_manifest", path=manifest_path)
         manifest = read_json_or_error(manifest_path, errors=errors)
@@ -326,12 +371,19 @@ def validate_metrics_manifests(root: Path, *, model: str, checked: list[str], ch
 
 
 def validate_gate_reports(root: Path, *, model: str, checked: list[str], checked_paths: list[str], warnings: list[str], errors: list[str]) -> None:
-    metrics_root = root / METRICS_ROOT_NAME
-    if not metrics_root.exists():
-        return
     target_models = ("graph2mat", "deeph") if model == "auto" else (model,)
+    seen: set[str] = set()
     for target_model in target_models:
-        for report_path in sorted({path for path in (metrics_root / target_model).rglob(GATE_REPORT_NAME) if path.is_file()}):
+        report_paths = [
+            path
+            for path in gate_report_candidates(root, target_model)
+            if path.is_file()
+        ]
+        for report_path in sorted(report_paths):
+            key = str(report_path.resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
             record_checked(checked=checked, checked_paths=checked_paths, label="gate_report", path=report_path)
             read_json_or_error(report_path, errors=errors)
 
@@ -361,17 +413,20 @@ def validate_completed_stage_artifacts(
         errors.append(f"Workflow manifest says build_derivative_stencils completed, but no {STENCIL_MANIFEST_NAME} was found under {root}")
     if stages.get("run_derivative_siesta_reference", {}).get("status") == "completed" and not (root / "siesta_hamiltonians" / REFERENCE_MANIFEST_NAME).exists():
         errors.append(f"Workflow manifest says run_derivative_siesta_reference completed, but no {REFERENCE_MANIFEST_NAME} was found under {root}")
-    if "graph2mat" in target_models and stages.get("predict_derivative_graph2mat", {}).get("status") == "completed" and not (root / "predicted_hamiltonians" / PREDICTION_MANIFESTS["graph2mat"]).exists():
+    if "graph2mat" in target_models and stages.get("predict_derivative_graph2mat", {}).get("status") == "completed" and existing_path(prediction_manifest_candidates(root, "graph2mat")) is None:
         errors.append(f"Workflow manifest says predict_derivative_graph2mat completed, but no {PREDICTION_MANIFESTS['graph2mat']} was found under {root}")
-    if "deeph" in target_models and stages.get("predict_derivative_deeph", {}).get("status") == "completed" and not (root / "predicted_hamiltonians" / PREDICTION_MANIFESTS["deeph"]).exists():
+    if "deeph" in target_models and stages.get("predict_derivative_deeph", {}).get("status") == "completed" and existing_path(prediction_manifest_candidates(root, "deeph")) is None:
         errors.append(f"Workflow manifest says predict_derivative_deeph completed, but no {PREDICTION_MANIFESTS['deeph']} was found under {root}")
-    if "graph2mat" in target_models and stages.get("derivative_metrics_graph2mat", {}).get("status") == "completed" and not (root / METRICS_ROOT_NAME / "graph2mat" / "manifest.json").exists():
+    if "graph2mat" in target_models and stages.get("derivative_metrics_graph2mat", {}).get("status") == "completed" and existing_path(metrics_manifest_candidates(root, "graph2mat")) is None:
         errors.append(f"Workflow manifest says derivative_metrics_graph2mat completed, but no {METRICS_ROOT_NAME}/manifest.json was found under {root}")
-    if "deeph" in target_models and stages.get("derivative_metrics_deeph", {}).get("status") == "completed" and not (root / METRICS_ROOT_NAME / "deeph" / "manifest.json").exists():
+    if "deeph" in target_models and stages.get("derivative_metrics_deeph", {}).get("status") == "completed" and existing_path(metrics_manifest_candidates(root, "deeph")) is None:
         errors.append(f"Workflow manifest says derivative_metrics_deeph completed, but no {METRICS_ROOT_NAME}/manifest.json was found under {root}")
-    gate_reports = []
-    for target_model in target_models:
-        gate_reports.extend(path for path in (root / METRICS_ROOT_NAME / target_model).rglob(GATE_REPORT_NAME) if path.is_file())
+    gate_reports = [
+        report
+        for target_model in target_models
+        for report in gate_report_candidates(root, target_model)
+        if report.is_file()
+    ]
     if stages.get("derivative_gate_check", {}).get("status") == "completed" and not gate_reports:
         errors.append(f"Workflow manifest says derivative_gate_check completed, but no {GATE_REPORT_NAME} was found under {root}")
 

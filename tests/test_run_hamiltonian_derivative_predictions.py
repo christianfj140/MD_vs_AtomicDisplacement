@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,8 @@ from build_hamiltonian_derivative_stencils import build_derivative_stencils  # n
 from hamiltonian_derivative_stencil import discover_derivative_stencils  # noqa: E402
 from run_hamiltonian_derivative_predictions import (  # noqa: E402
     DerivativePredictionStageError,
+    build_deeph_derivative_raw_mirror,
+    discover_siesta_reference_samples,
     run_derivative_predictions,
 )
 from deeph_prediction_adapter import DeepHPredictionAdapterResult  # noqa: E402
@@ -307,12 +310,15 @@ class DerivativePredictionStageTests(unittest.TestCase):
         model_dir.mkdir()
         (model_dir / "config.ini").write_text("[basic]\ndisable_cuda = True\ndevice = cpu\n[graph]\nradius = -1.0\n", encoding="utf-8")
         output_root = self.root / "deeph_predictions"
-        cli_dir = self.root / "deeph_bin"
-        cli_dir.mkdir()
+        deeph_repo = self.root / "DeepH-pack"
+        (deeph_repo / "deeph").mkdir(parents=True)
+        cli_dir = deeph_repo / ".venv" / "bin"
+        cli_dir.mkdir(parents=True)
         inference_cli = cli_dir / "deeph-inference"
         preprocess_cli = cli_dir / "deeph-preprocess"
         inference_cli.write_text("#!/bin/sh\n", encoding="utf-8")
         preprocess_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        calls: list[dict[str, object]] = []
 
         def fake_raw_mirror(*, references, raw_dir):
             rows = []
@@ -324,6 +330,7 @@ class DerivativePredictionStageTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             command_list = list(command)
+            calls.append({"command": command_list, "cwd": kwargs.get("cwd"), "env": kwargs.get("env")})
             if Path(command_list[0]).name == "deeph-preprocess":
                 config = configparser.ConfigParser()
                 config.read(command_list[-1])
@@ -383,11 +390,53 @@ class DerivativePredictionStageTests(unittest.TestCase):
 
         self.assertEqual(result["samples_failed"], 0)
         self.assertEqual(result["samples_ok"], len(sample_ids))
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertEqual(Path(call["cwd"]), deeph_repo)
+            env = call["env"]
+            self.assertIsInstance(env, dict)
+            self.assertEqual(str(env["PYTHONPATH"]).split(os.pathsep)[0], str(deeph_repo))
+            self.assertEqual(str(env["PATH"]).split(os.pathsep)[0], str(cli_dir))
+        self.assertEqual(result["runtime"]["cwd"], str(deeph_repo))
+        self.assertEqual(result["runtime"]["pythonpath_prefix"], str(deeph_repo))
         self.assertTrue((output_root / "derivative_deeph_prediction_manifest.json").exists())
         self.assertTrue((output_root / "deeph_sparse_layout_note.json").exists())
         self.assertTrue((output_root.parent / "deeph" / "inference" / "adapter_manifest.json").exists())
         for sample_id in sample_ids:
             self.assertTrue((output_root / sample_id / "ML_prediction.HSX").exists(), sample_id)
+
+    def test_paired_full_deeph_raw_mirror_uses_model_specific_siesta_refs_after_materialization(self) -> None:
+        common_root, manifest = self.build_stencil()
+        deeph_root = self.root / "deeph_derivative_result"
+        shutil.copytree(common_root / "structures", deeph_root / "structures")
+        common_siesta = common_root / "siesta_hamiltonians"
+        deeph_siesta = deeph_root / "siesta_hamiltonians"
+        for record in manifest["samples"]:
+            sample_id = record["sample_id"]
+            common_sample = common_siesta / sample_id
+            deeph_sample = deeph_siesta / sample_id
+            common_sample.mkdir(parents=True, exist_ok=True)
+            deeph_sample.mkdir(parents=True, exist_ok=True)
+            for suffix in (".HSX", ".TSHS", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
+                (common_sample / f"{sample_id}{suffix}").write_text(f"stale-common {suffix}\n", encoding="utf-8")
+                (deeph_sample / f"{sample_id}{suffix}").write_text(f"valid-deeph {suffix}\n", encoding="utf-8")
+            for name in ("RUN.fdf", "metadata.json"):
+                (common_sample / name).write_text("stale-common\n", encoding="utf-8")
+                (deeph_sample / name).write_text("valid-deeph\n", encoding="utf-8")
+
+        structures = sorted(path for path in (deeph_root / "structures").iterdir() if path.is_dir())
+        references = discover_siesta_reference_samples(deeph_root, structures=structures)
+        raw_mirror = build_deeph_derivative_raw_mirror(references=references, raw_dir=deeph_root / "deeph" / "raw")
+
+        self.assertEqual(set(references), {record["sample_id"] for record in manifest["samples"]})
+        for row in raw_mirror["rows"]:
+            self.assertIn(str(deeph_siesta), row["source_dir"])
+            self.assertNotIn(str(common_siesta), row["source_dir"])
+            raw_sample = Path(row["raw_dir"])
+            hsx_link = next(raw_sample.glob("*.HSX"))
+            self.assertTrue(hsx_link.is_symlink())
+            self.assertIn(str(deeph_siesta), str(hsx_link.resolve()))
+            self.assertEqual(hsx_link.read_text(encoding="utf-8"), "valid-deeph .HSX\n")
 
 
 if __name__ == "__main__":

@@ -7841,6 +7841,7 @@ G2M_DEEPH_DERIVATIVE_ARTIFACTS = {
 def _g2m_deeph_standalone_derivative_summary_path(run_root: Path, filename: str) -> Path | None:
     candidates = [
         run_root / "derivative_metrics" / "summary" / filename,
+        run_root / "derivative_metrics" / "summary" / "derivative_plots" / filename,
         run_root / "derivative_metrics" / "graph2mat" / "summary" / filename,
         run_root / "derivative_metrics" / "deeph" / "summary" / filename,
     ]
@@ -7860,16 +7861,57 @@ def _is_standalone_derivative_run_root(run_root: Path) -> bool:
 
 
 def _g2m_deeph_standalone_derivative_run_roots() -> list[Path]:
-    smoke_root = RESULTS_ROOT / "derivative_smoke"
-    if not smoke_root.exists():
-        return []
     roots: list[Path] = []
-    for candidate in sorted(smoke_root.iterdir()):
-        if not candidate.is_dir():
+    candidates: list[Path] = []
+    smoke_root = RESULTS_ROOT / "derivative_smoke"
+    if smoke_root.exists():
+        candidates.extend(candidate for candidate in sorted(smoke_root.iterdir()) if candidate.is_dir())
+    for pattern in ("derivative_postprocess", "*/derivative_postprocess", "*/*/derivative_postprocess", "*/*/*/derivative_postprocess"):
+        candidates.extend(path for path in sorted(RESULTS_ROOT.glob(pattern)) if path.is_dir())
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve(strict=False))
+        if key in seen:
             continue
+        seen.add(key)
         if _is_standalone_derivative_run_root(candidate):
             roots.append(candidate)
     return roots
+
+
+def _g2m_deeph_nested_derivative_run_root(run_root: Path) -> Path | None:
+    candidates: list[Path] = []
+    sweep_manifest = load_json_object(run_root / "sweep" / "training_sweep_manifest.json")
+    workflows = sweep_manifest.get("derivative_workflows")
+    if isinstance(workflows, list):
+        for workflow in workflows:
+            if not isinstance(workflow, dict):
+                continue
+            manifest_path = str(workflow.get("derivative_workflow_manifest_path") or "").strip()
+            if manifest_path:
+                candidate = Path(manifest_path).expanduser()
+                if not candidate.is_absolute():
+                    candidate = run_root / candidate
+                candidates.append(candidate.parent)
+            workflow_run_id = str(workflow.get("run_id") or "").strip()
+            if workflow_run_id:
+                candidates.append(run_root / "sweep" / "derivative_workflows" / workflow_run_id)
+    derivative_workflow_root = run_root / "sweep" / "derivative_workflows"
+    if derivative_workflow_root.exists():
+        candidates.extend(candidate for candidate in sorted(derivative_workflow_root.iterdir()) if candidate.is_dir())
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _is_standalone_derivative_run_root(candidate):
+            return candidate
+    return None
+
+
+def _g2m_deeph_effective_derivative_run_root(run_root: Path) -> Path:
+    return _g2m_deeph_nested_derivative_run_root(run_root) or run_root
 
 
 def _g2m_deeph_standalone_derivative_run_entry(run_root: Path) -> dict[str, Any]:
@@ -7904,6 +7946,76 @@ def _g2m_deeph_standalone_derivative_run_entry(run_root: Path) -> dict[str, Any]
     }
 
 
+def _g2m_deeph_sweep_run_roots() -> list[Path]:
+    roots: list[Path] = []
+    candidates = [
+        manifest.parent.parent
+        for manifest in RESULTS_ROOT.glob("*/*/sweep/training_sweep_manifest.json")
+        if manifest.is_file()
+    ]
+    candidates.extend(
+        manifest.parent.parent
+        for manifest in RESULTS_ROOT.glob("*/sweep/training_sweep_manifest.json")
+        if manifest.is_file()
+    )
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            roots.append(candidate)
+    return roots
+
+
+def _g2m_deeph_sweep_run_entry(run_root: Path) -> dict[str, Any]:
+    manifest_path = run_root / "sweep" / "training_sweep_manifest.json"
+    manifest = load_json_object(manifest_path)
+    workflows = manifest.get("derivative_workflows")
+    derivative_models: set[str] = set()
+    derivative_status = ""
+    if isinstance(workflows, list):
+        for workflow in workflows:
+            if not isinstance(workflow, dict):
+                continue
+            derivative_status = derivative_status or str(workflow.get("derivative_workflow_status") or "")
+            workflow_root: Path | None = None
+            workflow_manifest = str(workflow.get("derivative_workflow_manifest_path") or "").strip()
+            if workflow_manifest:
+                workflow_manifest_path = Path(workflow_manifest).expanduser()
+                if not workflow_manifest_path.is_absolute():
+                    workflow_manifest_path = run_root / workflow_manifest_path
+                workflow_root = workflow_manifest_path.parent
+            if workflow_root is None:
+                workflow_run_id = str(workflow.get("run_id") or "").strip()
+                if workflow_run_id:
+                    workflow_root = run_root / "sweep" / "derivative_workflows" / workflow_run_id
+            if workflow_root is not None:
+                for method in ("graph2mat", "deeph"):
+                    if (workflow_root / "derivative_metrics" / method / "manifest.json").exists():
+                        derivative_models.add(method)
+    try:
+        modified_at = max(manifest_path.stat().st_mtime, run_root.stat().st_mtime)
+    except OSError:
+        modified_at = None
+    return {
+        "id": hashlib.sha256(str(run_root.resolve()).encode("utf-8")).hexdigest()[:16],
+        "run_id": run_root.name,
+        "run_root": str(run_root),
+        "label": f"{run_root.name} (training sweep)",
+        "status": str(manifest.get("status") or derivative_status or "completed"),
+        "dataset_ids": [],
+        "models": sorted(derivative_models) or ["graph2mat", "deeph"],
+        "completed_runs": 0,
+        "failed_runs": 0,
+        "planned_runs": 0,
+        "has_training_sweep": True,
+        "has_metric_rows": False,
+        "modified_at": modified_at,
+    }
+
+
 def _g2m_deeph_plot_runs_payload() -> dict[str, Any]:
     payload = G2M_DEEPH_RUNNER.plot_runs()
     runs = [dict(item) for item in payload.get("runs") or [] if isinstance(item, dict)]
@@ -7917,6 +8029,12 @@ def _g2m_deeph_plot_runs_payload() -> dict[str, Any]:
         if root_key in known_roots:
             continue
         runs.append(_g2m_deeph_standalone_derivative_run_entry(run_root))
+        known_roots.add(root_key)
+    for run_root in _g2m_deeph_sweep_run_roots():
+        root_key = str(run_root.resolve())
+        if root_key in known_roots:
+            continue
+        runs.append(_g2m_deeph_sweep_run_entry(run_root))
         known_roots.add(root_key)
     runs.sort(key=lambda item: float(item.get("modified_at") or 0.0), reverse=True)
     return {
@@ -7955,19 +8073,27 @@ def resolve_g2m_deeph_run_root(run_id: str | None = None) -> Path | None:
 
 
 def _g2m_deeph_derivative_root(run_root: Path, method: str) -> Path | None:
-    benchmark_root = run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics"
-    if benchmark_root.exists():
-        return benchmark_root
-    standalone_root = run_root / "derivative_metrics" / method
-    if standalone_root.exists():
-        return standalone_root
+    derivative_run_root = _g2m_deeph_effective_derivative_run_root(run_root)
+    candidates = [
+        run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics",
+        derivative_run_root / "common_metrics" / f"{method}_eval" / "derivative_metrics",
+        derivative_run_root / "derivative_metrics" / method,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
     return None
 
 
 def _g2m_deeph_derivative_summary_path(run_root: Path, filename: str) -> Path | None:
+    derivative_run_root = _g2m_deeph_effective_derivative_run_root(run_root)
     candidates = [
         run_root / "common_metrics" / "summary" / filename,
+        run_root / "common_metrics" / "summary" / "derivative_plots" / filename,
+        derivative_run_root / "common_metrics" / "summary" / filename,
+        derivative_run_root / "common_metrics" / "summary" / "derivative_plots" / filename,
         _g2m_deeph_standalone_derivative_summary_path(run_root, filename),
+        _g2m_deeph_standalone_derivative_summary_path(derivative_run_root, filename),
     ]
     for path in candidates:
         if path is not None and path.exists():
@@ -8017,26 +8143,51 @@ def _g2m_deeph_derivative_artifact_path(run_root: Path, kind: str) -> Path | Non
     if kind == "gate_report":
         return _g2m_deeph_derivative_summary_path(run_root, "derivative_gate_report.json")
     if kind == "model_comparison_summary":
+        derivative_run_root = _g2m_deeph_effective_derivative_run_root(run_root)
         candidates = [
             run_root / "common_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_comparison_summary.json",
             run_root / "derivative_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_comparison_summary.json",
+            derivative_run_root
+            / "common_metrics"
+            / "summary"
+            / "derivative_model_comparison"
+            / "derivative_model_comparison_summary.json",
+            derivative_run_root
+            / "derivative_metrics"
+            / "summary"
+            / "derivative_model_comparison"
+            / "derivative_model_comparison_summary.json",
         ]
         for path in candidates:
             if path.exists():
                 return path
         return None
     if kind == "model_paired_comparison":
+        derivative_run_root = _g2m_deeph_effective_derivative_run_root(run_root)
         candidates = [
             run_root / "common_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_paired_comparison.csv",
             run_root / "derivative_metrics" / "summary" / "derivative_model_comparison" / "derivative_model_paired_comparison.csv",
+            derivative_run_root
+            / "common_metrics"
+            / "summary"
+            / "derivative_model_comparison"
+            / "derivative_model_paired_comparison.csv",
+            derivative_run_root
+            / "derivative_metrics"
+            / "summary"
+            / "derivative_model_comparison"
+            / "derivative_model_paired_comparison.csv",
         ]
         for path in candidates:
             if path.exists():
                 return path
         return None
     if kind == "artifact_validation":
-        path = run_root / "derivative_artifact_validation.json"
-        return path if path.exists() else None
+        derivative_run_root = _g2m_deeph_effective_derivative_run_root(run_root)
+        for path in (run_root / "derivative_artifact_validation.json", derivative_run_root / "derivative_artifact_validation.json"):
+            if path.exists():
+                return path
+        return None
     return None
 
 
@@ -8190,6 +8341,7 @@ def _g2m_deeph_derivative_metric_summary_rows(
 
 
 def _g2m_deeph_derivative_paired_comparison_rows(run_root: Path) -> list[dict[str, Any]]:
+    derivative_run_root = _g2m_deeph_effective_derivative_run_root(run_root)
     candidates = [
         run_root
         / "common_metrics"
@@ -8197,6 +8349,16 @@ def _g2m_deeph_derivative_paired_comparison_rows(run_root: Path) -> list[dict[st
         / "derivative_model_comparison"
         / "derivative_model_paired_comparison.csv",
         run_root
+        / "derivative_metrics"
+        / "summary"
+        / "derivative_model_comparison"
+        / "derivative_model_paired_comparison.csv",
+        derivative_run_root
+        / "common_metrics"
+        / "summary"
+        / "derivative_model_comparison"
+        / "derivative_model_paired_comparison.csv",
+        derivative_run_root
         / "derivative_metrics"
         / "summary"
         / "derivative_model_comparison"

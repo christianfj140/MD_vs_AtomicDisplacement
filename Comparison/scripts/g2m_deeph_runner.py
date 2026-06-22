@@ -7866,6 +7866,8 @@ class Graph2MatDeepHBenchmarkRunner:
                         command.extend([flag, str(config[key])])
             else:
                 deeph_command = config.get("deeph_command")
+                if deeph_command in (None, ""):
+                    deeph_command = self._deeph_command(payload, "deeph-inference")
                 if deeph_command not in (None, ""):
                     command.extend(["--deeph-command", str(deeph_command)])
                 if _parse_bool(config.get("deeph_shell"), False):

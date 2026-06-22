@@ -494,12 +494,13 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                 },
             }
             payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner._deeph_command = lambda _payload, name: f"/opt/deeph/bin/{name}"  # type: ignore[method-assign]
 
             summary = runner._run_modular_derivative_workflow(payload)
 
             self.assertEqual(summary["stages"]["predict_derivative_deeph"]["status"], "completed")
             self.assertTrue(commands)
-            self.assertNotIn("--deeph-command", commands[0])
+            self.assertEqual(commands[0][commands[0].index("--deeph-command") + 1], "/opt/deeph/bin/deeph-inference")
 
     def test_modular_derivatives_alias_is_normalized_to_derivative_key(self):
         workflow = _normalized_modular_workflow_payload(
@@ -926,6 +927,8 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
 
             runner._run_command = fake_run_command  # type: ignore[method-assign]
             payload = self._h_then_derivative_prediction_payload(root / "derivatives")
+            payload["modular_workflow"]["derivative"].pop("deeph_command", None)
+            runner._deeph_command = lambda _payload, name: f"/opt/deeph/bin/{name}"  # type: ignore[method-assign]
 
             summary = runner._run_modular_derivative_workflow(
                 payload,
@@ -938,6 +941,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             deeph_command = commands[1][1]
             self.assertEqual(graph2mat_command[graph2mat_command.index("--checkpoint") + 1], str(checkpoint))
             self.assertEqual(deeph_command[deeph_command.index("--model-dir") + 1], str(deeph_context.save_dir))
+            self.assertEqual(deeph_command[deeph_command.index("--deeph-command") + 1], "/opt/deeph/bin/deeph-inference")
             self.assertEqual(
                 summary["stages"]["predict_derivative_graph2mat"]["model_artifact"]["source"],
                 "inferred_h_workflow_checkpoint",

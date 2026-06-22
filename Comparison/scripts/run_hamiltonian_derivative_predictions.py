@@ -165,11 +165,12 @@ def graph2mat_command(
     return command
 
 
-def run_command(command: list[str], *, cwd: Path) -> dict[str, Any]:
+def run_command(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
     started_at = time.time()
     completed = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -310,6 +311,39 @@ def infer_deeph_cli(command_template: str | None, *, cli_name: str) -> str:
     )
 
 
+def infer_deeph_source_repo(command_template: str | None) -> Path | None:
+    try:
+        inference_cli = Path(infer_deeph_cli(command_template, cli_name="deeph-inference")).expanduser()
+    except DerivativePredictionStageError:
+        return None
+    if not inference_cli.is_absolute():
+        resolved = shutil.which(str(inference_cli))
+        inference_cli = Path(resolved).expanduser() if resolved else inference_cli
+    for parent in inference_cli.resolve(strict=False).parents:
+        if parent.joinpath("deeph").is_dir():
+            return parent
+    return None
+
+
+def deeph_command_env(command_template: str | None) -> dict[str, str]:
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    inference_cli = Path(infer_deeph_cli(command_template, cli_name="deeph-inference")).expanduser()
+    if inference_cli.is_absolute():
+        bin_dir = str(inference_cli.resolve(strict=False).parent)
+        current_path = env.get("PATH", "")
+        env["PATH"] = bin_dir if not current_path else f"{bin_dir}{os.pathsep}{current_path}"
+    source_repo = infer_deeph_source_repo(command_template)
+    if source_repo is not None:
+        current_pythonpath = env.get("PYTHONPATH", "")
+        repo_path = str(source_repo)
+        env["PYTHONPATH"] = repo_path if not current_pythonpath else f"{repo_path}{os.pathsep}{current_pythonpath}"
+    return env
+
+
+def deeph_command_cwd(command_template: str | None) -> Path:
+    return infer_deeph_source_repo(command_template) or REPO_ROOT
+
+
 def deeph_runtime_settings(model_dir: Path, *, python_executable: str, command_template: str | None) -> dict[str, Any]:
     config_path = model_dir / "config.ini"
     radius = -1.0
@@ -441,7 +475,13 @@ def run_deeph_auto_backend(
         julia_interpreter="",
     )
     preprocess_cli = infer_deeph_cli(command_template, cli_name="deeph-preprocess")
-    preprocess_record = run_command([preprocess_cli, "--config", str(deeph_paths.preprocess_config)], cwd=REPO_ROOT)
+    command_cwd = deeph_command_cwd(command_template)
+    command_env = deeph_command_env(command_template)
+    preprocess_record = run_command(
+        [preprocess_cli, "--config", str(deeph_paths.preprocess_config)],
+        cwd=command_cwd,
+        env=command_env,
+    )
     rows: list[dict[str, Any]] = []
     layout_rows: list[dict[str, Any]] = []
     adapter_results: list[DeepHPredictionAdapterResult] = []
@@ -473,6 +513,8 @@ def run_deeph_auto_backend(
                 "preprocess_returncode": int(preprocess_record["returncode"]),
                 "preprocess_stdout": preprocess_record["stdout"],
                 "preprocess_stderr": preprocess_record["stderr"],
+                "cwd": str(command_cwd),
+                "pythonpath_prefix": str(infer_deeph_source_repo(command_template) or ""),
             },
         }
 
@@ -524,7 +566,7 @@ def run_deeph_auto_backend(
             radius=float(settings["radius"]),
         )
         command = [inference_cli, "--config", str(inference_config)]
-        command_record = run_command(command, cwd=REPO_ROOT)
+        command_record = run_command(command, cwd=command_cwd, env=command_env)
         prediction_dir = output_root / structure.name
         clean_prediction_dir(prediction_dir, overwrite=overwrite)
         h5_prediction_path = work_dir / "hamiltonians_pred.h5"
@@ -610,6 +652,8 @@ def run_deeph_auto_backend(
             "preprocess_stderr": preprocess_record["stderr"],
             "inference_cli": inference_cli,
             "python_interpreter": str(settings["python_interpreter"]),
+            "cwd": str(command_cwd),
+            "pythonpath_prefix": str(infer_deeph_source_repo(command_template) or ""),
         },
     }
 
@@ -812,7 +856,14 @@ def run_derivative_predictions(
     model = str(model or "").strip().lower()
     if model not in {"graph2mat", "deeph"}:
         raise DerivativePredictionStageError("model must be one of: graph2mat, deeph.")
+    stencil_root = stencil_root.expanduser().resolve(strict=False)
     output_root = output_root or stencil_root / "predicted_hamiltonians"
+    output_root = output_root.expanduser().resolve(strict=False)
+    checkpoint = checkpoint.expanduser().resolve(strict=False) if checkpoint is not None else None
+    model_dir = model_dir.expanduser().resolve(strict=False) if model_dir is not None else None
+    existing_prediction_root = (
+        existing_prediction_root.expanduser().resolve(strict=False) if existing_prediction_root is not None else None
+    )
     structures = discover_structure_samples(stencil_root)
     effective_max_samples = _effective_max_samples(max_samples=max_samples, max_jobs=max_jobs)
     if effective_max_samples is not None:

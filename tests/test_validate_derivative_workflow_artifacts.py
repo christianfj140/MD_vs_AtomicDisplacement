@@ -207,6 +207,28 @@ def write_metrics_manifest(root: Path, model: str, *, include_delta_stability: b
         write_json(metrics_root / "derivative_delta_stability.json", {"status": "available", "rows": []})
 
 
+def write_completed_workflow_manifest(root: Path) -> None:
+    stages = {
+        "build_derivative_stencils": "completed",
+        "run_derivative_siesta_reference": "completed",
+        "predict_derivative_graph2mat": "completed",
+        "predict_derivative_deeph": "completed",
+        "derivative_metrics_graph2mat": "completed",
+        "derivative_metrics_deeph": "completed",
+        "derivative_gate_check": "completed",
+    }
+    write_json(
+        root / "derivative_workflow_manifest.json",
+        {
+            "workflow_mode": "h_then_derivative_full",
+            "stages": {
+                stage: {"status": status}
+                for stage, status in stages.items()
+            },
+        },
+    )
+
+
 def build_valid_scope(root: Path, *, model: str = "graph2mat") -> Path:
     write_sample(root, "base_0", base_sample_id="base_0", sign=0, sign_label="0", delta_ang=0.0)
     write_sample(root, "plus_0", base_sample_id="base_0", sign=1, sign_label="+", delta_ang=0.1)
@@ -300,6 +322,31 @@ class DerivativeWorkflowArtifactValidatorTests(unittest.TestCase):
         self.assertEqual(summary["status"], "ok")
         self.assertIn(str(graph2mat_root), summary["checked_roots"])
         self.assertIn(str(deeph_root), summary["checked_roots"])
+
+    def test_paired_full_workflow_layout_validates_shared_metrics_and_gate(self) -> None:
+        parent_root = self.root / "derivative_postprocess"
+        graph2mat_root = parent_root / "graph2mat_derivative_result"
+        deeph_root = parent_root / "deeph_derivative_result"
+        build_valid_scope(parent_root)
+        write_reference_manifest(parent_root)
+        build_valid_scope(graph2mat_root)
+        write_reference_manifest(graph2mat_root)
+        write_prediction_manifest(graph2mat_root, "graph2mat")
+        build_valid_scope(deeph_root)
+        write_reference_manifest(deeph_root)
+        write_prediction_manifest(deeph_root, "deeph")
+        write_metrics_manifest(parent_root, "graph2mat")
+        write_metrics_manifest(parent_root, "deeph")
+        write_json(parent_root / "derivative_metrics" / "summary" / "derivative_gate_report.json", {"scientific_status": "blocked"})
+        write_completed_workflow_manifest(parent_root)
+
+        summary = validate_derivative_workflow_artifacts(parent_root)
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["errors"], [])
+        self.assertIn(str(parent_root / "derivative_metrics" / "graph2mat" / "manifest.json"), summary["checked_paths"])
+        self.assertIn(str(parent_root / "derivative_metrics" / "deeph" / "manifest.json"), summary["checked_paths"])
+        self.assertIn(str(parent_root / "derivative_metrics" / "summary" / "derivative_gate_report.json"), summary["checked_paths"])
 
     def test_model_graph2mat_ignores_deeph_only_prediction_checks(self) -> None:
         parent_root = self.root / "derivative_smoke"
