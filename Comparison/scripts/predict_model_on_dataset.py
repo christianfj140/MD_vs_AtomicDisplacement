@@ -379,6 +379,16 @@ def relative_pattern(pattern: str, base: Path) -> str:
     return pattern
 
 
+def normalize_pattern_for_workdir(pattern: str, *, source_cwd: Path, target_cwd: Path) -> str:
+    """Re-anchor a CLI path/glob so it stays valid after changing directories."""
+
+    if os.path.isabs(pattern):
+        absolute_pattern = pattern
+    else:
+        absolute_pattern = os.path.abspath(source_cwd / pattern)
+    return os.path.relpath(absolute_pattern, target_cwd).replace("\\", "/")
+
+
 def collect_predictions(rows: list[dict[str, Any]], workspace: Path, output_dir: Path) -> list[dict[str, Any]]:
     prediction_rows = []
     prediction_root = output_dir / "predicted_hamiltonians"
@@ -458,7 +468,12 @@ def main() -> int:
     start = time.time()
     copied_rows = copy_sample_inputs(rows, workspace)
     run_cwd = checkpoint_training_dir(args.checkpoint)
-    args.basis_files = relative_pattern(str(args.basis_files), run_cwd)
+    source_cwd = Path.cwd()
+    args.basis_files = normalize_pattern_for_workdir(
+        str(args.basis_files),
+        source_cwd=source_cwd,
+        target_cwd=run_cwd,
+    )
     predict_glob = os.path.relpath(
         workspace / "predict_structures" / "*" / "RUN.fdf",
         run_cwd,

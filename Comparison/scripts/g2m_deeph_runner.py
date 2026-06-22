@@ -7489,6 +7489,18 @@ class Graph2MatDeepHBenchmarkRunner:
                         )
                         + ".",
                     )
+                if config.get("basis_files") in (None, ""):
+                    source_dataset_root = self._derivative_path(config, "source_dataset_root")
+                    example = (
+                        str(source_dataset_root / "material_basis" / "*.ion.xml")
+                        if source_dataset_root is not None
+                        else "Comparison/datasets/<dataset>/material_basis/*.ion.xml"
+                    )
+                    fail(
+                        "predict_derivative_graph2mat",
+                        "missing derivative.basis_files; set derivative.basis_files to the Graph2Mat basis XML glob or file list, e.g. "
+                        f"{example}.",
+                    )
             else:
                 model_dir = self._derivative_path(config, "deeph_model_dir")
                 if model_dir is not None:
@@ -7511,13 +7523,6 @@ class Graph2MatDeepHBenchmarkRunner:
                         )
                         + ".",
                     )
-                if config.get("deeph_command") in (None, ""):
-                    fail(
-                        "predict_derivative_deeph",
-                        "missing derivative.deeph_command; alternatively provide "
-                        "derivative.deeph_existing_prediction_root.",
-                    )
-
         metrics_created_by_predictions = predict_graph2mat or predict_deeph
         h_metric_fallback = run_root is not None and bool(stages.get("hamiltonian_metrics"))
         if not build_stencils and not metrics_created_by_predictions and not h_metric_fallback:
@@ -7738,6 +7743,9 @@ class Graph2MatDeepHBenchmarkRunner:
                     "--siesta-command",
                     str(config.get("siesta_command") or "siesta"),
                 ]
+                source_dataset_root = self._derivative_path(config, "source_dataset_root")
+                if source_dataset_root is not None:
+                    command.extend(["--source-dataset-root", str(source_dataset_root)])
                 existing_reference_root = self._derivative_path(config, "existing_reference_root")
                 if existing_reference_root is not None:
                     command.extend(["--existing-reference-root", str(existing_reference_root)])

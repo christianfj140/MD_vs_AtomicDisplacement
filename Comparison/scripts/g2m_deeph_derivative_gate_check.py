@@ -58,6 +58,8 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 def normalize_root(root: Path) -> Path:
     root = Path(root)
+    if (root / "manifest.json").exists():
+        return root
     return root if root.name == "derivative_metrics" else root / "derivative_metrics"
 
 

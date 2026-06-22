@@ -51,6 +51,7 @@
     "graph2mat_checkpoint": "Comparison/results/e2e_smoke_12snap_20ep/e2e_smoke_12snap_20ep/sweep/graph2mat/graphene_w90_scale_iid12/G2M-E2E12-20EP/graph2mat/training/lightning_logs/my_first_model/version_0/checkpoints/best-160.ckpt",
     "deeph_model_dir": "Comparison/results/e2e_smoke_12snap_20ep/e2e_smoke_12snap_20ep/sweep/deeph/graphene_w90_scale_iid12/DH-E2E12-20EP/deeph/train",
     "deeph_command": "/home/christian/repositorios/DeepH-pack/.venv/bin/deeph-inference",
+    "basis_files": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid12/material_basis/*.ion.xml",
     "siesta_command": "/home/christian/bin/siesta",
     "skip_if_exists": true,
     "diagnostic_only": true,

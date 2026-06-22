@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import configparser
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -21,6 +23,8 @@ from run_hamiltonian_derivative_predictions import (  # noqa: E402
     DerivativePredictionStageError,
     run_derivative_predictions,
 )
+from deeph_prediction_adapter import DeepHPredictionAdapterResult  # noqa: E402
+from predict_model_on_dataset import normalize_pattern_for_workdir  # noqa: E402
 
 
 def synthetic_base_fdf() -> str:
@@ -143,6 +147,33 @@ class DerivativePredictionStageTests(unittest.TestCase):
                 checkpoint=self.root / "missing.ckpt",
             )
 
+    def test_graph2mat_prediction_stage_requires_basis_files_when_running(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+
+        with self.assertRaisesRegex(DerivativePredictionStageError, "--basis-files"):
+            run_derivative_predictions(
+                stencil_root=stencil_root,
+                model="graph2mat",
+                checkpoint=self.checkpoint(),
+            )
+
+    def test_repo_relative_basis_glob_is_reanchored_for_checkpoint_workdir(self) -> None:
+        checkpoint = self.checkpoint()
+        run_cwd = checkpoint.parents[3]
+        repo_relative = "Comparison/datasets/example/material_basis/*.ion.xml"
+
+        normalized = normalize_pattern_for_workdir(
+            repo_relative,
+            source_cwd=REPO_ROOT,
+            target_cwd=run_cwd,
+        )
+
+        self.assertNotEqual(normalized, repo_relative)
+        self.assertEqual(
+            normalized,
+            os.path.relpath((REPO_ROOT / repo_relative).resolve(strict=False), run_cwd).replace("\\", "/"),
+        )
+
     def test_deeph_prediction_stage_rejects_missing_model_dir_when_running(self) -> None:
         stencil_root, _manifest = self.build_stencil()
 
@@ -261,6 +292,102 @@ class DerivativePredictionStageTests(unittest.TestCase):
         self.assertFalse(captured["shell"])
         self.assertEqual(result["samples_failed"], 0)
         self.assertFalse(result["deeph_shell"])
+
+    def test_deeph_model_dir_auto_backend_writes_prediction_manifests(self) -> None:
+        stencil_root, manifest = self.build_stencil()
+        sample_ids = [record["sample_id"] for record in manifest["samples"]]
+        siesta_root = stencil_root / "siesta_hamiltonians"
+        for sample_id in sample_ids:
+            sample_dir = siesta_root / sample_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            for suffix in (".HSX", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
+                (sample_dir / f"{sample_id}{suffix}").write_text("stub\n", encoding="utf-8")
+
+        model_dir = self.root / "deeph_model"
+        model_dir.mkdir()
+        (model_dir / "config.ini").write_text("[basic]\ndisable_cuda = True\ndevice = cpu\n[graph]\nradius = -1.0\n", encoding="utf-8")
+        output_root = self.root / "deeph_predictions"
+        cli_dir = self.root / "deeph_bin"
+        cli_dir.mkdir()
+        inference_cli = cli_dir / "deeph-inference"
+        preprocess_cli = cli_dir / "deeph-preprocess"
+        inference_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        preprocess_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        def fake_raw_mirror(*, references, raw_dir):
+            rows = []
+            for index, sample_id in enumerate(sample_ids):
+                raw_sample = raw_dir / f"{index:06d}_{sample_id}"
+                raw_sample.mkdir(parents=True, exist_ok=True)
+                rows.append({"sample_id": sample_id, "raw_dir": str(raw_sample)})
+            return {"rows": rows}
+
+        def fake_run(command, **kwargs):
+            command_list = list(command)
+            if Path(command_list[0]).name == "deeph-preprocess":
+                config = configparser.ConfigParser()
+                config.read(command_list[-1])
+                raw_dir = Path(config.get("basic", "raw_dir"))
+                processed_dir = Path(config.get("basic", "processed_dir"))
+                for raw_sample in sorted(raw_dir.iterdir()):
+                    sample_dir = processed_dir / raw_sample.name
+                    sample_dir.mkdir(parents=True, exist_ok=True)
+                    for name in ("R_list.dat", "orbital_types.dat", "element.dat", "site_positions.dat", "lat.dat", "rlat.dat", "rc.h5", "hamiltonians.h5", "overlaps.h5"):
+                        (sample_dir / name).write_text("stub\n", encoding="utf-8")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if Path(command_list[0]).name == "deeph-inference":
+                config = configparser.ConfigParser()
+                config.read(command_list[-1])
+                work_dir = Path(config.get("basic", "work_dir"))
+                work_dir.mkdir(parents=True, exist_ok=True)
+                (work_dir / "hamiltonians_pred.h5").write_bytes(b"h5")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(command_list)
+
+        def fake_adapter(*, work_dir, processed_sample_dir, sample_id, prediction_filename="hamiltonians_pred.h5"):
+            return DeepHPredictionAdapterResult(
+                sample_id=sample_id,
+                status="ok",
+                metrics_ready=True,
+                diagnostic_only=True,
+                diagnostic_reason="diagnostic",
+                prediction_path=str(Path(work_dir) / prediction_filename),
+                processed_sample_dir=str(processed_sample_dir),
+                reference_hamiltonian_path=str(Path(processed_sample_dir) / "hamiltonians.h5"),
+                reference_overlap_path=str(Path(processed_sample_dir) / "overlaps.h5"),
+                orbital_types_path=str(Path(processed_sample_dir) / "orbital_types.dat"),
+                n_orbitals=8,
+                block_count=1,
+                prediction_key_count=1,
+                reference_key_count=1,
+            )
+
+        def fake_reconstruct(*, output_path, **_kwargs):
+            output_path.write_bytes(b"npz-like")
+            return {"kind": "deeph_h5_reconstructed_siesta_sparse_layout_v1", "nnz": 1, "shape_rows": 8, "shape_cols": 8}
+
+        with mock.patch("run_hamiltonian_derivative_predictions.build_deeph_derivative_raw_mirror", side_effect=fake_raw_mirror), mock.patch(
+            "run_hamiltonian_derivative_predictions.subprocess.run", side_effect=fake_run
+        ), mock.patch(
+            "run_hamiltonian_derivative_predictions.adapt_deeph_prediction_sample", side_effect=fake_adapter
+        ), mock.patch(
+            "run_hamiltonian_derivative_predictions.reconstruct_deeph_sparse_layout_prediction", side_effect=fake_reconstruct
+        ):
+            result = run_derivative_predictions(
+                stencil_root=stencil_root,
+                model="deeph",
+                output_root=output_root,
+                model_dir=model_dir,
+                deeph_command=str(inference_cli),
+            )
+
+        self.assertEqual(result["samples_failed"], 0)
+        self.assertEqual(result["samples_ok"], len(sample_ids))
+        self.assertTrue((output_root / "derivative_deeph_prediction_manifest.json").exists())
+        self.assertTrue((output_root / "deeph_sparse_layout_note.json").exists())
+        self.assertTrue((output_root.parent / "deeph" / "inference" / "adapter_manifest.json").exists())
+        for sample_id in sample_ids:
+            self.assertTrue((output_root / sample_id / "ML_prediction.HSX").exists(), sample_id)
 
 
 if __name__ == "__main__":

@@ -75,6 +75,7 @@
       "x"
     ],
     "siesta_command": "/home/christian/bin/siesta",
+    "basis_files": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid12/material_basis/*.ion.xml",
     "skip_if_exists": true,
     "diagnostic_only": true,
     "require_central": true

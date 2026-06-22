@@ -108,6 +108,8 @@ def _infer_model_from_rows(rows: list[dict[str, str]], fallback: str) -> str:
 
 def _normalize_root(root: Path) -> Path:
     root = Path(root)
+    if (root / "manifest.json").exists():
+        return root
     return root if root.name == "derivative_metrics" else root / "derivative_metrics"
 
 

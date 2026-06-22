@@ -458,7 +458,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "derivative preflight.*derivative.result_dir"):
                 runner._run_modular_derivative_workflow(payload)
 
-    def test_derivative_preflight_deeph_prediction_requires_command_without_existing_predictions(self):
+    def test_derivative_preflight_deeph_prediction_accepts_model_dir_without_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             stencil_root = root / "derivatives"
@@ -466,6 +466,19 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             stencil_root.mkdir()
             model_dir.mkdir()
             runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append(list(command))
+                output_root = Path(command[command.index("--output-root") + 1])
+                output_root.mkdir(parents=True, exist_ok=True)
+                (output_root / "derivative_deeph_prediction_manifest.json").write_text(
+                    json.dumps({"samples_failed": 0}) + "\n",
+                    encoding="utf-8",
+                )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
             payload = {
                 "workflow_mode": "derivative_predictions_only",
                 "derivative": {
@@ -482,8 +495,11 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             }
             payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
 
-            with self.assertRaisesRegex(RuntimeError, "derivative.deeph_command"):
-                runner._run_modular_derivative_workflow(payload)
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            self.assertEqual(summary["stages"]["predict_derivative_deeph"]["status"], "completed")
+            self.assertTrue(commands)
+            self.assertNotIn("--deeph-command", commands[0])
 
     def test_modular_derivatives_alias_is_normalized_to_derivative_key(self):
         workflow = _normalized_modular_workflow_payload(
@@ -1250,6 +1266,113 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             )
             self.assertEqual(summary["stages"]["derivative_metrics_graph2mat"]["status"], "completed")
             self.assertEqual(summary["stages"]["derivative_metrics_deeph"]["status"], "completed")
+
+    def test_modular_derivative_gate_and_plots_accept_direct_model_metrics_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "derivative_postprocess"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "derivative_stencil_manifest.json").write_text(
+                json.dumps({"sample_count": 5, "stencil_count": 2}) + "\n",
+                encoding="utf-8",
+            )
+
+            for model, mae, rmse, frob in (
+                ("graph2mat", "0.20", "0.30", "0.40"),
+                ("deeph", "0.10", "0.20", "0.30"),
+            ):
+                metrics_root = root / "derivative_metrics" / model
+                metrics_root.mkdir(parents=True, exist_ok=True)
+                (metrics_root / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "scientific_status": "diagnostic_only",
+                            "finite_difference_method": "central",
+                            "derivative_units": "eV/Ang",
+                            "stencils_ok": 1,
+                            "stencils_failed": 0,
+                            "warnings": [],
+                            "fatal_errors": [],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                _write_csv(
+                    metrics_root / "derivative_matrix_metrics.csv",
+                    [
+                        {
+                            "sample": f"{model}_sample",
+                            "source_model": model,
+                            "base_sample_id": "base_0",
+                            "atom_index_zero_based": "0",
+                            "axis": "x",
+                            "delta_ang": "0.01",
+                            "finite_difference_method": "central",
+                            "derivative_units": "eV/Ang",
+                            "dh_mae_union_eV_per_Ang": mae,
+                            "dh_rmse_union_eV_per_Ang": rmse,
+                            "dh_relative_frobenius_ref": frob,
+                            "dh_false_zero_rate": "0.0",
+                            "dh_false_nonzero_rate": "0.0",
+                            "comparison_status": "diagnostic_only",
+                        }
+                    ],
+                )
+                _write_csv(
+                    metrics_root / "derivative_hermiticity.csv",
+                    [
+                        {
+                            "sample": f"{model}_sample",
+                            "finite_difference_method": "central",
+                            "dH_ref_hermiticity_defect": "0.0",
+                            "dH_pred_hermiticity_defect": "0.0",
+                            "dH_hermiticity_error_delta": "0.0",
+                        }
+                    ],
+                )
+                _write_csv(
+                    metrics_root / "stencil_status.csv",
+                    [
+                        {
+                            "sample": f"{model}_sample",
+                            "status": "ok",
+                            "issue_codes": "",
+                            "issue_messages": "",
+                        }
+                    ],
+                )
+                (metrics_root / "derivative_delta_stability.json").write_text(
+                    json.dumps({"status": "available"}) + "\n",
+                    encoding="utf-8",
+                )
+
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fail_run_command(*_args, **_kwargs):
+                raise AssertionError("existing derivative metrics manifests should avoid rerunning metric commands")
+
+            runner._run_command = fail_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "derivative_metrics_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(root),
+                    "method": "central",
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            self.assertEqual(summary["stages"]["derivative_metrics_graph2mat"]["status"], "skipped_existing")
+            self.assertEqual(summary["stages"]["derivative_metrics_deeph"]["status"], "skipped_existing")
+            self.assertEqual(summary["stages"]["derivative_plots"]["status"], "completed")
+            self.assertEqual(summary["stages"]["derivative_gate_check"]["status"], "completed")
+            self.assertEqual(summary["stages"]["derivative_model_comparison"]["status"], "completed")
+            self.assertTrue((root / "derivative_metrics" / "summary" / "derivative_gate_report.json").exists())
+            self.assertTrue((root / "derivative_metrics" / "summary" / "derivative_plots" / "derivative_plot_payload.json").exists())
+            self.assertFalse((root / "derivative_metrics" / "graph2mat" / "derivative_metrics").exists())
+            self.assertFalse((root / "derivative_metrics" / "deeph" / "derivative_metrics").exists())
 
     def test_derivative_model_comparison_pairs_matching_stencils_without_winner_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3724,6 +3847,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             "result_dir": str(result_dir),
             "method": "central",
             "deeph_command": "deeph-inference {stencil_root} {output_root} {model_dir}",
+            "basis_files": "Comparison/datasets/test/material_basis/*.ion.xml",
         }
         derivative_config.update(derivative or {})
         payload = {

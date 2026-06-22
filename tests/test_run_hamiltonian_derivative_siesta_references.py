@@ -4,8 +4,8 @@ import json
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,16 +23,22 @@ from run_hamiltonian_derivative_siesta_references import (  # noqa: E402
 )
 
 
-def synthetic_base_fdf() -> str:
+def synthetic_base_fdf(*, include_ghost: bool = False) -> str:
+    species_count = 2 if include_ghost else 1
+    species_block = [
+        "%block ChemicalSpeciesLabel",
+        " 1 6 C",
+    ]
+    if include_ghost:
+        species_block.append(" 2 -1 Ghost-H")
+    species_block.append("%endblock ChemicalSpeciesLabel")
     return "\n".join(
         [
             "SystemName synthetic base",
             "SystemLabel shared_label",
-            "NumberOfSpecies 1",
+            f"NumberOfSpecies {species_count}",
             "NumberOfAtoms 2",
-            "%block ChemicalSpeciesLabel",
-            " 1 6 C",
-            "%endblock ChemicalSpeciesLabel",
+            *species_block,
             "LatticeConstant 1.0 Ang",
             "%block LatticeVectors",
             " 8.0 0.0 0.0",
@@ -92,6 +98,11 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         )
         return stencil_root, manifest
 
+    def write_pseudo(self, label: str, *, suffix: str = ".psf") -> Path:
+        path = self.dataset_root / f"{label}{suffix}"
+        path.write_text(f"pseudo for {label}\n", encoding="utf-8")
+        return path
+
     def test_skip_if_exists_avoids_rerunning_existing_reference(self) -> None:
         stencil_root, manifest = self.build_stencil()
         sample_id = sorted(record["sample_id"] for record in manifest["samples"])[0]
@@ -127,6 +138,7 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
 
     def test_failed_siesta_run_is_recorded_and_fails_closed(self) -> None:
         stencil_root, _manifest = self.build_stencil()
+        self.write_pseudo("C")
 
         with self.assertRaisesRegex(DerivativeSiestaReferenceError, "failed for"):
             run_derivative_siesta_references(
@@ -141,8 +153,79 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         self.assertEqual(manifest["rows"][0]["returncode"], 3)
         self.assertEqual(manifest["rows"][0]["error"], "siesta_returncode_nonzero")
 
+    def test_dataset_root_pseudopotential_is_staged_before_siesta_run(self) -> None:
+        stencil_root, manifest = self.build_stencil()
+        self.write_pseudo("C")
+        sample_ids = [record["sample_id"] for record in manifest["samples"]]
+        captured_dirs: list[Path] = []
+
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            captured_dirs.append(cwd)
+            self.assertTrue((cwd / "C.psf").exists())
+            (cwd / "siesta.TSHS").write_bytes(b"reference")
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                source_dataset_root=self.dataset_root,
+                max_samples=1,
+            )
+
+        self.assertEqual(result["samples_ok"], 1)
+        self.assertEqual(len(captured_dirs), 1)
+        self.assertTrue((captured_dirs[0] / "C.psf").exists())
+        self.assertEqual(result["source_dataset_root"], str(self.dataset_root))
+        self.assertIn(captured_dirs[0].name, sample_ids)
+
+    def test_ghost_pseudopotential_is_staged_when_species_is_declared(self) -> None:
+        (self.sample_dir / "RUN.fdf").write_text(synthetic_base_fdf(include_ghost=True), encoding="utf-8")
+        stencil_root, _manifest = self.build_stencil()
+        self.write_pseudo("C")
+        self.write_pseudo("Ghost-H")
+        staged = {}
+
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            staged["files"] = sorted(path.name for path in cwd.iterdir() if path.is_file())
+            self.assertTrue((cwd / "C.psf").exists())
+            self.assertTrue((cwd / "Ghost-H.psf").exists())
+            (cwd / "siesta.TSHS").write_bytes(b"reference")
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                source_dataset_root=self.dataset_root,
+                max_samples=1,
+            )
+
+        self.assertEqual(result["samples_failed"], 0)
+        self.assertIn("Ghost-H.psf", staged["files"])
+
+    def test_missing_required_pseudo_fails_with_actionable_error(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+
+        result = run_derivative_siesta_references(
+            stencil_root=stencil_root,
+            source_dataset_root=self.dataset_root,
+            diagnostic_only=True,
+            max_samples=1,
+        )
+
+        self.assertEqual(result["samples_failed"], 1)
+        error = result["rows"][0]["error"]
+        self.assertIn("Missing required pseudopotential", error)
+        self.assertIn("'C'", error)
+        self.assertIn(str(self.dataset_root), error)
+        self.assertIn("C.psf", error)
+        self.assertIn("C.vps", error)
+        self.assertIn("C.psml", error)
+
     def test_max_samples_limits_reference_samples(self) -> None:
         stencil_root, _manifest = self.build_stencil()
+        self.write_pseudo("C")
 
         result = run_derivative_siesta_references(
             stencil_root=stencil_root,
@@ -157,6 +240,7 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
 
     def test_max_jobs_alias_limits_reference_samples_and_is_recorded(self) -> None:
         stencil_root, _manifest = self.build_stencil()
+        self.write_pseudo("C")
 
         result = run_derivative_siesta_references(
             stencil_root=stencil_root,
@@ -173,11 +257,13 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
 
     def test_siesta_command_runs_as_argv_by_default(self) -> None:
         stencil_root, _manifest = self.build_stencil()
+        self.write_pseudo("C")
         captured = {}
 
         def fake_run(command, **kwargs):
             captured["command"] = command
             captured["shell"] = kwargs.get("shell")
+            self.assertTrue((Path(kwargs["cwd"]) / "C.psf").exists())
             (Path(kwargs["cwd"]) / "siesta.TSHS").write_bytes(b"reference")
             return mock.Mock(returncode=0)
 

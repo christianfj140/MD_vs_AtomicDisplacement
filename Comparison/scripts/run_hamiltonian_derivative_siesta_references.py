@@ -16,13 +16,13 @@ from typing import Any
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from reference_selection import choose_reference_matrix, file_sha256  # noqa: E402
 
 
-MATRIX_SUFFIXES = {".HSX", ".TSHS"}
 FORBIDDEN_REFERENCE_NAMES = {"ML_prediction.HSX"}
 STATUS_FIELDS = [
     "sample_id",
@@ -38,6 +38,8 @@ STATUS_FIELDS = [
     "error",
 ]
 STRUCTURE_SKIP_SUFFIXES = {".HSX", ".TSHS", ".TSDE", ".nc", ".out", ".XV", ".STRUCT_OUT", ".ORB_INDX"}
+PSEUDOPOTENTIAL_SUFFIXES = (".psf", ".vps", ".psml")
+PSEUDOPOTENTIAL_DIR_CANDIDATES = ("", "pseudopotentials", "pseudos")
 
 
 class DerivativeSiestaReferenceError(RuntimeError):
@@ -57,6 +59,18 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise DerivativeSiestaReferenceError(f"Missing JSON file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise DerivativeSiestaReferenceError(f"Malformed JSON file {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DerivativeSiestaReferenceError(f"JSON payload must be an object: {path}")
+    return payload
+
+
 def discover_structure_samples(stencil_root: Path) -> list[Path]:
     structures_root = stencil_root / "structures"
     if not structures_root.exists():
@@ -65,11 +79,8 @@ def discover_structure_samples(stencil_root: Path) -> list[Path]:
 
 
 def clean_reference_dir(reference_dir: Path, *, overwrite: bool) -> None:
-    if not reference_dir.exists():
-        return
-    if not overwrite:
-        return
-    shutil.rmtree(reference_dir)
+    if reference_dir.exists() and overwrite:
+        shutil.rmtree(reference_dir)
 
 
 def copy_structure_inputs(structure_dir: Path, reference_dir: Path) -> None:
@@ -104,6 +115,90 @@ def copy_existing_reference(sample_id: str, reference_dir: Path, existing_refere
     target = reference_dir / selection.path.name
     shutil.copy2(selection.path, target)
     return target
+
+
+def resolve_source_dataset_root(
+    *,
+    stencil_root: Path,
+    source_dataset_root: Path | None,
+) -> Path | None:
+    if source_dataset_root is not None:
+        if not source_dataset_root.exists():
+            raise DerivativeSiestaReferenceError(
+                f"Configured source dataset root does not exist: {source_dataset_root}"
+            )
+        return source_dataset_root
+    manifest_path = stencil_root / "derivative_stencil_manifest.json"
+    if not manifest_path.exists():
+        return None
+    payload = read_json(manifest_path)
+    raw = str(payload.get("source_dataset_root") or "").strip()
+    if not raw:
+        return None
+    resolved = Path(raw).expanduser()
+    if not resolved.is_absolute():
+        resolved = (REPO_ROOT / resolved).resolve(strict=False)
+    if not resolved.exists():
+        raise DerivativeSiestaReferenceError(
+            f"Derivative stencil manifest points to a missing source dataset root: {resolved} "
+            f"(from {manifest_path})"
+        )
+    return resolved
+
+
+def required_species_labels(run_fdf: Path) -> list[str]:
+    labels: list[str] = []
+    in_block = False
+    for raw_line in run_fdf.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        lowered = line.lower()
+        if lowered == "%block chemicalspecieslabel":
+            in_block = True
+            continue
+        if lowered == "%endblock chemicalspecieslabel":
+            break
+        if not in_block or not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 3:
+            label = parts[2].strip()
+            if label and label not in labels:
+                labels.append(label)
+    if not labels:
+        raise DerivativeSiestaReferenceError(
+            f"Could not determine required pseudopotential species from {run_fdf}"
+        )
+    return labels
+
+
+def stage_required_pseudopotentials(
+    *,
+    reference_dir: Path,
+    source_dataset_root: Path,
+) -> list[str]:
+    species_labels = required_species_labels(reference_dir / "RUN.fdf")
+    search_roots = [source_dataset_root / relative for relative in PSEUDOPOTENTIAL_DIR_CANDIDATES]
+    staged: list[str] = []
+    for label in species_labels:
+        candidates = [
+            root / f"{label}{suffix}"
+            for root in search_roots
+            for suffix in PSEUDOPOTENTIAL_SUFFIXES
+        ]
+        source = next((candidate for candidate in candidates if candidate.exists()), None)
+        if source is None:
+            raise DerivativeSiestaReferenceError(
+                "Missing required pseudopotential for species "
+                f"{label!r} in derivative SIESTA calculation directory {reference_dir}. "
+                f"Searched dataset/source root {source_dataset_root}. "
+                "Candidate filenames tried: "
+                + ", ".join(str(candidate) for candidate in candidates)
+            )
+        target = reference_dir / source.name
+        if not target.exists():
+            shutil.copy2(source, target)
+        staged.append(target.name)
+    return staged
 
 
 def run_siesta(reference_dir: Path, *, command: str, use_shell: bool = False) -> dict[str, Any]:
@@ -167,6 +262,7 @@ def run_derivative_siesta_references(
     *,
     stencil_root: Path,
     output_reference_root: Path | None = None,
+    source_dataset_root: Path | None = None,
     existing_reference_root: Path | None = None,
     siesta_command: str = "siesta",
     overwrite: bool = False,
@@ -179,6 +275,14 @@ def run_derivative_siesta_references(
 ) -> dict[str, Any]:
     output_reference_root = output_reference_root or stencil_root / "siesta_hamiltonians"
     structures = discover_structure_samples(stencil_root)
+    resolved_source_dataset_root = (
+        None
+        if existing_reference_root is not None
+        else resolve_source_dataset_root(
+            stencil_root=stencil_root,
+            source_dataset_root=source_dataset_root,
+        )
+    )
     effective_max_samples = _effective_max_samples(max_samples=max_samples, max_jobs=max_jobs)
     if effective_max_samples is not None:
         structures = structures[: max(0, int(effective_max_samples))]
@@ -229,6 +333,16 @@ def run_derivative_siesta_references(
                     )
                 )
                 continue
+            if resolved_source_dataset_root is None:
+                raise DerivativeSiestaReferenceError(
+                    "Derivative SIESTA references require a source dataset root to stage pseudopotentials. "
+                    f"Calculation directory: {reference_dir}. "
+                    "Provide --source-dataset-root or ensure derivative_stencil_manifest.json records source_dataset_root."
+                )
+            stage_required_pseudopotentials(
+                reference_dir=reference_dir,
+                source_dataset_root=resolved_source_dataset_root,
+            )
             run_record = run_siesta(reference_dir, command=siesta_command, use_shell=siesta_shell)
             selection = choose_reference_matrix(reference_dir)
             status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
@@ -266,6 +380,7 @@ def run_derivative_siesta_references(
         "stencil_root": str(stencil_root),
         "structures_root": str(stencil_root / "structures"),
         "output_reference_root": str(output_reference_root),
+        "source_dataset_root": str(resolved_source_dataset_root) if resolved_source_dataset_root else "",
         "existing_reference_root": str(existing_reference_root) if existing_reference_root else "",
         "siesta_hamiltonians_root": str(output_reference_root),
         "siesta_command": siesta_command if existing_reference_root is None else "",
@@ -313,6 +428,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stencil-root", type=Path, required=True)
     parser.add_argument("--output-reference-root", type=Path, default=None)
+    parser.add_argument("--source-dataset-root", type=Path, default=None)
     parser.add_argument("--existing-reference-root", type=Path, default=None)
     parser.add_argument("--siesta-command", default="siesta")
     parser.add_argument("--overwrite", action="store_true")
@@ -330,6 +446,7 @@ def main() -> int:
         manifest = run_derivative_siesta_references(
             stencil_root=args.stencil_root,
             output_reference_root=args.output_reference_root,
+            source_dataset_root=args.source_dataset_root,
             existing_reference_root=args.existing_reference_root,
             siesta_command=args.siesta_command,
             overwrite=args.overwrite,

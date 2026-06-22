@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import csv
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -14,10 +16,26 @@ import time
 from pathlib import Path
 from typing import Any
 
+from deeph_config import (
+    default_deeph_paths,
+    render_inference_config,
+    render_preprocess_config,
+    validate_deeph_siesta_sample,
+)
+from deeph_prediction_adapter import (
+    DeepHPredictionAdapterResult,
+    adapt_deeph_prediction_sample,
+    count_orbitals_from_orbital_types,
+    parse_block_key,
+    write_adapter_manifest,
+)
+from deeph_raw_global_equivalence_preflight import derive_deeph_to_siesta_basis_transform
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREDICTION_FILENAME = "ML_prediction.HSX"
+DEEPH_SPARSE_LAYOUT_KIND = "deeph_h5_reconstructed_siesta_sparse_layout_v1"
 STATUS_FIELDS = [
     "sample_id",
     "status",
@@ -199,6 +217,400 @@ def run_deeph_command(
         "finished_at": time.time(),
         "stdout": completed.stdout,
         "stderr": completed.stderr,
+    }
+
+
+def read_ini(path: Path) -> configparser.ConfigParser:
+    config = configparser.ConfigParser()
+    if not config.read(path):
+        raise DerivativePredictionStageError(f"Missing INI configuration file: {path}")
+    return config
+
+
+def discover_siesta_reference_samples(stencil_root: Path, *, structures: list[Path]) -> dict[str, Path]:
+    reference_root = stencil_root / "siesta_hamiltonians"
+    if not reference_root.exists():
+        raise DerivativePredictionStageError(
+            f"DeepH derivative prediction requires derivative SIESTA references under: {reference_root}"
+        )
+    references: dict[str, Path] = {}
+    missing: list[str] = []
+    for structure in structures:
+        sample_id = structure.name
+        sample_root = reference_root / sample_id
+        if not sample_root.exists():
+            missing.append(sample_id)
+            continue
+        references[sample_id] = sample_root
+    if missing:
+        raise DerivativePredictionStageError(
+            "DeepH derivative prediction is missing SIESTA reference sample directories for: " + ", ".join(missing)
+        )
+    return references
+
+
+def build_deeph_derivative_raw_mirror(*, references: dict[str, Path], raw_dir: Path) -> dict[str, Any]:
+    if raw_dir.exists():
+        shutil.rmtree(raw_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for index, sample_id in enumerate(sorted(references)):
+        source_dir = references[sample_id]
+        validate_deeph_siesta_sample(source_dir)
+        raw_sample = raw_dir / f"{index:06d}_{sample_id}"
+        raw_sample.mkdir(parents=True, exist_ok=True)
+        for artifact in sorted(source_dir.iterdir()):
+            if not artifact.is_file() or artifact.name == PREDICTION_FILENAME:
+                continue
+            destination = raw_sample / artifact.name
+            try:
+                os.symlink(os.path.relpath(artifact, raw_sample), destination)
+            except OSError:
+                shutil.copy2(artifact, destination)
+        rows.append({"sample_id": sample_id, "split": "test", "raw_dir": str(raw_sample), "source_dir": str(source_dir)})
+    return {"raw_dir": str(raw_dir), "seed": 0, "rows": rows}
+
+
+def deeph_command_uses_template(command_template: str | None) -> bool:
+    template = str(command_template or "")
+    return any(token in template for token in ("{stencil_root}", "{output_root}", "{model_dir}"))
+
+
+def deeph_auto_backend_requested(command_template: str | None) -> bool:
+    if command_template in (None, ""):
+        return True
+    return len(shlex.split(str(command_template))) == 1 and not deeph_command_uses_template(command_template)
+
+
+def infer_deeph_cli(command_template: str | None, *, cli_name: str) -> str:
+    if command_template not in (None, ""):
+        parts = shlex.split(str(command_template))
+        if len(parts) == 1:
+            candidate = Path(parts[0])
+            if candidate.name == "deeph-inference":
+                sibling = candidate.with_name(cli_name)
+                if sibling.exists():
+                    return str(sibling)
+            if cli_name == "deeph-inference":
+                return parts[0]
+    if cli_name == "deeph-inference":
+        return "deeph-inference"
+    import shutil as _shutil
+
+    discovered = _shutil.which(cli_name)
+    if discovered:
+        return discovered
+    inference_cli = infer_deeph_cli(command_template, cli_name="deeph-inference")
+    inference_path = Path(inference_cli)
+    sibling = inference_path.with_name(cli_name)
+    if sibling.exists():
+        return str(sibling)
+    raise DerivativePredictionStageError(
+        f"Could not resolve DeepH CLI '{cli_name}'. Provide derivative.deeph_command or add {cli_name} to PATH."
+    )
+
+
+def deeph_runtime_settings(model_dir: Path, *, python_executable: str, command_template: str | None) -> dict[str, Any]:
+    config_path = model_dir / "config.ini"
+    radius = -1.0
+    disable_cuda = True
+    device = "cpu"
+    huge_structure = False
+    if config_path.exists():
+        config = read_ini(config_path)
+        radius = config.getfloat("graph", "radius", fallback=-1.0)
+        disable_cuda = config.getboolean("basic", "disable_cuda", fallback=True)
+        device = config.get("basic", "device", fallback="cpu")
+    python_path = python_executable
+    if python_path in ("", sys.executable):
+        inference_cli = Path(infer_deeph_cli(command_template, cli_name="deeph-inference"))
+        sibling_python = inference_cli.with_name("python")
+        sibling_python3 = inference_cli.with_name("python3")
+        if sibling_python.exists():
+            python_path = str(sibling_python)
+        elif sibling_python3.exists():
+            python_path = str(sibling_python3)
+    return {
+        "radius": radius,
+        "disable_cuda": disable_cuda,
+        "device": device,
+        "huge_structure": huge_structure,
+        "python_interpreter": python_path,
+    }
+
+
+def first_matching_file(directory: Path, suffix: str) -> Path:
+    matches = sorted(directory.glob(f"*{suffix}"))
+    if not matches:
+        raise DerivativePredictionStageError(f"DeepH derivative prediction requires *{suffix} under {directory}")
+    return matches[0]
+
+
+def reconstruct_deeph_sparse_layout_prediction(
+    *,
+    prediction_h5: Path,
+    processed_sample_dir: Path,
+    siesta_reference_dir: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    import h5py
+    import numpy as np
+    from scipy import sparse
+
+    orbital_types = processed_sample_dir / "orbital_types.dat"
+    orbital_counts = count_orbitals_from_orbital_types(orbital_types)
+    offsets = np.cumsum([0, *orbital_counts])
+    unit_orbitals = int(offsets[-1])
+    r_list = [
+        tuple(int(value) for value in line.split())
+        for line in (processed_sample_dir / "R_list.dat").read_text(encoding="utf-8").splitlines()
+        if line.split()
+    ]
+    if not r_list:
+        raise DerivativePredictionStageError(f"DeepH processed sample has no R_list.dat entries: {processed_sample_dir}")
+    r_index = {vector: idx for idx, vector in enumerate(r_list)}
+    orb_indx = first_matching_file(siesta_reference_dir, ".ORB_INDX")
+    transform = derive_deeph_to_siesta_basis_transform(
+        row={"artifact_paths": {"orb_indx": str(orb_indx)}},
+        manifest_dir=REPO_ROOT,
+        orbital_types=orbital_types,
+        n_orbitals=unit_orbitals,
+    )
+    permutation = np.asarray(transform.get("permutation") or [], dtype=int)
+    signs = np.asarray(transform.get("signs") or [], dtype=float)
+    matrix = sparse.lil_matrix((unit_orbitals, unit_orbitals * len(r_list)), dtype=np.complex128)
+    with h5py.File(prediction_h5, "r") as handle:
+        for key in handle.keys():
+            lattice_r, atom_i, atom_j = parse_block_key(key)
+            column_block = r_index.get(tuple(lattice_r))
+            if column_block is None:
+                raise DerivativePredictionStageError(
+                    f"DeepH prediction block {key} uses R={tuple(lattice_r)} not present in {processed_sample_dir / 'R_list.dat'}"
+                )
+            row_slice = slice(int(offsets[atom_i]), int(offsets[atom_i + 1]))
+            col_slice = slice(int(offsets[atom_j]), int(offsets[atom_j + 1]))
+            block = np.asarray(handle[key][()])
+            row_perm = permutation[row_slice] - int(offsets[atom_i])
+            col_perm = permutation[col_slice] - int(offsets[atom_j])
+            row_sign = signs[row_slice]
+            col_sign = signs[col_slice]
+            block = block[np.ix_(row_perm, col_perm)]
+            block = (row_sign[:, None] * block) * col_sign[None, :]
+            r0, r1 = int(offsets[atom_i]), int(offsets[atom_i + 1])
+            c0 = column_block * unit_orbitals + int(offsets[atom_j])
+            c1 = column_block * unit_orbitals + int(offsets[atom_j + 1])
+            matrix[r0:r1, c0:c1] = block
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as handle:
+        sparse.save_npz(handle, matrix.tocsr())
+    reconstructed = matrix.tocsr()
+    return {
+        "kind": DEEPH_SPARSE_LAYOUT_KIND,
+        "nnz": int(reconstructed.nnz),
+        "shape_rows": int(reconstructed.shape[0]),
+        "shape_cols": int(reconstructed.shape[1]),
+    }
+
+
+def run_deeph_auto_backend(
+    *,
+    stencil_root: Path,
+    structures: list[Path],
+    output_root: Path,
+    model_dir: Path,
+    overwrite: bool,
+    skip_if_exists: bool,
+    diagnostic_only: bool,
+    command_template: str | None,
+    python_executable: str,
+) -> dict[str, Any]:
+    references = discover_siesta_reference_samples(stencil_root, structures=structures)
+    deeph_paths = default_deeph_paths(output_root.parent)
+    if overwrite and deeph_paths.root.exists():
+        shutil.rmtree(deeph_paths.root)
+    settings = deeph_runtime_settings(model_dir, python_executable=python_executable, command_template=command_template)
+    raw_mirror = build_deeph_derivative_raw_mirror(references=references, raw_dir=deeph_paths.raw_dir)
+    render_preprocess_config(
+        deeph_paths.preprocess_config,
+        raw_dir=deeph_paths.raw_dir,
+        processed_dir=deeph_paths.processed_dir,
+        multiprocessing=0,
+        local_coordinate=True,
+        get_s=True,
+        radius=float(settings["radius"]),
+        julia_interpreter="",
+    )
+    preprocess_cli = infer_deeph_cli(command_template, cli_name="deeph-preprocess")
+    preprocess_record = run_command([preprocess_cli, "--config", str(deeph_paths.preprocess_config)], cwd=REPO_ROOT)
+    rows: list[dict[str, Any]] = []
+    layout_rows: list[dict[str, Any]] = []
+    adapter_results: list[DeepHPredictionAdapterResult] = []
+    sample_index = {row["sample_id"]: row for row in raw_mirror["rows"]}
+    if int(preprocess_record["returncode"]) != 0:
+        for structure in structures:
+            rows.append(
+                status_row(
+                    sample_id=structure.name,
+                    status="error",
+                    model="deeph",
+                    structure_dir=structure,
+                    prediction_dir=output_root / structure.name,
+                    model_dir=model_dir,
+                    command=preprocess_record["command"],
+                    returncode=int(preprocess_record["returncode"]),
+                    started_at=preprocess_record["started_at"],
+                    finished_at=preprocess_record["finished_at"],
+                    error="deeph_preprocess_failed",
+                )
+            )
+        return {
+            "rows": rows,
+            "adapter_results": [],
+            "layout_rows": [],
+            "runtime": {
+                "mode": "deeph_auto_backend",
+                "preprocess_command": " ".join(preprocess_record["command"]),
+                "preprocess_returncode": int(preprocess_record["returncode"]),
+                "preprocess_stdout": preprocess_record["stdout"],
+                "preprocess_stderr": preprocess_record["stderr"],
+            },
+        }
+
+    inference_cli = infer_deeph_cli(command_template, cli_name="deeph-inference")
+    for structure in structures:
+        sample = sample_index[structure.name]
+        raw_sample_dir = Path(str(sample["raw_dir"]))
+        processed_sample_dir = deeph_paths.processed_dir / raw_sample_dir.name
+        if not processed_sample_dir.exists():
+            rows.append(
+                status_row(
+                    sample_id=structure.name,
+                    status="error",
+                    model="deeph",
+                    structure_dir=structure,
+                    prediction_dir=output_root / structure.name,
+                    model_dir=model_dir,
+                    command=[preprocess_cli, "--config", str(deeph_paths.preprocess_config)],
+                    returncode=0,
+                    error="deeph_processed_sample_missing",
+                )
+            )
+            continue
+        work_dir = deeph_paths.inference_dir / raw_sample_dir.name
+        if overwrite and work_dir.exists():
+            shutil.rmtree(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        for item in sorted(processed_sample_dir.iterdir()):
+            if item.is_file():
+                destination = work_dir / item.name
+                if destination.exists() or destination.is_symlink():
+                    destination.unlink()
+                try:
+                    os.symlink(os.path.relpath(item, work_dir), destination)
+                except OSError:
+                    shutil.copy2(item, destination)
+        inference_config = deeph_paths.config_dir / "inference" / f"{raw_sample_dir.name}.ini"
+        render_inference_config(
+            inference_config,
+            work_dir=work_dir,
+            trained_model_dir=model_dir,
+            python_interpreter=str(settings["python_interpreter"]),
+            interface="openmx",
+            task=[3, 4],
+            disable_cuda=bool(settings["disable_cuda"]),
+            device=str(settings["device"]),
+            huge_structure=bool(settings["huge_structure"]),
+            restore_blocks_py=True,
+            radius=float(settings["radius"]),
+        )
+        command = [inference_cli, "--config", str(inference_config)]
+        command_record = run_command(command, cwd=REPO_ROOT)
+        prediction_dir = output_root / structure.name
+        clean_prediction_dir(prediction_dir, overwrite=overwrite)
+        h5_prediction_path = work_dir / "hamiltonians_pred.h5"
+        rh_prediction_path = work_dir / "rh_pred.h5"
+        if h5_prediction_path.exists():
+            shutil.copy2(h5_prediction_path, prediction_dir / h5_prediction_path.name)
+        if rh_prediction_path.exists():
+            shutil.copy2(rh_prediction_path, prediction_dir / rh_prediction_path.name)
+        status = "error"
+        error = "prediction_command_failed" if int(command_record["returncode"]) != 0 else "missing_prediction"
+        adapter_status = ""
+        metrics_ready = False
+        reconstructed_layout: dict[str, Any] | None = None
+        if int(command_record["returncode"]) == 0 and h5_prediction_path.exists():
+            try:
+                adapter_result = adapt_deeph_prediction_sample(
+                    work_dir=work_dir,
+                    processed_sample_dir=processed_sample_dir,
+                    sample_id=structure.name,
+                )
+                adapter_results.append(adapter_result)
+                adapter_status = adapter_result.status
+                metrics_ready = bool(adapter_result.metrics_ready)
+                write_json(prediction_dir / "deeph_adapter_result.json", adapter_result.to_dict())
+                reconstructed_layout = reconstruct_deeph_sparse_layout_prediction(
+                    prediction_h5=h5_prediction_path,
+                    processed_sample_dir=processed_sample_dir,
+                    siesta_reference_dir=references[structure.name],
+                    output_path=prediction_dir / PREDICTION_FILENAME,
+                )
+                layout_rows.append({"sample_id": structure.name, **reconstructed_layout})
+                status = "predicted"
+                error = ""
+            except Exception as exc:
+                error = f"deeph_adapter_failed:{type(exc).__name__}"
+        row = status_row(
+            sample_id=structure.name,
+            status=status,
+            model="deeph",
+            structure_dir=structure,
+            prediction_dir=prediction_dir,
+            model_dir=model_dir,
+            command=command_record["command"],
+            returncode=int(command_record["returncode"]),
+            started_at=command_record["started_at"],
+            finished_at=command_record["finished_at"],
+            error=error,
+        )
+        row["prediction_h5_path"] = str(prediction_dir / h5_prediction_path.name) if h5_prediction_path.exists() else ""
+        row["adapter_status"] = adapter_status
+        row["metrics_ready"] = metrics_ready
+        if reconstructed_layout is not None:
+            row["prediction_layout"] = reconstructed_layout["kind"]
+            row["prediction_shape"] = [reconstructed_layout["shape_rows"], reconstructed_layout["shape_cols"]]
+        rows.append(row)
+
+    adapter_manifest_path = deeph_paths.inference_dir / "adapter_manifest.json"
+    adapter_manifest = write_adapter_manifest(adapter_manifest_path, adapter_results) if adapter_results else {}
+    layout_note_path = output_root / "deeph_sparse_layout_note.json"
+    layout_note = {
+        "kind": DEEPH_SPARSE_LAYOUT_KIND,
+        "description": (
+            "ML_prediction.HSX stores a scipy sparse NPZ payload in the SIESTA sparse row/column layout "
+            "reconstructed from DeepH hamiltonians_pred.h5 and the sample HSX sparsity pattern. "
+            "This is diagnostic-only and does not prove raw/global HSX equivalence."
+        ),
+        "rows": layout_rows,
+    }
+    if layout_rows:
+        write_json(layout_note_path, layout_note)
+    return {
+        "rows": rows,
+        "adapter_results": [result.to_dict() for result in adapter_results],
+        "adapter_manifest": str(adapter_manifest_path) if adapter_results else "",
+        "adapter_manifest_payload": adapter_manifest,
+        "layout_note": str(layout_note_path) if layout_rows else "",
+        "layout_rows": layout_rows,
+        "runtime": {
+            "mode": "deeph_auto_backend",
+            "preprocess_command": " ".join(preprocess_record["command"]),
+            "preprocess_returncode": int(preprocess_record["returncode"]),
+            "preprocess_stdout": preprocess_record["stdout"],
+            "preprocess_stderr": preprocess_record["stderr"],
+            "inference_cli": inference_cli,
+            "python_interpreter": str(settings["python_interpreter"]),
+        },
     }
 
 
@@ -434,7 +846,10 @@ def run_derivative_predictions(
         if checkpoint is None or not checkpoint.exists():
             raise DerivativePredictionStageError(f"Graph2Mat prediction requires an existing --checkpoint: {checkpoint}")
         if not basis_files:
-            raise DerivativePredictionStageError("Graph2Mat prediction requires --basis-files when not staging existing predictions.")
+            raise DerivativePredictionStageError(
+                "Graph2Mat prediction requires --basis-files when not staging existing predictions. "
+                "For workflow payloads, set derivative.basis_files to the required Graph2Mat basis XML glob or file list."
+            )
         run_output_dir = output_root.parent / f".{model}_derivative_prediction_run"
         if overwrite and run_output_dir.exists():
             shutil.rmtree(run_output_dir)
@@ -476,28 +891,42 @@ def run_derivative_predictions(
     else:
         if model_dir is None or not model_dir.exists():
             raise DerivativePredictionStageError(f"DeepH prediction requires an existing --model-dir: {model_dir}")
-        if not deeph_command:
+        if deeph_auto_backend_requested(deeph_command):
+            extras = run_deeph_auto_backend(
+                stencil_root=stencil_root,
+                structures=structures,
+                output_root=output_root,
+                model_dir=model_dir,
+                overwrite=overwrite,
+                skip_if_exists=skip_if_exists,
+                diagnostic_only=diagnostic_only,
+                command_template=deeph_command,
+                python_executable=python_executable or sys.executable,
+            )
+            rows = extras["rows"]
+        elif not deeph_command:
             raise DerivativePredictionStageError(
                 "DeepH prediction requires --existing-prediction-root or --deeph-command. "
                 "The command may use {stencil_root}, {output_root}, and {model_dir}."
             )
-        command_record = run_deeph_command(
-            deeph_command,
-            stencil_root=stencil_root,
-            output_root=output_root,
-            model_dir=model_dir,
-            use_shell=deeph_shell,
-        )
-        rows = rows_from_output(
-            structures=structures,
-            model=model,
-            output_root=output_root,
-            checkpoint=checkpoint,
-            model_dir=model_dir,
-            command_record=command_record,
-            overwrite=overwrite,
-            skip_if_exists=skip_if_exists,
-        )
+        else:
+            command_record = run_deeph_command(
+                deeph_command,
+                stencil_root=stencil_root,
+                output_root=output_root,
+                model_dir=model_dir,
+                use_shell=deeph_shell,
+            )
+            rows = rows_from_output(
+                structures=structures,
+                model=model,
+                output_root=output_root,
+                checkpoint=checkpoint,
+                model_dir=model_dir,
+                command_record=command_record,
+                overwrite=overwrite,
+                skip_if_exists=skip_if_exists,
+            )
 
     failed = [row for row in rows if row["status"] == "error"]
     manifest = {
@@ -510,6 +939,7 @@ def run_derivative_predictions(
         "checkpoint": str(checkpoint) if checkpoint else "",
         "model_dir": str(model_dir) if model_dir else "",
         "existing_prediction_root": str(existing_prediction_root) if existing_prediction_root else "",
+        "basis_files": basis_files or "",
         "overwrite": overwrite,
         "skip_if_exists": skip_if_exists,
         "diagnostic_only": diagnostic_only,
@@ -529,6 +959,14 @@ def run_derivative_predictions(
             "manifest": str(output_root / f"derivative_{model}_prediction_manifest.json"),
         },
     }
+    if model == "deeph" and "extras" in locals():
+        manifest.update(
+            {
+                "runtime": extras.get("runtime", {}),
+                "adapter_manifest": extras.get("adapter_manifest", ""),
+                "layout_note": extras.get("layout_note", ""),
+            }
+        )
     write_csv(output_root / f"derivative_{model}_prediction_status.csv", rows)
     write_json(output_root / f"derivative_{model}_prediction_manifest.json", manifest)
     if failed and not diagnostic_only:
