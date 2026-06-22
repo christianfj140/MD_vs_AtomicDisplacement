@@ -860,6 +860,7 @@ def build_common_plot_payload(
     status_payload = dict(status_payload or {})
     timing_scaling_rows = timing_scaling_rows or []
     metric_scaling_rows = metric_scaling_rows or []
+    metric_scaling_group_ids: set[str] = set()
     timing_scaling_plots = (
         [
             {
@@ -881,6 +882,7 @@ def build_common_plot_payload(
             rows = [row for row in metric_scaling_rows if row.get("metric_key") in metric_keys]
             if not rows:
                 continue
+            metric_scaling_group_ids.add(str(metric_group["id"]))
             metric_scaling_plots.append(
                 {
                     "id": f"metric_scaling_{metric_group['id']}",
@@ -922,6 +924,8 @@ def build_common_plot_payload(
     recommendation = _safe_recommendation_for_display(manifest)
     plots: list[dict[str, Any]] = []
     for metric_group in COMMON_METRIC_GROUPS:
+        if str(metric_group["id"]) in metric_scaling_group_ids:
+            continue
         rows = _plot_rows(summary_rows, metric_group)
         plots.append(
             {

@@ -2513,20 +2513,28 @@ function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
 function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   const grouped = new Map();
   for (const row of plot.rows || []) {
-    const key = String(row.method || row.finite_difference_method || "diagnostic");
+    const seriesKey = plot.series_key || "method";
+    const key = String(row[seriesKey] || row.method || row.finite_difference_method || "diagnostic");
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(row);
   }
-  const traces = Array.from(grouped.entries()).map(([key, rows], index) => ({
-    type: "scatter",
-    mode: "markers",
-    name: key,
-    marker: { symbol: g2mDeephIsDeepH(key) ? "triangle-up" : "circle", size: 9, color: plotColor(index) },
-    x: rows.map((row) => finiteNumber(row[plot.x_key || "x"])),
-    y: rows.map((row) => finiteNumber(row[plot.y_key])),
-    text: rows.map((row) => [row.sample, row.axis, row.atom_index_zero_based, row.finite_difference_method].filter((item) => item !== undefined && item !== "").join(" | ")),
-    hovertemplate: `%{x:.5g}, %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
-  }));
+  const metrics = (plot.metrics && plot.metrics.length) ? plot.metrics : [{ key: plot.y_key, label: plot.y_title || plot.y_key }];
+  const traces = [];
+  Array.from(grouped.entries()).forEach(([key, rows], index) => {
+    metrics.forEach((metric, metricIndex) => {
+      traces.push({
+        type: "scatter",
+        mode: rows.length > 1 ? "lines+markers" : "markers",
+        name: metrics.length > 1 ? `${key} · ${metric.label || metric.key}` : key,
+        marker: { symbol: g2mDeephIsDeepH(key) ? "triangle-up" : "circle", size: 9, color: plotColor(index) },
+        line: { color: plotColor(index), dash: metricIndex ? "dash" : "solid" },
+        x: rows.map((row) => finiteNumber(row[plot.x_key || "x"])),
+        y: rows.map((row) => finiteNumber(row[metric.key])),
+        text: rows.map((row) => [row.dataset_ids?.join?.(","), row.sample, row.axis, row.atom_index_zero_based, row.finite_difference_method, row.n_rows ? `rows ${row.n_rows}` : ""].filter((item) => item !== undefined && item !== "").join(" | ")),
+        hovertemplate: `%{x:.5g}, %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
+      });
+    });
+  });
   renderPlot(
     card,
     traces,
@@ -5411,10 +5419,12 @@ function normalizeG2MDeepHMetricPlots(payload = {}) {
   }
   const readableGroups = g2mDeephReadableMetricGroups();
   const readableMetricPlots = [];
+  const scaledMetricGroupIds = new Set();
   for (const group of readableGroups) {
     const metricKeys = new Set((group.metrics || []).map((metric) => metric.key));
     const groupRows = rows.filter((row) => metricKeys.has(row.metric_key));
     if (!groupRows.length) continue;
+    scaledMetricGroupIds.add(group.id);
     readableMetricPlots.push({
       id: `metric_scaling_${group.id}`,
       kind: "metric_scaling",
@@ -5425,7 +5435,9 @@ function normalizeG2MDeepHMetricPlots(payload = {}) {
       rows: groupRows,
     });
   }
-  const nonMetricPlots = (payload.plots || []).filter((plot) => plot.kind !== "metric_scaling");
+  const nonMetricPlots = (payload.plots || []).filter(
+    (plot) => plot.kind !== "metric_scaling" && (plot.kind !== "grouped_bar" || !scaledMetricGroupIds.has(plot.id)),
+  );
   return {
     ...payload,
     available: Boolean(payload.available || readableMetricPlots.length || nonMetricPlots.length),

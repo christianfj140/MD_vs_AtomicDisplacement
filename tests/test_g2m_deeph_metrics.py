@@ -595,6 +595,36 @@ class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
             all(len(plot.get("metrics") or []) == 1 for plot in payload["plots"] if plot["kind"] == "metric_scaling")
         )
 
+    def test_plot_payload_prefers_metric_scaling_when_dataset_size_exists(self) -> None:
+        payload = build_common_plot_payload(
+            {
+                "status": "valid_reused_joint_dataset",
+                "summary_rows": [
+                    {
+                        "method": "graph2mat",
+                        "h_mae_eV_mean": 0.2,
+                        "low_energy_rmse_eV_mean": 0.4,
+                    }
+                ],
+                "warnings": [],
+                "recommendation": {"winner": None, "robust_recommendation": False},
+            },
+            metric_scaling_rows=[
+                {
+                    "run_id": "run_a",
+                    "dataset_size": 20,
+                    "method": "graph2mat",
+                    "metric_key": "h_mae_eV_mean",
+                    "metric_value": 0.2,
+                }
+            ],
+        )
+
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("metric_scaling_h_mae", plot_ids)
+        self.assertNotIn("h_mae", plot_ids)
+        self.assertIn("spectral_low_energy", plot_ids)
+
     def test_plot_payload_splits_metric_groups_by_scale(self) -> None:
         payload = build_common_plot_payload(
             {
@@ -631,7 +661,19 @@ class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
             "dos_wasserstein",
         ):
             self.assertIn(plot_id, plot_ids)
-        self.assertTrue(all(len(plot.get("metrics") or []) == 1 for plot in payload["plots"] if plot["kind"] == "grouped_bar"))
+        for plot_id in (
+            "h_mae",
+            "h_rmse",
+            "h_mse",
+            "spectral_global",
+            "spectral_low_energy",
+            "spectral_fermi",
+            "spectral_frontier",
+            "dos_mae",
+            "dos_wasserstein",
+        ):
+            plot = next(plot for plot in payload["plots"] if plot["id"] == plot_id)
+            self.assertEqual(len(plot.get("metrics") or []), 1)
 
     def test_plot_payload_includes_artifact_missing_counts(self) -> None:
         payload = build_common_plot_payload(

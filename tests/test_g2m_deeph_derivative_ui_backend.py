@@ -351,6 +351,76 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertFalse((run_root / "common_metrics" / "summary" / "derivative_plots" / "derivative_plot_payload.json").exists())
         self.assertTrue(payload["comparison_rows"])
 
+    def test_derivative_backend_loads_old_and_dataset_size_plot_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_run_root = Path(tmp) / "old_payload_run"
+            self.write_derivative_tree(old_run_root, "graph2mat", source_model="graph2mat")
+            write_json(
+                old_run_root / "common_metrics" / "summary" / "derivative_plot_payload.json",
+                {
+                    "available": True,
+                    "plots": [
+                        {
+                            "id": "dh_mae_by_model",
+                            "kind": "grouped_bar",
+                            "rows": [{"method": "Graph2Mat", "dh_mae_union_eV_per_Ang": 0.2}],
+                            "metrics": [{"key": "dh_mae_union_eV_per_Ang", "label": "dH MAE", "unit": "eV/Ang"}],
+                        }
+                    ],
+                },
+            )
+            new_run_root = Path(tmp) / "new_payload_run"
+            self.write_derivative_tree(new_run_root, "graph2mat", source_model="graph2mat")
+            write_json(
+                new_run_root / "common_metrics" / "summary" / "derivative_plot_payload.json",
+                {
+                    "available": True,
+                    "plots": [
+                        {
+                            "id": "dh_mae_vs_dataset_size",
+                            "kind": "scatter",
+                            "x_key": "x_dataset_size",
+                            "x_title": "N_train snapshots",
+                            "y_key": "dh_mae_union_eV_per_Ang",
+                            "series_key": "model_label",
+                            "rows": [
+                                {
+                                    "model": "graph2mat",
+                                    "model_label": "Graph2Mat",
+                                    "x_dataset_size": 12,
+                                    "x_dataset_size_kind": "N_train",
+                                    "dataset_size_source": "frozen_split_manifest",
+                                    "dh_mae_union_eV_per_Ang": 0.2,
+                                },
+                                {
+                                    "model": "graph2mat",
+                                    "model_label": "Graph2Mat",
+                                    "x_dataset_size": 50,
+                                    "x_dataset_size_kind": "N_train",
+                                    "dataset_size_source": "frozen_split_manifest",
+                                    "dh_mae_union_eV_per_Ang": 0.1,
+                                },
+                            ],
+                            "diagnostic_only": True,
+                        }
+                    ],
+                    "scientific_warnings": [],
+                },
+            )
+
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=old_run_root):
+                old_payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("old_payload_run")
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=new_run_root):
+                new_payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("new_payload_run")
+
+        self.assertTrue(old_payload["plot_payload"]["available"])
+        self.assertEqual(old_payload["plot_payload"]["plots"][0]["id"], "dh_mae_by_model")
+        self.assertTrue(new_payload["plot_payload"]["available"])
+        dataset_plot = new_payload["plot_payload"]["plots"][0]
+        self.assertEqual(dataset_plot["id"], "dh_mae_vs_dataset_size")
+        self.assertEqual(dataset_plot["x_key"], "x_dataset_size")
+        self.assertEqual({row["x_dataset_size"] for row in dataset_plot["rows"]}, {12, 50})
+
     def test_blocked_gate_report_renders_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run_blocked"

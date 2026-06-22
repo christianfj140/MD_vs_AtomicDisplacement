@@ -287,6 +287,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn('"triangle-up"', self.app_js)
         self.assertIn('"circle"', self.app_js)
         self.assertIn("g2mDeepHPlotsQuery", self.app_js)
+        self.assertIn("scaledMetricGroupIds", self.app_js)
+        self.assertIn('plot.kind !== "grouped_bar" || !scaledMetricGroupIds.has(plot.id)', self.app_js)
         self.assertIn("plot-run-option", self.styles_css)
 
     def test_plotly_science_style_theme_is_applied_without_matplotlib(self) -> None:

@@ -42,11 +42,24 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
     def derivative_root(self, name: str) -> Path:
         return self.root / name / "derivative_metrics"
 
+    def write_dataset_root(self, name: str, *, train: int, validation: int = 1, test: int = 1) -> Path:
+        dataset_root = self.root / "datasets" / name
+        write_json(
+            dataset_root / "frozen_split_manifest.json",
+            {
+                "schema": "joint_graph2mat_deeph_frozen_split_manifest_v1",
+                "split_counts": {"train": train, "validation": validation, "test": test},
+            },
+        )
+        return dataset_root
+
     def write_derivative_fixture(
         self,
         name: str,
         *,
         source_model: str,
+        dataset_root: Path | None = None,
+        dataset_id: str = "",
         rows: list[dict[str, object]] | None = None,
         hermiticity_rows: list[dict[str, object]] | None = None,
         scientific_status: str = "diagnostic_only",
@@ -64,6 +77,8 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
                 "stencils_ok": len(rows or []),
                 "stencils_failed": stencils_failed,
                 "fatal_errors": fatal_errors or [],
+                "dataset_root": str(dataset_root) if dataset_root is not None else "",
+                "dataset_id": dataset_id,
             },
         )
         write_csv(derivative_root / "derivative_matrix_metrics.csv", rows or [])
@@ -243,6 +258,230 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertEqual(payload["force_constants_label"], "SIESTA force constants are not treated as dH/dR")
         paired_plot = next(plot for plot in payload["plots"] if plot["id"] == "graph2mat_vs_deeph_paired_comparison")
         self.assertEqual(len(paired_plot["rows"]), 1)
+
+    def test_dataset_size_plots_aggregate_by_model_and_n_train(self) -> None:
+        dataset_12 = self.write_dataset_root("dataset_12", train=12)
+        dataset_50 = self.write_dataset_root("dataset_50", train=50)
+        roots = [
+            self.write_derivative_fixture(
+                "graph2mat_n12",
+                source_model="graph2mat",
+                dataset_root=dataset_12,
+                dataset_id="n12",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.2,
+                        "dh_rmse_union_eV_per_Ang": 0.3,
+                        "dh_relative_frobenius_ref": 0.4,
+                        "dh_support_f1": 0.8,
+                        "dh_false_zero_rate": 0.1,
+                        "dh_false_nonzero_rate": 0.05,
+                    },
+                    {
+                        "sample": "s1",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 1,
+                        "axis": "y",
+                        "delta_ang": 0.02,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.4,
+                        "dh_rmse_union_eV_per_Ang": 0.5,
+                        "dh_relative_frobenius_ref": 0.6,
+                        "dh_support_f1": 0.6,
+                        "dh_false_zero_rate": 0.2,
+                        "dh_false_nonzero_rate": 0.15,
+                    },
+                ],
+            ),
+            self.write_derivative_fixture(
+                "deeph_n12",
+                source_model="deeph",
+                dataset_root=dataset_12,
+                dataset_id="n12",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "deeph",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.1,
+                        "dh_rmse_union_eV_per_Ang": 0.2,
+                        "dh_relative_frobenius_ref": 0.3,
+                        "dh_support_f1": 0.9,
+                        "dh_false_zero_rate": 0.05,
+                        "dh_false_nonzero_rate": 0.02,
+                    }
+                ],
+            ),
+            self.write_derivative_fixture(
+                "graph2mat_n50",
+                source_model="graph2mat",
+                dataset_root=dataset_50,
+                dataset_id="n50",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.08,
+                        "dh_rmse_union_eV_per_Ang": 0.18,
+                        "dh_relative_frobenius_ref": 0.28,
+                        "dh_support_f1": 0.95,
+                        "dh_false_zero_rate": 0.03,
+                        "dh_false_nonzero_rate": 0.01,
+                    }
+                ],
+            ),
+            self.write_derivative_fixture(
+                "deeph_n50",
+                source_model="deeph",
+                dataset_root=dataset_50,
+                dataset_id="n50",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "deeph",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.07,
+                        "dh_rmse_union_eV_per_Ang": 0.17,
+                        "dh_relative_frobenius_ref": 0.27,
+                        "dh_support_f1": 0.96,
+                        "dh_false_zero_rate": 0.02,
+                        "dh_false_nonzero_rate": 0.01,
+                    }
+                ],
+            ),
+        ]
+        output_dir = self.root / "plots_dataset_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        self.assertIn("dh_mae_vs_dataset_size", plots)
+        self.assertEqual(plots["dh_mae_vs_dataset_size"]["x_key"], "x_dataset_size")
+        self.assertEqual(plots["dh_mae_vs_dataset_size"]["series_key"], "model_label")
+        rows = plots["dh_mae_vs_dataset_size"]["rows"]
+        self.assertEqual({row["x_dataset_size"] for row in rows}, {12, 50})
+        self.assertEqual({row["model_label"] for row in rows}, {"Graph2Mat", "DeepH"})
+        graph2mat_12 = next(row for row in rows if row["model"] == "graph2mat" and row["x_dataset_size"] == 12)
+        self.assertAlmostEqual(graph2mat_12["dh_mae_union_eV_per_Ang"], 0.3)
+        self.assertEqual(graph2mat_12["n_rows"], 2)
+        self.assertEqual(graph2mat_12["n_stencils"], 2)
+        self.assertEqual(graph2mat_12["dataset_ids"], ["n12"])
+        self.assertEqual(graph2mat_12["x_dataset_size_kind"], "N_train")
+
+    def test_single_dataset_size_warns_and_keeps_existing_plots(self) -> None:
+        dataset_12 = self.write_dataset_root("dataset_12", train=12)
+        graph2mat_root = self.write_derivative_fixture(
+            "single_size_graph2mat",
+            source_model="graph2mat",
+            dataset_root=dataset_12,
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                    "dh_support_f1": 0.8,
+                    "dh_false_zero_rate": 0.1,
+                    "dh_false_nonzero_rate": 0.05,
+                }
+            ],
+        )
+        deeph_root = self.write_derivative_fixture(
+            "single_size_deeph",
+            source_model="deeph",
+            dataset_root=dataset_12,
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "deeph",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.3,
+                    "dh_support_f1": 0.9,
+                    "dh_false_zero_rate": 0.05,
+                    "dh_false_nonzero_rate": 0.02,
+                }
+            ],
+        )
+        output_dir = self.root / "plots_single_size"
+
+        completed = self.run_script(
+            "--derivative-root",
+            str(graph2mat_root),
+            "--derivative-root",
+            str(deeph_root),
+            "--output-dir",
+            str(output_dir),
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("dh_mae_by_model", plot_ids)
+        self.assertIn("graph2mat_vs_deeph_paired_comparison", plot_ids)
+        self.assertNotIn("dh_mae_vs_dataset_size", plot_ids)
+        codes = {warning["code"] for warning in payload["scientific_warnings"]}
+        self.assertIn("dataset_size_plots_unavailable_single_dataset_size", codes)
+
+    def test_missing_dataset_size_metadata_does_not_fabricate_plot(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "missing_size",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                    "dh_support_f1": 0.8,
+                    "dh_false_zero_rate": 0.1,
+                    "dh_false_nonzero_rate": 0.05,
+                }
+            ],
+        )
+        output_dir = self.root / "plots_missing_size"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        self.assertNotIn("dh_mae_vs_dataset_size", {plot["id"] for plot in payload["plots"]})
+        codes = {warning["code"] for warning in payload["scientific_warnings"]}
+        self.assertIn("dataset_size_metadata_missing", codes)
 
 
 if __name__ == "__main__":

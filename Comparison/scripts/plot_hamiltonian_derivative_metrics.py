@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,14 @@ MANIFEST_SCHEMA = "hamiltonian_derivative_plot_manifest_v1"
 TITLE = "Hamiltonian derivative diagnostics"
 REFERENCE_LABEL = "Reference: finite differences of SIESTA Hamiltonians"
 FORCE_CONSTANTS_LABEL = "SIESTA force constants are not treated as dH/dR"
+DATASET_SIZE_METRICS = [
+    "dh_mae_union_eV_per_Ang",
+    "dh_rmse_union_eV_per_Ang",
+    "dh_relative_frobenius_ref",
+    "dh_support_f1",
+    "dh_false_zero_rate",
+    "dh_false_nonzero_rate",
+]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -59,6 +68,14 @@ def number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _int_value(value: Any) -> int | None:
+    parsed = number(value)
+    if parsed is None:
+        return None
+    integer = int(parsed)
+    return integer if math.isclose(parsed, integer, rel_tol=0.0, abs_tol=1e-9) else None
 
 
 def _bool(value: Any) -> bool:
@@ -113,6 +130,306 @@ def _normalize_root(root: Path) -> Path:
     return root if root.name == "derivative_metrics" else root / "derivative_metrics"
 
 
+def _resolve_path(value: Any, *, base_dir: Path | None = None) -> Path | None:
+    if value in (None, ""):
+        return None
+    path = Path(str(value)).expanduser()
+    if path.is_absolute():
+        return path
+    return (base_dir or Path.cwd()) / path
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _split_counts(split_manifest: dict[str, Any]) -> dict[str, int]:
+    raw = split_manifest.get("split_counts")
+    if isinstance(raw, dict):
+        counts: dict[str, int] = {}
+        for split in ("train", "validation", "test"):
+            counts[split] = _int_value(raw.get(split)) or 0
+        return counts
+    counts = {"train": 0, "validation": 0, "test": 0}
+    rows = split_manifest.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict) and row.get("split") in counts:
+                counts[str(row["split"])] += 1
+    return counts
+
+
+def _metadata_from_counts(
+    *,
+    dataset_root: Path | None,
+    dataset_id: str,
+    counts: dict[str, int],
+    source: str,
+) -> dict[str, Any]:
+    n_train = counts.get("train") or None
+    n_validation = counts.get("validation") or None
+    n_test = counts.get("test") or None
+    n_total = sum(value for value in counts.values() if value)
+    x_dataset_size = n_train if n_train is not None else (n_total or None)
+    x_dataset_size_kind = "N_train" if n_train is not None else ("N_total" if x_dataset_size is not None else "")
+    return {
+        "dataset_id": dataset_id,
+        "dataset_root": str(dataset_root) if dataset_root is not None else "",
+        "n_train": n_train,
+        "n_validation": n_validation,
+        "n_test": n_test,
+        "n_total": n_total or None,
+        "x_dataset_size": x_dataset_size,
+        "x_dataset_size_kind": x_dataset_size_kind,
+        "dataset_size_source": source,
+        "warnings": [],
+    }
+
+
+def _metadata_from_dataset_root(
+    dataset_root: Path | None,
+    *,
+    dataset_id: str = "",
+    source: str = "frozen_split_manifest",
+) -> dict[str, Any] | None:
+    if dataset_root is None:
+        return None
+    split_path = dataset_root / "frozen_split_manifest.json"
+    split_manifest = read_json(split_path)
+    counts = _split_counts(split_manifest)
+    if any(counts.values()):
+        return _metadata_from_counts(
+            dataset_root=dataset_root,
+            dataset_id=dataset_id or dataset_root.name,
+            counts=counts,
+            source=source,
+        )
+    benchmark_manifest = read_json(dataset_root / "benchmark_dataset_manifest.json")
+    n_total = _int_value(benchmark_manifest.get("total_snapshots")) or _int_value(benchmark_manifest.get("valid_snapshots"))
+    samples = benchmark_manifest.get("samples")
+    if n_total is None and isinstance(samples, list):
+        n_total = len(samples)
+    if n_total is None:
+        return None
+    return {
+        "dataset_id": dataset_id or str(benchmark_manifest.get("dataset_id") or dataset_root.name),
+        "dataset_root": str(dataset_root),
+        "n_train": None,
+        "n_validation": None,
+        "n_test": None,
+        "n_total": n_total,
+        "x_dataset_size": n_total,
+        "x_dataset_size_kind": "N_total",
+        "dataset_size_source": "benchmark_dataset_manifest",
+        "warnings": [],
+    }
+
+
+def _metadata_from_explicit_payload(payload: dict[str, Any], *, base_dir: Path | None = None) -> dict[str, Any] | None:
+    metadata = payload.get("dataset_size_metadata")
+    if isinstance(metadata, dict):
+        payload = {**payload, **metadata}
+    dataset_root = _resolve_path(
+        payload.get("dataset_root") or payload.get("source_dataset_root"),
+        base_dir=base_dir,
+    )
+    dataset_id = str(payload.get("dataset_id") or payload.get("id") or "").strip()
+    if dataset_root is not None:
+        resolved = _metadata_from_dataset_root(dataset_root, dataset_id=dataset_id)
+        if resolved is not None:
+            return resolved
+    n_train = _int_value(payload.get("n_train") or payload.get("N_train") or payload.get("train_count"))
+    n_validation = _int_value(payload.get("n_validation") or payload.get("N_validation") or payload.get("validation_count"))
+    n_test = _int_value(payload.get("n_test") or payload.get("N_test") or payload.get("test_count"))
+    n_total = _int_value(payload.get("n_total") or payload.get("N_total") or payload.get("dataset_size") or payload.get("total_snapshot_count"))
+    if n_total is None and any(value is not None for value in (n_train, n_validation, n_test)):
+        n_total = sum(value or 0 for value in (n_train, n_validation, n_test))
+    x_dataset_size = n_train if n_train is not None else n_total
+    if x_dataset_size is None:
+        return None
+    return {
+        "dataset_id": dataset_id,
+        "dataset_root": str(dataset_root) if dataset_root is not None else "",
+        "n_train": n_train,
+        "n_validation": n_validation,
+        "n_test": n_test,
+        "n_total": n_total,
+        "x_dataset_size": x_dataset_size,
+        "x_dataset_size_kind": "N_train" if n_train is not None else "N_total",
+        "dataset_size_source": "explicit_payload",
+        "warnings": [],
+    }
+
+
+def _metadata_from_stage_manifest(manifest_path: Path) -> dict[str, Any] | None:
+    payload = read_json(manifest_path)
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    sweep_record = extra.get("sweep_record") if isinstance(extra.get("sweep_record"), dict) else {}
+    merged = {
+        **context,
+        "dataset_id": sweep_record.get("dataset_id") or context.get("dataset_id") or "",
+        "dataset_root": sweep_record.get("dataset_root") or context.get("dataset_root") or "",
+    }
+    split_path = _resolve_path(context.get("frozen_split_manifest_path"), base_dir=manifest_path.parent)
+    if split_path is not None:
+        split_manifest = read_json(split_path)
+        counts = _split_counts(split_manifest)
+        if any(counts.values()):
+            dataset_root = _resolve_path(merged.get("dataset_root"), base_dir=manifest_path.parent)
+            return _metadata_from_counts(
+                dataset_root=dataset_root,
+                dataset_id=str(merged.get("dataset_id") or (dataset_root.name if dataset_root is not None else "")),
+                counts=counts,
+                source="frozen_split_manifest",
+            )
+    return _metadata_from_explicit_payload(merged, base_dir=manifest_path.parent)
+
+
+def _candidate_stage_manifests(derivative_root: Path, manifest: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+    result_dir = _resolve_path(manifest.get("result_dir"), base_dir=derivative_root)
+    anchors = [derivative_root, derivative_root.parent]
+    if result_dir is not None:
+        anchors.append(result_dir)
+        anchors.extend(list(result_dir.parents[:4]))
+    anchors.extend(list(derivative_root.parents[:6]))
+    seen: set[str] = set()
+    for anchor in anchors:
+        for relative in (
+            "graph2mat_manifest.json",
+            "deeph_manifest.json",
+            "graph2mat/graph2mat_manifest.json",
+            "deeph/deeph_manifest.json",
+        ):
+            candidate = anchor / relative
+            key = str(candidate.resolve(strict=False))
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
+    return candidates
+
+
+def _training_sweep_metadata(derivative_root: Path) -> dict[str, Any] | None:
+    root = derivative_root.resolve(strict=False)
+    manifest_paths: list[Path] = []
+    for ancestor in [derivative_root, *derivative_root.parents]:
+        for candidate in (ancestor / "training_sweep_manifest.json", ancestor / "sweep" / "training_sweep_manifest.json"):
+            if candidate.exists() and candidate not in manifest_paths:
+                manifest_paths.append(candidate)
+    for manifest_path in manifest_paths:
+        manifest = read_json(manifest_path)
+        runs = [row for row in manifest.get("runs") or [] if isinstance(row, dict)]
+        matched_workflow: dict[str, Any] | None = None
+        for workflow in manifest.get("derivative_workflows") or []:
+            if not isinstance(workflow, dict):
+                continue
+            workflow_manifest = _resolve_path(workflow.get("derivative_workflow_manifest_path"), base_dir=manifest_path.parent.parent)
+            workflow_root = workflow_manifest.parent if workflow_manifest is not None else None
+            if workflow_root is not None and _is_relative_to(root, workflow_root):
+                matched_workflow = workflow
+                break
+        matched_runs: list[dict[str, Any]] = []
+        if matched_workflow is not None:
+            for key in ("child_result_dir", "graph2mat_child_result_dir", "deeph_child_result_dir"):
+                child_root = _resolve_path(matched_workflow.get(key), base_dir=manifest_path.parent.parent)
+                if child_root is None:
+                    continue
+                matched_runs.extend(
+                    row
+                    for row in runs
+                    if _resolve_path(row.get("run_root"), base_dir=manifest_path.parent.parent) == child_root
+                )
+            dataset_root = _resolve_path(matched_workflow.get("dataset_root"), base_dir=manifest_path.parent.parent)
+            dataset_id = str(matched_workflow.get("dataset_id") or matched_workflow.get("run_id") or "").strip()
+            if dataset_root is None and matched_runs:
+                dataset_root = _resolve_path(matched_runs[0].get("dataset_root"), base_dir=manifest_path.parent.parent)
+            if not dataset_id and matched_runs:
+                dataset_id = str(matched_runs[0].get("dataset_id") or "").strip()
+            resolved = _metadata_from_dataset_root(dataset_root, dataset_id=dataset_id)
+            if resolved is not None:
+                return resolved
+        for row in runs:
+            run_root = _resolve_path(row.get("run_root"), base_dir=manifest_path.parent.parent)
+            if run_root is not None and _is_relative_to(root, run_root):
+                return _metadata_from_explicit_payload(row, base_dir=manifest_path.parent.parent)
+    return None
+
+
+def _metadata_inferred_from_path(derivative_root: Path) -> dict[str, Any] | None:
+    for part in reversed(derivative_root.parts):
+        match = None
+        for pattern in (r"(?:n[_-]?train|train)[_-]?(\d+)", r"(?:n[_-]?total|snap|snapshot|size)[_-]?(\d+)"):
+            match = re.search(pattern, part.lower())
+            if match:
+                break
+        if match:
+            value = int(match.group(1))
+            kind = "N_train" if "train" in part.lower() else "N_total"
+            warning = _warning(
+                "dataset_size_inferred_from_path",
+                "Dataset size was inferred from a path token; prefer explicit frozen split metadata.",
+                dataset_size=value,
+                path=str(derivative_root),
+            )
+            return {
+                "dataset_id": "",
+                "dataset_root": "",
+                "n_train": value if kind == "N_train" else None,
+                "n_validation": None,
+                "n_test": None,
+                "n_total": value if kind == "N_total" else None,
+                "x_dataset_size": value,
+                "x_dataset_size_kind": kind,
+                "dataset_size_source": "inferred_from_path",
+                "warnings": [warning],
+            }
+    return None
+
+
+def resolve_dataset_size_metadata(derivative_root: Path, manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+    derivative_root = _normalize_root(derivative_root)
+    manifest = manifest or read_json(derivative_root / "manifest.json")
+    for resolver in (
+        lambda: _metadata_from_explicit_payload(manifest, base_dir=derivative_root),
+        lambda: next(
+            (
+                metadata
+                for metadata in (_metadata_from_stage_manifest(path) for path in _candidate_stage_manifests(derivative_root, manifest) if path.exists())
+                if metadata is not None
+            ),
+            None,
+        ),
+        lambda: _training_sweep_metadata(derivative_root),
+        lambda: _metadata_inferred_from_path(derivative_root),
+    ):
+        metadata = resolver()
+        if metadata is not None and metadata.get("x_dataset_size") is not None:
+            return metadata
+    return {
+        "dataset_id": "",
+        "dataset_root": "",
+        "n_train": None,
+        "n_validation": None,
+        "n_test": None,
+        "n_total": None,
+        "x_dataset_size": None,
+        "x_dataset_size_kind": "",
+        "dataset_size_source": "missing",
+        "warnings": [
+            _warning(
+                "dataset_size_metadata_missing",
+                "Dataset-size metadata is unavailable; metric-vs-dataset-size plots were not fabricated.",
+                derivative_root=str(derivative_root),
+            )
+        ],
+    }
+
+
 def _warning(code: str, message: str, *, severity: str = "warning", **details: Any) -> dict[str, Any]:
     return {
         "severity": severity,
@@ -163,11 +480,14 @@ def load_derivative_root(root: Path, *, forced_model: str | None = None) -> dict
                 "No derivative matrix metric rows are available; the payload is diagnostic metadata only.",
             )
         )
+    dataset_size_metadata = resolve_dataset_size_metadata(derivative_root, manifest)
+    warnings.extend(dataset_size_metadata.get("warnings") or [])
     return {
         "root": derivative_root,
         "model": model,
         "model_label": _model_label(model),
         "manifest": manifest,
+        "dataset_size_metadata": dataset_size_metadata,
         "metric_rows": metric_rows,
         "hermiticity_rows": hermiticity_rows,
         "stencil_rows": stencil_rows,
@@ -180,9 +500,19 @@ def _combined_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for dataset in datasets:
         model = dataset["model"]
         model_label = dataset["model_label"]
+        dataset_size_metadata = dataset.get("dataset_size_metadata") or {}
         for row in dataset["metric_rows"]:
             rows.append(
                 {
+                    "dataset_id": dataset_size_metadata.get("dataset_id") or "",
+                    "dataset_root": dataset_size_metadata.get("dataset_root") or "",
+                    "n_train": dataset_size_metadata.get("n_train"),
+                    "n_validation": dataset_size_metadata.get("n_validation"),
+                    "n_test": dataset_size_metadata.get("n_test"),
+                    "n_total": dataset_size_metadata.get("n_total"),
+                    "x_dataset_size": dataset_size_metadata.get("x_dataset_size"),
+                    "x_dataset_size_kind": dataset_size_metadata.get("x_dataset_size_kind") or "",
+                    "dataset_size_source": dataset_size_metadata.get("dataset_size_source") or "missing",
                     "model": model,
                     "model_label": model_label,
                     "sample": str(row.get("sample") or ""),
@@ -280,6 +610,38 @@ def _scatter_plot(
     }
 
 
+def _dataset_size_scatter_plot(
+    plot_id: str,
+    title: str,
+    y_title: str,
+    metric_key: str,
+    rows: list[dict[str, Any]],
+    *,
+    x_dataset_size_kind: str,
+    metrics: list[dict[str, Any]] | None = None,
+    warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    plot = _scatter_plot(
+        plot_id,
+        title,
+        f"{x_dataset_size_kind} snapshots",
+        y_title,
+        rows,
+        metric_key=metric_key,
+    )
+    plot.update(
+        {
+            "x_key": "x_dataset_size",
+            "series_key": "model_label",
+            "dataset_size_plot": True,
+            "warnings": warnings or [],
+        }
+    )
+    if metrics:
+        plot["metrics"] = metrics
+    return plot
+
+
 def _aggregate_by_model(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     buckets: dict[str, list[float | None]] = {}
     labels: dict[str, str] = {}
@@ -358,6 +720,142 @@ def _support_diagnostic_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             }
         )
     return results
+
+
+def _aggregate_metric_vs_dataset_size(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        x_dataset_size = _int_value(row.get("x_dataset_size"))
+        model = str(row.get("model") or "")
+        if x_dataset_size is None or not model:
+            continue
+        buckets.setdefault((model, x_dataset_size), []).append(row)
+    results: list[dict[str, Any]] = []
+    for (model, x_dataset_size), group in sorted(buckets.items(), key=lambda item: (item[0][0], item[0][1])):
+        stencils = {
+            (
+                str(item.get("sample") or ""),
+                item.get("atom_index_zero_based"),
+                str(item.get("axis") or ""),
+                item.get("delta_ang"),
+                str(item.get("finite_difference_method") or ""),
+            )
+            for item in group
+        }
+        aggregated: dict[str, Any] = {
+            "model": model,
+            "model_label": str(group[0].get("model_label") or model),
+            "x_dataset_size": x_dataset_size,
+            "x_dataset_size_kind": str(group[0].get("x_dataset_size_kind") or ""),
+            "dataset_size_source": ", ".join(str(value) for value in _sorted_unique([item.get("dataset_size_source") for item in group if item.get("dataset_size_source")])),
+            "n_rows": len(group),
+            "n_stencils": len(stencils),
+            "delta_values": _sorted_unique(sorted({item.get("delta_ang") for item in group if item.get("delta_ang") is not None})),
+            "atom_indices": _sorted_unique(sorted({item.get("atom_index_zero_based") for item in group if item.get("atom_index_zero_based") not in (None, "")})),
+            "axes": _sorted_unique(sorted({str(item.get("axis")) for item in group if str(item.get("axis") or "")})),
+            "dataset_ids": _sorted_unique([str(item.get("dataset_id") or "") for item in group if str(item.get("dataset_id") or "")]),
+        }
+        for key in DATASET_SIZE_METRICS:
+            aggregated[key] = _mean([number(item.get(key)) for item in group])
+        results.append(aggregated)
+    return results
+
+
+def _dataset_size_plot_result(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    warnings: list[dict[str, Any]] = []
+    missing_count = sum(1 for row in rows if row.get("x_dataset_size") is None)
+    available_rows = [row for row in rows if row.get("x_dataset_size") is not None]
+    if missing_count:
+        warnings.append(
+            _warning(
+                "dataset_size_metadata_missing",
+                "Dataset-size metadata is unavailable for some derivative metric rows; those rows were excluded from dataset-size plots.",
+                missing_rows=missing_count,
+            )
+        )
+    if not available_rows:
+        if not warnings:
+            warnings.append(
+                _warning(
+                    "dataset_size_metadata_missing",
+                    "Dataset-size metadata is unavailable; metric-vs-dataset-size plots were not fabricated.",
+                )
+            )
+        return {"plots": [], "warnings": warnings, "aggregated_rows": []}
+    unique_sizes = sorted({_int_value(row.get("x_dataset_size")) for row in available_rows if _int_value(row.get("x_dataset_size")) is not None})
+    if len(unique_sizes) < 2:
+        warnings.append(
+            _warning(
+                "dataset_size_plots_unavailable_single_dataset_size",
+                "Metric-vs-dataset-size plots require at least two unique dataset sizes.",
+                dataset_sizes=unique_sizes,
+            )
+        )
+        return {"plots": [], "warnings": warnings, "aggregated_rows": []}
+    inferred_rows = [row for row in available_rows if row.get("dataset_size_source") == "inferred_from_path"]
+    if inferred_rows:
+        warnings.append(
+            _warning(
+                "dataset_size_inferred_from_path",
+                "Some dataset sizes were inferred from paths; prefer explicit frozen split metadata.",
+                inferred_rows=len(inferred_rows),
+            )
+        )
+    aggregated_rows = _aggregate_metric_vs_dataset_size(available_rows)
+    x_kinds = [str(row.get("x_dataset_size_kind") or "") for row in aggregated_rows if str(row.get("x_dataset_size_kind") or "")]
+    x_kind = x_kinds[0] if len(set(x_kinds)) == 1 else "dataset size"
+    plots = [
+        _dataset_size_scatter_plot(
+            "dh_mae_vs_dataset_size",
+            "dH MAE vs dataset size",
+            "dH MAE eV/Ang",
+            "dh_mae_union_eV_per_Ang",
+            aggregated_rows,
+            x_dataset_size_kind=x_kind,
+            warnings=warnings,
+        ),
+        _dataset_size_scatter_plot(
+            "dh_rmse_vs_dataset_size",
+            "dH RMSE vs dataset size",
+            "dH RMSE eV/Ang",
+            "dh_rmse_union_eV_per_Ang",
+            aggregated_rows,
+            x_dataset_size_kind=x_kind,
+            warnings=warnings,
+        ),
+        _dataset_size_scatter_plot(
+            "relative_frobenius_vs_dataset_size",
+            "Relative Frobenius vs dataset size",
+            "Relative Frobenius",
+            "dh_relative_frobenius_ref",
+            aggregated_rows,
+            x_dataset_size_kind=x_kind,
+            warnings=warnings,
+        ),
+        _dataset_size_scatter_plot(
+            "support_f1_vs_dataset_size",
+            "Support F1 vs dataset size",
+            "Support F1",
+            "dh_support_f1",
+            aggregated_rows,
+            x_dataset_size_kind=x_kind,
+            warnings=warnings,
+        ),
+        _dataset_size_scatter_plot(
+            "support_error_rates_vs_dataset_size",
+            "Support error rates vs dataset size",
+            "Support error rate",
+            "dh_false_zero_rate",
+            aggregated_rows,
+            x_dataset_size_kind=x_kind,
+            metrics=[
+                {"key": "dh_false_zero_rate", "label": "False-zero rate", "unit": ""},
+                {"key": "dh_false_nonzero_rate", "label": "False-nonzero rate", "unit": ""},
+            ],
+            warnings=warnings,
+        ),
+    ]
+    return {"plots": plots, "warnings": warnings, "aggregated_rows": aggregated_rows}
 
 
 def _error_vs_delta_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -467,6 +965,7 @@ def build_derivative_plot_payload(
         )
     )
     meta = _plot_common_metadata(methods_seen)
+    dataset_size_plot_result = _dataset_size_plot_result(metric_rows)
 
     plots = [
         _scatter_plot(
@@ -549,7 +1048,9 @@ def build_derivative_plot_payload(
             metric_key="deeph_dh_mae_union_eV_per_Ang",
         ),
     ]
+    plots.extend(dataset_size_plot_result["plots"])
     warnings = _scientific_warnings(datasets, metric_rows, paired_rows)
+    warnings.extend(dataset_size_plot_result["warnings"])
     return {
         "schema": PLOT_SCHEMA,
         "available": bool(metric_rows or hermiticity_rows),
@@ -571,6 +1072,7 @@ def build_derivative_plot_payload(
             "metric_rows": len(metric_rows),
             "hermiticity_rows": len(hermiticity_rows),
             "paired_rows": len(paired_rows),
+            "dataset_size_rows": len(dataset_size_plot_result["aggregated_rows"]),
         },
     }
 
