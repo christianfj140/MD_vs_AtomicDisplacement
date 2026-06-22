@@ -1,0 +1,88 @@
+{
+  "run_id": "e2e_smoke_12snap_20ep",
+  "dataset_mode": "reuse_validated",
+  "dataset_root": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid12",
+  "output_root": "Comparison/results/e2e_smoke_12snap_20ep",
+  "workflow_mode": "h_then_derivative_full",
+  "metric_fail_policy": "diagnostic_only",
+  "performance": {
+    "compute_accelerator": "cpu",
+    "max_parallel_graph2mat_training_jobs": 1,
+    "max_parallel_deeph_training_jobs": 1,
+    "omp_num_threads": 1,
+    "mkl_num_threads": 1,
+    "openblas_num_threads": 1,
+    "numexpr_num_threads": 1,
+    "torch_num_threads": 1
+  },
+  "training_sweep": {
+    "enabled": true,
+    "search_policy": {
+      "strategy": "manual"
+    },
+    "manual_runs": [
+      {
+        "model": "graph2mat",
+        "config_id": "G2M-E2E12-20EP",
+        "common": {
+          "epochs": 20,
+          "learning_rate": 0.001,
+          "batch_size": 1,
+          "seed": 0
+        },
+        "overrides": {
+          "max_ell": 2,
+          "hidden_irreps_channels": 4,
+          "num_interactions": 1,
+          "correlation": 1,
+          "loader_threads": 1
+        }
+      },
+      {
+        "model": "deeph",
+        "config_id": "DH-E2E12-20EP",
+        "common": {
+          "epochs": 20,
+          "learning_rate": 0.001,
+          "batch_size": 1,
+          "seed": 0
+        },
+        "overrides": {
+          "atom_fea_len": 64,
+          "num_l": 5,
+          "disable_cuda": true,
+          "device": "cpu",
+          "num_threads": 1,
+          "multiprocessing": 0
+        }
+      }
+    ]
+  },
+  "derivative": {
+    "enabled": true,
+    "source_dataset_root": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid12",
+    "method": "central",
+    "delta_ang": [
+      0.005,
+      0.01
+    ],
+    "base_split": "test",
+    "max_base_snapshots": 1,
+    "atoms": [
+      "0"
+    ],
+    "axes": [
+      "x"
+    ],
+    "siesta_command": "/home/christian/bin/siesta",
+    "skip_if_exists": true,
+    "diagnostic_only": true,
+    "require_central": true
+  },
+  "derivative_metrics": {
+    "enabled": true,
+    "method": "central",
+    "require_central": true,
+    "diagnostic_only": true
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "run_id": "derivative_postprocess",
+  "dataset_mode": "reuse_validated",
+  "dataset_root": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid12",
+  "output_root": "Comparison/results/e2e_smoke_12snap_20ep/e2e_smoke_12snap_20ep",
+  "workflow_mode": "h_then_derivative_full",
+  "metric_fail_policy": "diagnostic_only",
+  "performance": {
+    "compute_accelerator": "cpu",
+    "omp_num_threads": 1,
+    "mkl_num_threads": 1,
+    "openblas_num_threads": 1,
+    "numexpr_num_threads": 1,
+    "torch_num_threads": 1
+  },
+  "stages": {
+    "generate_or_validate_dataset": false,
+    "freeze_splits": false,
+    "train_graph2mat": false,
+    "predict_graph2mat": false,
+    "train_deeph": false,
+    "predict_deeph": false,
+    "hamiltonian_metrics": false,
+    "build_derivative_stencils": true,
+    "validate_derivative_stencils": true,
+    "run_derivative_siesta_reference": true,
+    "predict_derivative_graph2mat": true,
+    "predict_derivative_deeph": true,
+    "derivative_metrics_graph2mat": true,
+    "derivative_metrics_deeph": true,
+    "derivative_gate_check": true,
+    "derivative_plots": true
+  },
+  "derivative": {
+    "enabled": true,
+    "source_dataset_root": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid12",
+    "output_root": "Comparison/results/e2e_smoke_12snap_20ep/e2e_smoke_12snap_20ep/derivative_postprocess",
+    "method": "central",
+    "base_split": "test",
+    "max_base_snapshots": 1,
+    "atoms": [
+      "0"
+    ],
+    "axes": [
+      "x"
+    ],
+    "delta_ang": [
+      0.005,
+      0.01
+    ],
+    "graph2mat_checkpoint": "Comparison/results/e2e_smoke_12snap_20ep/e2e_smoke_12snap_20ep/sweep/graph2mat/graphene_w90_scale_iid12/G2M-E2E12-20EP/graph2mat/training/lightning_logs/my_first_model/version_0/checkpoints/best-160.ckpt",
+    "deeph_model_dir": "Comparison/results/e2e_smoke_12snap_20ep/e2e_smoke_12snap_20ep/sweep/deeph/graphene_w90_scale_iid12/DH-E2E12-20EP/deeph/train",
+    "deeph_command": "/home/christian/repositorios/DeepH-pack/.venv/bin/deeph-inference",
+    "siesta_command": "/home/christian/bin/siesta",
+    "skip_if_exists": true,
+    "diagnostic_only": true,
+    "require_central": true
+  },
+  "derivative_metrics": {
+    "enabled": true,
+    "method": "central",
+    "require_central": true,
+    "diagnostic_only": true
+  }
+}
