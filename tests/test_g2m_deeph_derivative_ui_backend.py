@@ -648,6 +648,104 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertTrue(payload["plot_payload"]["available"])
         self.assertTrue(any(row["kind"] == "artifact_validation" and row["exists"] for row in payload["artifact_rows"]))
 
+    def test_sweep_run_entry_uses_manifest_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "results" / "manifest_only" / "manifest_only"
+            write_json(
+                run_root / "sweep" / "training_sweep_manifest.json",
+                {
+                    "status": "running",
+                    "planned_runs": [
+                        {"model": "graph2mat", "dataset_id": "joint_a", "config_id": "g1"},
+                        {"model": "deeph", "dataset_id": "joint_a", "config_id": "d1"},
+                        {"model": "graph2mat", "dataset_id": "joint_b", "config_id": "g2"},
+                    ],
+                    "runs": [
+                        {"status": "completed", "model": "graph2mat"},
+                        {"status": "failed", "model": "deeph"},
+                        {"status": "completed", "model": "graph2mat"},
+                    ],
+                },
+            )
+
+            payload = pipeline_ui._g2m_deeph_sweep_run_entry(run_root)
+
+        self.assertEqual(payload["status"], "running")
+        self.assertEqual(payload["planned_runs"], 3)
+        self.assertEqual(payload["completed_runs"], 2)
+        self.assertEqual(payload["failed_runs"], 1)
+
+    def test_sweep_run_entry_uses_runner_status_counts_without_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "results" / "runner_only" / "runner_only"
+            write_json(
+                run_root / "runner_status.json",
+                {
+                    "status": {
+                        "running": True,
+                        "stage": "training_sweep",
+                        "training_sweep": {
+                            "enabled": True,
+                            "completed": 8,
+                            "failed": 1,
+                            "total": 16,
+                        },
+                    }
+                },
+            )
+
+            payload = pipeline_ui._g2m_deeph_sweep_run_entry(run_root)
+
+        self.assertEqual(payload["planned_runs"], 16)
+        self.assertEqual(payload["completed_runs"], 8)
+        self.assertEqual(payload["failed_runs"], 1)
+
+    def test_plot_runs_payload_reports_sweep_progress_for_fallback_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results_root = Path(tmp) / "results"
+            run_root = results_root / "graphene_5x2_snapshot_scaling_12_1300_600epochs_1train" / "graphene_5x2_snapshot_scaling_12_1300_600epochs_1train_20260622_173854"
+            write_json(
+                run_root / "sweep" / "training_sweep_manifest.json",
+                {
+                    "status": "running",
+                    "planned_runs": [
+                        {"model": "graph2mat", "dataset_id": f"joint_{index}", "config_id": f"g{index}"}
+                        for index in range(16)
+                    ],
+                    "completed_runs": [{"config_id": f"done_{index}"} for index in range(8)],
+                    "failed_runs": [{"config_id": "failed_0"}],
+                },
+            )
+            write_json(
+                run_root / "runner_status.json",
+                {
+                    "status": {
+                        "running": True,
+                        "stage": "training_sweep",
+                        "run_id": run_root.name,
+                        "run_root": str(run_root),
+                        "training_sweep": {
+                            "enabled": True,
+                            "completed": 8,
+                            "failed": 1,
+                            "total": 16,
+                            "active_model": "graph2mat_parallel",
+                        },
+                    }
+                },
+            )
+            with patch.object(pipeline_ui, "RESULTS_ROOT", results_root),                  patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "plot_runs", return_value={"runs": [], "default_selected_run_ids": []}),                  patch.object(pipeline_ui.G2M_DEEPH_RUNNER, "status", return_value={"run_root": ""}):
+                payload = pipeline_ui._g2m_deeph_plot_runs_payload()
+
+        self.assertEqual(len(payload["runs"]), 1)
+        entry = payload["runs"][0]
+        self.assertEqual(entry["run_id"], run_root.name)
+        self.assertEqual(entry["status"], "running")
+        self.assertEqual(entry["planned_runs"], 16)
+        self.assertEqual(entry["completed_runs"], 8)
+        self.assertEqual(entry["failed_runs"], 1)
+        self.assertTrue(entry["has_training_sweep"])
+
     def test_standalone_derivative_smoke_paired_comparison_rows_are_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             results_root = Path(tmp) / "results"

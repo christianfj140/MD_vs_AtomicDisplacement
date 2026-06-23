@@ -1,0 +1,768 @@
+{
+  "description": "Graphene 5x2 snapshot-scaling payload cloned from the 200-1200 600-epoch 2-seed payload. It keeps the same 600-epoch Graph2Mat/DeepH anchor hyperparameters and protocol, changes the dataset sizes to 12,100,300,500,700,900,1100,1300, and runs one unseeded training per model anchor and dataset.",
+  "source_reference_payloads": [
+    "Comparison/config/graphene_5x2_snapshot_scaling_200_1200_600epochs_2seeds_payload.json"
+  ],
+  "pipeline_config": "Comparison/config/graphene_5x2_snapshot_scaling_20_100_4seeds_pipeline_config.yaml",
+  "material_preset": "graphene_5x2",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene_5x2"
+  },
+  "dataset_mode": "full_strict_pipeline",
+  "run_mode": "full_strict_pipeline",
+  "dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_5x2_snapshot_scaling_12_1300_600epochs_1train",
+  "output_root": "${REPO_ROOT}/Comparison/results/graphene_5x2_snapshot_scaling_12_1300_600epochs_1train",
+  "system_label": "graphene_5x2",
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": "disabled",
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "split_mode": "blocked_with_gap",
+  "temporal_gap": 1,
+  "block_order": "train,validation,test",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 3,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "dataset_sweep": {
+    "enabled": true,
+    "max_datasets": 8,
+    "recipes": [
+      {
+        "recipe_id": "graphene_5x2_scale_iid12",
+        "label": "Graphene 5x2 IID scale: 12 snapshots",
+        "size": 12,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid12_T150_2_1",
+            "label": "2 snapshots @ 150 K",
+            "n_snapshots": 2,
+            "temperature_K": 150,
+            "seed": 150012
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid12_T300_8_2",
+            "label": "8 snapshots @ 300 K",
+            "n_snapshots": 8,
+            "temperature_K": 300,
+            "seed": 300012
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid12_T450_2_3",
+            "label": "2 snapshots @ 450 K",
+            "n_snapshots": 2,
+            "temperature_K": 450,
+            "seed": 450012
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid100",
+        "label": "Graphene 5x2 IID scale: 100 snapshots",
+        "size": 100,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid100_T150_20_1",
+            "label": "20 snapshots @ 150 K",
+            "n_snapshots": 20,
+            "temperature_K": 150,
+            "seed": 150100
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid100_T300_60_2",
+            "label": "60 snapshots @ 300 K",
+            "n_snapshots": 60,
+            "temperature_K": 300,
+            "seed": 300100
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid100_T450_20_3",
+            "label": "20 snapshots @ 450 K",
+            "n_snapshots": 20,
+            "temperature_K": 450,
+            "seed": 450100
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid300",
+        "label": "Graphene 5x2 IID scale: 300 snapshots",
+        "size": 300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid300_T150_60_1",
+            "label": "60 snapshots @ 150 K",
+            "n_snapshots": 60,
+            "temperature_K": 150,
+            "seed": 150300
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid300_T300_180_2",
+            "label": "180 snapshots @ 300 K",
+            "n_snapshots": 180,
+            "temperature_K": 300,
+            "seed": 300300
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid300_T450_60_3",
+            "label": "60 snapshots @ 450 K",
+            "n_snapshots": 60,
+            "temperature_K": 450,
+            "seed": 450300
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid500",
+        "label": "Graphene 5x2 IID scale: 500 snapshots",
+        "size": 500,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid500_T150_100_1",
+            "label": "100 snapshots @ 150 K",
+            "n_snapshots": 100,
+            "temperature_K": 150,
+            "seed": 150500
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid500_T300_300_2",
+            "label": "300 snapshots @ 300 K",
+            "n_snapshots": 300,
+            "temperature_K": 300,
+            "seed": 300500
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid500_T450_100_3",
+            "label": "100 snapshots @ 450 K",
+            "n_snapshots": 100,
+            "temperature_K": 450,
+            "seed": 450500
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid700",
+        "label": "Graphene 5x2 IID scale: 700 snapshots",
+        "size": 700,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid700_T150_140_1",
+            "label": "140 snapshots @ 150 K",
+            "n_snapshots": 140,
+            "temperature_K": 150,
+            "seed": 150700
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid700_T300_420_2",
+            "label": "420 snapshots @ 300 K",
+            "n_snapshots": 420,
+            "temperature_K": 300,
+            "seed": 300700
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid700_T450_140_3",
+            "label": "140 snapshots @ 450 K",
+            "n_snapshots": 140,
+            "temperature_K": 450,
+            "seed": 450700
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid900",
+        "label": "Graphene 5x2 IID scale: 900 snapshots",
+        "size": 900,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid900_T150_180_1",
+            "label": "180 snapshots @ 150 K",
+            "n_snapshots": 180,
+            "temperature_K": 150,
+            "seed": 150900
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid900_T300_540_2",
+            "label": "540 snapshots @ 300 K",
+            "n_snapshots": 540,
+            "temperature_K": 300,
+            "seed": 300900
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid900_T450_180_3",
+            "label": "180 snapshots @ 450 K",
+            "n_snapshots": 180,
+            "temperature_K": 450,
+            "seed": 450900
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid1100",
+        "label": "Graphene 5x2 IID scale: 1100 snapshots",
+        "size": 1100,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid1100_T150_220_1",
+            "label": "220 snapshots @ 150 K",
+            "n_snapshots": 220,
+            "temperature_K": 150,
+            "seed": 151100
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid1100_T300_660_2",
+            "label": "660 snapshots @ 300 K",
+            "n_snapshots": 660,
+            "temperature_K": 300,
+            "seed": 301100
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid1100_T450_220_3",
+            "label": "220 snapshots @ 450 K",
+            "n_snapshots": 220,
+            "temperature_K": 450,
+            "seed": 451100
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x2_scale_iid1300",
+        "label": "Graphene 5x2 IID scale: 1300 snapshots",
+        "size": 1300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x2_scale_iid1300_T150_260_1",
+            "label": "260 snapshots @ 150 K",
+            "n_snapshots": 260,
+            "temperature_K": 150,
+            "seed": 151300
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid1300_T300_780_2",
+            "label": "780 snapshots @ 300 K",
+            "n_snapshots": 780,
+            "temperature_K": 300,
+            "seed": 301300
+          },
+          {
+            "block_id": "graphene_5x2_scale_iid1300_T450_260_3",
+            "label": "260 snapshots @ 450 K",
+            "n_snapshots": 260,
+            "temperature_K": 450,
+            "seed": 451300
+          }
+        ]
+      }
+    ]
+  },
+  "graph2mat_overrides": {
+    "max_epochs": 750,
+    "optim_lr": 0.0018,
+    "batch_size": 40,
+    "loader_threads": 4,
+    "num_interactions": 3,
+    "correlation": 3,
+    "max_ell": 3,
+    "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+    "loss": "graph2mat.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.006
+    },
+    "readout": "edge_node_mix",
+    "seed_everything": 0
+  },
+  "deeph": {
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "num_threads": 2,
+    "multiprocessing": 0,
+    "epochs": 750,
+    "batch_size": 4,
+    "learning_rate": 0.0003,
+    "criterion": "MaskMSELoss",
+    "retain_edge_fea": true,
+    "weight_decay": 0.0,
+    "optimizer": "adamW",
+    "edge_fea_len": 192,
+    "normalization": "LayerNorm",
+    "atom_update_net": "CGConv",
+    "if_lcmp": true,
+    "gauss_stop": 6,
+    "atom_fea_len": 192,
+    "num_l": 4,
+    "if_edge_update": true
+  },
+  "training_sweep": {
+    "enabled": true,
+    "max_runs": 16,
+    "apply_to_datasets": [
+      "all"
+    ],
+    "error_policy": "continue_on_error",
+    "search_policy": {
+      "strategy": "manual",
+      "random_seed": 0
+    },
+    "manual_runs": [
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N12",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N12",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid12",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N12",
+        "config_id": "DH-T1000-04-anchor-G5x2-N12",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid12",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N100",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N100",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid100",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N100",
+        "config_id": "DH-T1000-04-anchor-G5x2-N100",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid100",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N300",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N300",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid300",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N300",
+        "config_id": "DH-T1000-04-anchor-G5x2-N300",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid300",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N500",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N500",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid500",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N500",
+        "config_id": "DH-T1000-04-anchor-G5x2-N500",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid500",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N700",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N700",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid700",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N700",
+        "config_id": "DH-T1000-04-anchor-G5x2-N700",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid700",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N900",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N900",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid900",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N900",
+        "config_id": "DH-T1000-04-anchor-G5x2-N900",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid900",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N1100",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N1100",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid1100",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N1100",
+        "config_id": "DH-T1000-04-anchor-G5x2-N1100",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid1100",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-G5x2-N1300",
+        "config_id": "G2M-T1000-03-anchor-G5x2-N1300",
+        "model": "graph2mat",
+        "dataset_id": "graphene_5x2_scale_iid1300",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default"
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-G5x2-N1300",
+        "config_id": "DH-T1000-04-anchor-G5x2-N1300",
+        "model": "deeph",
+        "dataset_id": "graphene_5x2_scale_iid1300",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true
+        }
+      }
+    ]
+  },
+  "cost_accounting": {
+    "dataset_sweep_summary_json": "summary/dataset_sweep_summary.json",
+    "dataset_sweep_summary_csv": "summary/dataset_sweep_summary.csv",
+    "fields": [
+      "dataset_size",
+      "blocks",
+      "split_counts",
+      "generation_seconds",
+      "elapsed_seconds",
+      "artifact_validation_status",
+      "benchmark_manifest_path",
+      "frozen_split_manifest_path"
+    ],
+    "siesta_wall_time_source": "RUN.out timer: Elapsed wall time (sec), plus runner generation_seconds/elapsed_seconds per dataset row."
+  },
+  "notes": {
+    "intended_use": "Fresh graphene_5x2 dataset generation plus single-training Graph2Mat/DeepH snapshot scaling with 600-epoch anchor configs only.",
+    "expected_dataset_count": 8,
+    "expected_dataset_recipe_ids": [
+      "graphene_5x2_scale_iid12",
+      "graphene_5x2_scale_iid100",
+      "graphene_5x2_scale_iid300",
+      "graphene_5x2_scale_iid500",
+      "graphene_5x2_scale_iid700",
+      "graphene_5x2_scale_iid900",
+      "graphene_5x2_scale_iid1100",
+      "graphene_5x2_scale_iid1300"
+    ],
+    "expected_total_snapshots": 4912,
+    "expected_training_runs": 16,
+    "temperature_distribution": "20% at 150 K, 60% at 300 K, 20% at 450 K for every dataset size; N=12 is rounded to 2/8/2 snapshots.",
+    "paper_ready_parallelism": "Graph2Mat 7 parallel jobs, DeepH 5 parallel jobs, alternating model batches, starting with DeepH.",
+    "scientific_policy": "Only MD size varies. SIESTA physics/template, material, basis and pseudopotentials are held fixed. Test/validation split policy remains blocked_with_gap.",
+    "material_scope": "This payload is graphene-only.",
+    "expected_dataset_sizes": [
+      12,
+      100,
+      300,
+      500,
+      700,
+      900,
+      1100,
+      1300
+    ],
+    "paper_ready_similarity": "Uses the same fixed 600-epoch anchors as the source payload: G2M-T1000-03 and DH-T1000-04. Hyperparameter search is disabled so dataset size remains the main variable.",
+    "batch_size_guard": "Graph2Mat anchors use batch_size 40 and 32; DeepH anchors use batch_size 4 and 8. Reject this payload if any generated Graph2Mat config has batch_size > 80.",
+    "manual_anchor_configs_per_dataset": 2,
+    "discretization_policy": "Dataset-size grid: 12, 100, 300, 500, 700, 900, 1100, 1300 snapshots.",
+    "dataset_root_policy": "Uses a fresh dataset root to avoid overwriting or colliding with previous snapshot-scaling datasets.",
+    "source_protocol": "graphene_5x2_snapshot_scaling_200_1200_600epochs_2seeds, with training seed repetitions removed",
+    "configs_per_dataset": 2,
+    "training_seeds": [],
+    "supercell": "5x2 graphene, 20 carbon atoms",
+    "fdf_template": "materials/graphene_5x2/RUN.fdf",
+    "force_constants_used": false,
+    "single_training_per_model_dataset": true,
+    "plotting_policy": "Training manifests preserve requested_dataset_size/dataset_size via recipe metadata; completed metrics can be plotted against dataset_size now or later through the existing G2M/DeepH plot endpoints."
+  },
+  "run_id": "graphene_5x2_snapshot_scaling_12_1300_600epochs_1train_20260622_173854"
+}

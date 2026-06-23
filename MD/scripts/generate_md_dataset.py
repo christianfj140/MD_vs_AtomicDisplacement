@@ -1111,14 +1111,15 @@ def _find_hamiltonian(sample_dir: Path) -> Path | None:
         path = sample_dir / name
         if path.exists():
             return path
-    candidates = sorted(
-        [
-            path
-            for path in list(sample_dir.glob("*.TSHS")) + list(sample_dir.glob("*.HSX"))
-            if path.name != "ML_prediction.HSX"
-        ]
-    )
-    return candidates[0] if candidates else None
+    tshs_candidates = [path for path in sample_dir.glob("*.TSHS") if path.name != "ML_prediction.HSX"]
+    if tshs_candidates:
+        return sorted(tshs_candidates)[0]
+
+    hsx_candidates = [path for path in sample_dir.glob("*.HSX") if path.name != "ML_prediction.HSX"]
+    if hsx_candidates:
+        return sorted(hsx_candidates)[0]
+
+    return None
 
 
 def _write_manifest(path: Path, rows: list[dict[str, str]]) -> None:

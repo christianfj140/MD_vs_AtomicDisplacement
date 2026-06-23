@@ -7972,6 +7972,17 @@ def _g2m_deeph_sweep_run_roots() -> list[Path]:
 def _g2m_deeph_sweep_run_entry(run_root: Path) -> dict[str, Any]:
     manifest_path = run_root / "sweep" / "training_sweep_manifest.json"
     manifest = load_json_object(manifest_path)
+    runner_status_payload = load_json_object(run_root / "runner_status.json")
+    runner_status = (
+        runner_status_payload.get("status")
+        if isinstance(runner_status_payload.get("status"), dict)
+        else {}
+    )
+    runner_training_sweep = (
+        runner_status.get("training_sweep")
+        if isinstance(runner_status.get("training_sweep"), dict)
+        else {}
+    )
     workflows = manifest.get("derivative_workflows")
     derivative_models: set[str] = set()
     derivative_status = ""
@@ -7995,6 +8006,31 @@ def _g2m_deeph_sweep_run_entry(run_root: Path) -> dict[str, Any]:
                 for method in ("graph2mat", "deeph"):
                     if (workflow_root / "derivative_metrics" / method / "manifest.json").exists():
                         derivative_models.add(method)
+    manifest_runs = manifest.get("runs") if isinstance(manifest.get("runs"), list) else []
+    manifest_planned = manifest.get("planned_runs") if isinstance(manifest.get("planned_runs"), list) else []
+    manifest_completed = manifest.get("completed_runs") if isinstance(manifest.get("completed_runs"), list) else []
+    manifest_failed = manifest.get("failed_runs") if isinstance(manifest.get("failed_runs"), list) else []
+    completed_runs = sum(
+        1
+        for row in manifest_runs
+        if isinstance(row, dict) and str(row.get("status") or "").strip().lower() == "completed"
+    )
+    failed_runs = sum(
+        1
+        for row in manifest_runs
+        if isinstance(row, dict) and str(row.get("status") or "").strip().lower() == "failed"
+    )
+    if not completed_runs:
+        completed_runs = len(manifest_completed)
+    if not failed_runs:
+        failed_runs = len(manifest_failed)
+    if not completed_runs:
+        completed_runs = int(runner_training_sweep.get("completed") or 0)
+    if not failed_runs:
+        failed_runs = int(runner_training_sweep.get("failed") or 0)
+    planned_runs = len(manifest_planned)
+    if not planned_runs:
+        planned_runs = int(runner_training_sweep.get("total") or 0)
     try:
         modified_at = max(manifest_path.stat().st_mtime, run_root.stat().st_mtime)
     except OSError:
@@ -8007,9 +8043,9 @@ def _g2m_deeph_sweep_run_entry(run_root: Path) -> dict[str, Any]:
         "status": str(manifest.get("status") or derivative_status or "completed"),
         "dataset_ids": [],
         "models": sorted(derivative_models) or ["graph2mat", "deeph"],
-        "completed_runs": 0,
-        "failed_runs": 0,
-        "planned_runs": 0,
+        "completed_runs": completed_runs,
+        "failed_runs": failed_runs,
+        "planned_runs": planned_runs,
         "has_training_sweep": True,
         "has_metric_rows": False,
         "modified_at": modified_at,
