@@ -591,6 +591,8 @@ def _performance_settings_from_payload(payload: dict[str, Any]) -> dict[str, Any
         "graph2mat_checkpoint_every_n_epochs",
         "max_parallel_graph2mat_training_jobs",
         "max_parallel_deeph_training_jobs",
+        "max_parallel_derivative_workflows",
+        "max_parallel_derivative_reference_jobs",
         "torch_num_threads",
         "omp_num_threads",
         "mkl_num_threads",
@@ -729,6 +731,33 @@ def _graph2mat_training_parallelism(payload: dict[str, Any]) -> int:
 def _deeph_training_parallelism(payload: dict[str, Any]) -> int:
     settings = _performance_settings_from_payload(payload)
     raw = settings.get("max_parallel_deeph_training_jobs") or 1
+    try:
+        workers = int(raw)
+    except (TypeError, ValueError):
+        workers = 1
+    return max(1, workers)
+
+
+def _derivative_reference_workers(payload: dict[str, Any], config: dict[str, Any]) -> int:
+    configured = config.get("reference_workers")
+    if configured not in (None, "", "null"):
+        return _optional_positive_int(
+            configured,
+            field_name="modular_workflow.derivative.reference_workers",
+        ) or 1
+    settings = _performance_settings_from_payload(payload)
+    fallback = settings.get("max_parallel_derivative_reference_jobs")
+    if fallback not in (None, "", "null"):
+        return _optional_positive_int(
+            fallback,
+            field_name="performance.max_parallel_derivative_reference_jobs",
+        ) or 1
+    return 1
+
+
+def _derivative_workflow_parallelism(payload: dict[str, Any]) -> int:
+    settings = _performance_settings_from_payload(payload)
+    raw = settings.get("max_parallel_derivative_workflows") or 1
     try:
         workers = int(raw)
     except (TypeError, ValueError):
@@ -4732,9 +4761,52 @@ class Graph2MatDeepHBenchmarkRunner:
         stages = workflow.get("stages") if isinstance(workflow.get("stages"), dict) else {}
         if not any(stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES):
             return []
+        derivative_parallelism = _derivative_workflow_parallelism(payload)
+
+        def set_derivative_status(*, total: int, queued: int, active: int, completed: int, failed: int) -> None:
+            with self._lock:
+                derivatives = dict(self._state.training_sweep_status.get("derivatives") or {})
+                derivatives.update(
+                    {
+                        "enabled": True,
+                        "total": total,
+                        "queued": queued,
+                        "active": active,
+                        "completed": completed,
+                        "failed": failed,
+                        "max_parallel_derivative_workflows": derivative_parallelism,
+                    }
+                )
+                self._state.training_sweep_status["derivatives"] = derivatives
+
         workflow_mode = str(workflow.get("workflow_mode") or "")
+        records: list[dict[str, Any]] = []
+        jobs: list[dict[str, Any]] = []
+
+        def register_job(
+            record: dict[str, Any],
+            *,
+            child_payload: dict[str, Any],
+            derivative_run_root: Path,
+            graph2mat_context: Graph2MatBenchmarkContext | None,
+            deeph_context: DeepHBenchmarkContext | None,
+            success_fields: dict[str, Any] | None = None,
+        ) -> None:
+            records.append(record)
+            jobs.append(
+                {
+                    "index": len(records) - 1,
+                    "run_id": record["run_id"],
+                    "payload": child_payload,
+                    "derivative_run_root": derivative_run_root,
+                    "graph2mat_context": graph2mat_context,
+                    "deeph_context": deeph_context,
+                    "output_root": self._derivative_root(child_payload, run_root=derivative_run_root),
+                    "success_fields": dict(success_fields or {}),
+                }
+            )
+
         if workflow_mode not in {"h_then_derivative_full", "full_end_to_end"}:
-            records: list[dict[str, Any]] = []
             for entry in list(summary.get("runs") or []):
                 if not isinstance(entry, dict) or str(entry.get("status") or "") != "completed":
                     continue
@@ -4742,7 +4814,7 @@ class Graph2MatDeepHBenchmarkRunner:
                 if not raw_run_root:
                     continue
                 child_run_root = Path(raw_run_root).expanduser().resolve(strict=False)
-                record: dict[str, Any] = {
+                record = {
                     "run_id": str(entry.get("config_id") or child_run_root.name),
                     "child_result_dir": str(child_run_root),
                     "derivative_workflow_status": "pending",
@@ -4756,18 +4828,12 @@ class Graph2MatDeepHBenchmarkRunner:
                         child_run_root=child_run_root,
                         entry=entry,
                     )
-                    derivative_summary = self._run_modular_derivative_workflow(
-                        child_payload,
-                        run_root=child_run_root,
+                    register_job(
+                        record,
+                        child_payload=child_payload,
+                        derivative_run_root=child_run_root,
                         graph2mat_context=graph2mat_context,
                         deeph_context=deeph_context,
-                    )
-                    manifest_path = Path(str(derivative_summary["result_dir"])) / "derivative_workflow_manifest.json"
-                    record.update(
-                        {
-                            "derivative_workflow_status": "completed",
-                            "derivative_workflow_manifest_path": str(manifest_path),
-                        }
                     )
                 except Exception as exc:
                     record.update(
@@ -4776,92 +4842,164 @@ class Graph2MatDeepHBenchmarkRunner:
                             "failure_reason": str(exc),
                         }
                     )
-                records.append(record)
-                summary["derivative_workflows"] = records
-                self._write_training_sweep_summary(run_root, summary)
-            return records
+                    records.append(record)
+        else:
+            enabled_models = self._training_sweep_derivative_enabled_models(stages)
+            completed_entries = [
+                entry
+                for entry in list(summary.get("runs") or [])
+                if isinstance(entry, dict) and str(entry.get("status") or "") == "completed"
+            ]
+            grouped_entries: dict[str, dict[str, Any]] = {}
+            for entry in completed_entries:
+                dataset_root_value = str(entry.get("dataset_root") or "").strip()
+                key = dataset_root_value or f"__missing__::{entry.get('config_id') or entry.get('run_root') or len(grouped_entries)}"
+                grouped_entries.setdefault(key, {"dataset_root": dataset_root_value, "entries": []})["entries"].append(entry)
+            multiple_groups = len(grouped_entries) > 1
+            for group in grouped_entries.values():
+                entries = list(group.get("entries") or [])
+                dataset_root_value = str(group.get("dataset_root") or "").strip()
+                dataset_root = (
+                    _resolve_optional_repo_path(dataset_root_value, Path(dataset_root_value))
+                    if dataset_root_value
+                    else None
+                )
+                group_label = self._training_sweep_derivative_group_label(entries, dataset_root=dataset_root)
+                derivative_run_root = run_root / "sweep" / "derivative_workflows" / group_label
+                record = {
+                    "run_id": group_label,
+                    "dataset_root": str(dataset_root) if dataset_root is not None else "",
+                    "graph2mat_child_result_dir": "",
+                    "deeph_child_result_dir": "",
+                    "derivative_workflow_status": "pending",
+                    "derivative_workflow_manifest_path": "",
+                    "failure_reason": "",
+                }
+                try:
+                    graph2mat_entry = self._select_training_sweep_derivative_entry(
+                        entries,
+                        dataset_root=dataset_root,
+                        model="graph2mat",
+                        required="graph2mat" in enabled_models,
+                    )
+                    deeph_entry = self._select_training_sweep_derivative_entry(
+                        entries,
+                        dataset_root=dataset_root,
+                        model="deeph",
+                        required="deeph" in enabled_models,
+                    )
+                    graph2mat_context, _ = self._training_sweep_derivative_contexts(graph2mat_entry or {})
+                    _, deeph_context = self._training_sweep_derivative_contexts(deeph_entry or {})
+                    child_payload = self._training_sweep_derivative_launch_payload(
+                        payload,
+                        derivative_run_root=derivative_run_root,
+                        dataset_root=dataset_root,
+                        graph2mat_context=graph2mat_context,
+                        deeph_context=deeph_context,
+                        multiple_groups=multiple_groups,
+                        group_label=group_label,
+                    )
+                    register_job(
+                        record,
+                        child_payload=child_payload,
+                        derivative_run_root=run_root,
+                        graph2mat_context=graph2mat_context,
+                        deeph_context=deeph_context,
+                        success_fields={
+                            "graph2mat_child_result_dir": str(graph2mat_entry.get("run_root") or "") if graph2mat_entry else "",
+                            "deeph_child_result_dir": str(deeph_entry.get("run_root") or "") if deeph_entry else "",
+                        },
+                    )
+                except Exception as exc:
+                    record.update(
+                        {
+                            "derivative_workflow_status": "failed",
+                            "failure_reason": str(exc),
+                        }
+                    )
+                    records.append(record)
 
-        enabled_models = self._training_sweep_derivative_enabled_models(stages)
-        completed_entries = [
-            entry
-            for entry in list(summary.get("runs") or [])
-            if isinstance(entry, dict) and str(entry.get("status") or "") == "completed"
-        ]
-        grouped_entries: dict[str, dict[str, Any]] = {}
-        for entry in completed_entries:
-            dataset_root_value = str(entry.get("dataset_root") or "").strip()
-            key = dataset_root_value or f"__missing__::{entry.get('config_id') or entry.get('run_root') or len(grouped_entries)}"
-            grouped_entries.setdefault(key, {"dataset_root": dataset_root_value, "entries": []})["entries"].append(entry)
-        records: list[dict[str, Any]] = []
-        multiple_groups = len(grouped_entries) > 1
-        for group in grouped_entries.values():
-            entries = list(group.get("entries") or [])
-            dataset_root_value = str(group.get("dataset_root") or "").strip()
-            dataset_root = (
-                _resolve_optional_repo_path(dataset_root_value, Path(dataset_root_value))
-                if dataset_root_value
-                else None
-            )
-            group_label = self._training_sweep_derivative_group_label(entries, dataset_root=dataset_root)
-            derivative_run_root = run_root / "sweep" / "derivative_workflows" / group_label
-            record: dict[str, Any] = {
-                "run_id": group_label,
-                "dataset_root": str(dataset_root) if dataset_root is not None else "",
-                "graph2mat_child_result_dir": "",
-                "deeph_child_result_dir": "",
-                "derivative_workflow_status": "pending",
-                "derivative_workflow_manifest_path": "",
-                "failure_reason": "",
-            }
+        seen_output_roots: dict[str, str] = {}
+        for job in jobs:
+            output_root = Path(job["output_root"]).resolve(strict=False)
+            output_key = str(output_root)
+            run_id = str(job["run_id"])
+            if output_key in seen_output_roots:
+                raise RuntimeError(
+                    "training sweep derivative workflow output root collision: "
+                    f"{output_root} is shared by {seen_output_roots[output_key]} and {run_id}."
+                )
+            seen_output_roots[output_key] = run_id
+
+        initial_failed = len([record for record in records if record.get("derivative_workflow_status") == "failed"])
+        set_derivative_status(
+            total=len(records),
+            queued=len(jobs),
+            active=0,
+            completed=0,
+            failed=initial_failed,
+        )
+
+        def run_derivative_job(job: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            with self._lock:
+                derivatives = dict(self._state.training_sweep_status.get("derivatives") or {})
+                derivatives["queued"] = max(0, int(derivatives.get("queued") or 0) - 1)
+                derivatives["active"] = int(derivatives.get("active") or 0) + 1
+                self._state.training_sweep_status["derivatives"] = derivatives
+            success = False
             try:
-                graph2mat_entry = self._select_training_sweep_derivative_entry(
-                    entries,
-                    dataset_root=dataset_root,
-                    model="graph2mat",
-                    required="graph2mat" in enabled_models,
-                )
-                deeph_entry = self._select_training_sweep_derivative_entry(
-                    entries,
-                    dataset_root=dataset_root,
-                    model="deeph",
-                    required="deeph" in enabled_models,
-                )
-                graph2mat_context, _ = self._training_sweep_derivative_contexts(graph2mat_entry or {})
-                _, deeph_context = self._training_sweep_derivative_contexts(deeph_entry or {})
-                child_payload = self._training_sweep_derivative_launch_payload(
-                    payload,
-                    derivative_run_root=derivative_run_root,
-                    dataset_root=dataset_root,
-                    graph2mat_context=graph2mat_context,
-                    deeph_context=deeph_context,
-                    multiple_groups=multiple_groups,
-                    group_label=group_label,
-                )
                 derivative_summary = self._run_modular_derivative_workflow(
-                    child_payload,
-                    run_root=run_root,
-                    graph2mat_context=graph2mat_context,
-                    deeph_context=deeph_context,
+                    job["payload"],
+                    run_root=job["derivative_run_root"],
+                    graph2mat_context=job["graph2mat_context"],
+                    deeph_context=job["deeph_context"],
                 )
                 manifest_path = Path(str(derivative_summary["result_dir"])) / "derivative_workflow_manifest.json"
-                record.update(
+                success = True
+                return (
+                    int(job["index"]),
                     {
-                        "graph2mat_child_result_dir": str(graph2mat_entry.get("run_root") or "") if graph2mat_entry else "",
-                        "deeph_child_result_dir": str(deeph_entry.get("run_root") or "") if deeph_entry else "",
+                        **dict(job.get("success_fields") or {}),
                         "derivative_workflow_status": "completed",
                         "derivative_workflow_manifest_path": str(manifest_path),
-                    }
+                        "failure_reason": "",
+                    },
                 )
             except Exception as exc:
-                record.update(
+                return (
+                    int(job["index"]),
                     {
                         "derivative_workflow_status": "failed",
                         "failure_reason": str(exc),
-                    }
+                    },
                 )
-            records.append(record)
-            summary["derivative_workflows"] = records
-            self._write_training_sweep_summary(run_root, summary)
+            finally:
+                with self._lock:
+                    derivatives = dict(self._state.training_sweep_status.get("derivatives") or {})
+                    derivatives["active"] = max(0, int(derivatives.get("active") or 0) - 1)
+                    counter = "completed" if success else "failed"
+                    derivatives[counter] = int(derivatives.get(counter) or 0) + 1
+                    self._state.training_sweep_status["derivatives"] = derivatives
+
+        if jobs and derivative_parallelism > 1 and len(jobs) > 1:
+            self._logs.append(
+                f"[G2M-DEEPH][PERF] Running {len(jobs)} derivative workflows with max_parallel_derivative_workflows={derivative_parallelism}.\n"
+            )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(derivative_parallelism, len(jobs)),
+                thread_name_prefix="g2m-deeph-derivatives",
+            ) as executor:
+                futures = {executor.submit(run_derivative_job, job): job for job in jobs}
+                for future in concurrent.futures.as_completed(futures):
+                    index, update = future.result()
+                    records[index].update(update)
+        else:
+            for job in jobs:
+                index, update = run_derivative_job(job)
+                records[index].update(update)
+
+        summary["derivative_workflows"] = records
+        self._write_training_sweep_summary(run_root, summary)
         return records
 
     def _write_training_search_plan(self, run_root: Path, plan: dict[str, Any]) -> None:
@@ -5126,6 +5264,8 @@ class Graph2MatDeepHBenchmarkRunner:
         self._write_training_search_plan(run_root, plan)
         summary["budget"] = self._write_budget_summary(run_root, budget_tracker)
         self._set_stage("training_sweep")
+        derivative_workflow_enabled = any(stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES)
+        derivative_workflow_parallelism = _derivative_workflow_parallelism(payload)
         with self._lock:
             self._state.training_sweep_status = {
                 "enabled": True,
@@ -5140,6 +5280,15 @@ class Graph2MatDeepHBenchmarkRunner:
                 "active_config_id": None,
                 "active_runs": [],
                 "active_started_at": None,
+                "derivatives": {
+                    "enabled": derivative_workflow_enabled,
+                    "total": 0,
+                    "queued": 0,
+                    "active": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "max_parallel_derivative_workflows": derivative_workflow_parallelism,
+                },
             }
         mixed_model_batches = model_batch_schedule == "mixed"
         summary["graph2mat_parallelism"] = graph2mat_parallelism
@@ -5643,6 +5792,10 @@ class Graph2MatDeepHBenchmarkRunner:
         payload["_dataset_sweep_manifest"] = dataset_sweep_manifest
 
         if dry_run:
+            workflow = payload.get("modular_workflow") if isinstance(payload.get("modular_workflow"), dict) else {}
+            stages = workflow.get("stages") if isinstance(workflow.get("stages"), dict) else {}
+            derivative_workflow_enabled = any(stages.get(stage) for stage in DERIVATIVE_STAGE_NAMES)
+            derivative_workflow_parallelism = _derivative_workflow_parallelism(payload)
             summary: dict[str, Any] = {
                 "schema": "graph2mat_deeph_training_sweep_v1",
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -5662,11 +5815,20 @@ class Graph2MatDeepHBenchmarkRunner:
                     "enabled": True,
                     "total": len(summary["planned_runs"]),
                     "completed": 0,
-                "failed": 0,
-                "status": "planned_dry_run",
-                "graph2mat_parallelism": _graph2mat_training_parallelism(payload),
-                "deeph_parallelism": _deeph_training_parallelism(payload),
-            }
+                    "failed": 0,
+                    "status": "planned_dry_run",
+                    "graph2mat_parallelism": _graph2mat_training_parallelism(payload),
+                    "deeph_parallelism": _deeph_training_parallelism(payload),
+                    "derivatives": {
+                        "enabled": derivative_workflow_enabled,
+                        "total": 0,
+                        "queued": 0,
+                        "active": 0,
+                        "completed": 0,
+                        "failed": 0,
+                        "max_parallel_derivative_workflows": derivative_workflow_parallelism,
+                    },
+                }
             self._logs.append(
                 f"[G2M-DEEPH] Full strict dry-run: {len(datasets)} datasets and "
                 f"{len(summary['planned_runs'])} training runs planned.\n"
@@ -6483,8 +6645,13 @@ class Graph2MatDeepHBenchmarkRunner:
             roots[str(run_root.resolve())] = run_root
         if self._external_final_active():
             self._sync_external_final_run_locked()
+        self._sync_detached_external_run_locked()
         if self._external_final_run_root is not None:
             run_root = self._external_final_run_root
+            roots[str(run_root.resolve())] = run_root
+            search_roots.append(run_root.parent)
+        if self._external_detached_run_root is not None:
+            run_root = self._external_detached_run_root
             roots[str(run_root.resolve())] = run_root
             search_roots.append(run_root.parent)
         for base in search_roots:
@@ -7627,6 +7794,7 @@ class Graph2MatDeepHBenchmarkRunner:
         overwrite = _parse_bool(config.get("overwrite"), False)
         skip_if_exists = _parse_bool(config.get("skip_if_exists"), True)
         diagnostic_only = _parse_bool(config.get("diagnostic_only"), False)
+        reference_workers = _derivative_reference_workers(payload, config)
         python_executable = self._graph2mat_python(payload)
         summary: dict[str, Any] = {
             "schema": "graph2mat_deeph_modular_derivative_workflow_v1",
@@ -7731,7 +7899,14 @@ class Graph2MatDeepHBenchmarkRunner:
             manifest_path = reference_root / "derivative_siesta_reference_manifest.json"
             if skip_if_exists and not overwrite and manifest_path.exists():
                 self._check_derivative_manifest(manifest_path, stage="run_derivative_siesta_reference", fail_on_samples_failed=not diagnostic_only)
-                mark("run_derivative_siesta_reference", {"status": "skipped_existing", "manifest": str(manifest_path)})
+                mark(
+                    "run_derivative_siesta_reference",
+                    {
+                        "status": "skipped_existing",
+                        "manifest": str(manifest_path),
+                        "reference_workers": reference_workers,
+                    },
+                )
             else:
                 command = [
                     python_executable,
@@ -7757,6 +7932,7 @@ class Graph2MatDeepHBenchmarkRunner:
                 max_samples = config.get("max_samples") if config.get("max_samples") not in (None, "") else config.get("max_jobs")
                 if max_samples not in (None, ""):
                     command.extend(["--max-samples", str(max_samples)])
+                command.extend(["--workers", str(reference_workers)])
                 if _parse_bool(config.get("siesta_shell"), False):
                     command.append("--siesta-shell")
                 record = self._run_derivative_stage_command(
@@ -7770,7 +7946,10 @@ class Graph2MatDeepHBenchmarkRunner:
                     stage="run_derivative_siesta_reference",
                     fail_on_samples_failed=not diagnostic_only,
                 )
-                mark("run_derivative_siesta_reference", {**record, "status": "completed", "manifest": manifest})
+                mark(
+                    "run_derivative_siesta_reference",
+                    {**record, "status": "completed", "manifest": manifest, "reference_workers": reference_workers},
+                )
 
         prediction_models = [model for model in ("graph2mat", "deeph") if stages.get(f"predict_derivative_{model}") or stages.get(f"derivative_metrics_{model}")]
         separate_models = len(prediction_models) > 1 and any(stages.get(f"predict_derivative_{model}") for model in prediction_models)

@@ -33,6 +33,7 @@ from g2m_deeph_runner import (  # noqa: E402
     build_derivative_model_comparison_summary,
     _deeph_device_settings,
     _deeph_training_parallelism,
+    _derivative_reference_workers,
     _deeph_metric_command_args,
     _derivative_metric_command_args,
     _derivative_metrics_settings,
@@ -431,11 +432,187 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
 
                     runner._run_command = fake_run_command  # type: ignore[method-assign]
 
-                    runner._run_modular_derivative_workflow(payload)
+                    summary = runner._run_modular_derivative_workflow(payload)
 
                     self.assertEqual([label for label, _command in commands], ["Derivative SIESTA reference Hamiltonians"])
                     command = commands[0][1]
                     self.assertEqual(command[command.index("--siesta-command") + 1], expected_command)
+                    self.assertEqual(command[command.index("--workers") + 1], "1")
+                    self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 1)
+
+    def test_derivative_reference_workers_comes_from_performance_payload(self):
+        self.assertEqual(
+            _derivative_reference_workers(
+                {"performance": {"max_parallel_derivative_reference_jobs": "2"}},
+                {},
+            ),
+            2,
+        )
+
+    def test_derivative_siesta_reference_command_uses_configured_reference_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stencil_root = root / "derivative_inputs"
+            stencil_root.mkdir()
+            payload = {
+                "workflow_mode": "derivative_reference_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(stencil_root),
+                    "method": "central",
+                    "skip_if_exists": False,
+                    "reference_workers": 2,
+                },
+                "stages": {
+                    "validate_derivative_stencils": False,
+                    "run_derivative_siesta_reference": True,
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                reference_root = Path(command[command.index("--output-reference-root") + 1])
+                reference_root.mkdir(parents=True, exist_ok=True)
+                (reference_root / "derivative_siesta_reference_manifest.json").write_text(
+                    json.dumps({"samples_failed": 0, "samples_ok": 1}) + "\n",
+                    encoding="utf-8",
+                )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            command = commands[0][1]
+            self.assertEqual(command[command.index("--workers") + 1], "2")
+            self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 2)
+
+    def test_derivative_siesta_reference_command_uses_performance_worker_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stencil_root = root / "derivative_inputs"
+            stencil_root.mkdir()
+            payload = {
+                "workflow_mode": "derivative_reference_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(stencil_root),
+                    "method": "central",
+                    "skip_if_exists": False,
+                },
+                "performance": {"max_parallel_derivative_reference_jobs": 2},
+                "stages": {
+                    "validate_derivative_stencils": False,
+                    "run_derivative_siesta_reference": True,
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                reference_root = Path(command[command.index("--output-reference-root") + 1])
+                reference_root.mkdir(parents=True, exist_ok=True)
+                (reference_root / "derivative_siesta_reference_manifest.json").write_text(
+                    json.dumps({"samples_failed": 0, "samples_ok": 1}) + "\n",
+                    encoding="utf-8",
+                )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            command = commands[0][1]
+            self.assertEqual(command[command.index("--workers") + 1], "2")
+            self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 2)
+
+    def test_derivative_reference_workers_override_performance_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stencil_root = root / "derivative_inputs"
+            stencil_root.mkdir()
+            payload = {
+                "workflow_mode": "derivative_reference_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(stencil_root),
+                    "method": "central",
+                    "skip_if_exists": False,
+                    "reference_workers": 3,
+                },
+                "performance": {"max_parallel_derivative_reference_jobs": 2},
+                "stages": {
+                    "validate_derivative_stencils": False,
+                    "run_derivative_siesta_reference": True,
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                reference_root = Path(command[command.index("--output-reference-root") + 1])
+                reference_root.mkdir(parents=True, exist_ok=True)
+                (reference_root / "derivative_siesta_reference_manifest.json").write_text(
+                    json.dumps({"samples_failed": 0, "samples_ok": 1}) + "\n",
+                    encoding="utf-8",
+                )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            command = commands[0][1]
+            self.assertEqual(command[command.index("--workers") + 1], "3")
+            self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 3)
+
+    def test_derivative_reference_workers_invalid_values_fail_clearly(self):
+        cases = [
+            (
+                {"reference_workers": 0},
+                {},
+                "modular_workflow.derivative.reference_workers must be a positive integer",
+            ),
+            (
+                {},
+                {"max_parallel_derivative_reference_jobs": 0},
+                "performance.max_parallel_derivative_reference_jobs must be a positive integer",
+            ),
+        ]
+        for derivative_overrides, performance_overrides, error in cases:
+            with self.subTest(error=error):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    stencil_root = root / "derivative_inputs"
+                    stencil_root.mkdir()
+                    payload = {
+                        "workflow_mode": "derivative_reference_only",
+                        "derivative": {
+                            "enabled": True,
+                            "result_dir": str(stencil_root),
+                            "method": "central",
+                            "skip_if_exists": False,
+                            **derivative_overrides,
+                        },
+                        "performance": dict(performance_overrides),
+                        "stages": {
+                            "validate_derivative_stencils": False,
+                            "run_derivative_siesta_reference": True,
+                        },
+                    }
+                    payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+                    runner = Graph2MatDeepHBenchmarkRunner()
+                    runner._run_command = lambda *args, **kwargs: self.fail("runner should reject invalid workers before launching")  # type: ignore[method-assign]
+
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        runner._run_modular_derivative_workflow(payload)
 
     def test_derivative_preflight_metrics_only_requires_existing_artifact_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2635,6 +2812,297 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             manifest = json.loads((run_root / "sweep" / "training_sweep_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["derivative_workflows"]), 2)
 
+    def test_training_sweep_derivative_workflows_default_parallelism_is_sequential(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "benchmark"
+            child_a = run_root / "sweep" / "graph2mat" / "dataset" / "g2m"
+            child_b = run_root / "sweep" / "deeph" / "dataset" / "deeph"
+            (child_a / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True)
+            (child_b / "metrics" / "deeph" / "eval").mkdir(parents=True)
+            summary = {
+                "runs": [
+                    {"status": "completed", "run_root": str(child_a), "config_id": "g2m"},
+                    {"status": "completed", "run_root": str(child_b), "config_id": "deeph"},
+                ]
+            }
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {"enabled": True, "method": "central"},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+            call_roots = []
+
+            def fake_modular(child_payload, *, run_root=None, graph2mat_context=None, deeph_context=None):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                try:
+                    call_roots.append(Path(run_root).resolve())
+                    time.sleep(0.05)
+                    result_dir = Path(run_root) / "derivative_workflow"
+                    result_dir.mkdir(parents=True, exist_ok=True)
+                    (result_dir / "derivative_workflow_manifest.json").write_text("{}\n", encoding="utf-8")
+                    return {"result_dir": str(result_dir), "stages": {}}
+                finally:
+                    with lock:
+                        active -= 1
+
+            runner._run_modular_derivative_workflow = fake_modular  # type: ignore[method-assign]
+
+            records = runner._run_training_sweep_derivative_workflows(payload, run_root=run_root, summary=summary)
+
+            self.assertEqual(max_active, 1)
+            self.assertEqual([record["derivative_workflow_status"] for record in records], ["completed", "completed"])
+            self.assertEqual(call_roots, [child_a.resolve(), child_b.resolve()])
+
+    def test_training_sweep_derivative_workflows_parallelism_overlaps_independent_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "benchmark"
+            child_a = run_root / "sweep" / "graph2mat" / "dataset" / "g2m"
+            child_b = run_root / "sweep" / "deeph" / "dataset" / "deeph"
+            (child_a / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True)
+            (child_b / "metrics" / "deeph" / "eval").mkdir(parents=True)
+            summary = {
+                "runs": [
+                    {"status": "completed", "run_root": str(child_a), "config_id": "g2m"},
+                    {"status": "completed", "run_root": str(child_b), "config_id": "deeph"},
+                ]
+            }
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {"enabled": True, "method": "central"},
+                "performance": {"max_parallel_derivative_workflows": 2},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+            both_started = threading.Event()
+
+            def fake_modular(child_payload, *, run_root=None, graph2mat_context=None, deeph_context=None):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                    if active >= 2:
+                        both_started.set()
+                try:
+                    both_started.wait(timeout=1.0)
+                    time.sleep(0.05)
+                    result_dir = Path(run_root) / "derivative_workflow"
+                    result_dir.mkdir(parents=True, exist_ok=True)
+                    (result_dir / "derivative_workflow_manifest.json").write_text("{}\n", encoding="utf-8")
+                    return {"result_dir": str(result_dir), "stages": {}}
+                finally:
+                    with lock:
+                        active -= 1
+
+            runner._run_modular_derivative_workflow = fake_modular  # type: ignore[method-assign]
+
+            records = runner._run_training_sweep_derivative_workflows(payload, run_root=run_root, summary=summary)
+
+            self.assertTrue(both_started.is_set())
+            self.assertEqual(max_active, 2)
+            self.assertEqual([record["derivative_workflow_status"] for record in records], ["completed", "completed"])
+
+    def test_training_sweep_derivative_workflows_duplicate_output_root_fails_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "benchmark"
+            child = run_root / "sweep" / "graph2mat" / "dataset" / "shared"
+            (child / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True)
+            summary = {
+                "runs": [
+                    {"status": "completed", "run_root": str(child), "config_id": "g2m-a"},
+                    {"status": "completed", "run_root": str(child), "config_id": "g2m-b"},
+                ]
+            }
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {"enabled": True, "method": "central"},
+                "performance": {"max_parallel_derivative_workflows": 2},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            runner._run_modular_derivative_workflow = mock.Mock(side_effect=AssertionError("should not launch"))  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(RuntimeError, "output root collision"):
+                runner._run_training_sweep_derivative_workflows(payload, run_root=run_root, summary=summary)
+
+            self.assertEqual(runner._run_modular_derivative_workflow.call_count, 0)
+
+    def test_training_sweep_derivative_workflows_record_mixed_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "benchmark"
+            child_a = run_root / "sweep" / "graph2mat" / "dataset" / "g2m"
+            child_b = run_root / "sweep" / "deeph" / "dataset" / "deeph"
+            (child_a / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True)
+            (child_b / "metrics" / "deeph" / "eval").mkdir(parents=True)
+            summary = {
+                "runs": [
+                    {"status": "completed", "run_root": str(child_a), "config_id": "g2m"},
+                    {"status": "completed", "run_root": str(child_b), "config_id": "deeph"},
+                ]
+            }
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {"enabled": True, "method": "central"},
+                "performance": {"max_parallel_derivative_workflows": 2},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fake_modular(child_payload, *, run_root=None, graph2mat_context=None, deeph_context=None):
+                run_root = Path(run_root)
+                if run_root.name == "deeph":
+                    raise RuntimeError("simulated derivative workflow failure")
+                result_dir = run_root / "derivative_workflow"
+                result_dir.mkdir(parents=True, exist_ok=True)
+                (result_dir / "derivative_workflow_manifest.json").write_text("{}\n", encoding="utf-8")
+                return {"result_dir": str(result_dir), "stages": {}}
+
+            runner._run_modular_derivative_workflow = fake_modular  # type: ignore[method-assign]
+
+            records = runner._run_training_sweep_derivative_workflows(payload, run_root=run_root, summary=summary)
+
+            self.assertEqual([record["derivative_workflow_status"] for record in records], ["completed", "failed"])
+            self.assertIn("simulated derivative workflow failure", records[1]["failure_reason"])
+            manifest = json.loads((run_root / "sweep" / "training_sweep_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [row["derivative_workflow_status"] for row in manifest["derivative_workflows"]],
+                ["completed", "failed"],
+            )
+
+    def test_training_sweep_derivative_workflows_parent_writes_summary_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "benchmark"
+            child_a = run_root / "sweep" / "graph2mat" / "dataset" / "g2m"
+            child_b = run_root / "sweep" / "deeph" / "dataset" / "deeph"
+            (child_a / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True)
+            (child_b / "metrics" / "deeph" / "eval").mkdir(parents=True)
+            summary = {
+                "runs": [
+                    {"status": "completed", "run_root": str(child_a), "config_id": "g2m"},
+                    {"status": "completed", "run_root": str(child_b), "config_id": "deeph"},
+                ]
+            }
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {"enabled": True, "method": "central"},
+                "performance": {"max_parallel_derivative_workflows": 2},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            def fake_modular(child_payload, *, run_root=None, graph2mat_context=None, deeph_context=None):
+                result_dir = Path(run_root) / "derivative_workflow"
+                result_dir.mkdir(parents=True, exist_ok=True)
+                (result_dir / "derivative_workflow_manifest.json").write_text("{}\n", encoding="utf-8")
+                return {"result_dir": str(result_dir), "stages": {}}
+
+            runner._run_modular_derivative_workflow = fake_modular  # type: ignore[method-assign]
+
+            with mock.patch.object(runner, "_write_training_sweep_summary", wraps=runner._write_training_sweep_summary) as write_summary:
+                records = runner._run_training_sweep_derivative_workflows(payload, run_root=run_root, summary=summary)
+
+            self.assertEqual(write_summary.call_count, 1)
+            manifest = json.loads((run_root / "sweep" / "training_sweep_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual([record["derivative_workflow_status"] for record in records], ["completed", "completed"])
+            self.assertEqual(len(manifest["derivative_workflows"]), 2)
+
+    def test_training_sweep_derivative_status_progress_is_exposed_via_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root = root / "benchmark"
+            child_a = run_root / "sweep" / "graph2mat" / "dataset" / "g2m"
+            child_b = run_root / "sweep" / "deeph" / "dataset" / "deeph"
+            (child_a / "metrics" / "graph2mat" / "eval_input").mkdir(parents=True)
+            (child_b / "metrics" / "deeph" / "eval").mkdir(parents=True)
+            summary = {
+                "runs": [
+                    {"status": "completed", "run_root": str(child_a), "config_id": "g2m"},
+                    {"status": "completed", "run_root": str(child_b), "config_id": "deeph"},
+                ]
+            }
+            payload = {
+                "workflow_mode": "h_then_derivative_postprocess",
+                "derivative": {"enabled": True, "method": "central"},
+                "performance": {"max_parallel_derivative_workflows": 2},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            entered = threading.Event()
+            release = threading.Event()
+            errors = []
+
+            def fake_modular(child_payload, *, run_root=None, graph2mat_context=None, deeph_context=None):
+                entered.set()
+                release.wait(timeout=1.0)
+                result_dir = Path(run_root) / "derivative_workflow"
+                result_dir.mkdir(parents=True, exist_ok=True)
+                (result_dir / "derivative_workflow_manifest.json").write_text("{}\n", encoding="utf-8")
+                return {"result_dir": str(result_dir), "stages": {}}
+
+            def target():
+                try:
+                    runner._run_training_sweep_derivative_workflows(payload, run_root=run_root, summary=summary)
+                except Exception as exc:  # pragma: no cover - test should not fail here
+                    errors.append(exc)
+
+            runner._run_modular_derivative_workflow = fake_modular  # type: ignore[method-assign]
+            with runner._lock:
+                runner._state.stage = "training_sweep"
+                runner._state.training_sweep_status = {
+                    "enabled": True,
+                    "total": 4,
+                    "completed": 1,
+                    "failed": 0,
+                }
+            worker = threading.Thread(target=target)
+            runner._thread = worker
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1.0))
+
+            snapshot = None
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                snapshot = runner.status()["training_sweep"]
+                derivatives = snapshot.get("derivatives") if isinstance(snapshot.get("derivatives"), dict) else {}
+                if int(derivatives.get("active") or 0) >= 1 and int(derivatives.get("completed") or 0) == 0:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("derivative workflow progress did not become visible in status()")
+
+            derivatives = snapshot["derivatives"]
+            self.assertTrue(snapshot["enabled"])
+            self.assertEqual(snapshot["total"], 4)
+            self.assertEqual(snapshot["completed"], 1)
+            self.assertEqual(snapshot["failed"], 0)
+            self.assertTrue(derivatives["enabled"])
+            self.assertEqual(derivatives["total"], 2)
+            self.assertGreaterEqual(derivatives["active"], 1)
+            self.assertEqual(derivatives["completed"], 0)
+            self.assertEqual(derivatives["failed"], 0)
+            self.assertEqual(derivatives["max_parallel_derivative_workflows"], 2)
+            self.assertEqual(derivatives["active"] + derivatives["queued"], 2)
+
+            release.set()
+            worker.join(timeout=2.0)
+            runner._thread = None
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+
     def test_training_sweep_derivative_full_schedules_paired_launch_after_both_child_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3725,6 +4193,60 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             joined = "".join(logs["lines"])
             self.assertIn("Watching detached benchmark run", joined)
             self.assertIn("Epoch #12", joined)
+
+    def test_plots_selected_detached_run_includes_live_metric_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_root = Path(tmp) / "results" / "graphene_w90_g2m_deeph_benchmark"
+            detached_parent = Path(tmp) / "results" / "graphene_5x2_snapshot_scaling_12_1300_600epochs_1train"
+            run_root = detached_parent / "graphene_5x2_snapshot_scaling_12_1300_600epochs_1train_20260622_173854"
+            run_root.mkdir(parents=True)
+            (run_root / "runner_status.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "graph2mat_deeph_benchmark_runner_v1",
+                        "status": {
+                            "running": True,
+                            "stage": "training_sweep",
+                            "run_id": run_root.name,
+                            "run_root": str(run_root),
+                            "training_sweep": {
+                                "enabled": True,
+                                "completed": 8,
+                                "failed": 1,
+                                "total": 16,
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner = Graph2MatDeepHBenchmarkRunner()
+            live_row = {
+                "run_id": run_root.name,
+                "dataset_id": "graphene_5x2_scale_iid12",
+                "dataset_root": "/tmp/graphene_5x2_scale_iid12",
+                "dataset_size": 12,
+                "method": "deeph",
+                "config_id": "DH-T1000-04-anchor-G5x2-N12",
+                "epoch_label": "600 epochs",
+                "metric_key": "h_mae_eV_mean",
+                "metric_value": 0.123,
+                "scientific_status": "diagnostic_only",
+                "source": "live_training_sweep_metrics",
+            }
+
+            with (
+                mock.patch("g2m_deeph_runner.DEFAULT_OUTPUT_ROOT", output_root),
+                mock.patch.object(runner, "_latest_detached_running_run_root", return_value=run_root),
+                mock.patch("g2m_deeph_runner.live_metric_scaling_rows", return_value=[live_row]),
+            ):
+                runs = runner.plot_runs()["runs"]
+                selected = next(run for run in runs if run["run_id"] == run_root.name)
+                payload = runner.plots(selected_run_ids={selected["id"]})
+
+            self.assertTrue(payload["metric_scaling_rows"])
+            self.assertEqual({row["run_id"] for row in payload["metric_scaling_rows"]}, {run_root.name})
+            self.assertTrue(any(row.get("metric_value") == 0.123 for row in payload["metric_scaling_rows"]))
 
     def test_plots_endpoint_includes_live_metric_scaling_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

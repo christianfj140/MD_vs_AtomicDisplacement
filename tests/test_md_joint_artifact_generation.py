@@ -5,6 +5,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -99,6 +101,19 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        return config
+
+    def temperature_block_config(self, *, workers: int | None = None, blocks: list[dict] | None = None) -> dict:
+        config = self.config()
+        config["md"]["temperature_blocks"] = blocks or [
+            {"block_id": "md_300K", "n_snapshots": 2, "temperature_K": 300},
+            {"block_id": "md_500K", "n_snapshots": 2, "temperature_K": 500},
+        ]
+        config.setdefault("performance", {})
+        if workers is None:
+            config["performance"].pop("md_temperature_block_workers", None)
+        else:
+            config["performance"]["md_temperature_block_workers"] = workers
         return config
 
     def test_rendered_fdf_contains_deeph_required_output_flags(self) -> None:
@@ -304,6 +319,161 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
         self.assertIn("python_version", environment)
         self.assertIn("platform", environment)
         self.assertNotIn("SECRET_TOKEN", environment)
+
+    def test_temperature_block_workers_one_preserves_sequential_behavior(self) -> None:
+        config = self.temperature_block_config(workers=1)
+        calls: list[str] = []
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_run(_config, block, block_dir):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            calls.append(f"run:{block['block_id']}:{block_dir.name}")
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+
+        def fake_combine(_config, blocks):
+            calls.append("combine:" + ",".join(str(block["block_id"]) for block in blocks))
+
+        with mock.patch.object(self.generate, "run_temperature_block", side_effect=fake_run), mock.patch.object(
+            self.generate,
+            "combine_temperature_blocks",
+            side_effect=fake_combine,
+        ):
+            self.generate.run_temperature_block_dataset(config)
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual(
+            calls,
+            ["run:md_300K:md_300K", "run:md_500K:md_500K", "combine:md_300K,md_500K"],
+        )
+
+    def test_temperature_block_workers_two_overlaps_blocks(self) -> None:
+        config = self.temperature_block_config(workers=2)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_run(_config, block, _block_dir):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.06 if block["block_id"] == "md_300K" else 0.03)
+            with lock:
+                active -= 1
+
+        with mock.patch.object(self.generate, "run_temperature_block", side_effect=fake_run), mock.patch.object(
+            self.generate,
+            "combine_temperature_blocks",
+        ):
+            self.generate.run_temperature_block_dataset(config)
+
+        self.assertEqual(max_active, 2)
+
+    def test_temperature_block_combine_runs_only_after_all_blocks_complete(self) -> None:
+        config = self.temperature_block_config(workers=2)
+        completed: list[str] = []
+
+        def fake_run(_config, block, _block_dir):
+            time.sleep(0.04 if block["block_id"] == "md_300K" else 0.01)
+            completed.append(str(block["block_id"]))
+
+        def fake_combine(_config, blocks):
+            self.assertEqual(sorted(completed), ["md_300K", "md_500K"])
+            self.assertEqual([block["block_id"] for block in blocks], ["md_300K", "md_500K"])
+
+        with mock.patch.object(self.generate, "run_temperature_block", side_effect=fake_run), mock.patch.object(
+            self.generate,
+            "combine_temperature_blocks",
+            side_effect=fake_combine,
+        ) as combine:
+            self.generate.run_temperature_block_dataset(config)
+
+        combine.assert_called_once()
+
+    def test_temperature_block_failure_prevents_combine_and_reports_block_id(self) -> None:
+        config = self.temperature_block_config(workers=2)
+
+        def fake_run(_config, block, _block_dir):
+            if block["block_id"] == "md_500K":
+                raise RuntimeError("boom")
+
+        with mock.patch.object(self.generate, "run_temperature_block", side_effect=fake_run), mock.patch.object(
+            self.generate,
+            "combine_temperature_blocks",
+        ) as combine:
+            with self.assertRaisesRegex(RuntimeError, "md_500K"):
+                self.generate.run_temperature_block_dataset(config)
+
+        combine.assert_not_called()
+
+    def test_temperature_block_workers_invalid_values_fail_clearly(self) -> None:
+        config = self.temperature_block_config(workers=0)
+
+        with mock.patch.object(self.generate, "run_temperature_block") as run_block:
+            with self.assertRaisesRegex(RuntimeError, "performance.md_temperature_block_workers"):
+                self.generate.run_temperature_block_dataset(config)
+
+        run_block.assert_not_called()
+
+    def test_single_temperature_block_with_multiple_workers_stays_safe(self) -> None:
+        config = self.temperature_block_config(
+            workers=2,
+            blocks=[{"block_id": "md_300K", "n_snapshots": 2, "temperature_K": 300}],
+        )
+        calls: list[str] = []
+
+        def fake_run(_config, block, _block_dir):
+            calls.append(str(block["block_id"]))
+
+        with mock.patch.object(self.generate, "run_temperature_block", side_effect=fake_run), mock.patch.object(
+            self.generate,
+            "combine_temperature_blocks",
+        ) as combine:
+            self.generate.run_temperature_block_dataset(config)
+
+        self.assertEqual(calls, ["md_300K"])
+        combine.assert_called_once()
+
+    def test_temperature_block_manifest_records_worker_metadata(self) -> None:
+        config = self.temperature_block_config(workers=2)
+        dataset_dir = Path(config["paths"]["dataset_dir"])
+        blocks_root = dataset_dir / "md_temperature_blocks"
+        blocks = config["md"]["temperature_blocks"]
+        for block_index, block in enumerate(blocks):
+            block_dir = blocks_root / str(block["block_id"])
+            steps_dir = block_dir / "MD_steps"
+            steps_dir.mkdir(parents=True, exist_ok=True)
+            write_joint_snapshot(steps_dir / "0")
+            write_joint_snapshot(steps_dir / "1")
+            (block_dir / "RUN.out").write_text(f"block {block_index}\n", encoding="utf-8")
+
+        def fake_write_metadata(sample_dir: Path, _config: dict, *, extra=None, validation_status="pending_joint_artifact_validation"):
+            payload = dict(extra or {})
+            payload["artifact_contract_validation_status"] = validation_status
+            (sample_dir / "metadata.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            return payload
+
+        with mock.patch.object(self.generate, "validate_joint_benchmark_artifacts"), mock.patch.object(
+            self.generate,
+            "_materialize_graph2mat_basis_files",
+            return_value=0,
+        ), mock.patch.object(
+            self.generate,
+            "write_joint_snapshot_metadata",
+            side_effect=fake_write_metadata,
+        ):
+            self.generate.combine_temperature_blocks(config, blocks)
+
+        manifest = json.loads((dataset_dir / "md_temperature_blocks_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["temperature_block_workers"], 2)
+        self.assertTrue(manifest["parallel_execution_enabled"])
 
 
 if __name__ == "__main__":

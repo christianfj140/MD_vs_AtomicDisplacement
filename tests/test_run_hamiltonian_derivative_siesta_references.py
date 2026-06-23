@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,6 +22,7 @@ from build_hamiltonian_derivative_stencils import build_derivative_stencils  # n
 from hamiltonian_derivative_stencil import discover_derivative_stencils  # noqa: E402
 from run_hamiltonian_derivative_siesta_references import (  # noqa: E402
     DerivativeSiestaReferenceError,
+    build_argument_parser,
     run_derivative_siesta_references,
 )
 
@@ -103,23 +107,107 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         path.write_text(f"pseudo for {label}\n", encoding="utf-8")
         return path
 
+    def selected_sample_ids(self, manifest: dict, limit: int) -> list[str]:
+        return sorted(record["sample_id"] for record in manifest["samples"])[:limit]
+
+    def test_argument_parser_accepts_workers(self) -> None:
+        args = build_argument_parser().parse_args(["--stencil-root", str(self.root / "stencils"), "--workers", "2"])
+
+        self.assertEqual(args.workers, 2)
+
     def test_skip_if_exists_avoids_rerunning_existing_reference(self) -> None:
         stencil_root, manifest = self.build_stencil()
-        sample_id = sorted(record["sample_id"] for record in manifest["samples"])[0]
-        reference_dir = stencil_root / "siesta_hamiltonians" / sample_id
+        self.write_pseudo("C")
+        sample_ids = self.selected_sample_ids(manifest, 2)
+        reference_dir = stencil_root / "siesta_hamiltonians" / sample_ids[0]
         reference_dir.mkdir(parents=True)
         (reference_dir / "siesta.TSHS").write_bytes(b"existing")
+        calls: list[str] = []
 
-        result = run_derivative_siesta_references(
-            stencil_root=stencil_root,
-            siesta_command=f"{sys.executable} -c \"import sys; sys.exit(7)\"",
-            max_jobs=1,
-            skip_if_exists=True,
-        )
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            calls.append(cwd.name)
+            (cwd / "siesta.TSHS").write_bytes(b"new")
+            return mock.Mock(returncode=0)
 
-        self.assertEqual(result["samples_ok"], 1)
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                workers=2,
+                max_samples=2,
+                skip_if_exists=True,
+            )
+
+        self.assertEqual(result["samples_ok"], 2)
+        self.assertEqual([row["sample_id"] for row in result["rows"]], sample_ids)
         self.assertEqual(result["rows"][0]["status"], "skipped_existing")
+        self.assertEqual(result["rows"][1]["status"], "ok")
+        self.assertEqual(calls, [sample_ids[1]])
         self.assertEqual((reference_dir / "siesta.TSHS").read_bytes(), b"existing")
+
+    def test_workers_one_preserves_sequential_behavior(self) -> None:
+        stencil_root, manifest = self.build_stencil()
+        self.write_pseudo("C")
+        sample_ids = self.selected_sample_ids(manifest, 2)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_run(command, **kwargs):
+            nonlocal active, max_active
+            cwd = Path(kwargs["cwd"])
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            (cwd / "siesta.TSHS").write_bytes(b"reference")
+            with lock:
+                active -= 1
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                workers=1,
+                max_samples=2,
+            )
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual([row["sample_id"] for row in result["rows"]], sample_ids)
+        self.assertEqual(result["workers"], 1)
+        self.assertFalse(result["parallel_execution_enabled"])
+
+    def test_workers_two_overlap_jobs_and_preserve_row_order(self) -> None:
+        stencil_root, manifest = self.build_stencil()
+        self.write_pseudo("C")
+        sample_ids = self.selected_sample_ids(manifest, 2)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_run(command, **kwargs):
+            nonlocal active, max_active
+            cwd = Path(kwargs["cwd"])
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.2 if cwd.name == sample_ids[0] else 0.05)
+            (cwd / "siesta.TSHS").write_bytes(f"reference {cwd.name}".encode("utf-8"))
+            with lock:
+                active -= 1
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                workers=2,
+                max_samples=2,
+            )
+
+        self.assertEqual(max_active, 2)
+        self.assertEqual([row["sample_id"] for row in result["rows"]], sample_ids)
+        self.assertEqual(result["workers"], 2)
+        self.assertTrue(result["parallel_execution_enabled"])
 
     def test_missing_structure_reports_actionable_error(self) -> None:
         stencil_root = self.root / "broken_stencil"
@@ -226,13 +314,22 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
     def test_max_samples_limits_reference_samples(self) -> None:
         stencil_root, _manifest = self.build_stencil()
         self.write_pseudo("C")
+        calls: list[str] = []
 
-        result = run_derivative_siesta_references(
-            stencil_root=stencil_root,
-            siesta_command=f"{sys.executable} -c \"from pathlib import Path; Path('siesta.TSHS').write_bytes(b'h')\"",
-            max_samples=1,
-        )
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            calls.append(cwd.name)
+            (cwd / "siesta.TSHS").write_bytes(b"h")
+            return mock.Mock(returncode=0)
 
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                workers=2,
+                max_samples=1,
+            )
+
+        self.assertEqual(len(calls), 1)
         self.assertEqual(result["samples_total"], 1)
         self.assertEqual(result["samples_ok"], 1)
         self.assertEqual(result["max_samples"], 1)
@@ -241,19 +338,96 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
     def test_max_jobs_alias_limits_reference_samples_and_is_recorded(self) -> None:
         stencil_root, _manifest = self.build_stencil()
         self.write_pseudo("C")
+        calls: list[str] = []
 
-        result = run_derivative_siesta_references(
-            stencil_root=stencil_root,
-            siesta_command=f"{sys.executable} -c \"from pathlib import Path; Path('siesta.TSHS').write_bytes(b'h')\"",
-            max_jobs=1,
-            max_jobs_alias_used=True,
-        )
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            calls.append(cwd.name)
+            (cwd / "siesta.TSHS").write_bytes(b"h")
+            return mock.Mock(returncode=0)
 
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                workers=2,
+                max_jobs=1,
+                max_jobs_alias_used=True,
+            )
+
+        self.assertEqual(len(calls), 1)
         self.assertEqual(result["samples_total"], 1)
         self.assertEqual(result["samples_ok"], 1)
         self.assertEqual(result["max_samples"], 1)
         self.assertEqual(result["max_jobs"], 1)
         self.assertTrue(result["max_jobs_alias_used"])
+
+    def test_diagnostic_only_records_failure_while_other_samples_complete(self) -> None:
+        stencil_root, manifest = self.build_stencil()
+        self.write_pseudo("C")
+        sample_ids = self.selected_sample_ids(manifest, 2)
+
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            if cwd.name == sample_ids[0]:
+                return mock.Mock(returncode=3)
+            (cwd / "siesta.TSHS").write_bytes(b"reference")
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            result = run_derivative_siesta_references(
+                stencil_root=stencil_root,
+                workers=2,
+                max_samples=2,
+                diagnostic_only=True,
+            )
+
+        self.assertEqual([row["sample_id"] for row in result["rows"]], sample_ids)
+        self.assertEqual(result["samples_failed"], 1)
+        self.assertEqual(result["samples_ok"], 1)
+        self.assertEqual(result["rows"][0]["status"], "error")
+        self.assertEqual(result["rows"][1]["status"], "ok")
+
+    def test_failures_write_manifest_and_status_before_raise(self) -> None:
+        stencil_root, manifest = self.build_stencil()
+        self.write_pseudo("C")
+        sample_ids = self.selected_sample_ids(manifest, 2)
+
+        def fake_run(command, **kwargs):
+            cwd = Path(kwargs["cwd"])
+            if cwd.name == sample_ids[0]:
+                return mock.Mock(returncode=3)
+            (cwd / "siesta.TSHS").write_bytes(b"reference")
+            return mock.Mock(returncode=0)
+
+        with mock.patch("run_hamiltonian_derivative_siesta_references.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(DerivativeSiestaReferenceError, "failed for"):
+                run_derivative_siesta_references(
+                    stencil_root=stencil_root,
+                    workers=2,
+                    max_samples=2,
+                )
+
+        output_root = stencil_root / "siesta_hamiltonians"
+        manifest_path = output_root / "derivative_siesta_reference_manifest.json"
+        status_path = output_root / "derivative_siesta_reference_status.csv"
+        written_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        with status_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(written_manifest["samples_failed"], 1)
+        self.assertEqual([row["sample_id"] for row in written_manifest["rows"]], sample_ids)
+        self.assertEqual(len(rows), 2)
+
+    def test_invalid_workers_fail_clearly(self) -> None:
+        stencil_root, _manifest = self.build_stencil()
+
+        for workers in (0, -1, 1.5):
+            with self.subTest(workers=workers):
+                with self.assertRaisesRegex(DerivativeSiestaReferenceError, "workers must be a positive integer"):
+                    run_derivative_siesta_references(
+                        stencil_root=stencil_root,
+                        workers=workers,
+                    )
 
     def test_siesta_command_runs_as_argv_by_default(self) -> None:
         stencil_root, _manifest = self.build_stencil()

@@ -11,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
@@ -288,6 +289,19 @@ def performance_env(config: dict) -> dict[str, str]:
             raise RuntimeError(f"performance.{key} debe ser un entero positivo.")
         env[env_name] = str(threads)
     return env
+
+
+def temperature_block_workers(config: dict) -> int:
+    value = (config.get("performance") or {}).get("md_temperature_block_workers")
+    if value in (None, "", "null"):
+        return 1
+    try:
+        workers = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("performance.md_temperature_block_workers debe ser un entero positivo.") from exc
+    if workers <= 0:
+        raise RuntimeError("performance.md_temperature_block_workers debe ser un entero positivo.")
+    return workers
 
 
 def setup_store(config: dict) -> None:
@@ -1078,6 +1092,8 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
             "method": "md",
             "generation_method": "md_temperature_blocks",
             "total_snapshots": global_index,
+            "temperature_block_workers": temperature_block_workers(config),
+            "parallel_execution_enabled": temperature_block_workers(config) > 1 and len(blocks) > 1,
             "blocks": blocks,
             "samples": samples,
         },
@@ -1089,6 +1105,7 @@ def run_temperature_block_dataset(config: dict) -> None:
     blocks = md_temperature_blocks(config)
     if not blocks:
         return
+    workers = temperature_block_workers(config)
     pipeline_paths = paths(config)
     dataset_dir = pipeline_paths["dataset_dir"]
     blocks_root = dataset_dir / "md_temperature_blocks"
@@ -1102,7 +1119,37 @@ def run_temperature_block_dataset(config: dict) -> None:
             f"{block_id}: {block['n_snapshots']} snapshots, "
             f"T={block.get('temperature_K', config['md'].get('temperature_K', config['md'].get('initial_temperature_K', 300)))} K"
         )
-        run_temperature_block(config, block, blocks_root / block_id)
+    if workers <= 1 or len(blocks) <= 1:
+        for block in blocks:
+            block_id = str(block.get("block_id") or "md_block")
+            run_temperature_block(config, block, blocks_root / block_id)
+    else:
+        print(f"[INFO] Ejecutando {len(blocks)} bloques MD con workers={workers}.")
+        failures: list[tuple[str, Exception]] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                (
+                    str(block.get("block_id") or "md_block"),
+                    executor.submit(
+                        run_temperature_block,
+                        config,
+                        block,
+                        blocks_root / str(block.get("block_id") or "md_block"),
+                    ),
+                )
+                for block in blocks
+            ]
+            for block_id, future in futures:
+                try:
+                    future.result()
+                except Exception as exc:
+                    failures.append((block_id, exc))
+        if failures:
+            failed_block_ids = ", ".join(block_id for block_id, _ in failures)
+            first_block_id, first_exc = failures[0]
+            raise RuntimeError(
+                f"MD temperature block(s) failed: {failed_block_ids}. First failure in {first_block_id}: {first_exc}"
+            ) from first_exc
     combine_temperature_blocks(config, blocks)
 
 

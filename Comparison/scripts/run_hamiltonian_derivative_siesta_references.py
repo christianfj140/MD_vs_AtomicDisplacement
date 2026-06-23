@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -258,6 +259,103 @@ def sample_row(
     }
 
 
+def _process_siesta_reference_sample(
+    *,
+    structure_dir: Path,
+    output_reference_root: Path,
+    existing_reference_root: Path | None,
+    resolved_source_dataset_root: Path | None,
+    siesta_command: str,
+    overwrite: bool,
+    skip_if_exists: bool,
+    siesta_shell: bool,
+) -> dict[str, Any]:
+    sample_id = structure_dir.name
+    reference_dir = output_reference_root / sample_id
+    started_at = time.time()
+    try:
+        if not (structure_dir / "RUN.fdf").exists():
+            return sample_row(
+                sample_id=sample_id,
+                status="error",
+                structure_dir=structure_dir,
+                reference_dir=reference_dir,
+                started_at=started_at,
+                finished_at=time.time(),
+                error="missing_structure_run_fdf",
+            )
+        existing_selection = choose_reference_matrix(reference_dir)
+        if existing_selection.ok and skip_if_exists and not overwrite:
+            return sample_row(
+                sample_id=sample_id,
+                status="skipped_existing",
+                structure_dir=structure_dir,
+                reference_dir=reference_dir,
+                started_at=started_at,
+                finished_at=time.time(),
+            )
+        clean_reference_dir(reference_dir, overwrite=overwrite)
+        copy_structure_inputs(structure_dir, reference_dir)
+        staged = copy_existing_reference(sample_id, reference_dir, existing_reference_root)
+        if staged is not None:
+            return sample_row(
+                sample_id=sample_id,
+                status="staged",
+                structure_dir=structure_dir,
+                reference_dir=reference_dir,
+                started_at=started_at,
+                finished_at=time.time(),
+            )
+        if resolved_source_dataset_root is None:
+            raise DerivativeSiestaReferenceError(
+                "Derivative SIESTA references require a source dataset root to stage pseudopotentials. "
+                f"Calculation directory: {reference_dir}. "
+                "Provide --source-dataset-root or ensure derivative_stencil_manifest.json records source_dataset_root."
+            )
+        stage_required_pseudopotentials(
+            reference_dir=reference_dir,
+            source_dataset_root=resolved_source_dataset_root,
+        )
+        run_record = run_siesta(reference_dir, command=siesta_command, use_shell=siesta_shell)
+        selection = choose_reference_matrix(reference_dir)
+        status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
+        error = "" if status == "ok" else selection.reason if run_record["returncode"] == 0 else "siesta_returncode_nonzero"
+        return sample_row(
+            sample_id=sample_id,
+            status=status,
+            structure_dir=structure_dir,
+            reference_dir=reference_dir,
+            command=_command_display(run_record["command"]),
+            returncode=int(run_record["returncode"]),
+            started_at=started_at,
+            finished_at=time.time(),
+            error=error,
+        )
+    except Exception as exc:
+        return sample_row(
+            sample_id=sample_id,
+            status="error",
+            structure_dir=structure_dir,
+            reference_dir=reference_dir,
+            command=siesta_command,
+            started_at=started_at,
+            finished_at=time.time(),
+            error=str(exc),
+        )
+
+
+def _validate_workers(workers: int) -> int:
+    if isinstance(workers, bool):
+        raise DerivativeSiestaReferenceError("workers must be a positive integer.")
+    try:
+        value = int(workers)
+    except (TypeError, ValueError) as exc:
+        raise DerivativeSiestaReferenceError("workers must be a positive integer.") from exc
+    if value < 1 or (isinstance(workers, float) and workers != value):
+        raise DerivativeSiestaReferenceError("workers must be a positive integer.")
+    return value
+
+
 def run_derivative_siesta_references(
     *,
     stencil_root: Path,
@@ -268,12 +366,14 @@ def run_derivative_siesta_references(
     overwrite: bool = False,
     skip_if_exists: bool = True,
     diagnostic_only: bool = False,
+    workers: int = 1,
     max_samples: int | None = None,
     max_jobs: int | None = None,
     max_jobs_alias_used: bool = False,
     siesta_shell: bool = False,
 ) -> dict[str, Any]:
     output_reference_root = output_reference_root or stencil_root / "siesta_hamiltonians"
+    validated_workers = _validate_workers(workers)
     structures = discover_structure_samples(stencil_root)
     resolved_source_dataset_root = (
         None
@@ -286,93 +386,37 @@ def run_derivative_siesta_references(
     effective_max_samples = _effective_max_samples(max_samples=max_samples, max_jobs=max_jobs)
     if effective_max_samples is not None:
         structures = structures[: max(0, int(effective_max_samples))]
-    rows: list[dict[str, Any]] = []
-    for structure_dir in structures:
-        sample_id = structure_dir.name
-        reference_dir = output_reference_root / sample_id
-        started_at = time.time()
-        try:
-            if not (structure_dir / "RUN.fdf").exists():
-                rows.append(
-                    sample_row(
-                        sample_id=sample_id,
-                        status="error",
-                        structure_dir=structure_dir,
-                        reference_dir=reference_dir,
-                        started_at=started_at,
-                        finished_at=time.time(),
-                        error="missing_structure_run_fdf",
-                    )
-                )
-                continue
-            existing_selection = choose_reference_matrix(reference_dir)
-            if existing_selection.ok and skip_if_exists and not overwrite:
-                rows.append(
-                    sample_row(
-                        sample_id=sample_id,
-                        status="skipped_existing",
-                        structure_dir=structure_dir,
-                        reference_dir=reference_dir,
-                        started_at=started_at,
-                        finished_at=time.time(),
-                    )
-                )
-                continue
-            clean_reference_dir(reference_dir, overwrite=overwrite)
-            copy_structure_inputs(structure_dir, reference_dir)
-            staged = copy_existing_reference(sample_id, reference_dir, existing_reference_root)
-            if staged is not None:
-                rows.append(
-                    sample_row(
-                        sample_id=sample_id,
-                        status="staged",
-                        structure_dir=structure_dir,
-                        reference_dir=reference_dir,
-                        started_at=started_at,
-                        finished_at=time.time(),
-                    )
-                )
-                continue
-            if resolved_source_dataset_root is None:
-                raise DerivativeSiestaReferenceError(
-                    "Derivative SIESTA references require a source dataset root to stage pseudopotentials. "
-                    f"Calculation directory: {reference_dir}. "
-                    "Provide --source-dataset-root or ensure derivative_stencil_manifest.json records source_dataset_root."
-                )
-            stage_required_pseudopotentials(
-                reference_dir=reference_dir,
-                source_dataset_root=resolved_source_dataset_root,
+    if validated_workers == 1 or len(structures) < 2:
+        rows = [
+            _process_siesta_reference_sample(
+                structure_dir=structure_dir,
+                output_reference_root=output_reference_root,
+                existing_reference_root=existing_reference_root,
+                resolved_source_dataset_root=resolved_source_dataset_root,
+                siesta_command=siesta_command,
+                overwrite=overwrite,
+                skip_if_exists=skip_if_exists,
+                siesta_shell=siesta_shell,
             )
-            run_record = run_siesta(reference_dir, command=siesta_command, use_shell=siesta_shell)
-            selection = choose_reference_matrix(reference_dir)
-            status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
-            error = "" if status == "ok" else selection.reason if run_record["returncode"] == 0 else "siesta_returncode_nonzero"
-            rows.append(
-                sample_row(
-                    sample_id=sample_id,
-                    status=status,
+            for structure_dir in structures
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=validated_workers) as executor:
+            futures = [
+                executor.submit(
+                    _process_siesta_reference_sample,
                     structure_dir=structure_dir,
-                    reference_dir=reference_dir,
-                    command=_command_display(run_record["command"]),
-                    returncode=int(run_record["returncode"]),
-                    started_at=started_at,
-                    finished_at=time.time(),
-                    error=error,
+                    output_reference_root=output_reference_root,
+                    existing_reference_root=existing_reference_root,
+                    resolved_source_dataset_root=resolved_source_dataset_root,
+                    siesta_command=siesta_command,
+                    overwrite=overwrite,
+                    skip_if_exists=skip_if_exists,
+                    siesta_shell=siesta_shell,
                 )
-            )
-        except Exception as exc:
-            rows.append(
-                sample_row(
-                    sample_id=sample_id,
-                    status="error",
-                    structure_dir=structure_dir,
-                    reference_dir=reference_dir,
-                    command=siesta_command,
-                    started_at=started_at,
-                    finished_at=time.time(),
-                    error=str(exc),
-                )
-            )
+                for structure_dir in structures
+            ]
+            rows = [future.result() for future in futures]
 
     failed = [row for row in rows if row["status"] == "error"]
     manifest = {
@@ -387,6 +431,8 @@ def run_derivative_siesta_references(
         "overwrite": overwrite,
         "skip_if_exists": skip_if_exists,
         "diagnostic_only": diagnostic_only,
+        "workers": validated_workers,
+        "parallel_execution_enabled": validated_workers > 1,
         "max_samples": effective_max_samples,
         "max_jobs": max_jobs,
         "max_jobs_alias_used": max_jobs_alias_used,
@@ -434,6 +480,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-if-exists", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--diagnostic-only", action="store_true")
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-jobs", type=int, default=None, help="Deprecated alias for --max-samples.")
     parser.add_argument("--siesta-shell", action="store_true", help="Run --siesta-command through the shell. Default is argv execution.")
@@ -452,6 +499,7 @@ def main() -> int:
             overwrite=args.overwrite,
             skip_if_exists=args.skip_if_exists,
             diagnostic_only=args.diagnostic_only,
+            workers=args.workers,
             max_samples=args.max_samples,
             max_jobs=args.max_jobs,
             max_jobs_alias_used=args.max_jobs is not None,

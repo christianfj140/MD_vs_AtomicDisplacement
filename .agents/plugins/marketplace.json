@@ -1,0 +1,20 @@
+{
+  "name": "codex-marketplace-md_vs_atomicdisplacement-af3dacef",
+  "interface": {
+    "displayName": "Codex Plugins (MD_vs_AtomicDisplacement)"
+  },
+  "plugins": [
+    {
+      "name": "hugging-face",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hugging-face"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Data"
+    }
+  ]
+}
