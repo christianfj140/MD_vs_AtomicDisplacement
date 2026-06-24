@@ -70,6 +70,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def expand_repo_tokens(text: str) -> str:
+    return os.path.expandvars(text.replace("${REPO_ROOT}", str(REPO_ROOT)))
+
+
 def file_sha256(path: Path | None) -> str | None:
     if path is None or not path.exists() or not path.is_file():
         return None
@@ -864,6 +868,8 @@ def run_derivative_predictions(
     existing_prediction_root = (
         existing_prediction_root.expanduser().resolve(strict=False) if existing_prediction_root is not None else None
     )
+    if basis_files:
+        basis_files = expand_repo_tokens(str(basis_files))
     structures = discover_structure_samples(stencil_root)
     effective_max_samples = _effective_max_samples(max_samples=max_samples, max_jobs=max_jobs)
     if effective_max_samples is not None:
