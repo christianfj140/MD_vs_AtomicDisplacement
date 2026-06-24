@@ -1,0 +1,32 @@
+{
+  "schema": "adaptive_derivative_selection_smoke_v1",
+  "output_root": "Comparison/results/adaptive_derivative_selection_smoke",
+  "derivative": {
+    "method": "central",
+    "base_split": "test",
+    "base_selection_policy": "adaptive_min_fraction",
+    "min_base_snapshots": 20,
+    "base_fraction": 0.2,
+    "base_selection_seed": 1,
+    "delta_ang": [0.01],
+    "atoms": ["0"],
+    "axes": ["x"]
+  },
+  "cases": [
+    {
+      "label": "n_test_10",
+      "n_test": 10,
+      "expected_selected_base_snapshots": 10
+    },
+    {
+      "label": "n_test_80",
+      "n_test": 80,
+      "expected_selected_base_snapshots": 20
+    },
+    {
+      "label": "n_test_110",
+      "n_test": 110,
+      "expected_selected_base_snapshots": 22
+    }
+  ]
+}

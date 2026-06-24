@@ -1485,6 +1485,30 @@ def _normalize_derivative_workflow_config(payload: dict[str, Any]) -> dict[str, 
         config["max_base_snapshots"] = _optional_int_value(raw.get("max_base_snapshots"))
     else:
         config["max_base_snapshots"] = None
+    has_min_base_snapshots = raw.get("min_base_snapshots") not in (None, "", "null")
+    has_base_fraction = raw.get("base_fraction") not in (None, "", "null")
+    raw_policy = raw.get("base_selection_policy")
+    if raw_policy not in (None, "", "null"):
+        config["base_selection_policy"] = str(raw_policy).strip().lower()
+    elif has_min_base_snapshots or has_base_fraction:
+        config["base_selection_policy"] = "adaptive_min_fraction"
+    elif config["max_base_snapshots"] is not None:
+        config["base_selection_policy"] = "first"
+    else:
+        config["base_selection_policy"] = "all"
+    config["min_base_snapshots"] = _optional_int_value(raw.get("min_base_snapshots")) if has_min_base_snapshots else None
+    if has_base_fraction:
+        try:
+            config["base_fraction"] = float(raw.get("base_fraction"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("derivative.base_fraction must be numeric.") from exc
+    else:
+        config["base_fraction"] = None
+    config["base_selection_seed"] = (
+        _optional_int_value(raw.get("base_selection_seed"))
+        if raw.get("base_selection_seed") not in (None, "", "null")
+        else None
+    )
     config["atoms"] = _normalize_optional_string_list(raw.get("atoms"), field="derivative.atoms")
     config["axes"] = _normalize_optional_string_list(raw.get("axes"), field="derivative.axes")
     return config
@@ -1582,6 +1606,29 @@ def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[s
         raise RuntimeError("derivative.base_split must be one of: train, validation, test, all.")
     if config.get("max_base_snapshots") is not None and int(config["max_base_snapshots"]) <= 0:
         raise RuntimeError("derivative.max_base_snapshots must be positive when provided.")
+    policy = str(config.get("base_selection_policy") or "all")
+    if policy not in {"all", "first", "adaptive_min_fraction"}:
+        raise RuntimeError("derivative.base_selection_policy must be one of: all, first, adaptive_min_fraction.")
+    if policy == "adaptive_min_fraction":
+        if config.get("max_base_snapshots") is not None:
+            raise RuntimeError(
+                "derivative.max_base_snapshots cannot be combined with "
+                "derivative.base_selection_policy adaptive_min_fraction."
+            )
+        if config.get("min_base_snapshots") is None:
+            raise RuntimeError(
+                "derivative.min_base_snapshots is required when "
+                "derivative.base_selection_policy is adaptive_min_fraction."
+            )
+        if int(config["min_base_snapshots"]) <= 0:
+            raise RuntimeError("derivative.min_base_snapshots must be positive when adaptive base selection is used.")
+        if config.get("base_fraction") is None:
+            raise RuntimeError(
+                "derivative.base_fraction is required when "
+                "derivative.base_selection_policy is adaptive_min_fraction."
+            )
+        if not (0 < float(config["base_fraction"]) <= 1):
+            raise RuntimeError("derivative.base_fraction must be in (0, 1] when adaptive base selection is used.")
     invalid_axes = [axis for axis in config.get("axes", []) if axis not in {"x", "y", "z"}]
     if invalid_axes:
         raise RuntimeError(f"derivative.axes contains unsupported axes: {', '.join(invalid_axes)}.")
@@ -1684,6 +1731,52 @@ def _derivative_metric_command_args(
     if settings.get("max_stencils") is not None:
         command.extend(["--max-stencils", str(settings["max_stencils"])])
     return command
+
+
+def _derivative_cost_dataset_size(source_dataset_root: str) -> int | None:
+    if not source_dataset_root:
+        return None
+    path = Path(source_dataset_root)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    if not path.exists():
+        return None
+    frozen_split = path / "frozen_split_manifest.json"
+    if not frozen_split.exists():
+        return None
+    try:
+        payload = _load_json(frozen_split)
+    except Exception:
+        return None
+    split_counts = payload.get("split_counts") if isinstance(payload.get("split_counts"), dict) else {}
+    if split_counts:
+        try:
+            return sum(int(value) for value in split_counts.values())
+        except (TypeError, ValueError):
+            return None
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    return len(rows) if rows else None
+
+
+def _derivative_cost_summary(
+    *,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    reference_workers: int,
+) -> dict[str, Any]:
+    source_dataset_root = str(manifest.get("source_dataset_root") or config.get("source_dataset_root") or "")
+    dataset_id = str(config.get("dataset_id") or (Path(source_dataset_root).name if source_dataset_root else ""))
+    structure_count = manifest.get("expected_total_structure_samples")
+    if structure_count is None:
+        structure_count = manifest.get("sample_count")
+    return {
+        "dataset_id": dataset_id,
+        "dataset_size": config.get("dataset_size") or _derivative_cost_dataset_size(source_dataset_root),
+        "n_test_available": manifest.get("available_base_snapshot_count"),
+        "derivative_k_selected": manifest.get("selected_base_snapshot_count"),
+        "derivative_structure_count": structure_count,
+        "derivative_reference_workers": reference_workers,
+    }
 
 
 def _logged_subprocess_run(
@@ -4955,16 +5048,18 @@ class Graph2MatDeepHBenchmarkRunner:
                     deeph_context=job["deeph_context"],
                 )
                 manifest_path = Path(str(derivative_summary["result_dir"])) / "derivative_workflow_manifest.json"
+                cost = derivative_summary.get("derivative_cost") if isinstance(derivative_summary.get("derivative_cost"), dict) else None
                 success = True
-                return (
-                    int(job["index"]),
-                    {
-                        **dict(job.get("success_fields") or {}),
-                        "derivative_workflow_status": "completed",
-                        "derivative_workflow_manifest_path": str(manifest_path),
-                        "failure_reason": "",
-                    },
-                )
+                update = {
+                    **dict(job.get("success_fields") or {}),
+                    "derivative_workflow_status": "completed",
+                    "derivative_workflow_manifest_path": str(manifest_path),
+                    "failure_reason": "",
+                }
+                if cost is not None:
+                    update["derivative_cost"] = cost
+                    update.update(cost)
+                return (int(job["index"]), update)
             except Exception as exc:
                 return (
                     int(job["index"]),
@@ -7818,7 +7913,15 @@ class Graph2MatDeepHBenchmarkRunner:
         if stages.get("build_derivative_stencils"):
             manifest_path = common_root / "derivative_stencil_manifest.json"
             if skip_if_exists and not overwrite and manifest_path.exists():
-                mark("build_derivative_stencils", {"status": "skipped_existing", "manifest": str(manifest_path)})
+                manifest = self._check_derivative_manifest(manifest_path, stage="build_derivative_stencils")
+                cost = _derivative_cost_summary(
+                    manifest=manifest,
+                    config=config,
+                    reference_workers=reference_workers,
+                )
+                summary["derivative_cost"] = cost
+                summary["derivative_cost_by_dataset"] = [cost]
+                mark("build_derivative_stencils", {"status": "skipped_existing", "manifest": str(manifest_path), "cost": cost})
             else:
                 command = [
                     python_executable,
@@ -7846,8 +7949,15 @@ class Graph2MatDeepHBenchmarkRunner:
                     raw_sample_ids = [item.strip() for item in raw_sample_ids.split(",") if item.strip()]
                 for sample_id in raw_sample_ids:
                     command.extend(["--base-sample-id", str(sample_id)])
+                command.extend(["--base-selection-policy", str(config.get("base_selection_policy") or "all")])
                 if config.get("max_base_snapshots") is not None:
                     command.extend(["--max-base-snapshots", str(config["max_base_snapshots"])])
+                if config.get("min_base_snapshots") is not None:
+                    command.extend(["--min-base-snapshots", str(config["min_base_snapshots"])])
+                if config.get("base_fraction") is not None:
+                    command.extend(["--base-fraction", str(config["base_fraction"])])
+                if config.get("base_selection_seed") is not None:
+                    command.extend(["--base-selection-seed", str(config["base_selection_seed"])])
                 include_base = config.get("include_base")
                 if include_base is not None:
                     command.append("--include-base" if _parse_bool(include_base, True) else "--no-include-base")
@@ -7857,7 +7967,14 @@ class Graph2MatDeepHBenchmarkRunner:
                     command.append("--overwrite")
                 record = self._run_derivative_stage_command(command, payload=payload, label="Derivative stencil builder")
                 manifest = self._check_derivative_manifest(manifest_path, stage="build_derivative_stencils")
-                mark("build_derivative_stencils", {**record, "status": "completed", "manifest": manifest})
+                cost = _derivative_cost_summary(
+                    manifest=manifest,
+                    config=config,
+                    reference_workers=reference_workers,
+                )
+                summary["derivative_cost"] = cost
+                summary["derivative_cost_by_dataset"] = [cost]
+                mark("build_derivative_stencils", {**record, "status": "completed", "manifest": manifest, "cost": cost})
 
         if stages.get("validate_derivative_stencils"):
             output_json = common_root / "derivative_geometry_validation.json"

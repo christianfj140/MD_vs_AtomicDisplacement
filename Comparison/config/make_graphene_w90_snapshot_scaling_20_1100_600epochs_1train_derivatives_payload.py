@@ -193,7 +193,7 @@ def main() -> None:
     performance["reuse_validated_siesta_outputs"] = False
     performance["max_parallel_dataset_jobs"] = 1
     performance["max_parallel_derivative_workflows"] = 1
-    performance["max_parallel_derivative_reference_jobs"] = int(performance.get("max_parallel_siesta_jobs") or 3)
+    performance["max_parallel_derivative_reference_jobs"] = 6
     payload["performance"] = performance
 
     # Top-level workflow keys are intentional: the runner normalizes modular workflow from top-level
@@ -226,13 +226,18 @@ def main() -> None:
         "output_root": f"${{REPO_ROOT}}/Comparison/results/{RUN_TAG}/derivative_workflows",
         "method": "central",
         "base_split": "test",
-        # Real derivative run: all test snapshots, two deltas, both physical graphene atoms, all axes.
+        "base_selection_policy": "adaptive_min_fraction",
+        "min_base_snapshots": 20,
+        "base_fraction": 0.20,
+        "base_selection_seed": 1,
+        # Real derivative run: adaptive test bases, two deltas, both physical graphene atoms, all axes.
         # Atom indices are zero-based. Do not include ghost atoms.
         "atoms": ["0-1"],
         "axes": ["x", "y", "z"],
         "delta_ang": [0.005, 0.01],
         "basis_files": f"${{REPO_ROOT}}/Comparison/datasets/{RUN_TAG}/graphene_w90_scale_iid20/material_basis/*.ion.xml",
         "siesta_command": "/home/christian/bin/siesta",
+        "reference_workers": 6,
         "deeph_command": "/home/christian/repositorios/DeepH-pack/.venv/bin/deeph-inference",
         "skip_if_exists": True,
         "diagnostic_only": False,
@@ -269,13 +274,35 @@ def main() -> None:
             "method": "central finite difference",
             "delta_ang": [0.005, 0.01],
             "base_split": "test",
-            "max_base_snapshots": None,
+            "base_selection_policy": "adaptive_min_fraction",
+            "min_base_snapshots": 20,
+            "base_fraction": 0.20,
+            "base_selection_seed": 1,
+            "base_selection_formula": "K = min(n_test, max(20, ceil(0.20*n_test))); if n_test < 20, use all available test snapshots.",
+            "reference_workers": 6,
+            "reference_workers_note": (
+                "reference_workers controls how many derivative SIESTA processes run in parallel "
+                "inside each derivative workflow. Initial recommendation: 6 on a 24-CPU machine; "
+                "raise to 8 only if RAM and IO wait remain acceptable."
+            ),
+            "expected_selected_base_snapshots_by_dataset_size": {
+                "N20": 2,
+                "N40": 4,
+                "N60": 6,
+                "N80": 8,
+                "N100": 10,
+                "N200": 20,
+                "N300": 20,
+                "N500": 20,
+                "N800": 20,
+                "N1100": 22,
+            },
             "atoms": "0-1 zero-based physical graphene atoms; ghost atoms intentionally excluded",
             "axes": ["x", "y", "z"],
         },
         "cost_warning": (
-            "This is intentionally not a smoke test. With all test snapshots, 2 physical atoms, 3 axes "
-            "and 2 deltas, derivative SIESTA/reference + ML prediction cost is large."
+            "This is intentionally not a smoke test, but derivative bases are capped adaptively: "
+            "K = min(n_test, max(20, ceil(0.20*n_test))); if n_test < 20, the full test split is used."
         ),
     }
 

@@ -543,7 +543,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                     "result_dir": str(stencil_root),
                     "method": "central",
                     "skip_if_exists": False,
-                    "reference_workers": 3,
+                    "reference_workers": 6,
                 },
                 "performance": {"max_parallel_derivative_reference_jobs": 2},
                 "stages": {
@@ -570,8 +570,8 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             summary = runner._run_modular_derivative_workflow(payload)
 
             command = commands[0][1]
-            self.assertEqual(command[command.index("--workers") + 1], "3")
-            self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 3)
+            self.assertEqual(command[command.index("--workers") + 1], "6")
+            self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 6)
 
     def test_derivative_reference_workers_invalid_values_fail_clearly(self):
         cases = [
@@ -747,6 +747,92 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(workflow["derivative"]["delta_ang_values"], [0.005, 0.01, 0.02])
+
+    def test_modular_derivative_base_selection_adaptive_is_normalized(self):
+        workflow = _normalized_modular_workflow_payload(
+            {
+                "stages": {"build_derivative_stencils": True},
+                "derivative": {
+                    "enabled": True,
+                    "source_dataset_root": "/tmp/source",
+                    "delta_ang": 0.01,
+                    "atoms": [0],
+                    "axes": ["x"],
+                    "base_selection_policy": "adaptive_min_fraction",
+                    "min_base_snapshots": "20",
+                    "base_fraction": "0.2",
+                    "base_selection_seed": "7",
+                },
+            }
+        )
+
+        derivative = workflow["derivative"]
+        self.assertEqual(derivative["base_selection_policy"], "adaptive_min_fraction")
+        self.assertEqual(derivative["min_base_snapshots"], 20)
+        self.assertEqual(derivative["base_fraction"], 0.2)
+        self.assertEqual(derivative["base_selection_seed"], 7)
+
+    def test_modular_derivative_base_selection_defaults_preserve_legacy_modes(self):
+        with_max = _normalized_modular_workflow_payload(
+            {
+                "stages": {"build_derivative_stencils": True},
+                "derivative": {
+                    "enabled": True,
+                    "source_dataset_root": "/tmp/source",
+                    "delta_ang": 0.01,
+                    "atoms": [0],
+                    "axes": ["x"],
+                    "max_base_snapshots": 3,
+                },
+            }
+        )
+        adaptive_by_fields = _normalized_modular_workflow_payload(
+            {
+                "stages": {"build_derivative_stencils": True},
+                "derivative": {
+                    "enabled": True,
+                    "source_dataset_root": "/tmp/source",
+                    "delta_ang": 0.01,
+                    "atoms": [0],
+                    "axes": ["x"],
+                    "min_base_snapshots": 20,
+                    "base_fraction": 0.2,
+                },
+            }
+        )
+        default = _normalized_modular_workflow_payload({})
+
+        self.assertEqual(with_max["derivative"]["base_selection_policy"], "first")
+        self.assertEqual(adaptive_by_fields["derivative"]["base_selection_policy"], "adaptive_min_fraction")
+        self.assertEqual(default["derivative"]["base_selection_policy"], "all")
+
+    def test_modular_derivative_base_selection_invalid_values_fail(self):
+        cases = [
+            ({"min_base_snapshots": 20, "base_fraction": 0}, "derivative.base_fraction"),
+            ({"min_base_snapshots": 0, "base_fraction": 0.2}, "derivative.min_base_snapshots"),
+            (
+                {"min_base_snapshots": 20, "base_fraction": 0.2, "max_base_snapshots": 3},
+                "derivative.max_base_snapshots cannot be combined",
+            ),
+        ]
+
+        for overrides, error in cases:
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    _normalized_modular_workflow_payload(
+                        {
+                            "stages": {"build_derivative_stencils": True},
+                            "derivative": {
+                                "enabled": True,
+                                "source_dataset_root": "/tmp/source",
+                                "delta_ang": 0.01,
+                                "atoms": [0],
+                                "axes": ["x"],
+                                "base_selection_policy": "adaptive_min_fraction",
+                                **overrides,
+                            },
+                        }
+                    )
 
     def test_modular_h_then_derivative_full_enables_full_derivative_stage_set(self):
         workflow = _normalized_modular_workflow_payload(
@@ -1280,6 +1366,10 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             root = Path(tmp) / "derivatives"
             source = Path(tmp) / "source"
             source.mkdir()
+            (source / "frozen_split_manifest.json").write_text(
+                json.dumps({"split_counts": {"train": 88, "validation": 11, "test": 22}, "rows": []}) + "\n",
+                encoding="utf-8",
+            )
             runner = Graph2MatDeepHBenchmarkRunner()
             commands = []
 
@@ -1288,7 +1378,19 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                 if "stencil builder" in label:
                     root.mkdir(parents=True, exist_ok=True)
                     (root / "derivative_stencil_manifest.json").write_text(
-                        json.dumps({"sample_count": 3, "stencil_count": 3}) + "\n",
+                        json.dumps(
+                            {
+                                "source_dataset_root": str(source),
+                                "sample_count": 550,
+                                "stencil_count": 264,
+                                "available_base_snapshot_count": 110,
+                                "selected_base_snapshot_count": 22,
+                                "stencils_per_base_snapshot": 12,
+                                "expected_structures_per_base_snapshot": 25,
+                                "expected_total_structure_samples": 550,
+                            }
+                        )
+                        + "\n",
                         encoding="utf-8",
                     )
                 elif "geometry validation" in label:
@@ -1309,6 +1411,10 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                     "delta_ang": [0.005, 0.01, 0.02],
                     "atoms": ["0"],
                     "axes": ["x"],
+                    "base_selection_policy": "adaptive_min_fraction",
+                    "min_base_snapshots": 20,
+                    "base_fraction": 0.2,
+                    "base_selection_seed": 7,
                 },
             }
             payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
@@ -1319,7 +1425,17 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             delta_start = builder_command.index("--delta-ang") + 1
             delta_end = builder_command.index("--split")
             self.assertEqual(builder_command[delta_start:delta_end], ["0.005", "0.01", "0.02"])
+            self.assertEqual(builder_command[builder_command.index("--base-selection-policy") + 1], "adaptive_min_fraction")
+            self.assertEqual(builder_command[builder_command.index("--min-base-snapshots") + 1], "20")
+            self.assertEqual(builder_command[builder_command.index("--base-fraction") + 1], "0.2")
+            self.assertEqual(builder_command[builder_command.index("--base-selection-seed") + 1], "7")
             self.assertIn("--include-base", builder_command)
+            self.assertEqual(summary["derivative_cost"]["dataset_id"], "source")
+            self.assertEqual(summary["derivative_cost"]["dataset_size"], 121)
+            self.assertEqual(summary["derivative_cost"]["n_test_available"], 110)
+            self.assertEqual(summary["derivative_cost"]["derivative_k_selected"], 22)
+            self.assertEqual(summary["derivative_cost"]["derivative_structure_count"], 550)
+            self.assertEqual(summary["derivative_cost"]["derivative_reference_workers"], 1)
             self.assertEqual(summary["stages"]["build_derivative_stencils"]["status"], "completed")
             self.assertEqual(summary["stages"]["validate_derivative_stencils"]["status"], "completed")
 

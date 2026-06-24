@@ -249,6 +249,28 @@ Derivative-stencils-only, starting from MD/base snapshots. MD snapshots are base
 }
 ```
 
+Adaptive derivative base-selection smoke, without training, predictions, or
+SIESTA. This creates synthetic split manifests for `n_test=10`, `80`, and
+`110`, then runs stencil build and, when local Python dependencies are
+available, geometry validation:
+
+```bash
+python3 Comparison/scripts/smoke_adaptive_derivative_selection.py \
+  --payload Comparison/config/adaptive_derivative_selection_smoke.json
+```
+
+Expected compact output:
+
+```json
+{"status": "ok", "cases": [{"label": "n_test_10", "selected_base_snapshot_count": 10, "geometry_validation_status": "ok"}, {"label": "n_test_80", "selected_base_snapshot_count": 20, "geometry_validation_status": "ok"}, {"label": "n_test_110", "selected_base_snapshot_count": 22, "geometry_validation_status": "ok"}]}
+```
+
+Interpretation: each case checks `K = min(n_test, max(20, ceil(0.20*n_test)))`;
+when `n_test < 20`, all test snapshots are selected. Full manifests are written
+under `Comparison/results/adaptive_derivative_selection_smoke/stencils/*/`.
+If `numpy` is missing, `geometry_validation_status` is
+`skipped_missing_dependency`; the manifest K checks still run.
+
 Derivative-metrics-only, using existing finite-displacement stencil artifacts
 and Hamiltonians:
 

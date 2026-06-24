@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from fdf_materialization import extract_fdf_structure, materialize_sample_fdf  #
 
 AXES = {"x": 0, "y": 1, "z": 2}
 VALID_METHODS = {"central", "forward", "backward"}
+VALID_BASE_SELECTION_POLICIES = {"all", "first", "adaptive_min_fraction"}
 STRUCTURE_COPY_SUFFIXES = {".psf", ".psml", ".vps", ".ion", ".xml"}
 MATRIX_SUFFIXES = {".HSX", ".TSHS", ".TSDE", ".nc"}
 OUTPUT_SUFFIXES = {".out", ".XV", ".STRUCT_OUT", ".ORB_INDX"}
@@ -174,25 +176,98 @@ def base_sample_id(row: dict[str, Any]) -> str:
     raise DerivativeStencilBuildError(f"Frozen split row is missing sample_id and sample_dir: {row}")
 
 
+def optional_int(value: Any, *, option: str) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise DerivativeStencilBuildError(f"{option} must be an integer.")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise DerivativeStencilBuildError(f"{option} must be an integer.") from exc
+
+
+def optional_float(value: Any, *, option: str) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise DerivativeStencilBuildError(f"{option} must be numeric.")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise DerivativeStencilBuildError(f"{option} must be numeric.") from exc
+
+
 def selected_base_rows(
     rows: list[dict[str, Any]],
     *,
     sample_ids: list[str],
     max_base_snapshots: int | None,
-) -> list[dict[str, Any]]:
+    base_selection_policy: str | None = None,
+    min_base_snapshots: int | None = None,
+    base_fraction: float | None = None,
+    base_selection_seed: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if sample_ids:
         allowed = set(sample_ids)
         rows = [row for row in rows if base_sample_id(row) in allowed]
         missing = sorted(allowed - {base_sample_id(row) for row in rows})
         if missing:
             raise DerivativeStencilBuildError(f"Selected base snapshots not found: {', '.join(missing)}")
-    if max_base_snapshots is not None:
-        if max_base_snapshots <= 0:
-            raise DerivativeStencilBuildError("--max-base-snapshots must be positive.")
-        rows = rows[:max_base_snapshots]
+    available_count = len(rows)
+    explicit_policy = base_selection_policy not in (None, "")
+    policy = str(base_selection_policy or ("first" if max_base_snapshots is not None else "all")).strip().lower()
+    if policy not in VALID_BASE_SELECTION_POLICIES:
+        raise DerivativeStencilBuildError(
+            f"--base-selection-policy must be one of: {', '.join(sorted(VALID_BASE_SELECTION_POLICIES))}."
+        )
+    max_base_snapshots = optional_int(max_base_snapshots, option="--max-base-snapshots")
+    min_base_snapshots = optional_int(min_base_snapshots, option="--min-base-snapshots")
+    base_selection_seed = optional_int(base_selection_seed, option="--base-selection-seed")
+    base_fraction = optional_float(base_fraction, option="--base-fraction")
+    if max_base_snapshots is not None and max_base_snapshots <= 0:
+        raise DerivativeStencilBuildError("--max-base-snapshots must be positive.")
+    if min_base_snapshots is not None and min_base_snapshots <= 0:
+        raise DerivativeStencilBuildError("--min-base-snapshots must be positive.")
+    if base_fraction is not None and not (0 < base_fraction <= 1):
+        raise DerivativeStencilBuildError("--base-fraction must be in (0, 1].")
+    if policy == "adaptive_min_fraction" and max_base_snapshots is not None:
+        raise DerivativeStencilBuildError(
+            "--max-base-snapshots cannot be combined with --base-selection-policy adaptive_min_fraction."
+        )
+
+    effective_min = 20 if min_base_snapshots is None else int(min_base_snapshots)
+    effective_fraction = 0.20 if base_fraction is None else float(base_fraction)
+    formula = "K=n_available"
+    if policy == "first":
+        if max_base_snapshots is not None:
+            rows = rows[:max_base_snapshots]
+            formula = "K=min(n_available, max_base_snapshots)"
+        elif explicit_policy:
+            formula = "K=n_available"
+    elif policy == "adaptive_min_fraction":
+        if available_count < effective_min:
+            selected_count = available_count
+        else:
+            selected_count = min(available_count, max(effective_min, math.ceil(effective_fraction * available_count)))
+        rows = rows[:selected_count]
+        formula = (
+            "K=n_available if n_available < min_base_snapshots else "
+            "min(n_available, max(min_base_snapshots, ceil(base_fraction * n_available)))"
+        )
     if not rows:
         raise DerivativeStencilBuildError("No base snapshots selected.")
-    return rows
+    return rows, {
+        "base_selection_policy": policy,
+        "min_base_snapshots": effective_min if policy == "adaptive_min_fraction" else min_base_snapshots,
+        "base_fraction": effective_fraction if policy == "adaptive_min_fraction" else base_fraction,
+        "base_selection_seed": base_selection_seed,
+        "available_base_snapshot_count": available_count,
+        "selected_base_snapshot_count": len(rows),
+        "selected_base_snapshot_ids": [base_sample_id(row) for row in rows],
+        "base_selection_formula": formula,
+        "selection_mode": "deterministic_ordered",
+    }
 
 
 def copy_support_files(source_dir: Path, target_dir: Path) -> list[str]:
@@ -308,6 +383,10 @@ def build_derivative_stencils(
     axes: list[str],
     base_sample_ids: list[str] | None = None,
     max_base_snapshots: int | None = None,
+    base_selection_policy: str | None = None,
+    min_base_snapshots: int | None = None,
+    base_fraction: float | None = None,
+    base_selection_seed: int | None = None,
     include_base: bool | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
@@ -329,11 +408,18 @@ def build_derivative_stencils(
     structures_root.mkdir(parents=True, exist_ok=True)
 
     rows = load_base_rows(source_dataset_root=source_dataset_root, frozen_split=frozen_split, split=split)
-    rows = selected_base_rows(
+    rows, base_selection = selected_base_rows(
         rows,
         sample_ids=base_sample_ids or [],
         max_base_snapshots=max_base_snapshots,
+        base_selection_policy=base_selection_policy,
+        min_base_snapshots=min_base_snapshots,
+        base_fraction=base_fraction,
+        base_selection_seed=base_selection_seed,
     )
+    stencils_per_base_snapshot = len(atom_indices_zero_based) * len(axes) * len(delta_ang_values)
+    expected_structures_per_base_snapshot = (1 if include_base else 0) + len(signs_for_method(method)) * stencils_per_base_snapshot
+    expected_total_structure_samples = int(base_selection["selected_base_snapshot_count"]) * expected_structures_per_base_snapshot
 
     sample_records: list[dict[str, Any]] = []
     stencil_records: list[dict[str, Any]] = []
@@ -502,6 +588,10 @@ def build_derivative_stencils(
         "delta_ang_values": delta_ang_values,
         "split": split,
         "base_snapshots": [base_sample_id(row) for row in rows],
+        **base_selection,
+        "stencils_per_base_snapshot": stencils_per_base_snapshot,
+        "expected_structures_per_base_snapshot": expected_structures_per_base_snapshot,
+        "expected_total_structure_samples": expected_total_structure_samples,
         "atom_indices_zero_based": atom_indices_zero_based,
         "axes": axes,
         "include_base": include_base,
@@ -529,6 +619,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delta-ang", nargs="+", required=True, help="One or more positive Ang values; comma-separated values are accepted.")
     parser.add_argument("--base-sample-id", action="append", default=[])
     parser.add_argument("--max-base-snapshots", type=int, default=None)
+    parser.add_argument("--base-selection-policy", choices=sorted(VALID_BASE_SELECTION_POLICIES), default=None)
+    parser.add_argument("--min-base-snapshots", type=int, default=None)
+    parser.add_argument("--base-fraction", type=float, default=None)
+    parser.add_argument("--base-selection-seed", type=int, default=None)
     parser.add_argument("--atoms", required=True, help="Zero-based atom indices, e.g. 0,2 or 0-3.")
     parser.add_argument("--axes", required=True, help="Comma-separated Cartesian axes: x,y,z.")
     parser.add_argument("--include-base", action=argparse.BooleanOptionalAction, default=None)
@@ -549,6 +643,10 @@ def main() -> int:
         axes=parse_axes(args.axes),
         base_sample_ids=args.base_sample_id,
         max_base_snapshots=args.max_base_snapshots,
+        base_selection_policy=args.base_selection_policy,
+        min_base_snapshots=args.min_base_snapshots,
+        base_fraction=args.base_fraction,
+        base_selection_seed=args.base_selection_seed,
         include_base=args.include_base,
         overwrite=args.overwrite,
     )

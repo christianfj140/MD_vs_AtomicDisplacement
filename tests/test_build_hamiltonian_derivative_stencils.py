@@ -14,7 +14,7 @@ for directory in (SCRIPTS_DIR, SHARED_DIR):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from build_hamiltonian_derivative_stencils import build_derivative_stencils  # noqa: E402
+from build_hamiltonian_derivative_stencils import DerivativeStencilBuildError, build_derivative_stencils  # noqa: E402
 from fdf_materialization import extract_fdf_structure  # noqa: E402
 from hamiltonian_derivative_stencil import discover_derivative_stencils, validate_derivative_geometry  # noqa: E402
 
@@ -87,6 +87,35 @@ class HamiltonianDerivativeStencilBuilderTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def write_frozen_test_samples(self, count: int) -> None:
+        rows = []
+        for index in range(count):
+            sample_id = f"base_{index}"
+            sample_dir = self.dataset_root / "splits" / "test" / sample_id
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            (sample_dir / "RUN.fdf").write_text(synthetic_base_fdf(), encoding="utf-8")
+            (sample_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "sample_id": sample_id,
+                        "material_label": "synthetic",
+                        "system_label": "shared_label",
+                        "material_compatibility_hash": "material-hash",
+                        "orbital_ordering_hash": "orbital-hash",
+                        "neighbor_list_hash": "neighbor-hash",
+                        "sparsity_pattern_hash": "sparsity-hash",
+                        "basis_hash": "basis-hash",
+                        "pseudopotential_hash": "pseudo-hash",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rows.append({"sample_id": sample_id, "split": "test", "sample_dir": str(sample_dir)})
+        (self.dataset_root / "frozen_split_manifest.json").write_text(
+            json.dumps({"rows": rows}),
+            encoding="utf-8",
+        )
+
     def test_central_builder_writes_base_plus_minus_structures_and_discoverable_metadata(self) -> None:
         output_root = self.root / "stencils"
 
@@ -153,6 +182,82 @@ class HamiltonianDerivativeStencilBuilderTests(unittest.TestCase):
         self.assertEqual(discoveries[0].stencil.metadata.minus_sample_id, minus["sample_id"])
         self.assertEqual(discoveries[0].stencil.base_structure_path.parent.name, base["sample_id"])
         self.assertEqual(validate_derivative_geometry(discoveries[0]), [])
+
+    def test_adaptive_min_fraction_selects_expected_base_counts(self) -> None:
+        cases = [(10, 10), (20, 20), (30, 20), (80, 20), (110, 22)]
+
+        for n_available, expected in cases:
+            with self.subTest(n_available=n_available):
+                self.write_frozen_test_samples(n_available)
+                manifest = build_derivative_stencils(
+                    source_dataset_root=self.dataset_root,
+                    output_stencil_root=self.root / f"adaptive_{n_available}",
+                    split="test",
+                    method="central",
+                    delta_ang_values=[0.1],
+                    atom_indices_zero_based=[0],
+                    axes=["x"],
+                    base_selection_policy="adaptive_min_fraction",
+                    min_base_snapshots=20,
+                    base_fraction=0.2,
+                )
+
+                self.assertEqual(manifest["available_base_snapshot_count"], n_available)
+                self.assertEqual(manifest["selected_base_snapshot_count"], expected)
+                self.assertEqual(manifest["base_snapshots"], [f"base_{index}" for index in range(expected)])
+                self.assertEqual(manifest["selected_base_snapshot_ids"], manifest["base_snapshots"])
+                self.assertEqual(manifest["stencil_count"], expected)
+                self.assertEqual(manifest["selection_mode"], "deterministic_ordered")
+
+    def test_derivative_cost_fields_report_expected_structure_count_for_real_graphene_case(self) -> None:
+        self.write_frozen_test_samples(110)
+
+        manifest = build_derivative_stencils(
+            source_dataset_root=self.dataset_root,
+            output_stencil_root=self.root / "adaptive_cost",
+            split="test",
+            method="central",
+            delta_ang_values=[0.005, 0.01],
+            atom_indices_zero_based=[0, 1],
+            axes=["x", "y", "z"],
+            base_selection_policy="adaptive_min_fraction",
+            min_base_snapshots=20,
+            base_fraction=0.2,
+            include_base=True,
+        )
+
+        self.assertEqual(manifest["selected_base_snapshot_count"], 22)
+        self.assertEqual(manifest["stencils_per_base_snapshot"], 12)
+        self.assertEqual(manifest["expected_structures_per_base_snapshot"], 25)
+        self.assertEqual(manifest["expected_total_structure_samples"], 550)
+        self.assertEqual(manifest["sample_count"], 550)
+
+    def test_adaptive_min_fraction_rejects_invalid_selection_parameters(self) -> None:
+        cases = [
+            ({"base_fraction": 0}, "--base-fraction"),
+            ({"base_fraction": 1.1}, "--base-fraction"),
+            ({"min_base_snapshots": 0}, "--min-base-snapshots"),
+            ({"max_base_snapshots": 1}, "--max-base-snapshots cannot be combined"),
+            ({"base_selection_policy": "unknown"}, "--base-selection-policy"),
+        ]
+
+        for index, (overrides, error) in enumerate(cases):
+            with self.subTest(error=error):
+                kwargs = {
+                    "source_dataset_root": self.dataset_root,
+                    "output_stencil_root": self.root / f"invalid_adaptive_{index}",
+                    "split": "test",
+                    "method": "central",
+                    "delta_ang_values": [0.1],
+                    "atom_indices_zero_based": [0],
+                    "axes": ["x"],
+                    "base_selection_policy": "adaptive_min_fraction",
+                    "min_base_snapshots": 20,
+                    "base_fraction": 0.2,
+                    **overrides,
+                }
+                with self.assertRaisesRegex(DerivativeStencilBuildError, error):
+                    build_derivative_stencils(**kwargs)
 
 
 if __name__ == "__main__":
