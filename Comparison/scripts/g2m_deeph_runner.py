@@ -2444,7 +2444,7 @@ class Graph2MatDeepHBenchmarkRunner:
 
     def _latest_detached_running_run_root(self) -> Path | None:
         candidates: list[tuple[float, Path]] = []
-        search_root = REPO_ROOT / "Comparison" / "results"
+        search_root = DEFAULT_OUTPUT_ROOT
         patterns = (
             "*/runner_status.json",
             "*/*/runner_status.json",
@@ -5297,6 +5297,8 @@ class Graph2MatDeepHBenchmarkRunner:
         final_mode = is_final_benchmark_mode(payload)
         budget_fail_closed = _budget_accounting_fail_closed(payload, final_mode=final_mode)
         protocol_stage = protocol_stage_from_payload(payload, default=SEARCH_STAGE if final_mode else "exploratory")
+        workflow = payload.get("modular_workflow") if isinstance(payload.get("modular_workflow"), dict) else {}
+        stages = workflow.get("stages") if isinstance(workflow.get("stages"), dict) else {}
         run_root = Path(str(self._state.run_root or self._benchmark_run_root(payload, str(self._state.run_id))))
         resume_root, completed_by_key = self._load_resume_training_sweep(payload, run_root=run_root)
         budget_tracker = BudgetTracker(plan.get("budget_policy"))
