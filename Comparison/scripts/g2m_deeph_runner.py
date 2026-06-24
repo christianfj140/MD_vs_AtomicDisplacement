@@ -103,6 +103,7 @@ from plot_hamiltonian_derivative_metrics import write_derivative_plot_outputs  #
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
 LOG_HEARTBEAT_SECONDS = 30.0
+DETACHED_SEARCH_ROOT_ENV = "G2M_DEEPH_DETACHED_SEARCH_ROOT"
 EXTERNAL_FINAL_LOG_ROOT = REPO_ROOT / "Comparison" / "results" / "paper_ready_final_70_logs"
 EXTERNAL_FINAL_RUN_GLOB = "paper_ready_final70_*"
 DEFAULT_DATASETS_ROOT = REPO_ROOT / "Comparison" / "datasets"
@@ -2444,7 +2445,10 @@ class Graph2MatDeepHBenchmarkRunner:
 
     def _latest_detached_running_run_root(self) -> Path | None:
         candidates: list[tuple[float, Path]] = []
-        search_root = DEFAULT_OUTPUT_ROOT
+        search_root = _resolve_optional_repo_path(
+            os.environ.get(DETACHED_SEARCH_ROOT_ENV),
+            REPO_ROOT / "Comparison" / "results",
+        )
         patterns = (
             "*/runner_status.json",
             "*/*/runner_status.json",

@@ -179,6 +179,16 @@ def _write_training_ready_dataset(dataset: Path) -> None:
 
 
 class Graph2MatDeepHRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self._detached_search_tmp = tempfile.TemporaryDirectory()
+        self._detached_search_env = mock.patch.dict(
+            os.environ,
+            {"G2M_DEEPH_DETACHED_SEARCH_ROOT": self._detached_search_tmp.name},
+        )
+        self._detached_search_env.start()
+        self.addCleanup(self._detached_search_env.stop)
+        self.addCleanup(self._detached_search_tmp.cleanup)
+
     def test_status_before_run_is_idle(self):
         runner = Graph2MatDeepHBenchmarkRunner()
         status = runner.status()
