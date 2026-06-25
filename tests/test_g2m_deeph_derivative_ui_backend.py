@@ -396,10 +396,14 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
                 new_run_root / "common_metrics" / "summary" / "derivative_plot_payload.json",
                 {
                     "available": True,
+                    "primary_plot_ids": ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"],
+                    "dataset_size_plot_ids": ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"],
+                    "diagnostic_plot_ids": ["dh_mae_by_model"],
                     "plots": [
                         {
                             "id": "dh_mae_vs_dataset_size",
                             "kind": "scatter",
+                            "dataset_size_plot": True,
                             "x_key": "x_dataset_size",
                             "x_title": "N_train snapshots",
                             "y_key": "dh_mae_union_eV_per_Ang",
@@ -423,6 +427,18 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
                                 },
                             ],
                             "diagnostic_only": True,
+                        },
+                        {
+                            "id": "dh_rmse_vs_dataset_size",
+                            "kind": "scatter",
+                            "dataset_size_plot": True,
+                            "x_key": "x_dataset_size",
+                            "rows": [],
+                        },
+                        {
+                            "id": "dh_mae_by_model",
+                            "kind": "grouped_bar",
+                            "rows": [{"method": "Graph2Mat", "dh_mae_union_eV_per_Ang": 0.15}],
                         }
                     ],
                     "scientific_warnings": [],
@@ -441,6 +457,11 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(dataset_plot["id"], "dh_mae_vs_dataset_size")
         self.assertEqual(dataset_plot["x_key"], "x_dataset_size")
         self.assertEqual({row["x_dataset_size"] for row in dataset_plot["rows"]}, {12, 50})
+        self.assertEqual(new_payload["plot_payload"]["primary_plot_ids"], ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"])
+        self.assertEqual(new_payload["plot_payload"]["dataset_size_plot_ids"], ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"])
+        self.assertEqual(new_payload["plot_payload"]["diagnostic_plot_ids"], ["dh_mae_by_model"])
+        self.assertEqual([plot["id"] for plot in new_payload["plot_payload"]["plots"][:2]], ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"])
+        self.assertTrue(new_payload["plot_payload"]["plots"][0]["dataset_size_plot"])
 
     def test_blocked_gate_report_renders_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -363,7 +363,7 @@ def _training_sweep_metadata(derivative_root: Path) -> dict[str, Any] | None:
 def _metadata_inferred_from_path(derivative_root: Path) -> dict[str, Any] | None:
     for part in reversed(derivative_root.parts):
         match = None
-        for pattern in (r"(?:n[_-]?train|train)[_-]?(\d+)", r"(?:n[_-]?total|snap|snapshot|size)[_-]?(\d+)"):
+        for pattern in (r"(?:n[_-]?train|train)[_-]?(\d+)", r"(?:n[_-]?total|snap|snapshot|size|iid)[_-]?(\d+)"):
             match = re.search(pattern, part.lower())
             if match:
                 break
@@ -967,7 +967,7 @@ def build_derivative_plot_payload(
     meta = _plot_common_metadata(methods_seen)
     dataset_size_plot_result = _dataset_size_plot_result(metric_rows)
 
-    plots = [
+    diagnostic_plots = [
         _scatter_plot(
             "error_vs_delta",
             "Error vs delta",
@@ -1048,7 +1048,10 @@ def build_derivative_plot_payload(
             metric_key="deeph_dh_mae_union_eV_per_Ang",
         ),
     ]
-    plots.extend(dataset_size_plot_result["plots"])
+    dataset_size_plots = dataset_size_plot_result["plots"]
+    plots = [*dataset_size_plots, *diagnostic_plots] if dataset_size_plots else diagnostic_plots
+    dataset_size_plot_ids = [plot["id"] for plot in dataset_size_plots]
+    diagnostic_plot_ids = [plot["id"] for plot in diagnostic_plots]
     warnings = _scientific_warnings(datasets, metric_rows, paired_rows)
     warnings.extend(dataset_size_plot_result["warnings"])
     return {
@@ -1063,6 +1066,9 @@ def build_derivative_plot_payload(
         "methods_seen": methods_seen,
         "method_label": meta["method_label"],
         "plots": plots,
+        "primary_plot_ids": dataset_size_plot_ids or diagnostic_plot_ids,
+        "dataset_size_plot_ids": dataset_size_plot_ids,
+        "diagnostic_plot_ids": diagnostic_plot_ids,
         "scientific_warnings": warnings,
         "inputs": {
             "roots": [str(dataset["root"]) for dataset in datasets],

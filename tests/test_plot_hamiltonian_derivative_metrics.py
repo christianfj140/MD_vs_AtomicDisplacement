@@ -374,8 +374,20 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        dataset_size_plot_ids = [
+            "dh_mae_vs_dataset_size",
+            "dh_rmse_vs_dataset_size",
+            "relative_frobenius_vs_dataset_size",
+            "support_f1_vs_dataset_size",
+            "support_error_rates_vs_dataset_size",
+        ]
+        self.assertEqual([plot["id"] for plot in payload["plots"][:5]], dataset_size_plot_ids)
+        self.assertEqual(payload["primary_plot_ids"], dataset_size_plot_ids)
+        self.assertEqual(payload["dataset_size_plot_ids"], dataset_size_plot_ids)
+        self.assertIn("dh_mae_by_model", payload["diagnostic_plot_ids"])
         plots = {plot["id"]: plot for plot in payload["plots"]}
         self.assertIn("dh_mae_vs_dataset_size", plots)
+        self.assertIn("dh_mae_by_model", plots)
         self.assertEqual(plots["dh_mae_vs_dataset_size"]["x_key"], "x_dataset_size")
         self.assertEqual(plots["dh_mae_vs_dataset_size"]["series_key"], "model_label")
         rows = plots["dh_mae_vs_dataset_size"]["rows"]
@@ -387,6 +399,64 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertEqual(graph2mat_12["n_stencils"], 2)
         self.assertEqual(graph2mat_12["dataset_ids"], ["n12"])
         self.assertEqual(graph2mat_12["x_dataset_size_kind"], "N_train")
+
+    def test_dataset_size_plots_infer_iid_workflow_size_from_real_sweep_shape(self) -> None:
+        roots: list[Path] = []
+        for size, mae in ((20, 0.2), (40, 0.1)):
+            derivative_root = (
+                self.root
+                / "derivative_workflows"
+                / f"graphene_w90_scale_iid{size}"
+                / "derivative_metrics"
+                / "graph2mat"
+            )
+            write_json(
+                derivative_root / "manifest.json",
+                {
+                    "schema_version": "hamiltonian_derivative_metrics_v1",
+                    "scientific_status": "diagnostic_only",
+                    "force_constants_used": False,
+                    "stencils_total": 1,
+                    "stencils_ok": 1,
+                    "stencils_failed": 0,
+                    "fatal_errors": [],
+                    "dataset_root": "",
+                    "dataset_id": "",
+                },
+            )
+            write_csv(
+                derivative_root / "derivative_matrix_metrics.csv",
+                [
+                    {
+                        "source_model": "graph2mat",
+                        "sample": "s0",
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": mae,
+                        "dh_rmse_union_eV_per_Ang": mae + 0.1,
+                        "dh_relative_frobenius_ref": mae + 0.2,
+                    }
+                ],
+            )
+            write_csv(derivative_root / "derivative_hermiticity.csv", [])
+            write_csv(derivative_root / "stencil_status.csv", [])
+            roots.append(derivative_root)
+
+        output_dir = self.root / "plots_iid_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        self.assertIn("dh_mae_vs_dataset_size", plots)
+        rows = plots["dh_mae_vs_dataset_size"]["rows"]
+        self.assertEqual({row["x_dataset_size"] for row in rows}, {20, 40})
+        self.assertEqual(payload["summary"]["dataset_size_rows"], 2)
+        self.assertEqual({row["x_dataset_size_kind"] for row in rows}, {"N_total"})
 
     def test_single_dataset_size_warns_and_keeps_existing_plots(self) -> None:
         dataset_12 = self.write_dataset_root("dataset_12", train=12)
@@ -449,6 +519,8 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertIn("dh_mae_by_model", plot_ids)
         self.assertIn("graph2mat_vs_deeph_paired_comparison", plot_ids)
         self.assertNotIn("dh_mae_vs_dataset_size", plot_ids)
+        self.assertEqual(payload["dataset_size_plot_ids"], [])
+        self.assertEqual(payload["primary_plot_ids"], payload["diagnostic_plot_ids"])
         codes = {warning["code"] for warning in payload["scientific_warnings"]}
         self.assertIn("dataset_size_plots_unavailable_single_dataset_size", codes)
 
