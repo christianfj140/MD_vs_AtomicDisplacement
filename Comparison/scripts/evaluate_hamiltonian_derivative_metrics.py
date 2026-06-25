@@ -29,6 +29,7 @@ from hamiltonian_derivative_stencil import (  # noqa: E402
     DerivativeMetadata,
     DerivativeStencil,
     DerivativeStencilDiscovery,
+    derivative_ref_abs_quantile_metrics,
     derivative_sparse_metrics,
     discover_derivative_stencils,
     finite_difference_derivative_pair,
@@ -41,6 +42,35 @@ from hamiltonian_derivative_stencil import (  # noqa: E402
 SCHEMA_VERSION = "hamiltonian_derivative_metrics_v1"
 REFERENCE_DEFINITION = "siesta_hamiltonian_finite_difference"
 SUPPORT_THRESHOLDS_SWEEP = (1e-12, 1e-10, 1e-8, 1e-6)
+GROUPING_PRESERVES = [
+    "source_model",
+    "reference_source",
+    "dataset_size",
+    "seed",
+    "split",
+    "delta_ang",
+    "finite_difference_method",
+    "support_threshold",
+]
+GROUP_MEAN_MEDIAN_FIELDS = [
+    "dh_relative_frobenius_union_robust",
+    "dh_mae_union_eV_per_Ang",
+    "dh_rmse_union_eV_per_Ang",
+    "dh_relative_l1_union_robust",
+]
+SCALAR_DELTA_STABILITY_DEFINITION = "scalar_error_metric_pairwise_delta_change_not_matrix_delta_stability"
+DELTA_STABILITY_PAIRWISE_GROUP_KEYS = [
+    "source_model",
+    "reference_source",
+    "dataset_size",
+    "seed",
+    "split",
+    "base_sample_id",
+    "atom_index_zero_based",
+    "axis",
+    "finite_difference_method",
+    "support_threshold",
+]
 STATUS_FIELDS = [
     "sample",
     "status",
@@ -78,6 +108,28 @@ GEOMETRY_VALIDATION_FIELDS = [
     "delta_ang",
     "issue_codes",
     "issue_messages",
+]
+DERIVATIVE_REF_ABS_QUANTILE_FIELDS = [
+    "sample",
+    "source_model",
+    "reference_source",
+    "base_sample_id",
+    "atom_index_zero_based",
+    "axis",
+    "delta_ang",
+    "finite_difference_method",
+    "support_threshold",
+    "quantile_domain",
+    "quantile_bin",
+    "n_entries",
+    "n_ref_zero_entries",
+    "n_pred_nonzero_ref_zero_entries",
+    "abs_ref_min_eV_per_Ang",
+    "abs_ref_max_eV_per_Ang",
+    "abs_ref_mean_eV_per_Ang",
+    "dh_error_mae_eV_per_Ang",
+    "dh_error_rmse_eV_per_Ang",
+    "dh_error_relative_l1_robust",
 ]
 DELTA_STABILITY_FIELDS = [
     "source_model",
@@ -196,6 +248,7 @@ def evaluate_derivative_metrics(
 
     stencil_rows: list[dict[str, Any]] = []
     metric_rows: list[dict[str, Any]] = []
+    quantile_rows: list[dict[str, Any]] = []
     sweep_rows: list[dict[str, Any]] = []
     hermiticity_rows: list[dict[str, Any]] = []
     geometry_rows: list[dict[str, Any]] = []
@@ -203,7 +256,7 @@ def evaluate_derivative_metrics(
     fatal_errors: list[dict[str, Any]] = []
 
     for discovery in discoveries:
-        row, metrics, sweep, hermiticity, geometry, warning_rows, error_rows = _evaluate_discovery(
+        row, metrics, quantiles, sweep, hermiticity, geometry, warning_rows, error_rows = _evaluate_discovery(
             discovery,
             method=method,
             source_model=source_model,
@@ -212,6 +265,7 @@ def evaluate_derivative_metrics(
         )
         stencil_rows.append(row)
         metric_rows.extend(metrics)
+        quantile_rows.extend(quantiles)
         sweep_rows.extend(sweep)
         hermiticity_rows.extend(hermiticity)
         geometry_rows.append(geometry)
@@ -234,6 +288,15 @@ def evaluate_derivative_metrics(
     delta_stability_convergence = _delta_stability_convergence_summary(delta_stability)
     reference_noise = _reference_noise_summary(metric_rows)
     summary = _summary(metric_rows, stencil_rows, hermiticity_rows)
+    group_metrics = _derivative_group_metrics(metric_rows, split=split)
+    onsite_offsite_metrics = {"available": False, "reason": "orbital_to_atom_mapping_unavailable"}
+    warnings.append(
+        {
+            "kind": "derivative_onsite_offsite_metrics_unavailable",
+            "message": "Onsite/offsite derivative metrics were not computed because orbital-to-atom mapping was unavailable.",
+            "reason": "orbital_to_atom_mapping_unavailable",
+        }
+    )
     summary["delta_stability"] = {**delta_stability, **delta_stability_convergence}
     summary.update(delta_stability_convergence)
     summary["reference_noise"] = reference_noise
@@ -242,6 +305,7 @@ def evaluate_derivative_metrics(
         "manifest": str(output_dir / "manifest.json"),
         "stencil_status": str(output_dir / "stencil_status.csv"),
         "derivative_matrix_metrics": str(output_dir / "derivative_matrix_metrics.csv"),
+        "derivative_ref_abs_quantile_metrics": str(output_dir / "derivative_ref_abs_quantile_metrics.csv"),
         "derivative_support_sweep": str(output_dir / "derivative_support_sweep.csv"),
         "derivative_hermiticity": str(output_dir / "derivative_hermiticity.csv"),
         "derivative_delta_stability": str(output_dir / "derivative_delta_stability.csv"),
@@ -249,6 +313,8 @@ def evaluate_derivative_metrics(
         "derivative_geometry_validation": str(output_dir / "derivative_geometry_validation.csv"),
         "derivative_geometry_validation_json": str(output_dir / "derivative_geometry_validation.json"),
         "derivative_summary": str(output_dir / "derivative_summary.json"),
+        "derivative_group_metrics": str(output_dir / "derivative_group_metrics.json"),
+        "derivative_onsite_offsite_metrics": str(output_dir / "derivative_onsite_offsite_metrics.json"),
     }
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -282,6 +348,7 @@ def evaluate_derivative_metrics(
 
     write_csv(output_dir / "stencil_status.csv", STATUS_FIELDS, stencil_rows)
     write_csv(output_dir / "derivative_matrix_metrics.csv", _metric_fieldnames(metric_rows), metric_rows)
+    write_csv(output_dir / "derivative_ref_abs_quantile_metrics.csv", DERIVATIVE_REF_ABS_QUANTILE_FIELDS, quantile_rows)
     write_csv(output_dir / "derivative_support_sweep.csv", _metric_fieldnames(sweep_rows), sweep_rows)
     write_csv(output_dir / "derivative_hermiticity.csv", HERMITICITY_FIELDS, hermiticity_rows)
     delta_stability_json = {**delta_stability, **delta_stability_convergence}
@@ -290,6 +357,8 @@ def evaluate_derivative_metrics(
     write_csv(output_dir / "derivative_geometry_validation.csv", GEOMETRY_VALIDATION_FIELDS, geometry_rows)
     write_json(output_dir / "derivative_geometry_validation.json", _geometry_validation_summary(geometry_rows, include_rows=True))
     write_json(output_dir / "derivative_summary.json", summary)
+    write_json(output_dir / "derivative_group_metrics.json", group_metrics)
+    write_json(output_dir / "derivative_onsite_offsite_metrics.json", onsite_offsite_metrics)
     write_json(output_dir / "manifest.json", manifest)
     return manifest
 
@@ -309,10 +378,12 @@ def _evaluate_discovery(
     dict[str, Any],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     warnings: list[dict[str, Any]] = []
     fatal_errors: list[dict[str, Any]] = []
     metric_rows: list[dict[str, Any]] = []
+    quantile_rows: list[dict[str, Any]] = []
     sweep_rows: list[dict[str, Any]] = []
     hermiticity_rows: list[dict[str, Any]] = []
     status_row = _stencil_status_row(discovery, status=discovery.status)
@@ -321,7 +392,7 @@ def _evaluate_discovery(
     geometry_errors = validation_errors(geometry_issues)
     if discovery.stencil is None:
         fatal_errors.append(_discovery_error(discovery, "missing_stencil", "Discovery did not produce a complete stencil."))
-        return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+        return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
     if geometry_errors and not diagnostic_only:
         status_row = _stencil_status_row(
             replace(discovery, issues=tuple([*discovery.issues, *geometry_issues])),
@@ -335,7 +406,7 @@ def _evaluate_discovery(
                 issue_codes=[issue.code for issue in geometry_errors],
             )
         )
-        return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+        return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
     if geometry_errors:
         warnings.append(
             _discovery_error(
@@ -364,7 +435,7 @@ def _evaluate_discovery(
                     issue_codes=[issue.code for issue in errors],
                 )
             )
-            return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+            return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
         metadata = _metadata_for_status(stencil.metadata, diagnostic_only=diagnostic_only)
         pair = finite_difference_derivative_pair(
             method=method,
@@ -397,6 +468,25 @@ def _evaluate_discovery(
             }
         )
         metric_rows.append(row)
+        quantile_rows.extend(
+            derivative_ref_abs_quantile_metrics(
+                pair.reference.matrix,
+                pair.predicted.matrix,
+                sample=metadata.sample_id,
+                metadata=metadata,
+                source_model=source_model,
+                reference_source="siesta",
+                support_threshold=support_threshold,
+            )
+        )
+        if row["dh_union_nnz"] == 0:
+            warnings.append(
+                _discovery_error(
+                    discovery,
+                    "derivative_ref_abs_quantile_metrics_empty_union_support",
+                    "No derivative ref-abs quantile rows written because union support is empty.",
+                )
+            )
         for threshold in SUPPORT_THRESHOLDS_SWEEP:
             sweep = derivative_sparse_metrics(
                 pair.reference.matrix,
@@ -435,7 +525,7 @@ def _evaluate_discovery(
     except Exception as exc:  # Backend-specific sisl readers raise heterogeneous exceptions.
         status_row = _stencil_status_row(discovery, status="failed")
         fatal_errors.append(_discovery_error(discovery, "derivative_metric_evaluation_failed", str(exc)))
-    return status_row, metric_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+    return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
 
 
 def _load_stencil_matrices(stencil: DerivativeStencil) -> dict[str, sparse.csr_matrix]:
@@ -596,6 +686,68 @@ def _summary(
     }
 
 
+def _derivative_group_metrics(metric_rows: list[dict[str, Any]], *, split: str | None = None) -> dict[str, Any]:
+    rows = [{**row, **({"split": split} if split is not None and "split" not in row else {})} for row in metric_rows]
+    return {
+        "schema": "hamiltonian_derivative_group_metrics_v1",
+        "grouping_preserves": GROUPING_PRESERVES,
+        "by_atom": _aggregate_derivative_groups(rows, ["atom_index_zero_based"]),
+        "by_axis": _aggregate_derivative_groups(rows, ["axis"]),
+        "by_atom_axis": _aggregate_derivative_groups(rows, ["atom_index_zero_based", "axis"]),
+    }
+
+
+def _aggregate_derivative_groups(rows: list[dict[str, Any]], group_keys: list[str]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    keys = [*GROUPING_PRESERVES, *group_keys]
+    for row in rows:
+        grouped.setdefault(tuple(row.get(key) for key in keys), []).append(row)
+    return [
+        _aggregate_derivative_group(keys, key, group_rows)
+        for key, group_rows in sorted(grouped.items(), key=lambda item: repr(item[0]))
+    ]
+
+
+def _aggregate_derivative_group(keys: list[str], key: tuple[Any, ...], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = {name: value for name, value in zip(keys, key, strict=False)}
+    payload["n_stencils"] = len(rows)
+    for field in GROUP_MEAN_MEDIAN_FIELDS:
+        values = _finite_values(rows, field)
+        payload[f"{field}_mean"] = sum(values) / len(values) if values else None
+        payload[f"{field}_median"] = _median(values)
+    fro_pairs = [
+        (_finite_or_nan(row.get("dh_norm_error_union_fro")), _finite_or_nan(row.get("dh_norm_ref_union_fro")))
+        for row in rows
+        if "dh_norm_error_union_fro" in row and "dh_norm_ref_union_fro" in row
+    ]
+    fro_pairs = [(err, ref) for err, ref in fro_pairs if math.isfinite(err) and math.isfinite(ref)]
+    if fro_pairs:
+        payload["dh_relative_frobenius_union_robust_pooled"] = math.sqrt(sum(err**2 for err, _ in fro_pairs)) / (
+            math.sqrt(sum(ref**2 for _, ref in fro_pairs)) + 1e-30
+        )
+    l1_pairs = [
+        (_finite_or_nan(row.get("dh_norm_error_l1_union")), _finite_or_nan(row.get("dh_norm_ref_l1_union")))
+        for row in rows
+        if "dh_norm_error_l1_union" in row and "dh_norm_ref_l1_union" in row
+    ]
+    l1_pairs = [(err, ref) for err, ref in l1_pairs if math.isfinite(err) and math.isfinite(ref)]
+    if l1_pairs:
+        payload["dh_relative_l1_union_robust_pooled"] = sum(err for err, _ in l1_pairs) / (
+            sum(ref for _, ref in l1_pairs) + 1e-30
+        )
+    return payload
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(values)
+    midpoint = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return sorted_values[midpoint]
+    return (sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2.0
+
+
 def _delta_stability_group_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
     return (
         str(row.get("source_model") or ""),
@@ -658,9 +810,10 @@ def _delta_stability_summary(metric_rows: list[dict[str, Any]]) -> dict[str, Any
         row.update(_range_payload(group_rows, "dh_relative_frobenius_ref", "dh_relative_frobenius_ref"))
         rows.append(row)
 
+    pairwise_metric_rows = _delta_stability_pairwise_metric_rows(metric_rows)
     unique_deltas = sorted({float(row.get("delta_ang")) for row in metric_rows if math.isfinite(_finite_or_nan(row.get("delta_ang")))})
     if not rows:
-        status = "unavailable_single_delta" if len(unique_deltas) < 2 else "unavailable_no_matched_delta_groups"
+        status = "single_delta_only" if len(unique_deltas) < 2 else "unavailable_no_matched_delta_groups"
         reason = (
             "At least two delta_ang values for the same source_model/base_sample_id/atom/axis/method are required."
             if len(unique_deltas) >= 2
@@ -675,7 +828,66 @@ def _delta_stability_summary(metric_rows: list[dict[str, Any]]) -> dict[str, Any
         "groups_total": len(rows),
         "unique_delta_ang": unique_deltas,
         "rows": rows,
+        "pairwise_metric_rows": pairwise_metric_rows,
     }
+
+
+def _delta_stability_pairwise_metric_rows(metric_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for row in metric_rows:
+        delta = _finite_or_nan(row.get("delta_ang"))
+        if not math.isfinite(delta):
+            continue
+        groups.setdefault(tuple(row.get(key) for key in DELTA_STABILITY_PAIRWISE_GROUP_KEYS), []).append(row)
+
+    pairwise_rows: list[dict[str, Any]] = []
+    for key, group_rows in sorted(groups.items(), key=lambda item: repr(item[0])):
+        by_delta: dict[float, dict[str, Any]] = {}
+        for row in group_rows:
+            delta = _finite_or_nan(row.get("delta_ang"))
+            if math.isfinite(delta):
+                by_delta.setdefault(float(delta), row)
+        deltas = sorted(by_delta)
+        for delta_1, delta_2 in zip(deltas, deltas[1:], strict=False):
+            first = by_delta[delta_1]
+            second = by_delta[delta_2]
+            for metric_name in _delta_stability_metric_names(first, second):
+                value_1 = _finite_or_nan(first.get(metric_name))
+                value_2 = _finite_or_nan(second.get(metric_name))
+                if not math.isfinite(value_1) or not math.isfinite(value_2):
+                    continue
+                abs_change = abs(value_2 - value_1)
+                row = {
+                    name: value
+                    for name, value in zip(DELTA_STABILITY_PAIRWISE_GROUP_KEYS, key, strict=False)
+                    if value is not None
+                }
+                row.update(
+                    {
+                        "delta_1_ang": delta_1,
+                        "delta_2_ang": delta_2,
+                        "metric_name": metric_name,
+                        "value_delta_1": value_1,
+                        "value_delta_2": value_2,
+                        "abs_change": abs_change,
+                        "relative_change": abs_change / (abs(value_2) + 1e-30),
+                        "stability_definition": SCALAR_DELTA_STABILITY_DEFINITION,
+                    }
+                )
+                pairwise_rows.append(row)
+    return pairwise_rows
+
+
+def _delta_stability_metric_names(first: dict[str, Any], second: dict[str, Any]) -> list[str]:
+    fro = (
+        "dh_relative_frobenius_union_robust"
+        if "dh_relative_frobenius_union_robust" in first or "dh_relative_frobenius_union_robust" in second
+        else "dh_relative_frobenius_ref"
+    )
+    metrics = [fro, "dh_mae_union_eV_per_Ang", "dh_rmse_union_eV_per_Ang"]
+    if "dh_relative_l1_union_robust" in first or "dh_relative_l1_union_robust" in second:
+        metrics.append("dh_relative_l1_union_robust")
+    return metrics
 
 
 def _delta_stability_convergence_summary(

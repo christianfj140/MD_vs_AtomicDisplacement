@@ -166,21 +166,168 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
         with (metrics_root / "derivative_matrix_metrics.csv").open(encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
+        with (metrics_root / "derivative_ref_abs_quantile_metrics.csv").open(encoding="utf-8") as handle:
+            quantile_rows = list(csv.DictReader(handle))
 
         self.assertEqual(manifest["schema_version"], "hamiltonian_derivative_metrics_v1")
         self.assertFalse(manifest["force_constants_used"])
         self.assertEqual(manifest["reference_definition"], "siesta_hamiltonian_finite_difference")
         self.assertEqual(manifest["stencils_ok"], 1)
+        self.assertEqual(
+            manifest["outputs"]["derivative_ref_abs_quantile_metrics"],
+            str(metrics_root / "derivative_ref_abs_quantile_metrics.csv"),
+        )
+        self.assertEqual(
+            manifest["outputs"]["derivative_group_metrics"],
+            str(metrics_root / "derivative_group_metrics.json"),
+        )
+        self.assertEqual(
+            manifest["outputs"]["derivative_onsite_offsite_metrics"],
+            str(metrics_root / "derivative_onsite_offsite_metrics.json"),
+        )
+        onsite_offsite = json.loads((metrics_root / "derivative_onsite_offsite_metrics.json").read_text(encoding="utf-8"))
+        self.assertFalse(onsite_offsite["available"])
+        self.assertEqual(onsite_offsite["reason"], "orbital_to_atom_mapping_unavailable")
+        self.assertFalse((metrics_root / "derivative_onsite_offsite_metrics.csv").exists())
+        self.assertTrue(
+            any(
+                warning["kind"] == "derivative_onsite_offsite_metrics_unavailable"
+                and warning["reason"] == "orbital_to_atom_mapping_unavailable"
+                for warning in manifest["warnings"]
+            )
+        )
+        group_metrics = json.loads((metrics_root / "derivative_group_metrics.json").read_text(encoding="utf-8"))
+        self.assertEqual(group_metrics["schema"], "hamiltonian_derivative_group_metrics_v1")
+        self.assertEqual(len(group_metrics["by_axis"]), 1)
+        self.assertEqual(group_metrics["by_axis"][0]["axis"], "x")
+        self.assertEqual(group_metrics["by_axis"][0]["delta_ang"], 0.5)
+        self.assertEqual(group_metrics["by_axis"][0]["support_threshold"], 1e-12)
         self.assertEqual(rows[0]["derivative_units"], "eV/Ang")
         self.assertAlmostEqual(float(rows[0]["dh_mae_union_eV_per_Ang"]), 1.0)
+        self.assertEqual(len(quantile_rows), 2)
+        self.assertEqual(sum(int(row["n_entries"]) for row in quantile_rows), 2)
+        self.assertTrue(all(row["quantile_domain"] == "union_support" for row in quantile_rows))
+        self.assertAlmostEqual(float(quantile_rows[0]["abs_ref_mean_eV_per_Ang"]), 2.0)
+        self.assertAlmostEqual(float(quantile_rows[0]["dh_error_mae_eV_per_Ang"]), 1.0)
+        self.assertAlmostEqual(float(quantile_rows[0]["dh_error_rmse_eV_per_Ang"]), 1.0)
+        self.assertAlmostEqual(float(quantile_rows[0]["dh_error_relative_l1_robust"]), 0.5)
         self.assertTrue((metrics_root / "derivative_delta_stability.csv").exists())
         self.assertTrue((metrics_root / "derivative_delta_stability.json").exists())
-        self.assertEqual(manifest["delta_stability"]["status"], "unavailable_single_delta")
+        self.assertEqual(manifest["delta_stability"]["status"], "single_delta_only")
+        self.assertEqual(manifest["delta_stability"]["pairwise_metric_rows"], [])
         self.assertIn("delta_sensitivity_study_available", manifest)
         self.assertFalse(manifest["delta_sensitivity_study_available"])
         self.assertIsNone(manifest["delta_stability_converged"])
         self.assertEqual(manifest["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
         self.assertEqual(manifest["reference_noise"]["status"], "reference_noise_unavailable")
+
+    def test_cli_empty_quantile_support_warns_without_rows(self) -> None:
+        zero = sparse.csr_matrix((2, 2))
+        self.write_sample("base", sign=0, reference=zero, prediction=zero)
+        self.write_sample("plus", sign=1, reference=zero, prediction=zero)
+        self.write_sample("minus", sign=-1, reference=zero, prediction=zero)
+
+        self.run_cli("--method", "central", "--overwrite")
+
+        metrics_root = self.result_dir / "derivative_metrics"
+        manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
+        with (metrics_root / "derivative_ref_abs_quantile_metrics.csv").open(encoding="utf-8") as handle:
+            quantile_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(quantile_rows, [])
+        self.assertTrue(
+            any(
+                warning["kind"] == "derivative_ref_abs_quantile_metrics_empty_union_support"
+                for warning in manifest["warnings"]
+            )
+        )
+
+    def test_derivative_group_metrics_preserve_conditions_and_pool_norms(self) -> None:
+        rows = [
+            {
+                "source_model": "graph2mat",
+                "reference_source": "siesta",
+                "dataset_size": 10,
+                "seed": 1,
+                "split": "test",
+                "delta_ang": 0.01,
+                "finite_difference_method": "central",
+                "support_threshold": 1e-12,
+                "atom_index_zero_based": 0,
+                "axis": "x",
+                "dh_relative_frobenius_union_robust": 0.5,
+                "dh_mae_union_eV_per_Ang": 1.0,
+                "dh_rmse_union_eV_per_Ang": 1.5,
+                "dh_relative_l1_union_robust": 0.25,
+                "dh_norm_error_union_fro": 3.0,
+                "dh_norm_ref_union_fro": 4.0,
+                "dh_norm_error_l1_union": 5.0,
+                "dh_norm_ref_l1_union": 10.0,
+            },
+            {
+                "source_model": "graph2mat",
+                "reference_source": "siesta",
+                "dataset_size": 10,
+                "seed": 1,
+                "split": "test",
+                "delta_ang": 0.01,
+                "finite_difference_method": "central",
+                "support_threshold": 1e-12,
+                "atom_index_zero_based": 0,
+                "axis": "x",
+                "dh_relative_frobenius_union_robust": 1.0,
+                "dh_mae_union_eV_per_Ang": 3.0,
+                "dh_rmse_union_eV_per_Ang": 2.5,
+                "dh_relative_l1_union_robust": 0.75,
+                "dh_norm_error_union_fro": 4.0,
+                "dh_norm_ref_union_fro": 3.0,
+                "dh_norm_error_l1_union": 1.0,
+                "dh_norm_ref_l1_union": 2.0,
+            },
+            {
+                "source_model": "graph2mat",
+                "reference_source": "siesta",
+                "dataset_size": 10,
+                "seed": 2,
+                "split": "validation",
+                "delta_ang": 0.02,
+                "finite_difference_method": "central",
+                "support_threshold": 1e-10,
+                "atom_index_zero_based": 0,
+                "axis": "x",
+                "dh_relative_frobenius_union_robust": float("nan"),
+                "dh_mae_union_eV_per_Ang": float("inf"),
+                "dh_rmse_union_eV_per_Ang": 9.0,
+                "dh_relative_l1_union_robust": 2.0,
+            },
+        ]
+
+        groups = metrics_module._derivative_group_metrics(rows)
+
+        self.assertEqual(groups["grouping_preserves"], metrics_module.GROUPING_PRESERVES)
+        self.assertEqual(len(groups["by_atom"]), 2)
+        self.assertEqual(len(groups["by_axis"]), 2)
+        first_axis = [row for row in groups["by_axis"] if row["seed"] == 1 and row["split"] == "test"][0]
+        self.assertEqual(first_axis["delta_ang"], 0.01)
+        self.assertEqual(first_axis["support_threshold"], 1e-12)
+        self.assertEqual(first_axis["n_stencils"], 2)
+        self.assertAlmostEqual(first_axis["dh_mae_union_eV_per_Ang_mean"], 2.0)
+        self.assertAlmostEqual(first_axis["dh_mae_union_eV_per_Ang_median"], 2.0)
+        self.assertAlmostEqual(first_axis["dh_relative_frobenius_union_robust_mean"], 0.75)
+        self.assertAlmostEqual(first_axis["dh_relative_frobenius_union_robust_pooled"], 1.0)
+        self.assertAlmostEqual(first_axis["dh_relative_l1_union_robust_pooled"], 6.0 / 12.0)
+        second_axis = [row for row in groups["by_axis"] if row["seed"] == 2][0]
+        self.assertEqual(second_axis["split"], "validation")
+        self.assertEqual(second_axis["support_threshold"], 1e-10)
+        self.assertIsNone(second_axis["dh_mae_union_eV_per_Ang_mean"])
+
+    def test_derivative_group_metrics_empty_rows(self) -> None:
+        groups = metrics_module._derivative_group_metrics([])
+
+        self.assertEqual(groups["schema"], "hamiltonian_derivative_group_metrics_v1")
+        self.assertEqual(groups["by_atom"], [])
+        self.assertEqual(groups["by_axis"], [])
+        self.assertEqual(groups["by_atom_axis"], [])
 
     def test_cli_shared_base_multi_axis_has_no_false_operand_metadata_mismatch(self) -> None:
         zero = sparse.csr_matrix((2, 2))
@@ -222,25 +369,35 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         rows = [
             {
                 "source_model": "graph2mat",
+                "reference_source": "siesta",
+                "split": "test",
                 "base_sample_id": "base_0",
                 "atom_index_zero_based": 0,
                 "axis": "x",
                 "finite_difference_method": "central",
+                "support_threshold": 1e-12,
                 "delta_ang": 0.005,
                 "dh_mae_union_eV_per_Ang": 0.4,
                 "dh_rmse_union_eV_per_Ang": 0.5,
                 "dh_relative_frobenius_ref": 0.1,
+                "dh_relative_frobenius_union_robust": 0.2,
+                "dh_relative_l1_union_robust": 0.3,
             },
             {
                 "source_model": "graph2mat",
+                "reference_source": "siesta",
+                "split": "test",
                 "base_sample_id": "base_0",
                 "atom_index_zero_based": 0,
                 "axis": "x",
                 "finite_difference_method": "central",
+                "support_threshold": 1e-12,
                 "delta_ang": 0.01,
                 "dh_mae_union_eV_per_Ang": 0.6,
                 "dh_rmse_union_eV_per_Ang": 0.7,
                 "dh_relative_frobenius_ref": 0.15,
+                "dh_relative_frobenius_union_robust": 0.5,
+                "dh_relative_l1_union_robust": 0.9,
             },
         ]
 
@@ -250,6 +407,19 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertEqual(summary["groups_total"], 1)
         self.assertEqual(summary["rows"][0]["delta_count"], 2)
         self.assertAlmostEqual(summary["rows"][0]["dh_mae_union_eV_per_Ang_range"], 0.2)
+        self.assertEqual(len(summary["pairwise_metric_rows"]), 4)
+        pairwise = {
+            row["metric_name"]: row
+            for row in summary["pairwise_metric_rows"]
+        }
+        self.assertAlmostEqual(pairwise["dh_relative_frobenius_union_robust"]["abs_change"], 0.3)
+        self.assertAlmostEqual(pairwise["dh_relative_frobenius_union_robust"]["relative_change"], 0.3 / 0.5)
+        self.assertEqual(
+            pairwise["dh_mae_union_eV_per_Ang"]["stability_definition"],
+            "scalar_error_metric_pairwise_delta_change_not_matrix_delta_stability",
+        )
+        self.assertEqual(pairwise["dh_mae_union_eV_per_Ang"]["split"], "test")
+        self.assertEqual(pairwise["dh_mae_union_eV_per_Ang"]["support_threshold"], 1e-12)
 
     def test_delta_stability_summary_reports_single_delta_unavailable(self) -> None:
         summary = metrics_module._delta_stability_summary(
@@ -266,8 +436,45 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(summary["status"], "unavailable_single_delta")
+        self.assertEqual(summary["status"], "single_delta_only")
+        self.assertEqual(summary["pairwise_metric_rows"], [])
         self.assertIn("Fewer than two", summary["reason"])
+
+    def test_delta_stability_pairwise_preserves_split_and_threshold_and_skips_nonfinite(self) -> None:
+        base = {
+            "source_model": "graph2mat",
+            "reference_source": "siesta",
+            "base_sample_id": "base_0",
+            "atom_index_zero_based": 0,
+            "axis": "x",
+            "finite_difference_method": "central",
+            "dh_relative_frobenius_ref": 0.1,
+            "dh_mae_union_eV_per_Ang": 1.0,
+            "dh_rmse_union_eV_per_Ang": 2.0,
+        }
+        rows = [
+            {**base, "split": "test", "support_threshold": 1e-12, "delta_ang": 0.005},
+            {
+                **base,
+                "split": "test",
+                "support_threshold": 1e-12,
+                "delta_ang": 0.01,
+                "dh_relative_frobenius_ref": 0.4,
+                "dh_mae_union_eV_per_Ang": float("nan"),
+                "dh_rmse_union_eV_per_Ang": float("inf"),
+            },
+            {**base, "split": "validation", "support_threshold": 1e-12, "delta_ang": 0.02},
+            {**base, "split": "test", "support_threshold": 1e-10, "delta_ang": 0.02},
+        ]
+
+        summary = metrics_module._delta_stability_summary(rows)
+
+        pairwise = summary["pairwise_metric_rows"]
+        self.assertEqual(len(pairwise), 1)
+        self.assertEqual(pairwise[0]["metric_name"], "dh_relative_frobenius_ref")
+        self.assertEqual(pairwise[0]["split"], "test")
+        self.assertEqual(pairwise[0]["support_threshold"], 1e-12)
+        json.dumps(metrics_module.json_safe(summary), allow_nan=False)
 
     def test_delta_stability_convergence_summary_marks_availability_without_convergence_claim(self) -> None:
         summary = metrics_module._delta_stability_summary(
@@ -411,6 +618,8 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
             status_fields = next(csv.reader(handle))
         with (metrics_root / "derivative_support_sweep.csv").open(encoding="utf-8") as handle:
             sweep_fields = next(csv.reader(handle))
+        with (metrics_root / "derivative_ref_abs_quantile_metrics.csv").open(encoding="utf-8") as handle:
+            quantile_fields = next(csv.reader(handle))
         with (metrics_root / "derivative_geometry_validation.csv").open(encoding="utf-8") as handle:
             geometry_fields = next(csv.reader(handle))
 
@@ -418,6 +627,8 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertIn("comparison_status", matrix_fields)
         self.assertIn("issue_codes", status_fields)
         self.assertIn("dh_support_f1", sweep_fields)
+        self.assertIn("quantile_domain", quantile_fields)
+        self.assertIn("dh_error_relative_l1_robust", quantile_fields)
         self.assertIn("status", geometry_fields)
         self.assertTrue((metrics_root / "derivative_geometry_validation.json").exists())
 

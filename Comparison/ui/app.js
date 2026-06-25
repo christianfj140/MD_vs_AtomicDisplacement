@@ -2547,6 +2547,43 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   );
 }
 
+function renderG2MDeepHDerivativePlotSummary(card, plot, message = "") {
+  card.textContent = "";
+  const title = document.createElement("h4");
+  title.textContent = plot.title || plot.id || "Derivative diagnostic plot";
+  card.appendChild(title);
+  for (const text of [plot.subtitle, plot.reference_label, message].filter(Boolean)) {
+    const paragraph = document.createElement("p");
+    paragraph.className = "field-help";
+    paragraph.textContent = text;
+    card.appendChild(paragraph);
+  }
+  if (!message) {
+    const details = document.createElement("p");
+    details.className = "field-help";
+    details.textContent = [
+      plot.id ? `id: ${plot.id}` : "",
+      plot.kind ? `kind: ${plot.kind}` : "",
+      plot.x_key ? `x: ${plot.x_key}` : "",
+      plot.y_key ? `y: ${plot.y_key}` : "",
+      plot.series_key ? `series: ${plot.series_key}` : "",
+      (plot.metrics || []).length ? `metrics: ${(plot.metrics || []).map((metric) => metric.label || metric.key).join(", ")}` : "",
+      `rows: ${(plot.rows || []).length}`,
+    ].filter(Boolean).join(" | ");
+    card.appendChild(details);
+  }
+}
+
+function g2mDeephDerivativePlotSections(plotPayload = {}) {
+  const primaryIds = new Set(plotPayload.primary_plot_ids || []);
+  const diagnosticIds = new Set(plotPayload.diagnostic_plot_ids || []);
+  return [
+    { title: "Primary derivative metrics", plots: (plotPayload.plots || []).filter((plot) => primaryIds.has(plot.id)) },
+    { title: "Secondary derivative metrics", plots: (plotPayload.plots || []).filter((plot) => !primaryIds.has(plot.id) && !diagnosticIds.has(plot.id)) },
+    { title: "Diagnostic derivative metrics", plots: (plotPayload.plots || []).filter((plot) => !primaryIds.has(plot.id) && diagnosticIds.has(plot.id)) },
+  ];
+}
+
 function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
   const container = document.getElementById("g2m-deeph-derivative-plots");
   if (!container) return;
@@ -2561,17 +2598,32 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
     container.appendChild(placeholder);
     return;
   }
-  for (const plot of plotPayload.plots || []) {
-    const card = document.createElement("div");
-    card.id = `g2m-deeph-derivative-plot-${plot.id || container.children.length}`;
-    card.className = "plot-card wide";
-    container.appendChild(card);
-    if (window.Plotly && plot.kind === "grouped_bar") {
-      renderG2MDeepHDerivativeGroupedBarPlot(card, plot);
-    } else if (window.Plotly && plot.kind === "scatter") {
-      renderG2MDeepHDerivativeScatterPlot(card, plot);
-    } else {
-      card.textContent = plot.title || "Derivative diagnostic plot";
+  for (const section of g2mDeephDerivativePlotSections(plotPayload)) {
+    const heading = document.createElement("h3");
+    heading.className = "plot-section-title";
+    heading.textContent = section.title;
+    container.appendChild(heading);
+    if (!section.plots.length) {
+      const placeholder = document.createElement("div");
+      placeholder.className = "plot-card full placeholder-card";
+      placeholder.textContent = "No data available for this metric";
+      container.appendChild(placeholder);
+      continue;
+    }
+    for (const plot of section.plots) {
+      const card = document.createElement("div");
+      card.id = `g2m-deeph-derivative-plot-${plot.id || container.children.length}`;
+      card.className = "plot-card wide";
+      container.appendChild(card);
+      if (!(plot.rows || []).length) {
+        renderG2MDeepHDerivativePlotSummary(card, plot, "No data available for this metric");
+      } else if (window.Plotly && plot.kind === "grouped_bar") {
+        renderG2MDeepHDerivativeGroupedBarPlot(card, plot);
+      } else if (window.Plotly && (plot.kind === "scatter" || plot.kind === "line")) {
+        renderG2MDeepHDerivativeScatterPlot(card, plot);
+      } else {
+        renderG2MDeepHDerivativePlotSummary(card, plot);
+      }
     }
   }
   schedulePlotResize();

@@ -266,6 +266,40 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("Technical internal diagnostic only. No winner claim comes from derivative metrics.", self.app_js)
         self.assertIn("Derivative metadata/order diagnostics need attention", derivative_js)
 
+    def test_derivative_plot_payload_renders_new_metric_plots_generically(self) -> None:
+        derivative_js = self.app_js.split("function renderG2MDeepHDerivativeRunSelector", 1)[1].split(
+            "const DATASET_MINIMUM_CRITERIA",
+            1,
+        )[0]
+        for text in (
+            "Primary derivative metrics",
+            "Secondary derivative metrics",
+            "Diagnostic derivative metrics",
+            "No data available for this metric",
+            "g2mDeephDerivativePlotSections",
+            "primary_plot_ids",
+            "diagnostic_plot_ids",
+            'plot.kind === "grouped_bar"',
+            'plot.kind === "scatter" || plot.kind === "line"',
+            "plot.x_key",
+            "plot.y_key",
+            "plot.series_key",
+            "plot.metrics",
+            "plot.rows",
+            "plot.title",
+            "plot.subtitle",
+            "plot.reference_label",
+            "g2m-deeph-derivative-plot-${plot.id",
+        ):
+            self.assertIn(text, derivative_js)
+        mock_payload_plot_ids = (
+            "relative_frobenius_union_robust_by_model",
+            "derivative_residual_summary_by_model",
+            "derivative_error_by_abs_ref_quantile",
+            "robust_error_by_axis",
+        )
+        self.assertTrue(all(mock_payload_plot_ids))
+
     def test_plot_payload_renders_grouped_bar_plots(self) -> None:
         self.assertIn("renderG2MDeepHGroupedBarPlot", self.app_js)
         self.assertIn("renderG2MDeepHTimingScalingPlot", self.app_js)

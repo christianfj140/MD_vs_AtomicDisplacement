@@ -24,6 +24,7 @@ from hamiltonian_derivative_stencil import (  # noqa: E402
     DerivativeMetadata,
     DerivativeStencil,
     HamiltonianDerivativeError,
+    derivative_ref_abs_quantile_metrics,
     derivative_sparse_metrics,
     discover_derivative_stencils,
     finite_difference_derivative,
@@ -457,9 +458,40 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertAlmostEqual(row["dh_rmse_ref_eV_per_Ang"], (2.5) ** 0.5)
         self.assertAlmostEqual(row["dh_mse_ref_eV2_per_Ang2"], 2.5)
         self.assertAlmostEqual(row["dh_max_abs_error_union_eV_per_Ang"], 2.0)
+        self.assertAlmostEqual(row["dh_residual_abs_mean_union_eV_per_Ang"], 1.5)
+        self.assertAlmostEqual(row["dh_residual_abs_median_union_eV_per_Ang"], 1.5)
+        self.assertAlmostEqual(row["dh_residual_abs_p90_union_eV_per_Ang"], 1.9)
+        self.assertAlmostEqual(row["dh_residual_abs_p95_union_eV_per_Ang"], 1.95)
+        self.assertAlmostEqual(row["dh_residual_abs_p99_union_eV_per_Ang"], 1.99)
+        self.assertLessEqual(row["dh_residual_abs_p90_union_eV_per_Ang"], row["dh_residual_abs_p95_union_eV_per_Ang"])
+        self.assertLessEqual(row["dh_residual_abs_p95_union_eV_per_Ang"], row["dh_residual_abs_p99_union_eV_per_Ang"])
+        self.assertAlmostEqual(row["dh_residual_mean_union_eV_per_Ang"], -0.5)
+        self.assertAlmostEqual(row["dh_residual_std_union_eV_per_Ang"], 1.5)
+        self.assertAlmostEqual(row["dh_residual_median_union_eV_per_Ang"], -0.5)
+        self.assertAlmostEqual(row["dh_residual_bias_over_mae_union"], 0.5 / 1.5)
+        self.assertTrue(np.isfinite(row["dh_residual_bias_over_mae_union"]))
+        self.assertEqual(row["dh_residual_complex_mode"], "real_only")
+        self.assertEqual(row["dh_residual_signed_unavailable_reason"], "")
         self.assertAlmostEqual(row["dh_relative_frobenius_ref"], (5.0 / 10.0) ** 0.5)
         self.assertAlmostEqual(row["dh_relative_l1_union"], 3.0 / 4.0)
         self.assertAlmostEqual(row["dh_cosine_similarity_union"], 5.0 / ((10.0) ** 0.5 * (5.0) ** 0.5))
+        self.assertAlmostEqual(row["dh_norm_ref_fro"], 10.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_pred_fro"], 5.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_error_fro"], 5.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_ref_union_fro"], 10.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_pred_union_fro"], 5.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_error_union_fro"], 5.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_ref_l1_union"], 4.0)
+        self.assertAlmostEqual(row["dh_norm_pred_l1_union"], 3.0)
+        self.assertAlmostEqual(row["dh_norm_error_l1_union"], 3.0)
+        self.assertAlmostEqual(row["dh_relative_frobenius_ref_robust"], (5.0**0.5) / (10.0**0.5 + 1e-30))
+        self.assertAlmostEqual(row["dh_relative_frobenius_union_robust"], (5.0**0.5) / (10.0**0.5 + 1e-30))
+        self.assertAlmostEqual(row["dh_relative_l1_union_robust"], 3.0 / (4.0 + 1e-30))
+        self.assertFalse(row["dh_relative_frobenius_ref_near_zero_denominator"])
+        self.assertFalse(row["dh_relative_frobenius_union_near_zero_denominator"])
+        self.assertFalse(row["dh_relative_l1_union_near_zero_denominator"])
+        self.assertAlmostEqual(row["dh_max_abs_ref_union_eV_per_Ang"], 3.0)
+        self.assertAlmostEqual(row["dh_max_abs_pred_union_eV_per_Ang"], 2.0)
 
     def test_derivative_sparse_metrics_zero_reference_norm_behavior(self) -> None:
         reference = sparse.csr_matrix((2, 2))
@@ -470,9 +502,44 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertTrue(np.isnan(row["dh_relative_frobenius_ref"]))
         self.assertTrue(np.isnan(row["dh_relative_frobenius_union"]))
         self.assertTrue(np.isnan(row["dh_relative_l1_union"]))
+        self.assertTrue(np.isfinite(row["dh_relative_frobenius_ref_robust"]))
+        self.assertTrue(np.isfinite(row["dh_relative_frobenius_union_robust"]))
+        self.assertTrue(np.isfinite(row["dh_relative_l1_union_robust"]))
+        self.assertAlmostEqual(row["dh_relative_frobenius_ref_robust"], 1.0e30)
+        self.assertAlmostEqual(row["dh_relative_frobenius_union_robust"], 1.0e30)
+        self.assertAlmostEqual(row["dh_relative_l1_union_robust"], 1.0e30)
+        self.assertTrue(row["dh_relative_frobenius_ref_near_zero_denominator"])
+        self.assertTrue(row["dh_relative_frobenius_union_near_zero_denominator"])
+        self.assertTrue(row["dh_relative_l1_union_near_zero_denominator"])
         self.assertEqual(row["dh_relative_unavailable_reason"], "reference_derivative_norm_zero")
         self.assertTrue(np.isnan(row["dh_cosine_similarity_union"]))
         self.assertEqual(row["dh_cosine_unavailable_reason"], "reference_derivative_norm_zero")
+
+        empty = derivative_sparse_metrics(
+            sparse.csr_matrix((2, 2)),
+            sparse.csr_matrix((2, 2)),
+            sample="s_empty",
+            metadata=self.metadata(),
+        )
+        self.assertTrue(np.isnan(empty["dh_residual_abs_mean_union_eV_per_Ang"]))
+        self.assertTrue(np.isnan(empty["dh_residual_mean_union_eV_per_Ang"]))
+        self.assertEqual(empty["dh_residual_signed_unavailable_reason"], "empty_union_support")
+
+    def test_derivative_sparse_metrics_tiny_denominator_flags(self) -> None:
+        reference = sparse.csr_matrix([[1.0e-25, 0.0], [0.0, 0.0]])
+        predicted = sparse.csr_matrix((2, 2))
+
+        row = derivative_sparse_metrics(
+            reference,
+            predicted,
+            sample="s0",
+            metadata=self.metadata(),
+            support_threshold=0.0,
+        )
+
+        self.assertTrue(row["dh_relative_frobenius_ref_near_zero_denominator"])
+        self.assertTrue(row["dh_relative_frobenius_union_near_zero_denominator"])
+        self.assertTrue(row["dh_relative_l1_union_near_zero_denominator"])
 
     def test_derivative_sparse_metrics_support_mismatch_behavior(self) -> None:
         reference = sparse.csr_matrix([[1.0, 0.0], [0.0, 0.0]])
@@ -486,6 +553,78 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertEqual(row["dh_false_zero_rate"], 1.0)
         self.assertEqual(row["dh_false_nonzero_rate"], 1.0)
         self.assertEqual(row["dh_union_nnz"], 2)
+        self.assertAlmostEqual(row["dh_norm_error_fro"], 5.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_ref_union_fro"], 1.0)
+        self.assertAlmostEqual(row["dh_norm_pred_union_fro"], 2.0)
+        self.assertAlmostEqual(row["dh_norm_error_l1_union"], 3.0)
+
+    def test_derivative_sparse_metrics_real_correlations(self) -> None:
+        reference = sparse.csr_matrix([[1.0, 0.0], [2.0, 3.0]])
+        positive = sparse.csr_matrix([[2.0, 0.0], [4.0, 6.0]])
+        negative = sparse.csr_matrix([[-1.0, 0.0], [-2.0, -3.0]])
+
+        positive_row = derivative_sparse_metrics(reference, positive, sample="s0", metadata=self.metadata())
+        negative_row = derivative_sparse_metrics(reference, negative, sample="s1", metadata=self.metadata())
+
+        self.assertAlmostEqual(positive_row["dh_pearson_union"], 1.0)
+        self.assertAlmostEqual(positive_row["dh_spearman_union"], 1.0)
+        self.assertEqual(positive_row["dh_pearson_union_mode"], "real_only")
+        self.assertEqual(positive_row["dh_spearman_union_mode"], "real_only")
+        self.assertEqual(positive_row["dh_pearson_unavailable_reason"], "")
+        self.assertEqual(positive_row["dh_spearman_unavailable_reason"], "")
+        self.assertAlmostEqual(negative_row["dh_pearson_union"], -1.0)
+        self.assertAlmostEqual(negative_row["dh_spearman_union"], -1.0)
+
+    def test_derivative_sparse_metrics_correlation_zero_variance(self) -> None:
+        reference = sparse.csr_matrix([[1.0, 1.0], [0.0, 0.0]])
+        predicted = sparse.csr_matrix([[2.0, 3.0], [0.0, 0.0]])
+
+        row = derivative_sparse_metrics(reference, predicted, sample="s0", metadata=self.metadata())
+
+        self.assertTrue(np.isnan(row["dh_pearson_union"]))
+        self.assertTrue(np.isnan(row["dh_spearman_union"]))
+        self.assertEqual(row["dh_pearson_unavailable_reason"], "zero_variance")
+        self.assertEqual(row["dh_spearman_unavailable_reason"], "zero_variance")
+
+    def test_derivative_sparse_metrics_correlations_use_sorted_union_support(self) -> None:
+        reference_a = sparse.coo_matrix(([2.0, 1.0, 3.0], ([1, 0, 1], [0, 0, 1])), shape=(2, 2)).tocsr()
+        predicted_a = sparse.coo_matrix(([4.0, 2.0, 6.0], ([1, 0, 1], [0, 0, 1])), shape=(2, 2)).tocsr()
+        reference_b = sparse.coo_matrix(([3.0, 1.0, 2.0], ([1, 0, 1], [1, 0, 0])), shape=(2, 2)).tocsr()
+        predicted_b = sparse.coo_matrix(([6.0, 2.0, 4.0], ([1, 0, 1], [1, 0, 0])), shape=(2, 2)).tocsr()
+
+        row_a = derivative_sparse_metrics(reference_a, predicted_a, sample="s0", metadata=self.metadata())
+        row_b = derivative_sparse_metrics(reference_b, predicted_b, sample="s1", metadata=self.metadata())
+
+        self.assertAlmostEqual(row_a["dh_pearson_union"], row_b["dh_pearson_union"])
+        self.assertAlmostEqual(row_a["dh_spearman_union"], row_b["dh_spearman_union"])
+
+    def test_derivative_sparse_metrics_complex_values_use_modulus(self) -> None:
+        reference = sparse.csr_matrix([[(3.0 + 4.0j), 0.0], [1.0 + 0.0j, 0.0]])
+        predicted = sparse.csr_matrix([[(6.0 + 8.0j), 0.0], [2.0 + 0.0j, 0.0]])
+
+        row = derivative_sparse_metrics(reference, predicted, sample="s0", metadata=self.metadata())
+
+        self.assertAlmostEqual(row["dh_norm_ref_fro"], 26.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_pred_fro"], 104.0**0.5)
+        self.assertAlmostEqual(row["dh_norm_error_fro"], 26.0**0.5)
+        self.assertAlmostEqual(row["dh_mae_union_eV_per_Ang"], 3.0)
+        self.assertAlmostEqual(row["dh_rmse_union_eV_per_Ang"], (13.0) ** 0.5)
+        self.assertAlmostEqual(row["dh_max_abs_ref_union_eV_per_Ang"], 5.0)
+        self.assertAlmostEqual(row["dh_max_abs_pred_union_eV_per_Ang"], 10.0)
+        self.assertAlmostEqual(row["dh_max_abs_error_union_eV_per_Ang"], 5.0)
+        self.assertAlmostEqual(row["dh_residual_abs_mean_union_eV_per_Ang"], 3.0)
+        self.assertAlmostEqual(row["dh_residual_real_mean_union_eV_per_Ang"], 2.0)
+        self.assertAlmostEqual(row["dh_residual_real_std_union_eV_per_Ang"], 1.0)
+        self.assertAlmostEqual(row["dh_residual_imag_mean_union_eV_per_Ang"], 2.0)
+        self.assertAlmostEqual(row["dh_residual_imag_std_union_eV_per_Ang"], 2.0)
+        self.assertEqual(row["dh_residual_complex_mode"], "real_imag_split")
+        self.assertAlmostEqual(row["dh_pearson_union"], 1.0)
+        self.assertAlmostEqual(row["dh_spearman_union"], 1.0)
+        self.assertEqual(row["dh_pearson_union_mode"], "real_imag_concatenated")
+        self.assertEqual(row["dh_spearman_union_mode"], "real_imag_concatenated")
+        self.assertTrue(np.isnan(row["dh_residual_mean_union_eV_per_Ang"]))
+        self.assertTrue(np.isnan(row["dh_residual_bias_over_mae_union"]))
+        self.assertEqual(row["dh_residual_signed_unavailable_reason"], "complex_residuals_real_imag_split")
 
     def test_derivative_sparse_metrics_cosine_similarity_edge_cases(self) -> None:
         zero = sparse.csr_matrix((2, 2))
@@ -498,6 +637,41 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertEqual(both_zero["dh_cosine_unavailable_reason"], "reference_and_prediction_derivative_norm_zero")
         self.assertTrue(np.isnan(pred_zero["dh_cosine_similarity_union"]))
         self.assertEqual(pred_zero["dh_cosine_unavailable_reason"], "prediction_derivative_norm_zero")
+
+    def test_derivative_ref_abs_quantile_metrics_sparse_union_bins(self) -> None:
+        reference = sparse.csr_matrix([[0.0, 3.0 + 4.0j], [2.0, 4.0]])
+        predicted = sparse.csr_matrix([[1.0, 0.0], [4.0, 8.0]])
+
+        rows = derivative_ref_abs_quantile_metrics(
+            reference,
+            predicted,
+            sample="s0",
+            metadata=self.metadata(),
+            support_threshold=0.0,
+        )
+
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(all(row["quantile_domain"] == "union_support" for row in rows))
+        self.assertEqual(sum(row["n_entries"] for row in rows), 4)
+        self.assertEqual(sum(row["n_ref_zero_entries"] for row in rows), 1)
+        self.assertEqual(sum(row["n_pred_nonzero_ref_zero_entries"] for row in rows), 1)
+        self.assertEqual(rows[0]["n_ref_zero_entries"], 1)
+        self.assertAlmostEqual(rows[0]["dh_error_mae_eV_per_Ang"], 1.0)
+        self.assertAlmostEqual(rows[1]["abs_ref_mean_eV_per_Ang"], 2.0)
+        self.assertAlmostEqual(rows[1]["dh_error_mae_eV_per_Ang"], 2.0)
+        self.assertAlmostEqual(rows[2]["abs_ref_mean_eV_per_Ang"], 4.0)
+        self.assertAlmostEqual(rows[2]["dh_error_rmse_eV_per_Ang"], 4.0)
+        self.assertAlmostEqual(rows[3]["abs_ref_mean_eV_per_Ang"], 5.0)
+        self.assertAlmostEqual(rows[3]["dh_error_mae_eV_per_Ang"], 5.0)
+        self.assertAlmostEqual(rows[3]["dh_error_relative_l1_robust"], 1.0)
+
+        empty = derivative_ref_abs_quantile_metrics(
+            sparse.csr_matrix((2, 2)),
+            sparse.csr_matrix((2, 2)),
+            sample="empty",
+            metadata=self.metadata(),
+        )
+        self.assertEqual(empty, [])
 
     def test_derivative_sparse_metrics_metadata_fields_and_units_present(self) -> None:
         metadata = self.metadata(delta_ang=0.04, method="central", claim_status="diagnostic_only")
@@ -523,6 +697,54 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertEqual(row["displacement_units"], "Ang")
         self.assertEqual(row["matrix_metric_target_space"], DERIVATIVE_MATRIX_METRIC_TARGET_SPACE)
         self.assertEqual(row["comparison_status"], "diagnostic_only")
+        for name in (
+            "dh_relative_frobenius_ref",
+            "dh_relative_frobenius_union",
+            "dh_relative_l1_union",
+            "dh_mae_union_eV_per_Ang",
+            "dh_rmse_union_eV_per_Ang",
+            "dh_support_f1",
+            "dh_norm_ref_fro",
+            "dh_norm_pred_fro",
+            "dh_norm_error_fro",
+            "dh_norm_ref_union_fro",
+            "dh_norm_pred_union_fro",
+            "dh_norm_error_union_fro",
+            "dh_norm_ref_l1_union",
+            "dh_norm_pred_l1_union",
+            "dh_norm_error_l1_union",
+            "dh_relative_frobenius_ref_robust",
+            "dh_relative_frobenius_union_robust",
+            "dh_relative_l1_union_robust",
+            "dh_relative_frobenius_ref_near_zero_denominator",
+            "dh_relative_frobenius_union_near_zero_denominator",
+            "dh_relative_l1_union_near_zero_denominator",
+            "dh_max_abs_ref_union_eV_per_Ang",
+            "dh_max_abs_pred_union_eV_per_Ang",
+            "dh_max_abs_error_union_eV_per_Ang",
+            "dh_residual_abs_mean_union_eV_per_Ang",
+            "dh_residual_abs_median_union_eV_per_Ang",
+            "dh_residual_abs_p90_union_eV_per_Ang",
+            "dh_residual_abs_p95_union_eV_per_Ang",
+            "dh_residual_abs_p99_union_eV_per_Ang",
+            "dh_residual_mean_union_eV_per_Ang",
+            "dh_residual_std_union_eV_per_Ang",
+            "dh_residual_median_union_eV_per_Ang",
+            "dh_residual_bias_over_mae_union",
+            "dh_residual_real_mean_union_eV_per_Ang",
+            "dh_residual_real_std_union_eV_per_Ang",
+            "dh_residual_imag_mean_union_eV_per_Ang",
+            "dh_residual_imag_std_union_eV_per_Ang",
+            "dh_residual_complex_mode",
+            "dh_residual_signed_unavailable_reason",
+            "dh_pearson_union",
+            "dh_pearson_unavailable_reason",
+            "dh_pearson_union_mode",
+            "dh_spearman_union",
+            "dh_spearman_unavailable_reason",
+            "dh_spearman_union_mode",
+        ):
+            self.assertIn(name, row)
 
     def test_discovery_groups_central_stencil_from_plus_minus_metadata(self) -> None:
         self.write_result_sample("base", sign=0, is_reference=True)

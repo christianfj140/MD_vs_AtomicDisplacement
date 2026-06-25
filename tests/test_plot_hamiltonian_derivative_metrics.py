@@ -61,6 +61,10 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         dataset_root: Path | None = None,
         dataset_id: str = "",
         rows: list[dict[str, object]] | None = None,
+        quantile_rows: list[dict[str, object]] | None = None,
+        group_metrics: dict[str, object] | None = None,
+        onsite_offsite_rows: list[dict[str, object]] | None = None,
+        onsite_offsite_payload: dict[str, object] | None = None,
         hermiticity_rows: list[dict[str, object]] | None = None,
         scientific_status: str = "diagnostic_only",
         stencils_failed: int = 0,
@@ -82,6 +86,14 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
             },
         )
         write_csv(derivative_root / "derivative_matrix_metrics.csv", rows or [])
+        if quantile_rows is not None:
+            write_csv(derivative_root / "derivative_ref_abs_quantile_metrics.csv", quantile_rows)
+        if group_metrics is not None:
+            write_json(derivative_root / "derivative_group_metrics.json", group_metrics)
+        if onsite_offsite_rows is not None:
+            write_csv(derivative_root / "derivative_onsite_offsite_metrics.csv", onsite_offsite_rows)
+        if onsite_offsite_payload is not None:
+            write_json(derivative_root / "derivative_onsite_offsite_metrics.json", onsite_offsite_payload)
         write_csv(derivative_root / "derivative_hermiticity.csv", hermiticity_rows or [])
         write_csv(derivative_root / "stencil_status.csv", [])
         return derivative_root
@@ -180,6 +192,425 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertIn("scientific_status_diagnostic", codes)
         self.assertIn("failed_stencils_present", codes)
         self.assertIn("fatal_errors_present", codes)
+        self.assertIn("robust_derivative_metrics_missing", codes)
+        self.assertIn("derivative_correlation_or_residual_metrics_missing", codes)
+        self.assertIn("derivative_ref_abs_quantile_metrics_missing", codes)
+        self.assertIn("derivative_group_metrics_missing", codes)
+        self.assertIn("derivative_onsite_offsite_metrics_missing", codes)
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("dh_mae_by_model", plot_ids)
+        self.assertIn("relative_frobenius_by_model", plot_ids)
+        self.assertIn("error_by_atom_index_zero_based", plot_ids)
+        self.assertIn("error_by_axis", plot_ids)
+        self.assertNotIn("relative_frobenius_union_robust_by_model", plot_ids)
+        self.assertNotIn("derivative_correlation_by_model", plot_ids)
+        self.assertNotIn("derivative_error_by_abs_ref_quantile", plot_ids)
+        self.assertNotIn("robust_error_by_displaced_atom", plot_ids)
+        self.assertNotIn("onsite_offsite_derivative_error", plot_ids)
+
+    def test_onsite_offsite_metrics_are_exposed_when_csv_exists(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "onsite_offsite",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                }
+            ],
+            onsite_offsite_rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_onsite_relative_frobenius_robust": 0.2,
+                    "dh_onsite_mae_eV_per_Ang": 0.03,
+                    "dh_onsite_rmse_eV_per_Ang": 0.04,
+                    "dh_offsite_relative_frobenius_robust": 0.5,
+                    "dh_offsite_mae_eV_per_Ang": 0.06,
+                    "dh_offsite_rmse_eV_per_Ang": 0.08,
+                },
+                {
+                    "sample": "s1",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 1,
+                    "axis": "y",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_onsite_relative_frobenius_robust": 0.4,
+                    "dh_onsite_mae_eV_per_Ang": 0.05,
+                    "dh_onsite_rmse_eV_per_Ang": 0.06,
+                    "dh_offsite_relative_frobenius_robust": 0.7,
+                    "dh_offsite_mae_eV_per_Ang": 0.1,
+                    "dh_offsite_rmse_eV_per_Ang": 0.12,
+                },
+            ],
+        )
+        output_dir = self.root / "plots_onsite_offsite"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        self.assertIn("onsite_offsite_derivative_error", plots)
+        self.assertIn("onsite_offsite_derivative_error", payload["diagnostic_plot_ids"])
+        plot = plots["onsite_offsite_derivative_error"]
+        self.assertEqual(plot["kind"], "grouped_bar")
+        self.assertEqual(
+            {metric["key"] for metric in plot["metrics"]},
+            {
+                "dh_onsite_relative_frobenius_robust",
+                "dh_offsite_relative_frobenius_robust",
+                "dh_onsite_mae_eV_per_Ang",
+                "dh_offsite_mae_eV_per_Ang",
+            },
+        )
+        self.assertAlmostEqual(plot["rows"][0]["dh_onsite_relative_frobenius_robust"], 0.3)
+        self.assertAlmostEqual(plot["rows"][0]["dh_offsite_relative_frobenius_robust"], 0.6)
+        self.assertAlmostEqual(plot["rows"][0]["dh_onsite_mae_eV_per_Ang"], 0.04)
+        self.assertAlmostEqual(plot["rows"][0]["dh_offsite_mae_eV_per_Ang"], 0.08)
+        self.assertNotIn("derivative_onsite_offsite_metrics_missing", {warning["code"] for warning in payload["scientific_warnings"]})
+
+    def test_onsite_offsite_unavailable_json_warns_without_plot(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "onsite_offsite_unavailable",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                }
+            ],
+            onsite_offsite_payload={"available": False, "reason": "orbital_to_atom_mapping_unavailable"},
+        )
+        output_dir = self.root / "plots_onsite_offsite_unavailable"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        self.assertNotIn("onsite_offsite_derivative_error", {plot["id"] for plot in payload["plots"]})
+        warnings = {warning["code"]: warning for warning in payload["scientific_warnings"]}
+        self.assertIn("derivative_onsite_offsite_metrics_unavailable", warnings)
+        self.assertEqual(
+            warnings["derivative_onsite_offsite_metrics_unavailable"]["details"]["reason"],
+            "orbital_to_atom_mapping_unavailable",
+        )
+
+    def test_ref_abs_quantile_metrics_are_exposed_when_csv_exists(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "quantiles",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                }
+            ],
+            quantile_rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "base_sample_id": "base",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "support_threshold": 1e-12,
+                    "quantile_bin": 1,
+                    "n_entries": 2,
+                    "abs_ref_min_eV_per_Ang": 0.0,
+                    "abs_ref_max_eV_per_Ang": 0.5,
+                    "abs_ref_mean_eV_per_Ang": 0.25,
+                    "dh_error_mae_eV_per_Ang": 0.1,
+                    "dh_error_rmse_eV_per_Ang": 0.2,
+                    "dh_error_relative_l1_robust": 0.3,
+                },
+                {
+                    "sample": "s1",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "base_sample_id": "base",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "support_threshold": 1e-12,
+                    "quantile_bin": 1,
+                    "n_entries": 3,
+                    "abs_ref_min_eV_per_Ang": 0.1,
+                    "abs_ref_max_eV_per_Ang": 0.6,
+                    "abs_ref_mean_eV_per_Ang": 0.35,
+                    "dh_error_mae_eV_per_Ang": 0.3,
+                    "dh_error_rmse_eV_per_Ang": 0.4,
+                    "dh_error_relative_l1_robust": 0.5,
+                },
+                {
+                    "sample": "s2",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "base_sample_id": "base",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "support_threshold": 1e-12,
+                    "quantile_bin": 2,
+                    "n_entries": 4,
+                    "abs_ref_min_eV_per_Ang": 0.6,
+                    "abs_ref_max_eV_per_Ang": 1.0,
+                    "abs_ref_mean_eV_per_Ang": 0.8,
+                    "dh_error_mae_eV_per_Ang": 0.6,
+                    "dh_error_rmse_eV_per_Ang": 0.7,
+                    "dh_error_relative_l1_robust": 0.8,
+                },
+            ],
+        )
+        output_dir = self.root / "plots_quantiles"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("derivative_error_by_abs_ref_quantile", plot_ids)
+        self.assertIn("derivative_relative_l1_by_abs_ref_quantile", plot_ids)
+        self.assertIn("derivative_error_by_abs_ref_quantile", payload["diagnostic_plot_ids"])
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        error_plot = plots["derivative_error_by_abs_ref_quantile"]
+        self.assertEqual(error_plot["x_key"], "quantile_bin")
+        self.assertEqual(error_plot["series_key"], "model_label")
+        first_row = error_plot["rows"][0]
+        self.assertEqual(first_row["quantile_bin"], 1)
+        self.assertEqual(first_row["n_entries_total"], 5)
+        self.assertAlmostEqual(first_row["dh_error_mae_eV_per_Ang"], 0.2)
+        self.assertAlmostEqual(first_row["dh_error_rmse_eV_per_Ang"], 0.3)
+        relative_plot = plots["derivative_relative_l1_by_abs_ref_quantile"]
+        self.assertAlmostEqual(relative_plot["rows"][0]["dh_error_relative_l1_robust"], 0.4)
+        self.assertNotIn("derivative_ref_abs_quantile_metrics_missing", {warning["code"] for warning in payload["scientific_warnings"]})
+
+    def test_group_metrics_are_exposed_when_json_exists(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "group_metrics",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                }
+            ],
+            group_metrics={
+                "schema": "hamiltonian_derivative_group_metrics_v1",
+                "by_atom": [
+                    {
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "n_stencils": 2,
+                        "dh_relative_frobenius_union_robust_mean": 0.4,
+                        "dh_relative_frobenius_union_robust_pooled": 0.25,
+                        "dh_relative_l1_union_robust_mean": 0.6,
+                    }
+                ],
+                "by_axis": [
+                    {
+                        "source_model": "graph2mat",
+                        "axis": "x",
+                        "n_stencils": 2,
+                        "dh_relative_frobenius_union_robust_mean": 0.4,
+                        "dh_relative_frobenius_union_robust_pooled": 0.25,
+                        "dh_relative_l1_union_robust_mean": 0.6,
+                        "dh_relative_l1_union_robust_pooled": 0.5,
+                    }
+                ],
+                "by_atom_axis": [
+                    {
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "n_stencils": 2,
+                        "dh_relative_frobenius_union_robust_mean": 0.4,
+                        "dh_relative_frobenius_union_robust_pooled": 0.25,
+                        "dh_relative_l1_union_robust_mean": 0.6,
+                        "dh_relative_l1_union_robust_pooled": 0.5,
+                    }
+                ],
+            },
+        )
+        output_dir = self.root / "plots_group_metrics"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("error_by_atom_index_zero_based", plot_ids)
+        self.assertIn("error_by_axis", plot_ids)
+        self.assertIn("robust_error_by_displaced_atom", plot_ids)
+        self.assertIn("robust_error_by_axis", plot_ids)
+        self.assertIn("robust_error_by_atom_axis", plot_ids)
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        atom_plot = plots["robust_error_by_displaced_atom"]
+        self.assertEqual(atom_plot["x_key"], "atom_index_zero_based")
+        self.assertEqual(atom_plot["metrics"][0]["key"], "dh_relative_frobenius_union_robust_pooled")
+        self.assertAlmostEqual(atom_plot["rows"][0]["dh_relative_frobenius_union_robust_pooled"], 0.25)
+        axis_plot = plots["robust_error_by_axis"]
+        self.assertEqual(axis_plot["x_key"], "axis")
+        self.assertEqual(
+            {metric["key"] for metric in axis_plot["metrics"]},
+            {"dh_relative_frobenius_union_robust_pooled", "dh_relative_l1_union_robust_pooled"},
+        )
+        atom_axis_plot = plots["robust_error_by_atom_axis"]
+        self.assertEqual(atom_axis_plot["x_key"], "atom_axis")
+        self.assertEqual(atom_axis_plot["rows"][0]["atom_axis"], "0:x")
+        self.assertNotIn("derivative_group_metrics_missing", {warning["code"] for warning in payload["scientific_warnings"]})
+
+    def test_robust_derivative_metric_plots_are_exposed_when_columns_exist(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "robust",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                    "dh_relative_frobenius_union_robust": 0.25,
+                    "dh_relative_l1_union_robust": 0.5,
+                    "dh_norm_ref_union_fro": 2.0,
+                    "dh_norm_error_union_fro": 0.5,
+                    "dh_norm_ref_l1_union": 4.0,
+                    "dh_norm_error_l1_union": 2.0,
+                    "dh_false_zero_rate": 0.1,
+                    "dh_false_nonzero_rate": 0.05,
+                }
+            ],
+        )
+        output_dir = self.root / "plots_robust"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("dh_mae_by_model", plot_ids)
+        self.assertIn("relative_frobenius_by_model", plot_ids)
+        self.assertIn("relative_frobenius_union_robust_by_model", plot_ids)
+        self.assertIn("relative_l1_union_robust_by_model", plot_ids)
+        self.assertIn("robust_primary_metrics_by_model", plot_ids)
+        self.assertIn("relative_frobenius_union_robust_by_model", payload["diagnostic_plot_ids"])
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        frob_rows = plots["relative_frobenius_union_robust_by_model"]["rows"]
+        self.assertAlmostEqual(frob_rows[0]["dh_relative_frobenius_union_robust"], 0.25)
+        l1_rows = plots["relative_l1_union_robust_by_model"]["rows"]
+        self.assertAlmostEqual(l1_rows[0]["dh_relative_l1_union_robust"], 0.5)
+        combined = plots["robust_primary_metrics_by_model"]
+        combined_keys = {metric["key"] for metric in combined["metrics"]}
+        self.assertEqual(
+            combined_keys,
+            {
+                "dh_relative_frobenius_union_robust",
+                "dh_relative_l1_union_robust",
+                "dh_mae_union_eV_per_Ang",
+                "dh_rmse_union_eV_per_Ang",
+            },
+        )
+        self.assertAlmostEqual(combined["rows"][0]["dh_relative_frobenius_union_robust"], 0.25)
+        self.assertAlmostEqual(combined["rows"][0]["dh_relative_l1_union_robust"], 0.5)
+        self.assertNotIn("robust_derivative_metrics_missing", {warning["code"] for warning in payload["scientific_warnings"]})
+
+    def test_correlation_and_residual_metric_plots_are_exposed_when_columns_exist(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "correlation_residual",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "s0",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                    "dh_pearson_union": 0.91,
+                    "dh_spearman_union": 0.87,
+                    "dh_residual_mean_union_eV_per_Ang": -0.01,
+                    "dh_residual_std_union_eV_per_Ang": 0.06,
+                    "dh_residual_median_union_eV_per_Ang": -0.02,
+                    "dh_residual_abs_p90_union_eV_per_Ang": 0.1,
+                    "dh_residual_abs_p95_union_eV_per_Ang": 0.12,
+                    "dh_residual_abs_p99_union_eV_per_Ang": 0.2,
+                    "dh_residual_bias_over_mae_union": 0.05,
+                    "dh_false_zero_rate": 0.1,
+                    "dh_false_nonzero_rate": 0.05,
+                }
+            ],
+        )
+        output_dir = self.root / "plots_correlation_residual"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("dh_mae_by_model", plot_ids)
+        self.assertIn("relative_frobenius_by_model", plot_ids)
+        self.assertIn("derivative_correlation_by_model", plot_ids)
+        self.assertIn("derivative_residual_summary_by_model", plot_ids)
+        self.assertIn("derivative_residual_tail_by_model", plot_ids)
+        self.assertIn("derivative_correlation_by_model", payload["diagnostic_plot_ids"])
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        correlation = plots["derivative_correlation_by_model"]
+        self.assertAlmostEqual(correlation["rows"][0]["dh_pearson_union"], 0.91)
+        self.assertAlmostEqual(correlation["rows"][0]["dh_spearman_union"], 0.87)
+        residual = plots["derivative_residual_summary_by_model"]
+        self.assertAlmostEqual(residual["rows"][0]["dh_residual_mean_union_eV_per_Ang"], -0.01)
+        self.assertAlmostEqual(residual["rows"][0]["dh_residual_bias_over_mae_union"], 0.05)
+        tail = plots["derivative_residual_tail_by_model"]
+        self.assertAlmostEqual(tail["rows"][0]["dh_residual_abs_p99_union_eV_per_Ang"], 0.2)
+        self.assertNotIn(
+            "derivative_correlation_or_residual_metrics_missing",
+            {warning["code"] for warning in payload["scientific_warnings"]},
+        )
 
     def test_no_paper_level_wording_appears(self) -> None:
         graph2mat_root = self.write_derivative_fixture(

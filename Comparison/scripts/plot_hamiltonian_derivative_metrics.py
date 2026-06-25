@@ -26,6 +26,21 @@ DATASET_SIZE_METRICS = [
     "dh_false_zero_rate",
     "dh_false_nonzero_rate",
 ]
+ROBUST_DERIVATIVE_METRICS = [
+    "dh_relative_frobenius_union_robust",
+    "dh_relative_l1_union_robust",
+]
+CORRELATION_RESIDUAL_DERIVATIVE_METRICS = [
+    "dh_pearson_union",
+    "dh_spearman_union",
+    "dh_residual_mean_union_eV_per_Ang",
+    "dh_residual_std_union_eV_per_Ang",
+    "dh_residual_median_union_eV_per_Ang",
+    "dh_residual_abs_p90_union_eV_per_Ang",
+    "dh_residual_abs_p95_union_eV_per_Ang",
+    "dh_residual_abs_p99_union_eV_per_Ang",
+    "dh_residual_bias_over_mae_union",
+]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -443,6 +458,10 @@ def load_derivative_root(root: Path, *, forced_model: str | None = None) -> dict
     derivative_root = _normalize_root(root)
     manifest = read_json(derivative_root / "manifest.json")
     metric_rows = read_csv_rows(derivative_root / "derivative_matrix_metrics.csv")
+    quantile_rows = read_csv_rows(derivative_root / "derivative_ref_abs_quantile_metrics.csv")
+    group_metrics = read_json(derivative_root / "derivative_group_metrics.json")
+    onsite_offsite_rows = read_csv_rows(derivative_root / "derivative_onsite_offsite_metrics.csv")
+    onsite_offsite_payload = read_json(derivative_root / "derivative_onsite_offsite_metrics.json")
     hermiticity_rows = read_csv_rows(derivative_root / "derivative_hermiticity.csv")
     stencil_rows = read_csv_rows(derivative_root / "stencil_status.csv")
     model = (forced_model or _infer_model_from_rows(metric_rows, derivative_root.parent.name or derivative_root.name)).lower()
@@ -480,6 +499,41 @@ def load_derivative_root(root: Path, *, forced_model: str | None = None) -> dict
                 "No derivative matrix metric rows are available; the payload is diagnostic metadata only.",
             )
         )
+    if not quantile_rows:
+        warnings.append(
+            _warning(
+                "derivative_ref_abs_quantile_metrics_missing",
+                "derivative_ref_abs_quantile_metrics.csv is unavailable; abs-reference quantile derivative plots were not fabricated.",
+                severity="info",
+            )
+        )
+    if not group_metrics:
+        warnings.append(
+            _warning(
+                "derivative_group_metrics_missing",
+                "derivative_group_metrics.json is unavailable; robust atom/axis derivative group plots were not fabricated.",
+                severity="info",
+            )
+        )
+    if not onsite_offsite_rows:
+        if onsite_offsite_payload.get("available") is False:
+            reason = str(onsite_offsite_payload.get("reason") or "onsite_offsite_metrics_unavailable")
+            warnings.append(
+                _warning(
+                    "derivative_onsite_offsite_metrics_unavailable",
+                    f"Onsite/offsite derivative metrics are unavailable: {reason}.",
+                    severity="info",
+                    reason=reason,
+                )
+            )
+        else:
+            warnings.append(
+                _warning(
+                    "derivative_onsite_offsite_metrics_missing",
+                    "derivative_onsite_offsite_metrics.csv/json is unavailable; onsite/offsite derivative plots were not fabricated.",
+                    severity="info",
+                )
+            )
     dataset_size_metadata = resolve_dataset_size_metadata(derivative_root, manifest)
     warnings.extend(dataset_size_metadata.get("warnings") or [])
     return {
@@ -489,6 +543,10 @@ def load_derivative_root(root: Path, *, forced_model: str | None = None) -> dict
         "manifest": manifest,
         "dataset_size_metadata": dataset_size_metadata,
         "metric_rows": metric_rows,
+        "quantile_rows": quantile_rows,
+        "group_metrics": group_metrics,
+        "onsite_offsite_rows": onsite_offsite_rows,
+        "onsite_offsite_payload": onsite_offsite_payload,
         "hermiticity_rows": hermiticity_rows,
         "stencil_rows": stencil_rows,
         "warnings": warnings,
@@ -523,6 +581,21 @@ def _combined_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "dh_mae_union_eV_per_Ang": number(row.get("dh_mae_union_eV_per_Ang")),
                     "dh_rmse_union_eV_per_Ang": number(row.get("dh_rmse_union_eV_per_Ang")),
                     "dh_relative_frobenius_ref": number(row.get("dh_relative_frobenius_ref")),
+                    "dh_relative_frobenius_union_robust": number(row.get("dh_relative_frobenius_union_robust")),
+                    "dh_relative_l1_union_robust": number(row.get("dh_relative_l1_union_robust")),
+                    "dh_norm_ref_union_fro": number(row.get("dh_norm_ref_union_fro")),
+                    "dh_norm_error_union_fro": number(row.get("dh_norm_error_union_fro")),
+                    "dh_norm_ref_l1_union": number(row.get("dh_norm_ref_l1_union")),
+                    "dh_norm_error_l1_union": number(row.get("dh_norm_error_l1_union")),
+                    "dh_pearson_union": number(row.get("dh_pearson_union")),
+                    "dh_spearman_union": number(row.get("dh_spearman_union")),
+                    "dh_residual_mean_union_eV_per_Ang": number(row.get("dh_residual_mean_union_eV_per_Ang")),
+                    "dh_residual_std_union_eV_per_Ang": number(row.get("dh_residual_std_union_eV_per_Ang")),
+                    "dh_residual_median_union_eV_per_Ang": number(row.get("dh_residual_median_union_eV_per_Ang")),
+                    "dh_residual_abs_p90_union_eV_per_Ang": number(row.get("dh_residual_abs_p90_union_eV_per_Ang")),
+                    "dh_residual_abs_p95_union_eV_per_Ang": number(row.get("dh_residual_abs_p95_union_eV_per_Ang")),
+                    "dh_residual_abs_p99_union_eV_per_Ang": number(row.get("dh_residual_abs_p99_union_eV_per_Ang")),
+                    "dh_residual_bias_over_mae_union": number(row.get("dh_residual_bias_over_mae_union")),
                     "dh_false_zero_rate": number(row.get("dh_false_zero_rate")),
                     "dh_false_nonzero_rate": number(row.get("dh_false_nonzero_rate")),
                     "dh_support_f1": number(row.get("dh_support_f1")),
@@ -549,6 +622,109 @@ def _combined_hermiticity_rows(datasets: list[dict[str, Any]]) -> list[dict[str,
                     "dH_ref_hermiticity_defect": number(row.get("dH_ref_hermiticity_defect")),
                     "dH_pred_hermiticity_defect": number(row.get("dH_pred_hermiticity_defect")),
                     "dH_hermiticity_error_delta": number(row.get("dH_hermiticity_error_delta")),
+                }
+            )
+    return rows
+
+
+def _combined_quantile_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for dataset in datasets:
+        model = dataset["model"]
+        model_label = dataset["model_label"]
+        dataset_size_metadata = dataset.get("dataset_size_metadata") or {}
+        for row in dataset["quantile_rows"]:
+            rows.append(
+                {
+                    "dataset_id": dataset_size_metadata.get("dataset_id") or "",
+                    "dataset_root": dataset_size_metadata.get("dataset_root") or "",
+                    "n_train": dataset_size_metadata.get("n_train"),
+                    "n_validation": dataset_size_metadata.get("n_validation"),
+                    "n_test": dataset_size_metadata.get("n_test"),
+                    "n_total": dataset_size_metadata.get("n_total"),
+                    "x_dataset_size": dataset_size_metadata.get("x_dataset_size"),
+                    "x_dataset_size_kind": dataset_size_metadata.get("x_dataset_size_kind") or "",
+                    "dataset_size_source": dataset_size_metadata.get("dataset_size_source") or "missing",
+                    "model": model,
+                    "model_label": model_label,
+                    "sample": str(row.get("sample") or ""),
+                    "source_model": str(row.get("source_model") or model),
+                    "reference_source": str(row.get("reference_source") or ""),
+                    "base_sample_id": str(row.get("base_sample_id") or ""),
+                    "atom_index_zero_based": row.get("atom_index_zero_based"),
+                    "axis": str(row.get("axis") or ""),
+                    "delta_ang": number(row.get("delta_ang")),
+                    "finite_difference_method": str(row.get("finite_difference_method") or ""),
+                    "support_threshold": number(row.get("support_threshold")),
+                    "quantile_bin": _int_value(row.get("quantile_bin")),
+                    "n_entries": _int_value(row.get("n_entries")),
+                    "abs_ref_min_eV_per_Ang": number(row.get("abs_ref_min_eV_per_Ang")),
+                    "abs_ref_max_eV_per_Ang": number(row.get("abs_ref_max_eV_per_Ang")),
+                    "abs_ref_mean_eV_per_Ang": number(row.get("abs_ref_mean_eV_per_Ang")),
+                    "dh_error_mae_eV_per_Ang": number(row.get("dh_error_mae_eV_per_Ang")),
+                    "dh_error_rmse_eV_per_Ang": number(row.get("dh_error_rmse_eV_per_Ang")),
+                    "dh_error_relative_l1_robust": number(row.get("dh_error_relative_l1_robust")),
+                }
+            )
+    return rows
+
+
+def _combined_group_rows(datasets: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for dataset in datasets:
+        group_metrics = dataset.get("group_metrics") or {}
+        source_rows = group_metrics.get(key) if isinstance(group_metrics.get(key), list) else []
+        for row in source_rows:
+            source_model = str(row.get("source_model") or dataset["model"])
+            model = source_model.lower()
+            rows.append(
+                {
+                    "model": model,
+                    "model_label": _model_label(model),
+                    "source_model": source_model,
+                    "atom_index_zero_based": row.get("atom_index_zero_based"),
+                    "axis": str(row.get("axis") or ""),
+                    "atom_axis": f"{row.get('atom_index_zero_based')}:{row.get('axis')}",
+                    "n_stencils": _int_value(row.get("n_stencils")),
+                    "dh_relative_frobenius_union_robust_mean": number(row.get("dh_relative_frobenius_union_robust_mean")),
+                    "dh_relative_frobenius_union_robust_median": number(row.get("dh_relative_frobenius_union_robust_median")),
+                    "dh_mae_union_eV_per_Ang_mean": number(row.get("dh_mae_union_eV_per_Ang_mean")),
+                    "dh_mae_union_eV_per_Ang_median": number(row.get("dh_mae_union_eV_per_Ang_median")),
+                    "dh_rmse_union_eV_per_Ang_mean": number(row.get("dh_rmse_union_eV_per_Ang_mean")),
+                    "dh_rmse_union_eV_per_Ang_median": number(row.get("dh_rmse_union_eV_per_Ang_median")),
+                    "dh_relative_l1_union_robust_mean": number(row.get("dh_relative_l1_union_robust_mean")),
+                    "dh_relative_l1_union_robust_median": number(row.get("dh_relative_l1_union_robust_median")),
+                    "dh_relative_frobenius_union_robust_pooled": number(
+                        row.get("dh_relative_frobenius_union_robust_pooled")
+                    ),
+                    "dh_relative_l1_union_robust_pooled": number(row.get("dh_relative_l1_union_robust_pooled")),
+                }
+            )
+    return rows
+
+
+def _combined_onsite_offsite_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for dataset in datasets:
+        for row in dataset["onsite_offsite_rows"]:
+            source_model = str(row.get("source_model") or dataset["model"])
+            model = source_model.lower()
+            rows.append(
+                {
+                    "model": model,
+                    "model_label": _model_label(model),
+                    "source_model": source_model,
+                    "sample": str(row.get("sample") or ""),
+                    "atom_index_zero_based": row.get("atom_index_zero_based"),
+                    "axis": str(row.get("axis") or ""),
+                    "delta_ang": number(row.get("delta_ang")),
+                    "finite_difference_method": str(row.get("finite_difference_method") or ""),
+                    "dh_onsite_relative_frobenius_robust": number(row.get("dh_onsite_relative_frobenius_robust")),
+                    "dh_onsite_mae_eV_per_Ang": number(row.get("dh_onsite_mae_eV_per_Ang")),
+                    "dh_onsite_rmse_eV_per_Ang": number(row.get("dh_onsite_rmse_eV_per_Ang")),
+                    "dh_offsite_relative_frobenius_robust": number(row.get("dh_offsite_relative_frobenius_robust")),
+                    "dh_offsite_mae_eV_per_Ang": number(row.get("dh_offsite_mae_eV_per_Ang")),
+                    "dh_offsite_rmse_eV_per_Ang": number(row.get("dh_offsite_rmse_eV_per_Ang")),
                 }
             )
     return rows
@@ -583,6 +759,19 @@ def _grouped_bar_plot(
         "metrics": metrics,
         "diagnostic_only": True,
     }
+
+
+def _grouped_bar_plot_with_x(
+    plot_id: str,
+    title: str,
+    metrics: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    x_key: str,
+) -> dict[str, Any]:
+    plot = _grouped_bar_plot(plot_id, title, metrics, rows)
+    plot["x_key"] = x_key
+    return plot
 
 
 def _scatter_plot(
@@ -640,6 +829,49 @@ def _dataset_size_scatter_plot(
     if metrics:
         plot["metrics"] = metrics
     return plot
+
+
+def _quantile_plot(
+    plot_id: str,
+    title: str,
+    y_title: str,
+    metric_key: str,
+    rows: list[dict[str, Any]],
+    *,
+    metrics: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    plot = _scatter_plot(plot_id, title, "abs |dH_ref| quantile bin", y_title, rows, metric_key=metric_key)
+    plot.update({"x_key": "quantile_bin", "series_key": "model_label"})
+    if metrics:
+        plot["metrics"] = metrics
+    return plot
+
+
+def _aggregate_quantile_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        quantile_bin = row.get("quantile_bin")
+        if quantile_bin is None:
+            continue
+        buckets.setdefault((str(row.get("model_label") or ""), int(quantile_bin)), []).append(row)
+    results: list[dict[str, Any]] = []
+    for (model_label, quantile_bin), group in sorted(buckets.items(), key=lambda item: (item[0][0], item[0][1])):
+        results.append(
+            {
+                "model_label": model_label,
+                "quantile_bin": quantile_bin,
+                "n_entries_total": sum(_int_value(row.get("n_entries")) or 0 for row in group),
+                "dh_error_mae_eV_per_Ang": _mean([row.get("dh_error_mae_eV_per_Ang") for row in group]),
+                "dh_error_rmse_eV_per_Ang": _mean([row.get("dh_error_rmse_eV_per_Ang") for row in group]),
+                "dh_error_relative_l1_robust": _mean([row.get("dh_error_relative_l1_robust") for row in group]),
+            }
+        )
+    return results
+
+
+def _preferred_group_metric_key(rows: list[dict[str, Any]], prefix: str) -> str:
+    pooled = f"{prefix}_pooled"
+    return pooled if any(row.get(pooled) is not None for row in rows) else f"{prefix}_mean"
 
 
 def _aggregate_by_model(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
@@ -915,6 +1147,28 @@ def _scientific_warnings(datasets: list[dict[str, Any]], metric_rows: list[dict[
     warnings: list[dict[str, Any]] = []
     for dataset in datasets:
         warnings.extend(dataset["warnings"])
+    if metric_rows and not any(
+        row.get(metric) is not None
+        for row in metric_rows
+        for metric in ROBUST_DERIVATIVE_METRICS
+    ):
+        warnings.append(
+            _warning(
+                "robust_derivative_metrics_missing",
+                "Robust derivative metrics are unavailable in derivative_matrix_metrics.csv; robust diagnostic plots were not fabricated.",
+            )
+        )
+    if metric_rows and not any(
+        row.get(metric) is not None
+        for row in metric_rows
+        for metric in CORRELATION_RESIDUAL_DERIVATIVE_METRICS
+    ):
+        warnings.append(
+            _warning(
+                "derivative_correlation_or_residual_metrics_missing",
+                "Derivative correlation/residual metrics are unavailable in derivative_matrix_metrics.csv; correlation/residual diagnostic plots were not fabricated.",
+            )
+        )
     if len(_sorted_unique([row.get("delta_ang") for row in metric_rows if row.get("delta_ang") is not None])) <= 1:
         warnings.append(
             _warning(
@@ -953,6 +1207,12 @@ def build_derivative_plot_payload(
     for root in derivative_roots:
         datasets.append(load_derivative_root(root))
     metric_rows = _combined_rows(datasets)
+    quantile_rows = _combined_quantile_rows(datasets)
+    quantile_aggregate_rows = _aggregate_quantile_rows(quantile_rows)
+    group_by_atom_rows = _combined_group_rows(datasets, "by_atom")
+    group_by_axis_rows = _combined_group_rows(datasets, "by_axis")
+    group_by_atom_axis_rows = _combined_group_rows(datasets, "by_atom_axis")
+    onsite_offsite_rows = _combined_onsite_offsite_rows(datasets)
     hermiticity_rows = _combined_hermiticity_rows(datasets)
     paired_rows = _paired_comparison_rows(metric_rows)
     methods_seen = _sorted_unique(
@@ -1048,6 +1308,204 @@ def build_derivative_plot_payload(
             metric_key="deeph_dh_mae_union_eV_per_Ang",
         ),
     ]
+    if any(row.get("dh_relative_frobenius_union_robust") is not None for row in metric_rows):
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "relative_frobenius_union_robust_by_model",
+                "Robust relative Frobenius by model",
+                [{"key": "dh_relative_frobenius_union_robust", "label": "Robust relative Frobenius", "unit": ""}],
+                _aggregate_by_model(metric_rows, "dh_relative_frobenius_union_robust"),
+            )
+        )
+    if any(row.get("dh_relative_l1_union_robust") is not None for row in metric_rows):
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "relative_l1_union_robust_by_model",
+                "Robust relative L1 by model",
+                [{"key": "dh_relative_l1_union_robust", "label": "Robust relative L1", "unit": ""}],
+                _aggregate_by_model(metric_rows, "dh_relative_l1_union_robust"),
+            )
+        )
+    if any(row.get(metric) is not None for row in metric_rows for metric in ROBUST_DERIVATIVE_METRICS):
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "robust_primary_metrics_by_model",
+                "Robust primary metrics by model",
+                [
+                    {"key": "dh_relative_frobenius_union_robust", "label": "Robust relative Frobenius", "unit": ""},
+                    {"key": "dh_relative_l1_union_robust", "label": "Robust relative L1", "unit": ""},
+                    {"key": "dh_mae_union_eV_per_Ang", "label": "dH MAE", "unit": "eV/Ang"},
+                    {"key": "dh_rmse_union_eV_per_Ang", "label": "dH RMSE", "unit": "eV/Ang"},
+                ],
+                _aggregate_model_metrics(
+                    metric_rows,
+                    [
+                        "dh_relative_frobenius_union_robust",
+                        "dh_relative_l1_union_robust",
+                        "dh_mae_union_eV_per_Ang",
+                        "dh_rmse_union_eV_per_Ang",
+                    ],
+                ),
+            )
+        )
+    if any(row.get(metric) is not None for row in metric_rows for metric in ("dh_pearson_union", "dh_spearman_union")):
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "derivative_correlation_by_model",
+                "Derivative correlation by model",
+                [
+                    {"key": "dh_pearson_union", "label": "Pearson", "unit": ""},
+                    {"key": "dh_spearman_union", "label": "Spearman", "unit": ""},
+                ],
+                _aggregate_model_metrics(metric_rows, ["dh_pearson_union", "dh_spearman_union"]),
+            )
+        )
+    if any(
+        row.get(metric) is not None
+        for row in metric_rows
+        for metric in (
+            "dh_residual_mean_union_eV_per_Ang",
+            "dh_residual_std_union_eV_per_Ang",
+            "dh_residual_median_union_eV_per_Ang",
+            "dh_residual_bias_over_mae_union",
+        )
+    ):
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "derivative_residual_summary_by_model",
+                "Derivative residual summary by model",
+                [
+                    {"key": "dh_residual_mean_union_eV_per_Ang", "label": "Mean residual", "unit": "eV/Ang"},
+                    {"key": "dh_residual_std_union_eV_per_Ang", "label": "Residual std", "unit": "eV/Ang"},
+                    {"key": "dh_residual_median_union_eV_per_Ang", "label": "Median residual", "unit": "eV/Ang"},
+                    {"key": "dh_residual_bias_over_mae_union", "label": "Bias over MAE", "unit": ""},
+                ],
+                _aggregate_model_metrics(
+                    metric_rows,
+                    [
+                        "dh_residual_mean_union_eV_per_Ang",
+                        "dh_residual_std_union_eV_per_Ang",
+                        "dh_residual_median_union_eV_per_Ang",
+                        "dh_residual_bias_over_mae_union",
+                    ],
+                ),
+            )
+        )
+    if any(
+        row.get(metric) is not None
+        for row in metric_rows
+        for metric in (
+            "dh_residual_abs_p90_union_eV_per_Ang",
+            "dh_residual_abs_p95_union_eV_per_Ang",
+            "dh_residual_abs_p99_union_eV_per_Ang",
+        )
+    ):
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "derivative_residual_tail_by_model",
+                "Derivative residual tail by model",
+                [
+                    {"key": "dh_residual_abs_p90_union_eV_per_Ang", "label": "Abs residual p90", "unit": "eV/Ang"},
+                    {"key": "dh_residual_abs_p95_union_eV_per_Ang", "label": "Abs residual p95", "unit": "eV/Ang"},
+                    {"key": "dh_residual_abs_p99_union_eV_per_Ang", "label": "Abs residual p99", "unit": "eV/Ang"},
+                ],
+                _aggregate_model_metrics(
+                    metric_rows,
+                    [
+                        "dh_residual_abs_p90_union_eV_per_Ang",
+                        "dh_residual_abs_p95_union_eV_per_Ang",
+                        "dh_residual_abs_p99_union_eV_per_Ang",
+                    ],
+                ),
+            )
+        )
+    if quantile_aggregate_rows:
+        diagnostic_plots.append(
+            _quantile_plot(
+                "derivative_error_by_abs_ref_quantile",
+                "Derivative error by |dH_ref| quantile",
+                "Derivative error eV/Ang",
+                "dh_error_mae_eV_per_Ang",
+                quantile_aggregate_rows,
+                metrics=[
+                    {"key": "dh_error_mae_eV_per_Ang", "label": "dH error MAE", "unit": "eV/Ang"},
+                    {"key": "dh_error_rmse_eV_per_Ang", "label": "dH error RMSE", "unit": "eV/Ang"},
+                ],
+            )
+        )
+        diagnostic_plots.append(
+            _quantile_plot(
+                "derivative_relative_l1_by_abs_ref_quantile",
+                "Derivative relative L1 by |dH_ref| quantile",
+                "Robust relative L1",
+                "dh_error_relative_l1_robust",
+                quantile_aggregate_rows,
+                metrics=[
+                    {"key": "dh_error_relative_l1_robust", "label": "Robust relative L1", "unit": ""},
+                ],
+            )
+        )
+    atom_fro_key = _preferred_group_metric_key(group_by_atom_rows, "dh_relative_frobenius_union_robust")
+    axis_fro_key = _preferred_group_metric_key(group_by_axis_rows, "dh_relative_frobenius_union_robust")
+    axis_l1_key = _preferred_group_metric_key(group_by_axis_rows, "dh_relative_l1_union_robust")
+    atom_axis_fro_key = _preferred_group_metric_key(group_by_atom_axis_rows, "dh_relative_frobenius_union_robust")
+    atom_axis_l1_key = _preferred_group_metric_key(group_by_atom_axis_rows, "dh_relative_l1_union_robust")
+    if group_by_atom_rows:
+        diagnostic_plots.append(
+            _grouped_bar_plot_with_x(
+                "robust_error_by_displaced_atom",
+                "Robust derivative error by displaced atom",
+                [{"key": atom_fro_key, "label": "Robust relative Frobenius", "unit": ""}],
+                group_by_atom_rows,
+                x_key="atom_index_zero_based",
+            )
+        )
+    if group_by_axis_rows:
+        diagnostic_plots.append(
+            _grouped_bar_plot_with_x(
+                "robust_error_by_axis",
+                "Robust derivative error by axis",
+                [
+                    {"key": axis_fro_key, "label": "Robust relative Frobenius", "unit": ""},
+                    {"key": axis_l1_key, "label": "Robust relative L1", "unit": ""},
+                ],
+                group_by_axis_rows,
+                x_key="axis",
+            )
+        )
+    if group_by_atom_axis_rows:
+        diagnostic_plots.append(
+            _grouped_bar_plot_with_x(
+                "robust_error_by_atom_axis",
+                "Robust derivative error by atom and axis",
+                [
+                    {"key": atom_axis_fro_key, "label": "Robust relative Frobenius", "unit": ""},
+                    {"key": atom_axis_l1_key, "label": "Robust relative L1", "unit": ""},
+                ],
+                group_by_atom_axis_rows,
+                x_key="atom_axis",
+            )
+        )
+    if onsite_offsite_rows:
+        onsite_offsite_metric_keys = [
+            "dh_onsite_relative_frobenius_robust",
+            "dh_offsite_relative_frobenius_robust",
+            "dh_onsite_mae_eV_per_Ang",
+            "dh_offsite_mae_eV_per_Ang",
+        ]
+        diagnostic_plots.append(
+            _grouped_bar_plot(
+                "onsite_offsite_derivative_error",
+                "Onsite/offsite derivative error by model",
+                [
+                    {"key": "dh_onsite_relative_frobenius_robust", "label": "Onsite robust relative Frobenius", "unit": ""},
+                    {"key": "dh_offsite_relative_frobenius_robust", "label": "Offsite robust relative Frobenius", "unit": ""},
+                    {"key": "dh_onsite_mae_eV_per_Ang", "label": "Onsite dH MAE", "unit": "eV/Ang"},
+                    {"key": "dh_offsite_mae_eV_per_Ang", "label": "Offsite dH MAE", "unit": "eV/Ang"},
+                ],
+                _aggregate_model_metrics(onsite_offsite_rows, onsite_offsite_metric_keys),
+            )
+        )
     dataset_size_plots = dataset_size_plot_result["plots"]
     plots = [*dataset_size_plots, *diagnostic_plots] if dataset_size_plots else diagnostic_plots
     dataset_size_plot_ids = [plot["id"] for plot in dataset_size_plots]
@@ -1056,7 +1514,7 @@ def build_derivative_plot_payload(
     warnings.extend(dataset_size_plot_result["warnings"])
     return {
         "schema": PLOT_SCHEMA,
-        "available": bool(metric_rows or hermiticity_rows),
+        "available": bool(metric_rows or hermiticity_rows or onsite_offsite_rows),
         "diagnostic_only": True,
         "scientific_status": "diagnostic_only",
         "title": TITLE,
@@ -1077,6 +1535,7 @@ def build_derivative_plot_payload(
         "summary": {
             "metric_rows": len(metric_rows),
             "hermiticity_rows": len(hermiticity_rows),
+            "onsite_offsite_rows": len(onsite_offsite_rows),
             "paired_rows": len(paired_rows),
             "dataset_size_rows": len(dataset_size_plot_result["aggregated_rows"]),
         },

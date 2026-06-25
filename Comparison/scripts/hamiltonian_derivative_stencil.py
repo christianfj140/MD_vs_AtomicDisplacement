@@ -545,17 +545,27 @@ def derivative_sparse_metrics(
     ref_support = set(ref_values)
     pred_support = set(pred_values)
     union_support = ref_support | pred_support
+    sorted_union_support = sorted(union_support)
     intersection = ref_support & pred_support
     ref_errors = _errors_on_support(ref_values, pred_values, ref_support)
     pred_errors = _errors_on_support(ref_values, pred_values, pred_support)
-    union_errors = _errors_on_support(ref_values, pred_values, union_support)
+    union_errors = _errors_on_support(ref_values, pred_values, sorted_union_support)
+    eps = 1e-30
+    denominator_epsilon_warning = 1e-20
     ref_norm = sparse_frobenius_norm(reference)
+    pred_norm = sparse_frobenius_norm(predicted)
     ref_error_norm = _frobenius_from_values(ref_errors)
-    ref_union_norm = _frobenius_from_values([ref_values.get(index, 0.0) for index in union_support])
+    union_ref_values = [ref_values.get(index, 0.0) for index in sorted_union_support]
+    union_pred_values = [pred_values.get(index, 0.0) for index in sorted_union_support]
+    ref_union_norm = _frobenius_from_values(union_ref_values)
+    pred_union_norm = _frobenius_from_values(union_pred_values)
     union_error_norm = _frobenius_from_values(union_errors)
-    ref_l1_union = _l1_from_values([ref_values.get(index, 0.0) for index in union_support])
+    ref_l1_union = _l1_from_values(union_ref_values)
+    pred_l1_union = _l1_from_values(union_pred_values)
     error_l1_union = _l1_from_values(union_errors)
     zero_ref_reason = "reference_derivative_norm_zero" if ref_norm == 0.0 else ""
+    residual_row = _residual_summary_union(union_errors)
+    correlation_row = _correlation_summary_union(union_ref_values, union_pred_values)
     cosine, cosine_reason = _cosine_similarity_from_values(ref_values, pred_values, union_support)
     metadata_row = _derivative_metric_metadata(
         sample=sample,
@@ -581,6 +591,25 @@ def derivative_sparse_metrics(
         "dh_rmse_pred_eV_per_Ang": _rmse(pred_errors),
         "dh_mae_union_eV_per_Ang": _mean_abs(union_errors),
         "dh_rmse_union_eV_per_Ang": _rmse(union_errors),
+        **residual_row,
+        **correlation_row,
+        "dh_norm_ref_fro": ref_norm,
+        "dh_norm_pred_fro": pred_norm,
+        "dh_norm_error_fro": union_error_norm,
+        "dh_norm_ref_union_fro": ref_union_norm,
+        "dh_norm_pred_union_fro": pred_union_norm,
+        "dh_norm_error_union_fro": union_error_norm,
+        "dh_norm_ref_l1_union": ref_l1_union,
+        "dh_norm_pred_l1_union": pred_l1_union,
+        "dh_norm_error_l1_union": error_l1_union,
+        "dh_relative_frobenius_ref_robust": union_error_norm / (ref_norm + eps),
+        "dh_relative_frobenius_union_robust": union_error_norm / (ref_union_norm + eps),
+        "dh_relative_l1_union_robust": error_l1_union / (ref_l1_union + eps),
+        "dh_relative_frobenius_ref_near_zero_denominator": ref_norm < denominator_epsilon_warning,
+        "dh_relative_frobenius_union_near_zero_denominator": ref_union_norm < denominator_epsilon_warning,
+        "dh_relative_l1_union_near_zero_denominator": ref_l1_union < denominator_epsilon_warning,
+        "dh_max_abs_ref_union_eV_per_Ang": _max_abs(union_ref_values),
+        "dh_max_abs_pred_union_eV_per_Ang": _max_abs(union_pred_values),
         "dh_max_abs_error_union_eV_per_Ang": _max_abs(union_errors),
         "dh_relative_frobenius_ref": ref_error_norm / ref_norm if ref_norm else math.nan,
         "dh_relative_frobenius_union": union_error_norm / ref_union_norm if ref_union_norm else math.nan,
@@ -603,6 +632,77 @@ def derivative_sparse_metrics(
     if ref_l1_union == 0.0 and not row["dh_relative_unavailable_reason"]:
         row["dh_relative_unavailable_reason"] = "reference_derivative_l1_norm_zero"
     return row
+
+
+def derivative_ref_abs_quantile_metrics(
+    reference: sparse.spmatrix,
+    predicted: sparse.spmatrix,
+    *,
+    sample: str,
+    metadata: DerivativeMetadata | None = None,
+    source_model: str = "",
+    reference_source: str = "siesta",
+    support_threshold: float = DERIVATIVE_SUPPORT_THRESHOLD,
+) -> list[dict[str, Any]]:
+    reference = reference.tocsr(copy=True)
+    predicted = predicted.tocsr(copy=True)
+    _require_matching_shapes(("reference_derivative", "predicted_derivative"), reference, predicted)
+    ref_values = sparse_value_dict(reference, threshold=support_threshold)
+    pred_values = sparse_value_dict(predicted, threshold=support_threshold)
+    union_support = sorted(set(ref_values) | set(pred_values))
+    if not union_support:
+        return []
+
+    metadata_row = _derivative_metric_metadata(
+        sample=sample,
+        metadata=metadata,
+        source_model=source_model,
+        reference_source=reference_source,
+    )
+    entries = sorted(
+        (
+            (
+                abs(ref_values.get(index, 0.0)),
+                abs(pred_values.get(index, 0.0) - ref_values.get(index, 0.0)),
+                abs(pred_values.get(index, 0.0)),
+            )
+            for index in union_support
+        ),
+        key=lambda item: item[0],
+    )
+    rows: list[dict[str, Any]] = []
+    for bin_index, bin_entries in enumerate(np.array_split(np.array(entries, dtype=float), min(4, len(entries))), start=1):
+        if len(bin_entries) == 0:
+            continue
+        abs_ref = bin_entries[:, 0]
+        abs_err = bin_entries[:, 1]
+        abs_pred = bin_entries[:, 2]
+        ref_zero = abs_ref == 0.0
+        rows.append(
+            {
+                "sample": metadata_row["sample"],
+                "source_model": metadata_row["source_model"],
+                "reference_source": metadata_row["reference_source"],
+                "base_sample_id": metadata.base_sample_id if metadata else None,
+                "atom_index_zero_based": metadata_row["atom_index_zero_based"],
+                "axis": metadata_row["axis"],
+                "delta_ang": metadata_row["delta_ang"],
+                "finite_difference_method": metadata_row["finite_difference_method"],
+                "support_threshold": support_threshold,
+                "quantile_domain": "union_support",
+                "quantile_bin": bin_index,
+                "n_entries": int(len(bin_entries)),
+                "n_ref_zero_entries": int(np.count_nonzero(ref_zero)),
+                "n_pred_nonzero_ref_zero_entries": int(np.count_nonzero(ref_zero & (abs_pred > support_threshold))),
+                "abs_ref_min_eV_per_Ang": float(np.min(abs_ref)),
+                "abs_ref_max_eV_per_Ang": float(np.max(abs_ref)),
+                "abs_ref_mean_eV_per_Ang": float(np.mean(abs_ref)),
+                "dh_error_mae_eV_per_Ang": float(np.mean(abs_err)),
+                "dh_error_rmse_eV_per_Ang": float(np.sqrt(np.mean(abs_err**2))),
+                "dh_error_relative_l1_robust": float(np.sum(abs_err) / (np.sum(abs_ref) + 1e-30)),
+            }
+        )
+    return rows
 
 
 def _required_geometry_roles(method: str) -> tuple[str, ...]:
@@ -1871,6 +1971,120 @@ def _rmse(values: list[complex]) -> float:
 
 def _max_abs(values: list[complex]) -> float:
     return float(max((abs(value) for value in values), default=math.nan))
+
+
+def _residual_summary_union(values: list[complex]) -> dict[str, Any]:
+    nan = math.nan
+    row = {
+        "dh_residual_abs_mean_union_eV_per_Ang": _mean_abs(values),
+        "dh_residual_abs_median_union_eV_per_Ang": nan,
+        "dh_residual_abs_p90_union_eV_per_Ang": nan,
+        "dh_residual_abs_p95_union_eV_per_Ang": nan,
+        "dh_residual_abs_p99_union_eV_per_Ang": nan,
+        "dh_residual_mean_union_eV_per_Ang": nan,
+        "dh_residual_std_union_eV_per_Ang": nan,
+        "dh_residual_median_union_eV_per_Ang": nan,
+        "dh_residual_bias_over_mae_union": nan,
+        "dh_residual_real_mean_union_eV_per_Ang": nan,
+        "dh_residual_real_std_union_eV_per_Ang": nan,
+        "dh_residual_imag_mean_union_eV_per_Ang": nan,
+        "dh_residual_imag_std_union_eV_per_Ang": nan,
+        "dh_residual_complex_mode": "real_only",
+        "dh_residual_signed_unavailable_reason": "",
+    }
+    if not values:
+        row["dh_residual_signed_unavailable_reason"] = "empty_union_support"
+        return row
+
+    abs_values = np.abs(values)
+    row.update(
+        {
+            "dh_residual_abs_median_union_eV_per_Ang": float(np.median(abs_values)),
+            "dh_residual_abs_p90_union_eV_per_Ang": float(np.quantile(abs_values, 0.90)),
+            "dh_residual_abs_p95_union_eV_per_Ang": float(np.quantile(abs_values, 0.95)),
+            "dh_residual_abs_p99_union_eV_per_Ang": float(np.quantile(abs_values, 0.99)),
+        }
+    )
+    if any(value.imag != 0.0 for value in values):
+        real_values = np.array([value.real for value in values], dtype=float)
+        imag_values = np.array([value.imag for value in values], dtype=float)
+        row.update(
+            {
+                "dh_residual_real_mean_union_eV_per_Ang": float(np.mean(real_values)),
+                "dh_residual_real_std_union_eV_per_Ang": float(np.std(real_values)),
+                "dh_residual_imag_mean_union_eV_per_Ang": float(np.mean(imag_values)),
+                "dh_residual_imag_std_union_eV_per_Ang": float(np.std(imag_values)),
+                "dh_residual_complex_mode": "real_imag_split",
+                "dh_residual_signed_unavailable_reason": "complex_residuals_real_imag_split",
+            }
+        )
+        return row
+
+    real_values = np.array([value.real for value in values], dtype=float)
+    mean = float(np.mean(real_values))
+    mae = float(np.mean(abs_values))
+    row.update(
+        {
+            "dh_residual_mean_union_eV_per_Ang": mean,
+            "dh_residual_std_union_eV_per_Ang": float(np.std(real_values)),
+            "dh_residual_median_union_eV_per_Ang": float(np.median(real_values)),
+            "dh_residual_bias_over_mae_union": abs(mean) / (mae + 1e-30),
+        }
+    )
+    return row
+
+
+def _correlation_summary_union(ref_values: list[complex], pred_values: list[complex]) -> dict[str, Any]:
+    complex_mode = any(value.imag != 0.0 for value in [*ref_values, *pred_values])
+    if complex_mode:
+        ref_vector = [value.real for value in ref_values] + [value.imag for value in ref_values]
+        pred_vector = [value.real for value in pred_values] + [value.imag for value in pred_values]
+        mode = "real_imag_concatenated"
+    else:
+        ref_vector = [value.real for value in ref_values]
+        pred_vector = [value.real for value in pred_values]
+        mode = "real_only"
+    pearson, pearson_reason = _pearson_from_real_vectors(ref_vector, pred_vector)
+    spearman, spearman_reason = _pearson_from_real_vectors(_average_ranks(ref_vector), _average_ranks(pred_vector))
+    return {
+        "dh_pearson_union": pearson,
+        "dh_pearson_unavailable_reason": pearson_reason,
+        "dh_pearson_union_mode": mode,
+        "dh_spearman_union": spearman,
+        "dh_spearman_unavailable_reason": spearman_reason,
+        "dh_spearman_union_mode": mode,
+    }
+
+
+def _pearson_from_real_vectors(ref_values: list[float], pred_values: list[float]) -> tuple[float, str]:
+    if len(ref_values) < 2 or len(pred_values) < 2:
+        return math.nan, "too_few_union_entries"
+    ref = np.array(ref_values, dtype=float)
+    pred = np.array(pred_values, dtype=float)
+    ref_centered = ref - float(np.mean(ref))
+    pred_centered = pred - float(np.mean(pred))
+    ref_norm = float(np.sqrt(np.sum(ref_centered**2)))
+    pred_norm = float(np.sqrt(np.sum(pred_centered**2)))
+    if ref_norm == 0.0 or pred_norm == 0.0:
+        return math.nan, "zero_variance"
+    return float(np.sum(pred_centered * ref_centered) / (pred_norm * ref_norm)), ""
+
+
+def _average_ranks(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    order = sorted(range(len(values)), key=lambda index: values[index])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        end = start + 1
+        while end < len(order) and values[order[end]] == values[order[start]]:
+            end += 1
+        average_rank = (start + 1 + end) / 2.0
+        for index in order[start:end]:
+            ranks[index] = average_rank
+        start = end
+    return ranks
 
 
 def _frobenius_from_values(values: list[complex]) -> float:
