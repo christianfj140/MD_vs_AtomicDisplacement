@@ -291,6 +291,27 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(payload["gate_report"]["derivative_winner_claim"], "none")
         self.assertIn("optional post-processing", payload["message"])
 
+    def test_derivative_backend_exposes_partial_workflow_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run_demo"
+            workflow = run_root / "derivative_workflows" / "graphene_w90_scale_iid20"
+            self.write_standalone_derivative_method(workflow, "graph2mat", mae=0.2, rmse=0.3, frob=0.4)
+            self.write_standalone_derivative_method(workflow, "deeph", mae=0.1, rmse=0.2, frob=0.3)
+            write_json(
+                run_root / "summary" / "derivative_plots" / "derivative_plot_payload.json",
+                {"available": True, "plots": [{"id": "dh_mae_vs_dataset_size", "rows": [{"x_dataset_size": 20}]}]},
+            )
+            write_json(workflow / "derivative_incremental_status.json", {"status": "metrics_completed"})
+
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_demo")
+
+        self.assertTrue(payload["available"])
+        self.assertFalse(payload["not_computed"])
+        self.assertTrue(payload["workflow_status_rows"])
+        self.assertEqual(payload["workflow_status_rows"][0]["status"], "completed_visible")
+        self.assertTrue(payload["plot_payload"]["available"])
+
     def test_derivative_payload_includes_status_warnings_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run_demo"

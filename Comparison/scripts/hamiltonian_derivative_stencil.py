@@ -2108,6 +2108,8 @@ def _validate_operand_metadata(stencil: DerivativeStencil, issues: list[Derivati
     for role, matrix in stencil.matrix_inputs().items():
         if matrix is None:
             continue
+        if role.endswith("_base"):
+            continue
         if matrix.atom_index_zero_based is not None and metadata.atom_index_zero_based is not None:
             if int(matrix.atom_index_zero_based) != int(metadata.atom_index_zero_based):
                 _issue(
@@ -2158,8 +2160,6 @@ def _validate_operand_metadata(stencil: DerivativeStencil, issues: list[Derivati
                 expected=metadata.axis_index,
                 actual=matrix.axis_index,
             )
-        if role.endswith("_base"):
-            continue
         if matrix.delta_ang is not None and metadata.delta_ang is not None:
             if not math.isclose(float(matrix.delta_ang), float(metadata.delta_ang), rel_tol=0.0, abs_tol=1e-12):
                 _issue(

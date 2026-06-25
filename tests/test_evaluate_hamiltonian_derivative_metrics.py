@@ -43,14 +43,19 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         reference: sparse.spmatrix | None = None,
         prediction: sparse.spmatrix | None = None,
         atom_index_zero_based: int = 0,
+        axis: str = "x",
         amplitude_ang: float = 0.5,
         include_metadata: bool = True,
         include_matrix_shape: bool = True,
         claim_status: str = "diagnostic_only",
+        base_sample_id: str | None = None,
     ) -> None:
         structure_dir = self.result_dir / "structures" / sample_id
         structure_dir.mkdir(parents=True, exist_ok=True)
-        displacement = sign * amplitude_ang if sign else 0.0
+        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+        coordinates = [0.0, 0.0, 0.0]
+        if sign:
+            coordinates[axis_index] = sign * amplitude_ang
         (structure_dir / "RUN.fdf").write_text(
             "\n".join(
                 [
@@ -69,7 +74,7 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
                     "%endblock LatticeVectors",
                     "AtomicCoordinatesFormat Ang",
                     "%block AtomicCoordinatesAndAtomicSpecies",
-                    f" {displacement:.12g} 0.0 0.0 1",
+                    f" {coordinates[0]:.12g} {coordinates[1]:.12g} {coordinates[2]:.12g} 1",
                     " 1.0 0.0 0.0 1",
                     "%endblock AtomicCoordinatesAndAtomicSpecies",
                     "",
@@ -84,15 +89,15 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
                 "is_reference": sign == 0,
                 "atom_index": atom_index_zero_based + 1 if sign else None,
                 "atom_index_zero_based": atom_index_zero_based if sign else None,
-                "axis": "x" if sign else None,
-                "axis_index": 0 if sign else None,
+                "axis": axis if sign else None,
+                "axis_index": axis_index if sign else None,
                 "sign": sign,
                 "sign_label": "+" if sign > 0 else "-" if sign < 0 else None,
                 "amplitude_ang": amplitude_ang if sign else 0.0,
-                "displacement_ang": [sign * amplitude_ang, 0.0, 0.0],
+                "displacement_ang": coordinates,
                 "split_group_id": "generic_cartesian_displacement:graphene:reference"
                 if sign == 0
-                else "generic_cartesian_displacement:graphene:atom_0001",
+                else f"generic_cartesian_displacement:graphene:atom_0001:{axis}",
                 "claim_status": claim_status,
                 "material_compatibility_hash": "material-hash",
                 "orbital_ordering_hash": "orbital-hash",
@@ -103,6 +108,8 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
             }
             if include_matrix_shape:
                 metadata["matrix_shape"] = [2, 2]
+            if base_sample_id is not None:
+                metadata["base_sample_id"] = base_sample_id
             (structure_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         if reference is not None:
             self.write_sparse_payload(
@@ -174,6 +181,42 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertIsNone(manifest["delta_stability_converged"])
         self.assertEqual(manifest["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
         self.assertEqual(manifest["reference_noise"]["status"], "reference_noise_unavailable")
+
+    def test_cli_shared_base_multi_axis_has_no_false_operand_metadata_mismatch(self) -> None:
+        zero = sparse.csr_matrix((2, 2))
+        ref_plus = sparse.csr_matrix([[2.0, 0.0], [0.0, 2.0]])
+        pred_plus = sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]])
+        self.write_sample("base", sign=0, reference=zero, prediction=zero)
+        for axis in ("x", "y"):
+            self.write_sample(
+                f"{axis}_plus",
+                sign=1,
+                axis=axis,
+                reference=ref_plus,
+                prediction=pred_plus,
+                base_sample_id="base",
+            )
+            self.write_sample(
+                f"{axis}_minus",
+                sign=-1,
+                axis=axis,
+                reference=zero,
+                prediction=zero,
+                base_sample_id="base",
+            )
+
+        completed = self.run_cli("--method", "central", "--require-central", "--overwrite", check=False)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        manifest = json.loads((self.result_dir / "derivative_metrics" / "manifest.json").read_text(encoding="utf-8"))
+        issue_codes = {
+            code
+            for error in manifest["fatal_errors"]
+            for code in error.get("issue_codes", [])
+        }
+        self.assertEqual(manifest["stencils_ok"], 2)
+        self.assertNotIn("axis_mismatch", issue_codes)
+        self.assertNotIn("atom_index_mismatch", issue_codes)
 
     def test_delta_stability_summary_aggregates_matching_delta_sweep_rows(self) -> None:
         rows = [

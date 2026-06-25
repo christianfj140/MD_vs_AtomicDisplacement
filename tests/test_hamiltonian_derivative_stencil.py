@@ -824,7 +824,7 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
                 method="central",
                 delta_ang_values=[0.005, 0.01],
                 atom_indices_zero_based=[0],
-                axes=["x"],
+                axes=["x", "y"],
                 base_sample_ids=["md_270"],
                 max_base_snapshots=1,
                 include_base=True,
@@ -832,15 +832,91 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
             )
 
         base_call = next(call for call in captured_calls if call["sample_id"] == "md_270_base")
-        self.assertEqual(base_call["metadata"]["atom_index_zero_based"], 0)
-        self.assertEqual(base_call["metadata"]["axis"], "x")
-        self.assertEqual(base_call["metadata"]["axis_index"], 0)
         self.assertEqual(base_call["metadata"]["sign"], 0)
-        self.assertEqual(base_call["metadata"]["base_sample_id"], "md_270_base")
+        self.assertEqual(base_call["metadata"]["base_sample_id"], "md_270")
+        self.assertEqual(base_call["metadata"]["reference_base_sample_id"], "md_270_base")
         self.assertEqual(base_call["metadata"]["source_base_sample_id"], "md_270")
+        self.assertNotIn("atom_index", base_call["metadata"])
+        self.assertNotIn("atom_index_zero_based", base_call["metadata"])
+        self.assertNotIn("axis", base_call["metadata"])
+        self.assertNotIn("axis_index", base_call["metadata"])
+        self.assertNotIn("representative_stencil_delta_ang", base_call["metadata"])
+        self.assertNotIn("split_group_id", base_call["metadata"])
         self.assertEqual(manifest["stencils"][0]["base_sample_id"], "md_270_base")
         self.assertEqual(manifest["stencils"][0]["plus_sample_id"], "md_270_atom0000_x_d0.005_plus")
         self.assertEqual(manifest["stencils"][0]["minus_sample_id"], "md_270_atom0000_x_d0.005_minus")
+
+    def test_shared_base_multi_axis_does_not_create_axis_mismatch(self) -> None:
+        source_root = self.root / "source_dataset"
+        sample_dir = source_root / "splits" / "test" / "md_270"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        (sample_dir / "RUN.fdf").write_text("SystemLabel test\n", encoding="utf-8")
+        (sample_dir / "metadata.json").write_text(
+            json.dumps({"structure_type": "cartesian", "material_label": "graphene"}),
+            encoding="utf-8",
+        )
+        output_root = self.root / "derivative_result"
+
+        def fake_write_structure_sample(**kwargs):
+            output_sample_dir = Path(kwargs["output_sample_dir"])
+            output_sample_dir.mkdir(parents=True, exist_ok=True)
+            (output_sample_dir / "RUN.fdf").write_text("SystemLabel test\n", encoding="utf-8")
+            (output_sample_dir / "metadata.json").write_text(json.dumps(kwargs["metadata"]), encoding="utf-8")
+            return {
+                "sample_id": kwargs["sample_id"],
+                "sample_dir": str(output_sample_dir),
+                "run_fdf": str(output_sample_dir / "RUN.fdf"),
+                "metadata_path": str(output_sample_dir / "metadata.json"),
+            }
+
+        with (
+            mock.patch.object(
+                stencil_builder,
+                "load_base_rows",
+                return_value=[{"sample_id": "md_270", "sample_dir": str(sample_dir)}],
+            ),
+            mock.patch.object(
+                stencil_builder,
+                "extract_fdf_structure",
+                return_value=SimpleNamespace(
+                    positions_ang=[[0.0, 0.0, 0.0]],
+                    atom_species=["C"],
+                    lattice_vectors_ang=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    structure_type="cartesian",
+                ),
+            ),
+            mock.patch.object(stencil_builder, "write_structure_sample", side_effect=fake_write_structure_sample),
+        ):
+            manifest = stencil_builder.build_derivative_stencils(
+                source_dataset_root=source_root,
+                output_stencil_root=output_root,
+                split="test",
+                method="central",
+                delta_ang_values=[0.005],
+                atom_indices_zero_based=[0],
+                axes=["x", "y"],
+                base_sample_ids=["md_270"],
+                max_base_snapshots=1,
+                include_base=True,
+                overwrite=True,
+            )
+
+        for sample in manifest["samples"]:
+            sample_id = sample["sample_id"]
+            for root, filename in (("siesta_hamiltonians", "siesta.TSHS"), ("predicted_hamiltonians", "ML_prediction.HSX")):
+                matrix_dir = output_root / root / sample_id
+                matrix_dir.mkdir(parents=True, exist_ok=True)
+                (matrix_dir / filename).write_bytes(b"matrix\n")
+
+        discoveries = discover_derivative_stencils(
+            output_root,
+            method="graph2mat",
+            finite_difference_method="central",
+            require_central=True,
+        )
+        y_discovery = next(discovery for discovery in discoveries if discovery.stencil and discovery.stencil.metadata.axis == "y")
+
+        self.assertNotIn("axis_mismatch", {issue.code for issue in y_discovery.issues})
 
 
 if __name__ == "__main__":
