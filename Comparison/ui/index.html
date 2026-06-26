@@ -1128,15 +1128,10 @@
               <div class="run-selector-heading">
                 <div>
                   <strong>Derivative run selector</strong>
-                  <p class="field-help">Pick a Graph2Mat vs DeepH run. Running jobs appear after the backend writes runner status; if derivative metrics are absent, the UI shows not computed and keeps the benchmark valid for H-vs-H metrics.</p>
+                  <p class="field-help">Pick one or more Graph2Mat vs DeepH runs. Running jobs appear after the backend writes runner status; if derivative metrics are absent, the UI shows not computed and keeps the benchmark valid for H-vs-H metrics.</p>
                 </div>
               </div>
-              <label class="field">
-                <span>Run</span>
-                <select id="g2m-deeph-derivative-run-select">
-                  <option value="">No run selected</option>
-                </select>
-              </label>
+              <div id="g2m-deeph-derivative-run-list" class="plot-run-list"></div>
             </div>
             <div id="g2m-deeph-derivative-status" class="result-list muted-text">Derivative diagnostics not loaded yet.</div>
             <div class="grid two split-grid">
@@ -1151,7 +1146,7 @@
             </div>
             <section>
               <h3>Gate report</h3>
-              <div id="g2m-deeph-derivative-gate-report" class="result-list muted-text">No derivative gate report yet.</div>
+              <div id="g2m-deeph-derivative-gate-report" class="result-list muted-text gate-report-scroll">No derivative gate report yet.</div>
             </section>
             <section>
               <h3>Warnings and fatal errors</h3>

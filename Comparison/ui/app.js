@@ -659,6 +659,7 @@ const state = {
   g2mDeephDefaultPlotRunIds: [],
   g2mDeephSelectedPlotRunIds: [],
   g2mDeephDerivativeRunId: null,
+  g2mDeephDerivativeRunIds: [],
   datasetMinimumPayload: null,
   datasetMinimumRunRootSelection: null,
   datasetMinimumThresholdPresetKey: "h_mae_relaxed_10",
@@ -1474,7 +1475,7 @@ function appendG2MDeepHTable(container, title, columns, rows, emptyMessage = "No
   }
   const wrap = document.createElement("div");
   wrap.className = "cleanup-table-wrap g2m-deeph-table-wrap";
-  if (["Metrics vs dataset size", "Timing vs dataset size"].includes(title)) {
+  if (["Metrics vs dataset size", "Timing vs dataset size", "Scientific gates", "Derivative gate report"].includes(title)) {
     wrap.classList.add("g2m-deeph-scroll-table-wrap");
   }
   const table = document.createElement("table");
@@ -2447,27 +2448,64 @@ const G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS = "SIESTA force constants are not tre
 const G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS = "Default status: diagnostic-only unless all scientific gates pass";
 const G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING = "Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.";
 const G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY = "Technical internal diagnostic only. No winner claim comes from derivative metrics.";
+const G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS = [
+  ["relative_frobenius_union_robust_by_model", "Robust relative Frobenius by model"],
+  ["relative_l1_union_robust_by_model", "Robust relative L1 by model"],
+  ["robust_primary_metrics_by_model", "Robust primary metrics by model"],
+  ["derivative_correlation_by_model", "Derivative correlation by model"],
+  ["derivative_residual_summary_by_model", "Derivative residual summary by model"],
+  ["derivative_residual_tail_by_model", "Derivative residual tail by model"],
+  ["derivative_error_by_abs_ref_quantile", "Derivative error by |dH_ref| quantile"],
+  ["derivative_relative_l1_by_abs_ref_quantile", "Derivative relative L1 by |dH_ref| quantile"],
+  ["robust_error_by_displaced_atom", "Robust derivative error by displaced atom"],
+  ["robust_error_by_axis", "Robust derivative error by axis"],
+  ["robust_error_by_atom_axis", "Robust derivative error by atom and axis"],
+  ["onsite_offsite_derivative_error", "Onsite/offsite derivative error by model"],
+];
 
 function renderG2MDeepHDerivativeRunSelector() {
-  const select = document.getElementById("g2m-deeph-derivative-run-select");
-  if (!select) return;
+  const list = document.getElementById("g2m-deeph-derivative-run-list");
+  if (!list) return;
   const runs = state.g2mDeephPlotRuns || [];
-  const selectedRunId = preferredG2MDeepHDerivativeRunId();
-  state.g2mDeephDerivativeRunId = selectedRunId;
-  select.textContent = "";
+  const visibleIds = new Set(runs.map((run) => run.run_id || run.id).filter(Boolean));
+  let selectedRunIds = (state.g2mDeephDerivativeRunIds || []).filter((id) => visibleIds.has(id));
+  if (!selectedRunIds.length) selectedRunIds = (state.g2mDeephSelectedPlotRunIds || []).filter((id) => visibleIds.has(id));
+  if (!selectedRunIds.length && preferredG2MDeepHDerivativeRunId()) selectedRunIds = [preferredG2MDeepHDerivativeRunId()];
+  state.g2mDeephDerivativeRunIds = selectedRunIds;
+  state.g2mDeephDerivativeRunId = selectedRunIds[0] || null;
+  list.textContent = "";
   if (!runs.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "No Graph2Mat vs DeepH runs available yet";
-    select.appendChild(option);
+    list.textContent = "No Graph2Mat vs DeepH runs available yet";
     return;
   }
   for (const run of runs) {
-    const option = document.createElement("option");
-    option.value = run.run_id || "";
-    option.textContent = run.label || run.run_id || run.id;
-    option.selected = option.value === selectedRunId;
-    select.appendChild(option);
+    const value = run.run_id || run.id || "";
+    const option = document.createElement("label");
+    option.className = "plot-run-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "g2m-deeph-derivative-run-checkbox";
+    checkbox.value = value;
+    checkbox.checked = selectedRunIds.includes(value);
+    checkbox.addEventListener("change", () => {
+      const next = new Set(state.g2mDeephDerivativeRunIds || []);
+      if (checkbox.checked) next.add(value);
+      else next.delete(value);
+      state.g2mDeephDerivativeRunIds = Array.from(next);
+      state.g2mDeephDerivativeRunId = state.g2mDeephDerivativeRunIds[0] || null;
+      renderG2MDeepHDerivativeRunSelector();
+      loadG2MDeepHDerivativeMetrics().catch((error) => showToast(error.message));
+    });
+    const body = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = run.label || run.run_id || run.id;
+    const details = document.createElement("span");
+    details.textContent = [(run.models || []).map(methodDisplayLabel).join("+"), (run.dataset_ids || []).join(", "), run.status || ""].filter(Boolean).join(" | ");
+    body.appendChild(title);
+    body.appendChild(details);
+    option.appendChild(checkbox);
+    option.appendChild(body);
+    list.appendChild(option);
   }
 }
 
@@ -2479,12 +2517,14 @@ function g2mDeephDerivativeStatusText(payload = {}) {
 }
 
 function g2mDeephDerivativePlotLabel(row = {}) {
-  if (row.method && row.axis) return `${row.axis} · ${row.method}`;
-  if (row.method && row.atom_index_zero_based != null) return `atom ${row.atom_index_zero_based} · ${row.method}`;
-  if (row.method) return String(row.method);
-  if (row.axis) return String(row.axis);
-  if (row.atom_index_zero_based != null) return `atom ${row.atom_index_zero_based}`;
-  return row.sample || "value";
+  const run = row.run_label || row.run_id || "";
+  const suffix = run ? ` · ${run}` : "";
+  if (row.method && row.axis) return `${row.axis} · ${row.method}${suffix}`;
+  if (row.method && row.atom_index_zero_based != null) return `atom ${row.atom_index_zero_based} · ${row.method}${suffix}`;
+  if (row.method) return `${row.method}${suffix}`;
+  if (row.axis) return `${row.axis}${suffix}`;
+  if (row.atom_index_zero_based != null) return `atom ${row.atom_index_zero_based}${suffix}`;
+  return `${row.sample || "value"}${suffix}`;
 }
 
 function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
@@ -2514,7 +2554,7 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   const grouped = new Map();
   for (const row of plot.rows || []) {
     const seriesKey = plot.series_key || "method";
-    const key = String(row[seriesKey] || row.method || row.finite_difference_method || "diagnostic");
+    const key = String(row.combined_series || row[seriesKey] || row.method || row.finite_difference_method || "diagnostic");
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(row);
   }
@@ -2575,12 +2615,24 @@ function renderG2MDeepHDerivativePlotSummary(card, plot, message = "") {
 }
 
 function g2mDeephDerivativePlotSections(plotPayload = {}) {
+  const plots = [...(plotPayload.plots || [])];
+  const seen = new Set(plots.map((plot) => plot.id).filter(Boolean));
+  for (const [id, title] of G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS) {
+    if (seen.has(id)) continue;
+    plots.push({
+      id,
+      title,
+      kind: "grouped_bar",
+      rows: [],
+      unavailable_message: "No data available for this metric. Regenerate derivative_plot_payload.json from derivative metric CSV/JSON artifacts.",
+    });
+  }
   const primaryIds = new Set(plotPayload.primary_plot_ids || []);
   const diagnosticIds = new Set(plotPayload.diagnostic_plot_ids || []);
   return [
-    { title: "Primary derivative metrics", plots: (plotPayload.plots || []).filter((plot) => primaryIds.has(plot.id)) },
-    { title: "Secondary derivative metrics", plots: (plotPayload.plots || []).filter((plot) => !primaryIds.has(plot.id) && !diagnosticIds.has(plot.id)) },
-    { title: "Diagnostic derivative metrics", plots: (plotPayload.plots || []).filter((plot) => !primaryIds.has(plot.id) && diagnosticIds.has(plot.id)) },
+    { title: "Primary derivative metrics", plots: plots.filter((plot) => primaryIds.has(plot.id)) },
+    { title: "Secondary derivative metrics", plots: plots.filter((plot) => !primaryIds.has(plot.id) && !diagnosticIds.has(plot.id)) },
+    { title: "Diagnostic derivative metrics", plots: plots.filter((plot) => !primaryIds.has(plot.id) && diagnosticIds.has(plot.id)) },
   ];
 }
 
@@ -2616,7 +2668,7 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
       card.className = "plot-card wide";
       container.appendChild(card);
       if (!(plot.rows || []).length) {
-        renderG2MDeepHDerivativePlotSummary(card, plot, "No data available for this metric");
+        renderG2MDeepHDerivativePlotSummary(card, plot, plot.unavailable_message || "No data available for this metric");
       } else if (window.Plotly && plot.kind === "grouped_bar") {
         renderG2MDeepHDerivativeGroupedBarPlot(card, plot);
       } else if (window.Plotly && (plot.kind === "scatter" || plot.kind === "line")) {
@@ -2812,9 +2864,13 @@ async function loadG2MDeepHDerivativeMetrics({ runId = null } = {}) {
     await loadG2MDeepHPlotRuns({ preserveSelection: true });
   }
   renderG2MDeepHDerivativeRunSelector();
-  const selectedRunId = runId || preferredG2MDeepHDerivativeRunId();
-  state.g2mDeephDerivativeRunId = selectedRunId;
-  const query = selectedRunId ? `?run_id=${encodeURIComponent(selectedRunId)}` : "";
+  let selectedRunIds = runId ? [runId] : (state.g2mDeephDerivativeRunIds || []);
+  if (!selectedRunIds.length) selectedRunIds = [preferredG2MDeepHDerivativeRunId()].filter(Boolean);
+  state.g2mDeephDerivativeRunIds = selectedRunIds;
+  state.g2mDeephDerivativeRunId = selectedRunIds[0] || null;
+  const params = new URLSearchParams();
+  selectedRunIds.forEach((id) => params.append("run_id", id));
+  const query = params.toString() ? `?${params.toString()}` : "";
   const payload = await request(`/api/g2m-deeph/derivative-metrics${query}`);
   state.g2mDeephDerivativePayload = payload;
   renderG2MDeepHDerivativeRunSelector();
@@ -11866,10 +11922,6 @@ function setupEvents() {
   });
   document.getElementById("g2m-deeph-derivative-refresh")?.addEventListener("click", () => {
     loadG2MDeepHDerivativeMetrics().catch((error) => showToast(error.message));
-  });
-  document.getElementById("g2m-deeph-derivative-run-select")?.addEventListener("change", (event) => {
-    state.g2mDeephDerivativeRunId = event.target?.value || null;
-    loadG2MDeepHDerivativeMetrics({ runId: state.g2mDeephDerivativeRunId }).catch((error) => showToast(error.message));
   });
   document.getElementById("g2m-deeph-dataset-minimum-refresh")?.addEventListener("click", () => {
     loadDatasetMinimum()

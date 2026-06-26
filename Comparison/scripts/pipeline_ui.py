@@ -8531,6 +8531,22 @@ def _g2m_deeph_derivative_gate_report(run_root: Path) -> dict[str, Any]:
     }
 
 
+def _g2m_deeph_hamiltonian_metrics_root(run_root: Path) -> Path:
+    """Resolve the root that holds H graph2mat/deeph metrics (the `sweep/` tree).
+
+    Some completed runs nest the actual sweep one level deeper, under a
+    child directory sharing the run root's own name (OUTER/OUTER.name/sweep).
+    Derivative diagnostics (derivative_workflows/) live at the outer level
+    regardless, so this resolution must stay independent of that lookup.
+    """
+    if (run_root / "sweep").exists() or (run_root / "benchmark_manifest.yaml").exists():
+        return run_root
+    nested_root = run_root / run_root.name
+    if (nested_root / "sweep").exists() or (nested_root / "benchmark_manifest.yaml").exists():
+        return nested_root
+    return run_root
+
+
 def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str, Any]:
     run_root = resolve_g2m_deeph_run_root(run_id)
     requested_run_id = str(run_id or "").strip()
@@ -8546,6 +8562,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "not_computed": True,
         }
     effective_run_id = run_root.name
+    hamiltonian_metrics_root = _g2m_deeph_hamiltonian_metrics_root(run_root)
     graph2mat_root = _g2m_deeph_derivative_root(run_root, "graph2mat")
     deeph_root = _g2m_deeph_derivative_root(run_root, "deeph")
     partial_graph2mat_roots = _g2m_deeph_partial_derivative_metric_roots(run_root, "graph2mat")
@@ -8562,6 +8579,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "status": "not_computed",
             "run_id": effective_run_id,
             "run_root": str(run_root),
+            "hamiltonian_metrics_root": str(hamiltonian_metrics_root),
             "message": (
                 "Derivative diagnostics are optional post-processing outputs. "
                 "If not computed, the benchmark remains valid for H-vs-H metrics."
@@ -8634,6 +8652,7 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         "status": overall_status,
         "run_id": effective_run_id,
         "run_root": str(run_root),
+        "hamiltonian_metrics_root": str(hamiltonian_metrics_root),
         "title": "Hamiltonian derivative diagnostics",
         "reference_label": "Reference: finite differences of SIESTA Hamiltonians",
         "force_constants_label": "SIESTA force constants are not treated as dH/dR",
@@ -8654,6 +8673,69 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
             "Derivative diagnostics are available for technical internal diagnostic inspection only. "
             "They do not change the H-vs-H benchmark winner."
         ),
+    }
+
+
+def g2m_deeph_derivative_metrics_multi_payload(run_ids: list[str]) -> dict[str, Any]:
+    ids = [str(item).strip() for item in run_ids if str(item).strip()]
+    if len(ids) <= 1:
+        return g2m_deeph_derivative_metrics_payload(ids[0] if ids else None)
+    payloads = [g2m_deeph_derivative_metrics_payload(run_id) for run_id in ids]
+    combined_plots: dict[str, dict[str, Any]] = {}
+    primary_ids: list[str] = []
+    diagnostic_ids: list[str] = []
+    dataset_size_ids: list[str] = []
+    for payload in payloads:
+        run_id = str(payload.get("run_id") or "")
+        plot_payload = payload.get("plot_payload") or {}
+        for key, target in (
+            ("primary_plot_ids", primary_ids),
+            ("diagnostic_plot_ids", diagnostic_ids),
+            ("dataset_size_plot_ids", dataset_size_ids),
+        ):
+            for plot_id in plot_payload.get(key) or []:
+                if plot_id not in target:
+                    target.append(plot_id)
+        for plot in plot_payload.get("plots") or []:
+            plot_id = str(plot.get("id") or "")
+            if not plot_id:
+                continue
+            merged = combined_plots.setdefault(plot_id, {**plot, "rows": []})
+            for row in plot.get("rows") or []:
+                method = str(row.get("method") or row.get("model_label") or row.get("model") or "")
+                series = str(row.get(plot.get("series_key") or "") or method or "diagnostic")
+                merged["rows"].append(
+                    {
+                        **row,
+                        "run_id": run_id,
+                        "run_label": run_id,
+                        "combined_series": f"{series} | {run_id}" if series else run_id,
+                    }
+                )
+    plot_payload = {
+        "available": any((payload.get("plot_payload") or {}).get("available") for payload in payloads),
+        "plots": list(combined_plots.values()),
+        "primary_plot_ids": primary_ids,
+        "diagnostic_plot_ids": diagnostic_ids,
+        "dataset_size_plot_ids": dataset_size_ids,
+        "scientific_warnings": [warning for payload in payloads for warning in (payload.get("scientific_warnings") or [])],
+    }
+    first = payloads[0] if payloads else {}
+    return {
+        **first,
+        "available": any(payload.get("available") for payload in payloads),
+        "run_id": ", ".join(ids),
+        "run_ids": ids,
+        "run_root": "",
+        "status_rows": [row for payload in payloads for row in (payload.get("status_rows") or [])],
+        "workflow_status_rows": [row for payload in payloads for row in (payload.get("workflow_status_rows") or [])],
+        "issue_rows": [row for payload in payloads for row in (payload.get("issue_rows") or [])],
+        "prominent_issue_rows": [row for payload in payloads for row in (payload.get("prominent_issue_rows") or [])],
+        "comparison_rows": [row for payload in payloads for row in (payload.get("comparison_rows") or [])],
+        "paired_comparison_rows": [row for payload in payloads for row in (payload.get("paired_comparison_rows") or [])],
+        "artifact_rows": [row for payload in payloads for row in (payload.get("artifact_rows") or [])],
+        "plot_payload": plot_payload,
+        "scientific_warnings": plot_payload["scientific_warnings"],
     }
 
 
@@ -16037,8 +16119,11 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, G2M_DEEPH_RUNNER.plots(selected_run_ids=selected_run_ids))
             elif path == "/api/g2m-deeph/derivative-metrics":
                 query = parse_qs(parsed_url.query)
-                run_id = str((query.get("run_id") or [""])[0] or "").strip() or None
-                json_response(self, g2m_deeph_derivative_metrics_payload(run_id=run_id))
+                run_ids: list[str] = []
+                for key in ("run_id", "run_ids", "selected_run_ids"):
+                    for value in query.get(key, []):
+                        run_ids.extend(item.strip() for item in str(value).split(",") if item.strip())
+                json_response(self, g2m_deeph_derivative_metrics_multi_payload(run_ids))
             elif path == "/api/g2m-deeph/derivative-metrics/artifact":
                 query = parse_qs(parsed_url.query)
                 run_id = str((query.get("run_id") or [""])[0] or "").strip()

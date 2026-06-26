@@ -54,7 +54,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-plot-runs-all",
             "g2m-deeph-plot-runs-clear",
             "g2m-deeph-plots",
-            "g2m-deeph-derivative-run-select",
+            "g2m-deeph-derivative-run-list",
             "g2m-deeph-derivative-refresh",
             "g2m-deeph-derivative-status",
             "g2m-deeph-derivative-summary",
@@ -65,6 +65,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-derivative-artifacts",
         ):
             self.assertIn(f'id="{control_id}"', self.index_html)
+        self.assertIn('id="g2m-deeph-derivative-run-list" class="plot-run-list"', self.index_html)
         self.assertIn('value="Comparison/datasets/graphene_w90_joint"', self.index_html)
         self.assertIn("separado de results/ y workspaces/", self.index_html)
         self.assertIn("Available joint datasets for training / reuse", self.index_html)
@@ -236,6 +237,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn('status === "no_robust_winner"', self.app_js)
         self.assertIn(".comparison-status-banner.diagnostic", self.styles_css)
         self.assertIn(".comparison-status-banner.invalid", self.styles_css)
+        self.assertIn(".gate-report-scroll", self.styles_css)
+        self.assertIn('"Scientific gates", "Derivative gate report"', self.app_js)
 
     def test_derivative_panel_html_contains_required_text_and_ids(self) -> None:
         derivative_html = self.index_html.split('<section class="panel g2m-deeph-derivative-panel">', 1)[1].split(
@@ -265,6 +268,8 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.", self.app_js)
         self.assertIn("Technical internal diagnostic only. No winner claim comes from derivative metrics.", self.app_js)
         self.assertIn("Derivative metadata/order diagnostics need attention", derivative_js)
+        self.assertIn("g2m-deeph-derivative-run-checkbox", derivative_js)
+        self.assertIn("plot-run-option", derivative_js)
 
     def test_derivative_plot_payload_renders_new_metric_plots_generically(self) -> None:
         derivative_js = self.app_js.split("function renderG2MDeepHDerivativeRunSelector", 1)[1].split(
@@ -277,6 +282,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "Diagnostic derivative metrics",
             "No data available for this metric",
             "g2mDeephDerivativePlotSections",
+            "G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS",
             "primary_plot_ids",
             "diagnostic_plot_ids",
             'plot.kind === "grouped_bar"',
@@ -290,15 +296,27 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "plot.subtitle",
             "plot.reference_label",
             "g2m-deeph-derivative-plot-${plot.id",
+            "Regenerate derivative_plot_payload.json from derivative metric CSV/JSON artifacts.",
         ):
             self.assertIn(text, derivative_js)
         mock_payload_plot_ids = (
             "relative_frobenius_union_robust_by_model",
+            "relative_l1_union_robust_by_model",
+            "robust_primary_metrics_by_model",
+            "derivative_correlation_by_model",
             "derivative_residual_summary_by_model",
+            "derivative_residual_tail_by_model",
             "derivative_error_by_abs_ref_quantile",
+            "derivative_relative_l1_by_abs_ref_quantile",
+            "robust_error_by_displaced_atom",
             "robust_error_by_axis",
+            "robust_error_by_atom_axis",
+            "onsite_offsite_derivative_error",
         )
-        self.assertTrue(all(mock_payload_plot_ids))
+        for plot_id in mock_payload_plot_ids:
+            self.assertIn(plot_id, self.app_js)
+        for text in ("g2mDeephDerivativeRunIds", 'params.append("run_id", id)', "combined_series"):
+            self.assertIn(text, self.app_js)
 
     def test_plot_payload_renders_grouped_bar_plots(self) -> None:
         self.assertIn("renderG2MDeepHGroupedBarPlot", self.app_js)

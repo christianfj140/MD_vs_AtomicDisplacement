@@ -1,0 +1,1303 @@
+{
+  "description": "Graphene W90 real end-to-end snapshot-scaling payload derived from graphene_w90_snapshot_scaling_reuse_10_1000_4seeds_payload.json and the W90 dense/full generation payload logic. It generates datasets for N=12,30,50,70,90,150,250,400,600,700,1300, runs one 600-epoch Graph2Mat train and one 600-epoch DeepH train per dataset, then runs Hamiltonian metrics and finite-difference Hamiltonian derivative metrics.",
+  "source_reference_payloads": [
+    "Comparison/config/graphene_w90_snapshot_scaling_reuse_10_1000_4seeds_payload.json",
+    "Comparison/config/graphene_w90_snapshot_scaling_150_1000_dense_payload.json",
+    "Comparison/config/graphene_w90_snapshot_scaling_1100_1300_4seeds_followup_payload.json"
+  ],
+  "pipeline_config": "Comparison/workspaces/20260521_124937/md/md_dataset1_azrt5n_graphene_w90_default_huber_b0p01_real_d26e8feb74/pipeline_config.yaml",
+  "material_preset": "graphene",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene"
+  },
+  "dataset_mode": "full_strict_pipeline",
+  "run_mode": "full_strict_pipeline",
+  "dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives",
+  "output_root": "${REPO_ROOT}/Comparison/results/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives",
+  "system_label": "graphene",
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": "disabled",
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "split_mode": "blocked_with_gap",
+  "temporal_gap": 1,
+  "block_order": "train,validation,test",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": false,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 3,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error",
+    "max_parallel_derivative_workflows": 3,
+    "max_parallel_derivative_reference_jobs": 6
+  },
+  "dataset_sweep": {
+    "enabled": true,
+    "max_datasets": 11,
+    "recipes": [
+      {
+        "recipe_id": "graphene_w90_scale_iid12",
+        "label": "Graphene W90 IID scale: 12 snapshots",
+        "size": 12,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid12_T150_2_1",
+            "label": "2 snapshots @ 150 K",
+            "n_snapshots": 2,
+            "temperature_K": 150,
+            "seed": 150012
+          },
+          {
+            "block_id": "graphene_w90_scale_iid12_T300_8_2",
+            "label": "8 snapshots @ 300 K",
+            "n_snapshots": 8,
+            "temperature_K": 300,
+            "seed": 300012
+          },
+          {
+            "block_id": "graphene_w90_scale_iid12_T450_2_3",
+            "label": "2 snapshots @ 450 K",
+            "n_snapshots": 2,
+            "temperature_K": 450,
+            "seed": 450012
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid30",
+        "label": "Graphene W90 IID scale: 30 snapshots",
+        "size": 30,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid30_T150_6_1",
+            "label": "6 snapshots @ 150 K",
+            "n_snapshots": 6,
+            "temperature_K": 150,
+            "seed": 150030
+          },
+          {
+            "block_id": "graphene_w90_scale_iid30_T300_18_2",
+            "label": "18 snapshots @ 300 K",
+            "n_snapshots": 18,
+            "temperature_K": 300,
+            "seed": 300030
+          },
+          {
+            "block_id": "graphene_w90_scale_iid30_T450_6_3",
+            "label": "6 snapshots @ 450 K",
+            "n_snapshots": 6,
+            "temperature_K": 450,
+            "seed": 450030
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid50",
+        "label": "Graphene W90 IID scale: 50 snapshots",
+        "size": 50,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid50_T150_10_1",
+            "label": "10 snapshots @ 150 K",
+            "n_snapshots": 10,
+            "temperature_K": 150,
+            "seed": 150050
+          },
+          {
+            "block_id": "graphene_w90_scale_iid50_T300_30_2",
+            "label": "30 snapshots @ 300 K",
+            "n_snapshots": 30,
+            "temperature_K": 300,
+            "seed": 300050
+          },
+          {
+            "block_id": "graphene_w90_scale_iid50_T450_10_3",
+            "label": "10 snapshots @ 450 K",
+            "n_snapshots": 10,
+            "temperature_K": 450,
+            "seed": 450050
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid70",
+        "label": "Graphene W90 IID scale: 70 snapshots",
+        "size": 70,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid70_T150_14_1",
+            "label": "14 snapshots @ 150 K",
+            "n_snapshots": 14,
+            "temperature_K": 150,
+            "seed": 150070
+          },
+          {
+            "block_id": "graphene_w90_scale_iid70_T300_42_2",
+            "label": "42 snapshots @ 300 K",
+            "n_snapshots": 42,
+            "temperature_K": 300,
+            "seed": 300070
+          },
+          {
+            "block_id": "graphene_w90_scale_iid70_T450_14_3",
+            "label": "14 snapshots @ 450 K",
+            "n_snapshots": 14,
+            "temperature_K": 450,
+            "seed": 450070
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid90",
+        "label": "Graphene W90 IID scale: 90 snapshots",
+        "size": 90,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid90_T150_18_1",
+            "label": "18 snapshots @ 150 K",
+            "n_snapshots": 18,
+            "temperature_K": 150,
+            "seed": 150090
+          },
+          {
+            "block_id": "graphene_w90_scale_iid90_T300_54_2",
+            "label": "54 snapshots @ 300 K",
+            "n_snapshots": 54,
+            "temperature_K": 300,
+            "seed": 300090
+          },
+          {
+            "block_id": "graphene_w90_scale_iid90_T450_18_3",
+            "label": "18 snapshots @ 450 K",
+            "n_snapshots": 18,
+            "temperature_K": 450,
+            "seed": 450090
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid150",
+        "label": "Graphene W90 IID scale: 150 snapshots",
+        "size": 150,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid150_T150_30_1",
+            "label": "30 snapshots @ 150 K",
+            "n_snapshots": 30,
+            "temperature_K": 150,
+            "seed": 150150
+          },
+          {
+            "block_id": "graphene_w90_scale_iid150_T300_90_2",
+            "label": "90 snapshots @ 300 K",
+            "n_snapshots": 90,
+            "temperature_K": 300,
+            "seed": 300150
+          },
+          {
+            "block_id": "graphene_w90_scale_iid150_T450_30_3",
+            "label": "30 snapshots @ 450 K",
+            "n_snapshots": 30,
+            "temperature_K": 450,
+            "seed": 450150
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid250",
+        "label": "Graphene W90 IID scale: 250 snapshots",
+        "size": 250,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid250_T150_50_1",
+            "label": "50 snapshots @ 150 K",
+            "n_snapshots": 50,
+            "temperature_K": 150,
+            "seed": 150250
+          },
+          {
+            "block_id": "graphene_w90_scale_iid250_T300_150_2",
+            "label": "150 snapshots @ 300 K",
+            "n_snapshots": 150,
+            "temperature_K": 300,
+            "seed": 300250
+          },
+          {
+            "block_id": "graphene_w90_scale_iid250_T450_50_3",
+            "label": "50 snapshots @ 450 K",
+            "n_snapshots": 50,
+            "temperature_K": 450,
+            "seed": 450250
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid400",
+        "label": "Graphene W90 IID scale: 400 snapshots",
+        "size": 400,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid400_T150_80_1",
+            "label": "80 snapshots @ 150 K",
+            "n_snapshots": 80,
+            "temperature_K": 150,
+            "seed": 150400
+          },
+          {
+            "block_id": "graphene_w90_scale_iid400_T300_240_2",
+            "label": "240 snapshots @ 300 K",
+            "n_snapshots": 240,
+            "temperature_K": 300,
+            "seed": 300400
+          },
+          {
+            "block_id": "graphene_w90_scale_iid400_T450_80_3",
+            "label": "80 snapshots @ 450 K",
+            "n_snapshots": 80,
+            "temperature_K": 450,
+            "seed": 450400
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid600",
+        "label": "Graphene W90 IID scale: 600 snapshots",
+        "size": 600,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid600_T150_120_1",
+            "label": "120 snapshots @ 150 K",
+            "n_snapshots": 120,
+            "temperature_K": 150,
+            "seed": 150600
+          },
+          {
+            "block_id": "graphene_w90_scale_iid600_T300_360_2",
+            "label": "360 snapshots @ 300 K",
+            "n_snapshots": 360,
+            "temperature_K": 300,
+            "seed": 300600
+          },
+          {
+            "block_id": "graphene_w90_scale_iid600_T450_120_3",
+            "label": "120 snapshots @ 450 K",
+            "n_snapshots": 120,
+            "temperature_K": 450,
+            "seed": 450600
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid700",
+        "label": "Graphene W90 IID scale: 700 snapshots",
+        "size": 700,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid700_T150_140_1",
+            "label": "140 snapshots @ 150 K",
+            "n_snapshots": 140,
+            "temperature_K": 150,
+            "seed": 150700
+          },
+          {
+            "block_id": "graphene_w90_scale_iid700_T300_420_2",
+            "label": "420 snapshots @ 300 K",
+            "n_snapshots": 420,
+            "temperature_K": 300,
+            "seed": 300700
+          },
+          {
+            "block_id": "graphene_w90_scale_iid700_T450_140_3",
+            "label": "140 snapshots @ 450 K",
+            "n_snapshots": 140,
+            "temperature_K": 450,
+            "seed": 450700
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_w90_scale_iid1300",
+        "label": "Graphene W90 IID scale: 1300 snapshots",
+        "size": 1300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_w90_scale_iid1300_T150_260_1",
+            "label": "260 snapshots @ 150 K",
+            "n_snapshots": 260,
+            "temperature_K": 150,
+            "seed": 151300
+          },
+          {
+            "block_id": "graphene_w90_scale_iid1300_T300_780_2",
+            "label": "780 snapshots @ 300 K",
+            "n_snapshots": 780,
+            "temperature_K": 300,
+            "seed": 301300
+          },
+          {
+            "block_id": "graphene_w90_scale_iid1300_T450_260_3",
+            "label": "260 snapshots @ 450 K",
+            "n_snapshots": 260,
+            "temperature_K": 450,
+            "seed": 451300
+          }
+        ]
+      }
+    ],
+    "notes": "Real full-strict dataset generation. No reuse_dataset_sweep_from_run_root and no dataset_sweep.reuse_only. Temperature distribution is 20/60/20 at 150/300/450 K."
+  },
+  "graph2mat_overrides": {
+    "max_epochs": 600,
+    "optim_lr": 0.0018,
+    "batch_size": 32,
+    "loader_threads": 4,
+    "num_interactions": 3,
+    "correlation": 3,
+    "max_ell": 3,
+    "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+    "loss": "graph2mat.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.01
+    },
+    "readout": "default",
+    "seed_everything": 1
+  },
+  "deeph": {
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "num_threads": 2,
+    "multiprocessing": 0,
+    "epochs": 600,
+    "batch_size": 8,
+    "learning_rate": 0.0003,
+    "criterion": "MaskMSELoss",
+    "retain_edge_fea": true,
+    "weight_decay": 0.0001,
+    "optimizer": "adamW",
+    "edge_fea_len": 128,
+    "normalization": "LayerNorm",
+    "atom_update_net": "CGConv",
+    "if_lcmp": true,
+    "gauss_stop": 6,
+    "atom_fea_len": 128,
+    "num_l": 4,
+    "if_edge_update": true,
+    "seed": 1
+  },
+  "training_sweep": {
+    "enabled": true,
+    "max_runs": 22,
+    "apply_to_datasets": [
+      "all"
+    ],
+    "error_policy": "continue_on_error",
+    "search_policy": {
+      "strategy": "manual",
+      "random_seed": 0
+    },
+    "manual_runs": [
+      {
+        "id": "G2M-T1000-03-anchor-N12",
+        "config_id": "G2M-T1000-03-anchor-N12",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid12",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N12",
+        "config_id": "DH-T1000-04-anchor-N12",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid12",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N30",
+        "config_id": "G2M-T1000-03-anchor-N30",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid30",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N30",
+        "config_id": "DH-T1000-04-anchor-N30",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid30",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N50",
+        "config_id": "G2M-T1000-03-anchor-N50",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid50",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N50",
+        "config_id": "DH-T1000-04-anchor-N50",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid50",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N70",
+        "config_id": "G2M-T1000-03-anchor-N70",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid70",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N70",
+        "config_id": "DH-T1000-04-anchor-N70",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid70",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N90",
+        "config_id": "G2M-T1000-03-anchor-N90",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid90",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N90",
+        "config_id": "DH-T1000-04-anchor-N90",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid90",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N150",
+        "config_id": "G2M-T1000-03-anchor-N150",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid150",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N150",
+        "config_id": "DH-T1000-04-anchor-N150",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid150",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N250",
+        "config_id": "G2M-T1000-03-anchor-N250",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid250",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N250",
+        "config_id": "DH-T1000-04-anchor-N250",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid250",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N400",
+        "config_id": "G2M-T1000-03-anchor-N400",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid400",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N400",
+        "config_id": "DH-T1000-04-anchor-N400",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid400",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N600",
+        "config_id": "G2M-T1000-03-anchor-N600",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid600",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N600",
+        "config_id": "DH-T1000-04-anchor-N600",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid600",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N700",
+        "config_id": "G2M-T1000-03-anchor-N700",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid700",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N700",
+        "config_id": "DH-T1000-04-anchor-N700",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid700",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      },
+      {
+        "id": "G2M-T1000-03-anchor-N1300",
+        "config_id": "G2M-T1000-03-anchor-N1300",
+        "model": "graph2mat",
+        "dataset_id": "graphene_w90_scale_iid1300",
+        "overrides": {
+          "max_epochs": 600,
+          "optim_lr": 0.0018,
+          "batch_size": 32,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.01
+          },
+          "readout": "default",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T1000-04-anchor-N1300",
+        "config_id": "DH-T1000-04-anchor-N1300",
+        "model": "deeph",
+        "dataset_id": "graphene_w90_scale_iid1300",
+        "overrides": {
+          "epochs": 600,
+          "batch_size": 8,
+          "learning_rate": 0.0003,
+          "retain_edge_fea": true,
+          "criterion": "MaskMSELoss",
+          "optimizer": "adamW",
+          "weight_decay": 0.0001,
+          "normalization": "LayerNorm",
+          "gauss_stop": 6,
+          "num_l": 4,
+          "edge_fea_len": 128,
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "atom_fea_len": 128,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      }
+    ]
+  },
+  "cost_accounting": {
+    "dataset_sweep_summary_json": "summary/dataset_sweep_summary.json",
+    "dataset_sweep_summary_csv": "summary/dataset_sweep_summary.csv",
+    "fields": [
+      "dataset_size",
+      "blocks",
+      "split_counts",
+      "generation_seconds",
+      "elapsed_seconds",
+      "artifact_validation_status",
+      "benchmark_manifest_path",
+      "frozen_split_manifest_path"
+    ],
+    "siesta_wall_time_source": "RUN.out timer: Elapsed wall time (sec), plus runner generation_seconds/elapsed_seconds per dataset row."
+  },
+  "notes": {
+    "intended_use": "Real end-to-end W90 dataset-size benchmark with derivative metrics.",
+    "expected_dataset_count": 11,
+    "expected_dataset_recipe_ids": [
+      "graphene_w90_scale_iid10",
+      "graphene_w90_scale_iid25",
+      "graphene_w90_scale_iid50",
+      "graphene_w90_scale_iid100",
+      "graphene_w90_scale_iid200",
+      "graphene_w90_scale_iid300",
+      "graphene_w90_scale_iid500"
+    ],
+    "expected_total_snapshots": 3000,
+    "expected_training_runs": 22,
+    "temperature_distribution": {
+      "150K": "20%",
+      "300K": "60%",
+      "450K": "20%"
+    },
+    "paper_ready_parallelism": "Graph2Mat 7 parallel jobs, DeepH 5 parallel jobs, alternating model batches, starting with DeepH.",
+    "scientific_policy": "Only MD size varies. SIESTA physics/template, material, basis and pseudopotentials are held fixed. Test/validation split policy remains blocked_with_gap.",
+    "material_scope": "This payload is graphene-only.",
+    "expected_dataset_sizes": [
+      12,
+      30,
+      50,
+      70,
+      90,
+      150,
+      250,
+      400,
+      600,
+      700,
+      1300
+    ],
+    "paper_ready_similarity": "Uses two fixed paper-ready anchors per model: G2M-T600-26, G2M-T1000-03, DH-T600-13 and DH-T1000-04. Hyperparameter search is disabled so dataset size remains the main variable.",
+    "batch_size_guard": "Graph2Mat anchors use batch_size 40 and 32; DeepH anchors use batch_size 4 and 8. Reject this payload if any generated Graph2Mat config has batch_size > 80.",
+    "manual_anchor_configs_per_dataset": 4,
+    "discretization_policy": "Dense dataset-size grid from 10 to 500 snapshots, reusing requested/previous scaling sizes where possible: 10,20,25,30,40,50,55,60,70,75,80,90,95,100,120,150,180,200,220,250,280,300,500.",
+    "dataset_root_policy": "Uses a fresh dataset root to avoid overwriting or colliding with previous snapshot-scaling datasets that were generated with a different training payload.",
+    "dataset_generation": "enabled_full_strict_pipeline",
+    "reuse_mode": "reuse_dataset_sweep_from_run_root + prebuilt dataset_sweep_summary.json",
+    "training_seeds": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "configs_per_dataset": 4,
+    "duplicate_resolution_policy": {
+      "rule": "Union of both source runs. When N exists in both, prefer paper_ready_like for N<=500; otherwise use the only available source.",
+      "overlapping_sizes": [
+        150,
+        200,
+        250,
+        300,
+        500
+      ],
+      "exceptions": []
+    },
+    "dataset_source_by_size": {
+      "10": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid10",
+        "dataset_id": "graphene_w90_scale_iid10"
+      },
+      "20": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid20",
+        "dataset_id": "graphene_w90_scale_iid20"
+      },
+      "25": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid25",
+        "dataset_id": "graphene_w90_scale_iid25"
+      },
+      "30": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid30",
+        "dataset_id": "graphene_w90_scale_iid30"
+      },
+      "40": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid40",
+        "dataset_id": "graphene_w90_scale_iid40"
+      },
+      "50": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid50",
+        "dataset_id": "graphene_w90_scale_iid50"
+      },
+      "55": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid55",
+        "dataset_id": "graphene_w90_scale_iid55"
+      },
+      "60": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid60",
+        "dataset_id": "graphene_w90_scale_iid60"
+      },
+      "70": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid70",
+        "dataset_id": "graphene_w90_scale_iid70"
+      },
+      "75": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid75",
+        "dataset_id": "graphene_w90_scale_iid75"
+      },
+      "80": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid80",
+        "dataset_id": "graphene_w90_scale_iid80"
+      },
+      "90": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid90",
+        "dataset_id": "graphene_w90_scale_iid90"
+      },
+      "95": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid95",
+        "dataset_id": "graphene_w90_scale_iid95"
+      },
+      "100": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid100",
+        "dataset_id": "graphene_w90_scale_iid100"
+      },
+      "120": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid120",
+        "dataset_id": "graphene_w90_scale_iid120"
+      },
+      "150": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid150",
+        "dataset_id": "graphene_w90_scale_iid150"
+      },
+      "175": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid175",
+        "dataset_id": "graphene_w90_scale_iid175"
+      },
+      "180": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid180",
+        "dataset_id": "graphene_w90_scale_iid180"
+      },
+      "200": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid200",
+        "dataset_id": "graphene_w90_scale_iid200"
+      },
+      "220": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid220",
+        "dataset_id": "graphene_w90_scale_iid220"
+      },
+      "250": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid250",
+        "dataset_id": "graphene_w90_scale_iid250"
+      },
+      "280": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid280",
+        "dataset_id": "graphene_w90_scale_iid280"
+      },
+      "300": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid300",
+        "dataset_id": "graphene_w90_scale_iid300"
+      },
+      "350": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid350",
+        "dataset_id": "graphene_w90_scale_iid350"
+      },
+      "400": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid400",
+        "dataset_id": "graphene_w90_scale_iid400"
+      },
+      "500": {
+        "source": "paper",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid500",
+        "dataset_id": "graphene_w90_scale_iid500"
+      },
+      "600": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid600",
+        "dataset_id": "graphene_w90_scale_iid600"
+      },
+      "700": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid700",
+        "dataset_id": "graphene_w90_scale_iid700"
+      },
+      "800": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid800",
+        "dataset_id": "graphene_w90_scale_iid800"
+      },
+      "900": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid900",
+        "dataset_id": "graphene_w90_scale_iid900"
+      },
+      "1000": {
+        "source": "dense",
+        "dataset_root": "/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid1000",
+        "dataset_id": "graphene_w90_scale_iid1000"
+      }
+    },
+    "warnings": [
+      "N=150: duplicate in both runs; using paper_ready_like source (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid150); dense copy ignored (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid150).",
+      "N=200: duplicate in both runs; using paper_ready_like source (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid200); dense copy ignored (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid200).",
+      "N=250: duplicate in both runs; using paper_ready_like source (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid250); dense copy ignored (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid250).",
+      "N=300: duplicate in both runs; using paper_ready_like source (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid300); dense copy ignored (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid300).",
+      "N=500: duplicate in both runs; using paper_ready_like source (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid500); dense copy ignored (/home/christian/repositorios/MD_vs_AtomicDisplacement/Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid500)."
+    ],
+    "dataset_reuse": "disabled",
+    "trains_per_dataset": {
+      "graph2mat": 1,
+      "deeph": 1
+    },
+    "training_seed_policy": "single deterministic train per model and dataset; seed=1 retained for reproducibility",
+    "epochs_policy": "only 600-epoch templates retained; 750-epoch templates ignored",
+    "derivative_policy": {
+      "method": "central finite difference",
+      "delta_ang": [
+        0.005,
+        0.01
+      ],
+      "base_split": "test",
+      "base_selection_policy": "adaptive_min_fraction",
+      "min_base_snapshots": 20,
+      "base_fraction": 0.2,
+      "base_selection_seed": 1,
+      "base_selection_formula": "K = min(n_test, max(20, ceil(0.20*n_test))); if n_test < 20, use all available test snapshots.",
+      "reference_workers": 6,
+      "reference_workers_note": "reference_workers controls how many derivative SIESTA processes run in parallel inside each derivative workflow. Initial recommendation: 6 on a 24-CPU machine; raise to 8 only if RAM and IO wait remain acceptable.",
+      "expected_selected_base_snapshots_by_dataset_size": {
+        "N20": 2,
+        "N40": 4,
+        "N60": 6,
+        "N80": 8,
+        "N100": 10,
+        "N200": 20,
+        "N300": 20,
+        "N500": 20,
+        "N800": 20,
+        "N1100": 22
+      },
+      "atoms": "0-1 zero-based physical graphene atoms; ghost atoms intentionally excluded",
+      "axes": [
+        "x",
+        "y",
+        "z"
+      ],
+      "max_parallel_derivative_workflows": 3,
+      "workflow_parallelism_note": "Runs up to 3 derivative workflows concurrently; each workflow runs up to 6 SIESTA reference workers."
+    },
+    "cost_warning": "This is intentionally not a smoke test, but derivative bases are capped adaptively: K = min(n_test, max(20, ceil(0.20*n_test))); if n_test < 20, the full test split is used."
+  },
+  "run_id": "graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives",
+  "source_reference_runs": [
+    "graphene_w90_snapshot_scaling_10_500_paper_ready_like_20260608_163955",
+    "graphene_w90_snapshot_scaling_150_1000_dense_20260609_132720"
+  ],
+  "overwrite_datasets": false,
+  "workflow_mode": "h_then_derivative_full",
+  "stages": {
+    "generate_or_validate_dataset": true,
+    "freeze_splits": true,
+    "train_graph2mat": true,
+    "predict_graph2mat": true,
+    "train_deeph": true,
+    "predict_deeph": true,
+    "hamiltonian_metrics": true,
+    "build_derivative_stencils": true,
+    "validate_derivative_stencils": true,
+    "run_derivative_siesta_reference": true,
+    "predict_derivative_graph2mat": true,
+    "predict_derivative_deeph": true,
+    "derivative_metrics_graph2mat": true,
+    "derivative_metrics_deeph": true,
+    "derivative_gate_check": true,
+    "derivative_plots": true
+  },
+  "derivative": {
+    "enabled": true,
+    "source_dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid12",
+    "output_root": "${REPO_ROOT}/Comparison/results/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/derivative_workflows",
+    "method": "central",
+    "base_split": "test",
+    "base_selection_policy": "adaptive_min_fraction",
+    "min_base_snapshots": 20,
+    "base_fraction": 0.2,
+    "base_selection_seed": 1,
+    "atoms": [
+      "0-1"
+    ],
+    "axes": [
+      "x",
+      "y",
+      "z"
+    ],
+    "delta_ang": [
+      0.005,
+      0.01
+    ],
+    "basis_files": "${REPO_ROOT}/Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid12/material_basis/*.ion.xml",
+    "siesta_command": "/home/christian/bin/siesta",
+    "reference_workers": 6,
+    "deeph_command": "/home/christian/repositorios/DeepH-pack/.venv/bin/deeph-inference",
+    "skip_if_exists": true,
+    "diagnostic_only": false,
+    "require_central": true
+  },
+  "derivative_metrics": {
+    "enabled": true,
+    "method": "central",
+    "require_central": true,
+    "diagnostic_only": false
+  }
+}

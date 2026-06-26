@@ -463,6 +463,38 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual([plot["id"] for plot in new_payload["plot_payload"]["plots"][:2]], ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"])
         self.assertTrue(new_payload["plot_payload"]["plots"][0]["dataset_size_plot"])
 
+    def test_derivative_backend_combines_multiple_run_plot_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = []
+            for name, value in (("run_a", 0.2), ("run_b", 0.1)):
+                run_root = Path(tmp) / name
+                roots.append(run_root)
+                self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat")
+                write_json(
+                    run_root / "common_metrics" / "summary" / "derivative_plot_payload.json",
+                    {
+                        "available": True,
+                        "diagnostic_plot_ids": ["dh_mae_by_model"],
+                        "plots": [
+                            {
+                                "id": "dh_mae_by_model",
+                                "kind": "grouped_bar",
+                                "rows": [{"method": "Graph2Mat", "dh_mae_union_eV_per_Ang": value}],
+                            }
+                        ],
+                    },
+                )
+
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", side_effect=roots):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_multi_payload(["run_a", "run_b"])
+
+        plot = payload["plot_payload"]["plots"][0]
+        self.assertEqual(plot["id"], "dh_mae_by_model")
+        self.assertEqual(len(plot["rows"]), 2)
+        self.assertEqual({row["run_id"] for row in plot["rows"]}, {"run_a", "run_b"})
+        self.assertTrue(all(row["combined_series"] for row in plot["rows"]))
+        self.assertEqual(payload["run_ids"], ["run_a", "run_b"])
+
     def test_blocked_gate_report_renders_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run_blocked"
@@ -787,6 +819,65 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(entry["completed_runs"], 8)
         self.assertEqual(entry["failed_runs"], 1)
         self.assertTrue(entry["has_training_sweep"])
+
+    def test_hamiltonian_metrics_root_resolves_nested_inner_while_derivatives_stay_outer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outer_root = Path(tmp) / "outer"
+            inner_root = outer_root / outer_root.name
+            (inner_root / "benchmark_manifest.yaml").parent.mkdir(parents=True, exist_ok=True)
+            (inner_root / "benchmark_manifest.yaml").write_text("schema: 1\n", encoding="utf-8")
+            write_json(
+                inner_root
+                / "sweep"
+                / "graph2mat"
+                / "graphene_w90_scale_iid12"
+                / "G2M"
+                / "metrics"
+                / "graph2mat"
+                / "eval_input"
+                / "metrics"
+                / "manifest.json",
+                {"status": "ok"},
+            )
+            write_json(
+                inner_root
+                / "sweep"
+                / "deeph"
+                / "graphene_w90_scale_iid12"
+                / "DH"
+                / "metrics"
+                / "deeph"
+                / "eval"
+                / "metrics"
+                / "manifest.json",
+                {"status": "ok"},
+            )
+
+            workflow_root = outer_root / "derivative_workflows" / "graphene_w90_scale_iid12"
+            self.write_standalone_derivative_method(workflow_root, "graph2mat", mae=0.2, rmse=0.3, frob=0.4)
+            self.write_standalone_derivative_method(workflow_root, "deeph", mae=0.1, rmse=0.2, frob=0.3)
+
+            # Non-nested layout: run_root itself already has sweep/, so it stays as-is.
+            non_nested_root = Path(tmp) / "non_nested"
+            (non_nested_root / "sweep").mkdir(parents=True, exist_ok=True)
+
+            self.assertEqual(pipeline_ui._g2m_deeph_hamiltonian_metrics_root(outer_root), inner_root)
+            self.assertEqual(pipeline_ui._g2m_deeph_hamiltonian_metrics_root(inner_root), inner_root)
+            self.assertEqual(
+                pipeline_ui._g2m_deeph_hamiltonian_metrics_root(non_nested_root),
+                non_nested_root,
+            )
+
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=outer_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("outer")
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(Path(payload["hamiltonian_metrics_root"]), inner_root)
+        self.assertEqual(payload["run_root"], str(outer_root))
+        self.assertTrue(payload["comparison_rows"])
+        comparison_by_method = {row["method"]: row for row in payload["comparison_rows"]}
+        self.assertAlmostEqual(comparison_by_method["Graph2Mat"]["dh_mae_union_eV_per_Ang"], 0.2)
+        self.assertAlmostEqual(comparison_by_method["DeepH"]["dh_mae_union_eV_per_Ang"], 0.1)
 
     def test_standalone_derivative_smoke_paired_comparison_rows_are_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

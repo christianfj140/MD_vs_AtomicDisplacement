@@ -1698,6 +1698,12 @@ pre {
   overscroll-behavior: contain;
 }
 
+.gate-report-scroll {
+  max-height: min(460px, 52vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
 .g2m-deeph-scroll-table-wrap .cleanup-table th {
   position: sticky;
   top: 0;
