@@ -241,6 +241,56 @@ class DerivativeGateCheckTests(unittest.TestCase):
         blocker_ids = {row["id"] for row in report["blockers"]}
         self.assertIn("missing_central_stencil", blocker_ids)
 
+    def test_optional_comparability_hash_warning_does_not_trigger_orbital_ordering_blocker(self) -> None:
+        self.write_fixture(
+            stencil_rows=[
+                {
+                    "sample": "sample_0",
+                    "status": "ok",
+                    "finite_difference_method": "central",
+                    "base_sample_id": "base",
+                    "plus_sample_id": "plus",
+                    "minus_sample_id": "minus",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "issue_codes": "missing_orbital_ordering_hash",
+                    "issue_messages": "orbital_ordering_hash is unavailable for derivative comparability validation.",
+                }
+            ],
+        )
+
+        report = self.build_report()
+
+        blocker_ids = {row["id"] for row in report["blockers"]}
+        self.assertNotIn("orbital_ordering_metadata_missing_or_inconsistent", blocker_ids)
+
+    def test_real_orbital_ordering_failure_still_triggers_blocker(self) -> None:
+        self.write_fixture(
+            stencil_rows=[
+                {
+                    "sample": "sample_0",
+                    "status": "failed",
+                    "finite_difference_method": "central",
+                    "base_sample_id": "base",
+                    "plus_sample_id": "plus",
+                    "minus_sample_id": "minus",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "issue_codes": "metadata_hash_mismatch",
+                    "issue_messages": "orbital_ordering_hash differs across derivative stencil operands.",
+                }
+            ],
+        )
+
+        report = self.build_report()
+
+        blocker_ids = {row["id"] for row in report["blockers"]}
+        self.assertIn("orbital_ordering_metadata_missing_or_inconsistent", blocker_ids)
+
     def test_diagnostic_only_allowed(self) -> None:
         self.write_fixture(
             manifest_overrides={"scientific_status": "diagnostic_only", "diagnostic_only_requested": True},

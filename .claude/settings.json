@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(.venv/bin/python3 -c ' *)",
+      "Bash(rg -n \"backfill_derivative_postprocess_from_training_sweep\\\\\\(\" Comparison/scripts/*.py)",
+      "Bash(.venv/bin/python -m pytest tests/test_g2m_deeph_ui.py tests/test_g2m_deeph_derivative_ui_backend.py -q)",
+      "Bash(.venv/bin/python -m pytest tests/test_hamiltonian_derivative_stencil.py tests/test_plot_hamiltonian_derivative_metrics.py tests/test_validate_derivative_workflow_artifacts.py -q)"
+    ]
+  }
+}

@@ -2615,6 +2615,69 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
             self.assertFalse(items[0]["selectable"])
             self.assertEqual(items[0]["blocked_reason"], "sweep_en_curso")
 
+    def test_outer_inner_same_name_run_roots_get_distinguishable_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign_root = Path(tmp) / "graphene_w90_snapshot_scaling_test"
+            outer_run_root = campaign_root
+            inner_run_root = campaign_root / campaign_root.name
+
+            outer_metrics_path = outer_run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+            outer_metrics_path.parent.mkdir(parents=True)
+            outer_metrics_path.write_text(
+                json.dumps(
+                    {
+                        "metric_scaling_rows": [
+                            {
+                                "method": "graph2mat",
+                                "dataset_size": 10,
+                                "metric_key": "h_mae_eV_mean",
+                                "metric_value": 0.02,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            inner_metrics_path = inner_run_root / "summary" / "ranking" / "normalized_run_metrics.json"
+            inner_metrics_path.parent.mkdir(parents=True)
+            inner_metrics_path.write_text(
+                json.dumps(
+                    {
+                        "metric_scaling_rows": [
+                            {
+                                "method": "graph2mat",
+                                "dataset_size": 20,
+                                "metric_key": "h_mae_eV_mean",
+                                "metric_value": 0.015,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            original_results_root = self.pipeline_ui.RESULTS_ROOT
+            original_status = self.pipeline_ui.G2M_DEEPH_RUNNER.status
+            try:
+                self.pipeline_ui.RESULTS_ROOT = Path(tmp)
+                self.pipeline_ui.G2M_DEEPH_RUNNER.status = lambda: {"running": False, "run_root": ""}
+                items = self.pipeline_ui.discover_dataset_size_minimum_run_roots()
+            finally:
+                self.pipeline_ui.RESULTS_ROOT = original_results_root
+                self.pipeline_ui.G2M_DEEPH_RUNNER.status = original_status
+
+            matching = [
+                item
+                for item in items
+                if Path(item["run_root"]) in (outer_run_root.resolve(), inner_run_root.resolve())
+            ]
+            self.assertEqual(len(matching), 2)
+            run_roots = {item["run_root"] for item in matching}
+            self.assertEqual(len(run_roots), 2)
+            labels = [item["label"] for item in matching]
+            self.assertEqual(len(set(labels)), 2, f"expected distinguishable labels, got {labels!r}")
+
     def test_run_analysis_rejects_active_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

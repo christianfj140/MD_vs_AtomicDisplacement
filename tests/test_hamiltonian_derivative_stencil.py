@@ -505,9 +505,12 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         self.assertTrue(np.isfinite(row["dh_relative_frobenius_ref_robust"]))
         self.assertTrue(np.isfinite(row["dh_relative_frobenius_union_robust"]))
         self.assertTrue(np.isfinite(row["dh_relative_l1_union_robust"]))
-        self.assertAlmostEqual(row["dh_relative_frobenius_ref_robust"], 1.0e30)
-        self.assertAlmostEqual(row["dh_relative_frobenius_union_robust"], 1.0e30)
-        self.assertAlmostEqual(row["dh_relative_l1_union_robust"], 1.0e30)
+        # These sentinel values are ~1e30 in magnitude; assertAlmostEqual's
+        # default places=7 is an absolute tolerance and is meaningless at
+        # this scale, so compare the ratio to 1.0 with a relative tolerance.
+        self.assertAlmostEqual(row["dh_relative_frobenius_ref_robust"] / 1.0e30, 1.0, places=6)
+        self.assertAlmostEqual(row["dh_relative_frobenius_union_robust"] / 1.0e30, 1.0, places=6)
+        self.assertAlmostEqual(row["dh_relative_l1_union_robust"] / 1.0e30, 1.0, places=6)
         self.assertTrue(row["dh_relative_frobenius_ref_near_zero_denominator"])
         self.assertTrue(row["dh_relative_frobenius_union_near_zero_denominator"])
         self.assertTrue(row["dh_relative_l1_union_near_zero_denominator"])

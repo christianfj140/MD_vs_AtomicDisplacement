@@ -5977,6 +5977,25 @@ def discover_dataset_size_minimum_run_roots() -> list[dict[str, Any]]:
             }
         )
 
+    label_counts: dict[str, int] = {}
+    for item in items:
+        label_counts[item["label"]] = label_counts.get(item["label"], 0) + 1
+    if any(count > 1 for count in label_counts.values()):
+        # Disambiguate items that share the same run_root.name (e.g. an
+        # "OUTER" campaign root and a same-named "INNER" nested run root)
+        # so the UI never offers two selectable entries with identical,
+        # indistinguishable labels. The run_root path itself is untouched;
+        # only the human-facing label gains a depth-derived suffix.
+        for item in items:
+            if label_counts.get(item["label"], 0) <= 1:
+                continue
+            run_root_path = Path(item["run_root"])
+            try:
+                suffix = str(run_root_path.relative_to(RESULTS_ROOT.resolve()))
+            except ValueError:
+                suffix = str(run_root_path)
+            item["label"] = f"{item['label']} ({suffix})" if suffix else item["label"]
+
     return sorted(items, key=lambda item: item.get("modified_at") or 0.0, reverse=True)
 
 

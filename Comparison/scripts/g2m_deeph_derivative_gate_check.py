@@ -234,13 +234,20 @@ def support_discontinuity_detected(dataset: dict[str, Any], threshold: float) ->
     return False
 
 
-def explicit_issue(dataset: dict[str, Any], terms: tuple[str, ...]) -> bool:
+def explicit_issue(dataset: dict[str, Any], terms: tuple[str, ...], *, require_row_failure: bool = False) -> bool:
     manifest = dataset["manifest"]
     if matches_text(manifest.get("fatal_errors"), terms):
         return True
     if matches_text(manifest.get("warnings"), terms):
         return True
     for row in dataset["stencil_rows"]:
+        if require_row_failure and str(row.get("status") or "").strip().lower() == "ok":
+            # Stencil rows with status "ok" may still carry benign warning-only
+            # issue codes/messages (e.g. an optional comparability hash being
+            # unavailable). Those are not real failures, so skip them here to
+            # avoid false-positive blockers when terms happen to match the
+            # benign warning text (e.g. "missing_orbital_ordering_hash").
+            continue
         if matches_text(row.get("issue_codes"), terms) or matches_text(row.get("issue_messages"), terms):
             return True
     return False
@@ -440,7 +447,7 @@ def evaluate_dataset(
                 evidence_paths=evidence_paths,
             )
         )
-    if explicit_issue(dataset, ("orbital_ordering", "missing_required_metadata")):
+    if explicit_issue(dataset, ("orbital_ordering", "missing_required_metadata"), require_row_failure=True):
         blockers.append(
             gate_row(
                 "orbital_ordering_metadata_missing_or_inconsistent",

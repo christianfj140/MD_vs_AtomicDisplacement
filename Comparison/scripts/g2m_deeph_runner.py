@@ -147,6 +147,7 @@ MODULAR_WORKFLOW_STAGE_NAMES = (
     "derivative_metrics_deeph",
     "derivative_gate_check",
     "derivative_plots",
+    "derivative_model_comparison",
 )
 MODULAR_WORKFLOW_DEFAULT_STAGES = {
     "generate_or_validate_dataset": True,
@@ -165,6 +166,7 @@ MODULAR_WORKFLOW_DEFAULT_STAGES = {
     "derivative_metrics_deeph": False,
     "derivative_gate_check": False,
     "derivative_plots": False,
+    "derivative_model_comparison": True,
 }
 MODULAR_WORKFLOW_MODE_ALIASES = {
     "h_only": "hamiltonian_only",
@@ -277,7 +279,9 @@ DERIVATIVE_STAGE_NAMES = {
     "derivative_plots",
 }
 HAMILTONIAN_STAGE_NAMES = tuple(
-    stage for stage in MODULAR_WORKFLOW_STAGE_NAMES if stage not in DERIVATIVE_STAGE_NAMES
+    stage
+    for stage in MODULAR_WORKFLOW_STAGE_NAMES
+    if stage not in DERIVATIVE_STAGE_NAMES and stage != "derivative_model_comparison"
 )
 DEEPH_TRAIN_OVERRIDE_KEYS = {
     "epochs",
@@ -2270,17 +2274,27 @@ def backfill_derivative_postprocess_from_training_sweep(
         if any(status == "failed" for status in method_statuses.values()):
             overall_status = "failed"
         counts[overall_status] = counts.get(overall_status, 0) + 1
+        plot_status = str((derivative_summary.get("plot_outputs") or {}).get("status") or "")
+        gate_status = str((derivative_summary.get("gate_report") or {}).get("status") or "")
+        model_comparison_status = str((derivative_summary.get("model_comparison") or {}).get("status") or "")
         summary_runs.append(
             {
                 "run_root": str(child_run_root),
                 "run_id": child_run_root.name,
                 "overall_status": overall_status,
                 "method_statuses": method_statuses,
-                "plot_status": str((derivative_summary.get("plot_outputs") or {}).get("status") or ""),
-                "gate_status": str((derivative_summary.get("gate_report") or {}).get("status") or ""),
+                "plot_status": plot_status,
+                "gate_status": gate_status,
+                "model_comparison_status": model_comparison_status,
                 "summary": derivative_summary,
             }
         )
+    postprocess_stage_failed = any(
+        run.get("plot_status") == "failed"
+        or run.get("gate_status") == "failed"
+        or run.get("model_comparison_status") == "failed"
+        for run in summary_runs
+    )
     backfill_summary = {
         "schema": "graph2mat_deeph_derivative_backfill_summary_v1",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -2290,6 +2304,7 @@ def backfill_derivative_postprocess_from_training_sweep(
         "processed_runs": len(summary_runs),
         "counts": counts,
         "runs": summary_runs,
+        "status": "completed_with_failures" if postprocess_stage_failed else "completed",
     }
     output_path = benchmark_run_root / "summary" / "derivative_backfill_summary.json"
     json_writer(output_path, backfill_summary)
@@ -6741,6 +6756,12 @@ class Graph2MatDeepHBenchmarkRunner:
             search_roots.append(Path(str(self._state.run_root)).parent)
         else:
             search_roots.append(DEFAULT_OUTPUT_ROOT)
+            # DEFAULT_OUTPUT_ROOT is a single fixed subfolder; completed sweeps
+            # are commonly written directly under Comparison/results/<run_name>,
+            # so also scan there to discover those when no run is active.
+            results_root = REPO_ROOT / "Comparison" / "results"
+            if results_root != DEFAULT_OUTPUT_ROOT:
+                search_roots.append(results_root)
         if self._state.run_root:
             run_root = Path(str(self._state.run_root))
             roots[str(run_root.resolve())] = run_root
@@ -8254,7 +8275,9 @@ class Graph2MatDeepHBenchmarkRunner:
             _write_json(output_path, gate_report)
             mark("derivative_gate_check", {"status": "completed", "output_path": str(output_path), "report": gate_report})
 
-        if metric_roots["graph2mat"] is not None or metric_roots["deeph"] is not None:
+        if stages.get("derivative_model_comparison", True) and (
+            metric_roots["graph2mat"] is not None or metric_roots["deeph"] is not None
+        ):
             comparison = build_derivative_model_comparison_summary(
                 graph2mat_root=metric_roots["graph2mat"],
                 deeph_root=metric_roots["deeph"],
@@ -8811,7 +8834,7 @@ def main() -> int:
         log=lambda message: sys.stdout.write(message),
     )
     sys.stdout.write(json.dumps(_json_safe_payload(summary), indent=2, ensure_ascii=False) + "\n")
-    return 0
+    return 1 if summary.get("status") == "completed_with_failures" else 0
 
 
 if __name__ == "__main__":
