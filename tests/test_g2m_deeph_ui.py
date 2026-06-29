@@ -283,6 +283,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "No data available for this metric",
             "g2mDeephDerivativePlotSections",
             "G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS",
+            "G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS",
             "primary_plot_ids",
             "diagnostic_plot_ids",
             'plot.kind === "grouped_bar"',
@@ -295,6 +296,10 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "plot.title",
             "plot.subtitle",
             "plot.reference_label",
+            "g2mDeephDerivativePlotInfo",
+            "G2M_DEEPH_DERIVATIVE_METRIC_HELP",
+            "plotInfo: g2mDeephDerivativePlotInfo(plot)",
+            "dH_pred/dR frente a dH_ref/dR",
             "g2m-deeph-derivative-plot-${plot.id",
             "Regenerate derivative_plot_payload.json from derivative metric CSV/JSON artifacts.",
         ):
@@ -317,6 +322,10 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             self.assertIn(plot_id, self.app_js)
         for text in ("g2mDeephDerivativeRunIds", 'params.append("run_id", id)', "combined_series"):
             self.assertIn(text, self.app_js)
+
+    def test_requested_derivative_panels_start_collapsed(self) -> None:
+        self.assertIn('<details id="g2m-deeph-dataset-picker-panel" class="advanced-recipes g2m-deeph-dataset-picker">', self.index_html)
+        self.assertIn("<summary>Warnings and fatal errors</summary>", self.index_html)
 
     def test_plot_payload_renders_grouped_bar_plots(self) -> None:
         self.assertIn("renderG2MDeepHGroupedBarPlot", self.app_js)

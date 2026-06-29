@@ -817,7 +817,7 @@
                 <input id="g2m-deeph-output-root" type="text" value="${REPO_ROOT}/Comparison/results/graphene_w90_g2m_deeph_benchmark" />
               </label>
             </div>
-            <details id="g2m-deeph-dataset-picker-panel" class="advanced-recipes g2m-deeph-dataset-picker" open>
+            <details id="g2m-deeph-dataset-picker-panel" class="advanced-recipes g2m-deeph-dataset-picker">
               <summary>Available joint datasets for training / reuse</summary>
               <div class="advanced-recipes-body">
                 <p class="field-help">
@@ -1148,10 +1148,12 @@
               <h3>Gate report</h3>
               <div id="g2m-deeph-derivative-gate-report" class="result-list muted-text gate-report-scroll">No derivative gate report yet.</div>
             </section>
-            <section>
-              <h3>Warnings and fatal errors</h3>
-              <div id="g2m-deeph-derivative-issues" class="result-list muted-text">No derivative warning table yet.</div>
-            </section>
+            <details class="advanced-recipes">
+              <summary>Warnings and fatal errors</summary>
+              <div class="advanced-recipes-body">
+                <div id="g2m-deeph-derivative-issues" class="result-list muted-text">No derivative warning table yet.</div>
+              </div>
+            </details>
             <section>
               <h3>Plots</h3>
               <div id="g2m-deeph-derivative-plots" class="plot-grid">
@@ -1526,7 +1528,7 @@
             </div>
             <div class="button-row">
               <label class="toggle-field">
-                <input id="show-plots" type="checkbox" checked />
+                <input id="show-plots" type="checkbox" />
                 <span>Show plots</span>
               </label>
               <button id="refresh-results" class="button secondary">Refresh</button>
@@ -1730,6 +1732,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260615-dataset-minimum-cost-per-error-plot"></script>
+    <script src="/app.js?v=20260629-ui-fast-boot"></script>
   </body>
 </html>

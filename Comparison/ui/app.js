@@ -52,22 +52,28 @@ function loadExternalScript(id, src) {
   if (existing?.dataset.loaded === "true") return Promise.resolve();
   if (existing?.dataset.loading === "true") {
     return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error(`Timeout cargando ${src}`)), 8000);
       existing.addEventListener("load", resolve, { once: true });
       existing.addEventListener("error", () => reject(new Error(`No se pudo cargar ${src}`)), { once: true });
+      existing.addEventListener("load", () => window.clearTimeout(timeout), { once: true });
+      existing.addEventListener("error", () => window.clearTimeout(timeout), { once: true });
     });
   }
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
+    const timeout = window.setTimeout(() => reject(new Error(`Timeout cargando ${src}`)), 8000);
     script.id = id;
     script.src = src;
     script.async = true;
     script.dataset.loading = "true";
     script.addEventListener("load", () => {
+      window.clearTimeout(timeout);
       script.dataset.loaded = "true";
       script.dataset.loading = "false";
       resolve();
     });
     script.addEventListener("error", () => {
+      window.clearTimeout(timeout);
       script.dataset.loading = "false";
       reject(new Error(`No se pudo cargar ${src}`));
     });
@@ -675,7 +681,7 @@ const state = {
   pollingInFlight: false,
   pollingFailures: 0,
   lastPollingToastAt: 0,
-  plotsEnabled: true,
+  plotsEnabled: false,
   plotData: null,
   fcMaxPerDisplacement: null,
   experimentWasRunning: false,
@@ -2462,6 +2468,188 @@ const G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS = [
   ["robust_error_by_atom_axis", "Robust derivative error by atom and axis"],
   ["onsite_offsite_derivative_error", "Onsite/offsite derivative error by model"],
 ];
+const G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS = new Set(["error_vs_delta", "graph2mat_vs_deeph_paired_comparison"]);
+
+const G2M_DEEPH_DERIVATIVE_METRIC_HELP = {
+  dh_mae_union_eV_per_Ang: {
+    label: "dH MAE union",
+    formula: "\\operatorname{MAE}=\\operatorname{mean}_{ij\\in R\\cup P}|(dH^{pred}/dR)_{ij}-(dH^{ref}/dR)_{ij}|",
+    description: "Error absoluto medio entre la derivada del Hamiltoniano predicha y la referencia SIESTA en la union de soportes sparse.",
+    purpose: "Da el error tipico de dH/dR sin penalizar excesivamente outliers.",
+    direction: "Menor es mejor. Unidades: eV/Ang. Es diagnostico, no decide winners.",
+  },
+  dh_rmse_union_eV_per_Ang: {
+    label: "dH RMSE union",
+    formula: "\\operatorname{RMSE}=\\sqrt{\\operatorname{mean}_{ij\\in R\\cup P}\\left((dH^{pred}/dR)_{ij}-(dH^{ref}/dR)_{ij}\\right)^2}",
+    description: "Raiz del error cuadratico medio de la derivada del Hamiltoniano en la union de soportes.",
+    purpose: "Resalta fallos grandes que una MAE puede suavizar.",
+    direction: "Menor es mejor. Si RMSE sube mucho frente a MAE, hay outliers relevantes.",
+  },
+  dh_relative_frobenius_ref: {
+    label: "dH relative Frobenius ref",
+    formula: "\\frac{\\|dH^{pred}/dR-dH^{ref}/dR\\|_{F,R}}{\\|dH^{ref}/dR\\|_{F,R}}",
+    description: "Norma Frobenius relativa del error de derivada sobre el soporte de referencia.",
+    purpose: "Mide el error global normalizado por la escala de la derivada SIESTA.",
+    direction: "Menor es mejor; valores cercanos a 0 indican derivadas de matriz mas parecidas.",
+  },
+  dh_relative_frobenius_union_robust: {
+    label: "Robust dH relative Frobenius",
+    formula: "\\frac{\\|dH^{pred}/dR-dH^{ref}/dR\\|_{F,R\\cup P}}{\\max(\\|dH^{ref}/dR\\|_{F,R\\cup P},\\epsilon)}",
+    description: "Version robusta de Frobenius relativo en la union de soportes, protegida frente a normas de referencia casi cero.",
+    purpose: "Compara error relativo de dH/dR entre modelos, atomos, ejes o tamanos de dataset.",
+    direction: "Menor es mejor. Si la referencia es muy pequena, interpretalo como diagnostico numerico.",
+  },
+  dh_relative_l1_union_robust: {
+    label: "Robust dH relative L1",
+    formula: "\\frac{\\|dH^{pred}/dR-dH^{ref}/dR\\|_{1,R\\cup P}}{\\max(\\|dH^{ref}/dR\\|_{1,R\\cup P},\\epsilon)}",
+    description: "Error relativo L1 robusto de la derivada del Hamiltoniano en la union de soportes.",
+    purpose: "Complementa Frobenius: L1 es menos dominado por pocos errores enormes.",
+    direction: "Menor es mejor.",
+  },
+  dh_support_f1: {
+    label: "dH support F1",
+    formula: "F_1=\\frac{2\\,precision\\,recall}{precision+recall}",
+    description: "F1 del soporte sparse de la derivada: combina si el modelo encuentra entradas dH/dR activas y si evita activaciones falsas.",
+    purpose: "Separa errores de patron sparse de errores de valor numerico.",
+    direction: "Mayor es mejor; 1 es soporte perfecto.",
+  },
+  dh_false_zero_rate: {
+    label: "dH false-zero rate",
+    formula: "\\frac{|\\{ij:(dH^{ref}/dR)_{ij}\\ne0\\land(dH^{pred}/dR)_{ij}=0\\}|}{|R|}",
+    description: "Fraccion del soporte de referencia que el modelo deja como cero.",
+    purpose: "Detecta acoplamientos derivados que la prediccion pierde.",
+    direction: "Menor es mejor.",
+  },
+  dh_false_nonzero_rate: {
+    label: "dH false-nonzero rate",
+    formula: "\\frac{|\\{ij:(dH^{pred}/dR)_{ij}\\ne0\\land(dH^{ref}/dR)_{ij}=0\\}|}{|P|}",
+    description: "Fraccion del soporte predicho que no existe en la referencia.",
+    purpose: "Detecta acoplamientos derivados espurios.",
+    direction: "Menor es mejor.",
+  },
+  dh_pearson_union: {
+    label: "dH Pearson correlation",
+    formula: "\\rho=\\operatorname{corr}(dH^{pred}/dR,dH^{ref}/dR)",
+    description: "Correlacion lineal entre derivadas predichas y de referencia en la union de soportes.",
+    purpose: "Mira si el modelo sigue la tendencia de magnitudes y signos.",
+    direction: "Mayor es mejor; 1 indica correlacion lineal perfecta.",
+  },
+  dh_spearman_union: {
+    label: "dH Spearman correlation",
+    formula: "\\rho_s=\\operatorname{corr}(rank(dH^{pred}/dR),rank(dH^{ref}/dR))",
+    description: "Correlacion de rangos entre derivadas predichas y de referencia.",
+    purpose: "Comprueba si el modelo ordena bien entradas grandes y pequenas aunque la escala no sea perfecta.",
+    direction: "Mayor es mejor; 1 indica mismo orden relativo.",
+  },
+  dh_residual_mean_union_eV_per_Ang: {
+    label: "Mean dH residual",
+    formula: "\\operatorname{mean}_{R\\cup P}(dH^{pred}/dR-dH^{ref}/dR)",
+    description: "Sesgo medio firmado del error de derivada.",
+    purpose: "Detecta si el modelo desplaza sistematicamente las derivadas hacia arriba o abajo.",
+    direction: "Cercano a 0 es mejor.",
+  },
+  dh_residual_std_union_eV_per_Ang: {
+    label: "dH residual std",
+    formula: "\\operatorname{std}_{R\\cup P}(dH^{pred}/dR-dH^{ref}/dR)",
+    description: "Dispersion de los residuos de dH/dR.",
+    purpose: "Resume variabilidad del error despues del sesgo medio.",
+    direction: "Menor es mejor.",
+  },
+  dh_residual_median_union_eV_per_Ang: {
+    label: "Median dH residual",
+    formula: "\\operatorname{median}_{R\\cup P}(dH^{pred}/dR-dH^{ref}/dR)",
+    description: "Residuo mediano firmado de la derivada.",
+    purpose: "Da una lectura robusta del sesgo central.",
+    direction: "Cercano a 0 es mejor.",
+  },
+  dh_residual_bias_over_mae_union: {
+    label: "dH bias over MAE",
+    formula: "\\frac{|\\operatorname{mean}(residual)|}{\\operatorname{MAE}}",
+    description: "Cuanto del error absoluto medio viene de sesgo sistematico.",
+    purpose: "Distingue sesgo global de ruido disperso.",
+    direction: "Menor es mejor.",
+  },
+  dh_residual_abs_p90_union_eV_per_Ang: {
+    label: "dH abs residual p90",
+    formula: "P_{90}(|dH^{pred}/dR-dH^{ref}/dR|)",
+    description: "Percentil 90 del error absoluto de derivada.",
+    purpose: "Mide la cola de errores grandes sin depender del maximo.",
+    direction: "Menor es mejor.",
+  },
+  dh_residual_abs_p95_union_eV_per_Ang: {
+    label: "dH abs residual p95",
+    formula: "P_{95}(|dH^{pred}/dR-dH^{ref}/dR|)",
+    description: "Percentil 95 del error absoluto de derivada.",
+    purpose: "Vigila outliers fuertes de dH/dR.",
+    direction: "Menor es mejor.",
+  },
+  dh_residual_abs_p99_union_eV_per_Ang: {
+    label: "dH abs residual p99",
+    formula: "P_{99}(|dH^{pred}/dR-dH^{ref}/dR|)",
+    description: "Percentil 99 del error absoluto de derivada.",
+    purpose: "Muestra la cola extrema sin usar un maximo posiblemente inestable.",
+    direction: "Menor es mejor.",
+  },
+  dH_pred_hermiticity_defect: {
+    label: "Predicted dH Hermiticity defect",
+    formula: "\\frac{\\|dH^{pred}/dR-(dH^{pred}/dR)^\\dagger\\|_F}{\\|dH^{pred}/dR\\|_F}",
+    description: "Defecto de Hermiticidad de la derivada predicha.",
+    purpose: "Comprueba si la derivada predicha respeta la simetria fisica esperada.",
+    direction: "Menor es mejor; cero es ideal.",
+  },
+  dH_hermiticity_error_delta: {
+    label: "dH Hermiticity error delta",
+    formula: "|h_{pred}-h_{ref}|",
+    description: "Diferencia entre defecto de Hermiticidad predicho y de referencia.",
+    purpose: "Detecta si el modelo introduce mas no-Hermiticidad que la referencia.",
+    direction: "Menor es mejor.",
+  },
+};
+
+const G2M_DEEPH_DERIVATIVE_PLOT_HELP_BY_ID = {
+  error_vs_delta: {
+    purpose: "Comprueba estabilidad frente al paso de diferencia finita.",
+    direction: "Curvas bajas y estables al cambiar delta son mas fiables.",
+  },
+  graph2mat_vs_deeph_paired_comparison: {
+    metric: "Paired dH MAE",
+    formula: "x=\\operatorname{MAE}_{Graph2Mat},\\quad y=\\operatorname{MAE}_{DeepH}",
+    description: "Compara errores de dH/dR de ambos modelos sobre los mismos stencils.",
+    purpose: "Permite ver pares donde un metodo falla mas que el otro.",
+    direction: "Puntos bajo la diagonal favorecen DeepH en MAE; puntos sobre la diagonal favorecen Graph2Mat. Sigue siendo diagnostico.",
+  },
+  derivative_error_by_abs_ref_quantile: {
+    purpose: "Muestra si los errores se concentran en derivadas pequenas, medianas o grandes.",
+    direction: "Menor es mejor en todos los cuantiles; colas altas indican regimenes dificiles.",
+  },
+  derivative_relative_l1_by_abs_ref_quantile: {
+    purpose: "Normaliza el error por escala de referencia en cada cuantil.",
+    direction: "Menor es mejor; cuantiles pequenos pueden ser ruidosos si la referencia es casi cero.",
+  },
+  robust_error_by_displaced_atom: {
+    purpose: "Localiza atomos desplazados que producen derivadas mas dificiles.",
+    direction: "Barras mas bajas son mejores; atomos altos piden inspeccion local.",
+  },
+  robust_error_by_axis: {
+    purpose: "Separa sensibilidad de dH/dR por direccion cartesiana.",
+    direction: "Barras mas bajas son mejores; anisotropias grandes pueden indicar geometria o modelo dificil.",
+  },
+  robust_error_by_atom_axis: {
+    purpose: "Combina atomos y ejes para encontrar casos locales problematicos.",
+    direction: "Barras mas bajas son mejores.",
+  },
+  onsite_offsite_derivative_error: {
+    purpose: "Separa errores onsite y offsite para distinguir terminos locales de acoplamientos entre atomos.",
+    direction: "Menor es mejor; compara onsite/offsite solo con la misma base y convenciones.",
+  },
+  support_change_false_zero_false_nonzero: {
+    metric: "dH support-change diagnostics",
+    formula: "support\\ change,\\ false\\ zero,\\ false\\ nonzero",
+    description: "Resume cambios de soporte sparse y errores de ceros/no-ceros en dH/dR.",
+    purpose: "Distingue fallos de patron sparse de fallos de magnitud.",
+    direction: "Menor es mejor para las tres tasas.",
+  },
+};
 
 function renderG2MDeepHDerivativeRunSelector() {
   const list = document.getElementById("g2m-deeph-derivative-run-list");
@@ -2527,6 +2715,36 @@ function g2mDeephDerivativePlotLabel(row = {}) {
   return `${row.sample || "value"}${suffix}`;
 }
 
+function g2mDeephDerivativeMetricHelp(metricKey) {
+  const key = String(metricKey || "").trim();
+  if (G2M_DEEPH_DERIVATIVE_METRIC_HELP[key]) return G2M_DEEPH_DERIVATIVE_METRIC_HELP[key];
+  return {
+    label: key || "Derivative metric",
+    formula: "m=\\operatorname{mean}_{\\text{finite derivative rows}}(metric)",
+    description: "Metrica diagnostica calculada sobre diferencias finitas de Hamiltonianos: dH_pred/dR frente a dH_ref/dR.",
+    purpose: "Sirve para inspeccionar el comportamiento de derivadas sin cambiar el winner de metricas H-vs-H.",
+    direction: "Interpreta la direccion segun el nombre de la metrica; errores y tasas bajan, correlaciones y F1 suben.",
+  };
+}
+
+function g2mDeephDerivativePlotInfo(plot = {}) {
+  const metrics = (plot.metrics || []).filter((metric) => metric?.key);
+  const primaryMetric = metrics[0]?.key || plot.y_key || "";
+  const help = g2mDeephDerivativeMetricHelp(primaryMetric);
+  const explicit = G2M_DEEPH_DERIVATIVE_PLOT_HELP_BY_ID[plot.id] || {};
+  const metricLabel = metrics.length > 1
+    ? metrics.map((metric) => g2mDeephDerivativeMetricHelp(metric.key).label || metric.label || metric.key).join(", ")
+    : (explicit.metric || help.label || plot.y_title || primaryMetric);
+  return {
+    title: plot.title || explicit.title || "Derivative diagnostic",
+    metric: metricLabel,
+    formula: explicit.formula || help.formula,
+    description: explicit.description || help.description,
+    purpose: explicit.purpose || help.purpose,
+    direction: explicit.direction || help.direction || G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY,
+  };
+}
+
 function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
   const rows = plot.rows || [];
   const labels = rows.map((row) => g2mDeephDerivativePlotLabel(row));
@@ -2547,6 +2765,7 @@ function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
       xaxis: { title: "Group", gridcolor: "#edf1f4", zeroline: false },
       yaxis: { title: plot.metrics?.[0]?.unit ? `${plot.metrics[0].label} (${plot.metrics[0].unit})` : plot.title || "", gridcolor: "#edf1f4", zeroline: false },
     }),
+    { plotInfo: g2mDeephDerivativePlotInfo(plot) },
   );
 }
 
@@ -2559,12 +2778,13 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
     grouped.get(key).push(row);
   }
   const metrics = (plot.metrics && plot.metrics.length) ? plot.metrics : [{ key: plot.y_key, label: plot.y_title || plot.y_key }];
+  const mode = G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS.has(plot.id) ? "markers" : null;
   const traces = [];
   Array.from(grouped.entries()).forEach(([key, rows], index) => {
     metrics.forEach((metric, metricIndex) => {
       traces.push({
         type: "scatter",
-        mode: rows.length > 1 ? "lines+markers" : "markers",
+        mode: mode || (rows.length > 1 ? "lines+markers" : "markers"),
         name: metrics.length > 1 ? `${key} · ${metric.label || metric.key}` : key,
         marker: { symbol: g2mDeephIsDeepH(key) ? "triangle-up" : "circle", size: 9, color: plotColor(index) },
         line: { color: plotColor(index), dash: metricIndex ? "dash" : "solid" },
@@ -2584,6 +2804,7 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
       yaxis: { title: plot.y_title || "y", gridcolor: "#edf1f4", zeroline: false },
       legend: { orientation: "h", y: -0.24 },
     }),
+    { plotInfo: g2mDeephDerivativePlotInfo(plot) },
   );
 }
 
@@ -2612,6 +2833,7 @@ function renderG2MDeepHDerivativePlotSummary(card, plot, message = "") {
     ].filter(Boolean).join(" | ");
     card.appendChild(details);
   }
+  installPlotInfoBubble(card, g2mDeephDerivativePlotInfo(plot));
 }
 
 function g2mDeephDerivativePlotSections(plotPayload = {}) {
@@ -9561,7 +9783,8 @@ function latexText(value) {
   return String(value || "").replace(/[{}\\]/g, "");
 }
 
-function plotInfoFor(plotId) {
+function plotInfoFor(plotId, explicitInfo = null) {
+  if (explicitInfo) return explicitInfo;
   const g2mDeepHInfo = G2M_DEEPH_PLOT_HELP_BY_ID[plotId];
   if (g2mDeepHInfo) return g2mDeepHInfo;
   const crossInfo = CROSS_PLOT_HELP_BY_ID[plotId];
@@ -9593,11 +9816,11 @@ function plotInfoFor(plotId) {
   return info;
 }
 
-function installPlotInfoBubble(id) {
+function installPlotInfoBubble(id, explicitInfo = null) {
   const node = plotNode(id);
   if (!node) return;
   node.querySelectorAll(":scope > .plot-info-bubble").forEach((bubble) => bubble.remove());
-  const info = plotInfoFor(node.id);
+  const info = plotInfoFor(node.id, explicitInfo);
   if (!info) return;
 
   const bubble = document.createElement("div");
@@ -9681,6 +9904,7 @@ function schedulePlotResize(id = null) {
 function renderPlot(id, traces, layout, config = {}) {
   const node = plotNode(id);
   if (!node || !window.Plotly) return;
+  const { plotInfo = null, ...plotlyConfig } = config || {};
   const nextLayout = sciencePlotLayout(layout || {});
   const nextTraces = (traces || []).map((trace, index) => sciencePlotTrace(trace, index));
   const nextConfig = {
@@ -9691,12 +9915,12 @@ function renderPlot(id, traces, layout, config = {}) {
       format: "svg",
       filename: "graph2mat_deeph_plot",
       scale: 2,
-      ...(config.toImageButtonOptions || {}),
+      ...(plotlyConfig.toImageButtonOptions || {}),
     },
-    ...config,
+    ...plotlyConfig,
   };
   Plotly.react(node, nextTraces, nextLayout, nextConfig).then(() => {
-    installPlotInfoBubble(node);
+    installPlotInfoBubble(node, plotInfo);
     schedulePlotResize(node);
   });
 }
@@ -12120,12 +12344,6 @@ async function boot() {
   renderG2MDeepHTrainingSweepPreview();
   renderG2MDeepHArtifactSummary(null);
   renderG2MDeepHMetricSummary(null);
-
-  try {
-    await loadDatasetMinimum();
-  } catch (error) {
-    renderDatasetMinimumLoadError(error);
-  }
 
   await pollOnce();
   state.polling = setInterval(pollOnce, POLL_INTERVAL_MS);
