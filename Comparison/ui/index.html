@@ -4,7 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pipeline Comparison</title>
-    <link rel="stylesheet" href="/styles.css?v=20260528-g2m-parallel-trains" />
+    <link rel="stylesheet" href="/styles.css?v=20260629-ui-theme" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("ui-theme");
+          if (saved === "light" || saved === "dark") {
+            document.documentElement.setAttribute("data-theme", saved);
+          }
+        } catch (error) {
+          /* localStorage unavailable; default theme applies */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div class="app-shell">
@@ -13,6 +25,10 @@
           <p class="eyebrow">MD / FC Cartesian / Random Cartesian</p>
           <h1>Comparison</h1>
         </div>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false">
+          <span class="theme-toggle-icon" aria-hidden="true">&#9788;</span>
+          <span id="theme-toggle-label">Light mode</span>
+        </button>
         <nav class="tabs" aria-label="Views">
           <button class="tab hidden" data-view="run" data-icon="RN" aria-hidden="true" tabindex="-1">Run</button>
           <button class="tab active" data-view="experiment" data-icon="EX">Experiment</button>
@@ -1116,14 +1132,19 @@
               <div>
                 <p class="eyebrow">Derivative diagnostics</p>
                 <h3>Hamiltonian derivative diagnostics</h3>
+              </div>
+              <button id="g2m-deeph-derivative-refresh" class="button secondary" type="button">Refresh derivative diagnostics</button>
+            </div>
+            <details class="advanced-recipes derivative-methodology-notes">
+              <summary>Methodology notes (diagnostic-only, no winner claims)</summary>
+              <div class="advanced-recipes-body">
                 <p class="field-help">Reference: finite differences of SIESTA Hamiltonians</p>
                 <p class="field-help">SIESTA force constants are not treated as dH/dR</p>
                 <p class="field-help">Default status: diagnostic-only unless all scientific gates pass</p>
                 <p class="field-help">Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.</p>
                 <p class="field-help">Use these outputs as a technical internal diagnostic only. No winner claim comes from derivative metrics.</p>
               </div>
-              <button id="g2m-deeph-derivative-refresh" class="button secondary" type="button">Refresh derivative diagnostics</button>
-            </div>
+            </details>
             <div class="g2m-deeph-run-selector" aria-label="Derivative diagnostics run selector">
               <div class="run-selector-heading">
                 <div>
@@ -1732,6 +1753,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260629-ui-fast-boot"></script>
+    <script src="/app.js?v=20260629-ui-theme"></script>
   </body>
 </html>

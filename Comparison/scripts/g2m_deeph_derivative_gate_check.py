@@ -112,6 +112,7 @@ def path_map(root: Path) -> dict[str, Path]:
         "stencil_status": root / "stencil_status.csv",
         "hermiticity": root / "derivative_hermiticity.csv",
         "delta_stability": root / "derivative_delta_stability.json",
+        "geometry_validation": root / "derivative_geometry_validation.csv",
     }
 
 
@@ -129,6 +130,7 @@ def load_dataset(root: Path) -> dict[str, Any]:
         "matrix_rows": read_csv_rows(paths["matrix_metrics"]),
         "stencil_rows": read_csv_rows(paths["stencil_status"]),
         "hermiticity_rows": read_csv_rows(paths["hermiticity"]),
+        "geometry_rows": read_csv_rows(paths["geometry_validation"]),
     }
 
 
@@ -253,6 +255,93 @@ def explicit_issue(dataset: dict[str, Any], terms: tuple[str, ...], *, require_r
     return False
 
 
+def rows_for_hash_checks(dataset: dict[str, Any]) -> list[dict[str, str]]:
+    return [*dataset["matrix_rows"], *dataset["stencil_rows"]]
+
+
+def has_consistent_required_hashes(dataset: dict[str, Any]) -> bool:
+    required = ("basis_hash", "pseudopotential_hash", "orbital_ordering_hash", "material_compatibility_hash")
+    rows = rows_for_hash_checks(dataset)
+    for field in required:
+        if any(not str(row.get(field) or "").strip() for row in rows):
+            return False
+        values = unique_nonempty([row.get(field) for row in rows])
+        if not values:
+            return False
+        if len(values) > 1:
+            return False
+    return True
+
+
+def geometry_validation_passed(dataset: dict[str, Any]) -> bool:
+    summary = dataset["manifest"].get("geometry_validation")
+    if isinstance(summary, dict) and int_or_none(summary.get("errors")) not in (None, 0):
+        return False
+    if any(str(row.get("status") or "").strip().lower() == "error" for row in dataset["geometry_rows"]):
+        return False
+    if any(truthy(row.get("invalid_geometry")) or truthy(row.get("geometry_validation_failed")) for row in dataset["matrix_rows"]):
+        return False
+    return bool(summary or dataset["geometry_rows"] or dataset["matrix_rows"])
+
+
+def unit_metadata_explicit(dataset: dict[str, Any]) -> bool:
+    if explicit_issue(dataset, ("missing_unit_metadata",)):
+        return False
+    for row in dataset["matrix_rows"]:
+        value = str(row.get("unit_metadata_explicit") or "").strip()
+        if value and not truthy(value):
+            return False
+    return True
+
+
+def central_only(dataset: dict[str, Any]) -> bool:
+    methods = unique_nonempty(
+        [
+            dataset["manifest"].get("finite_difference_method"),
+            *(row.get("finite_difference_method") for row in dataset["matrix_rows"]),
+            *(row.get("finite_difference_method") for row in dataset["stencil_rows"]),
+        ]
+    )
+    return bool(methods) and all(method.strip().lower() == "central" for method in methods)
+
+
+def delta_sensitivity_has_two_deltas(dataset: dict[str, Any]) -> bool:
+    delta_stability = dataset.get("delta_stability") if isinstance(dataset.get("delta_stability"), dict) else {}
+    unique_deltas = [
+        value
+        for value in (delta_stability.get("unique_delta_ang") or [])
+        if number(value) is not None
+    ]
+    if len(set(float(value) for value in unique_deltas)) >= 2:
+        return True
+    for row in delta_stability.get("rows") or []:
+        if int_or_none(row.get("delta_count")) and int(row.get("delta_count")) >= 2:
+            return True
+    metric_deltas = [number(row.get("delta_ang")) for row in central_metric_rows(dataset)]
+    return len({float(value) for value in metric_deltas if value is not None}) >= 2
+
+
+def split_consistency_proven(dataset: dict[str, Any]) -> bool:
+    manifest = dataset["manifest"]
+    return (
+        truthy(manifest.get("split_consistency_proven"))
+        or truthy(manifest.get("split_metadata_verified"))
+        or truthy(manifest.get("dataset_split_evidence"))
+    )
+
+
+def winner_claim_requires_paired_gate(dataset: dict[str, Any]) -> bool:
+    manifest = dataset["manifest"]
+    winner_claimed = (
+        truthy(manifest.get("derivative_winner_claim"))
+        or truthy(manifest.get("winner_claimed"))
+        or truthy(manifest.get("derivative_winner_claimed"))
+    )
+    if not winner_claimed:
+        return True
+    return truthy(manifest.get("paired_comparison_gate_proven")) or truthy(manifest.get("explicit_paired_comparison_gate"))
+
+
 def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     manifest = dataset["manifest"]
     matrix_rows = dataset["matrix_rows"]
@@ -262,6 +351,9 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     delta_available = truthy(manifest.get("delta_sensitivity_study_available")) or truthy(manifest.get("delta_sensitivity_study_passed"))
     if not delta_available:
         delta_available = delta_status == "available"
+    delta_passed = truthy(manifest.get("delta_sensitivity_study_passed"))
+    if "delta_sensitivity_study_passed" not in manifest:
+        delta_passed = delta_available
     convergence_status = str(
         manifest.get("delta_stability_convergence_status")
         or delta_stability.get("delta_stability_convergence_status")
@@ -276,10 +368,15 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     comparison_statuses = unique_nonempty([row.get("comparison_status") for row in matrix_rows])
     return {
         "has_non_diagnostic_comparison_rows": bool(comparison_statuses) and all(status != "diagnostic_only" for status in comparison_statuses),
+        "central_only": central_only(dataset),
+        "geometry_validation_passed": geometry_validation_passed(dataset),
+        "unit_metadata_explicit": unit_metadata_explicit(dataset),
+        "required_hashes_present_and_consistent": has_consistent_required_hashes(dataset),
         "basis_gauge_verified": truthy(manifest.get("basis_gauge_verified")) or truthy(manifest.get("basis_gauge_evidence")),
         "orbital_ordering_verified": truthy(manifest.get("orbital_ordering_verified")) or truthy(manifest.get("orbital_ordering_evidence")),
         "delta_sensitivity_study_available": delta_available,
-        "delta_sensitivity_study_passed": delta_available,
+        "delta_sensitivity_study_passed": delta_passed,
+        "delta_sensitivity_has_two_deltas": delta_sensitivity_has_two_deltas(dataset),
         "delta_stability_converged": delta_converged,
         "delta_stability_convergence_status": convergence_status or "not_evaluated_without_thresholds",
         "reference_noise_evidence": truthy(manifest.get("reference_noise_verified"))
@@ -288,10 +385,12 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
         "independent_dataset_metadata": truthy(manifest.get("independent_dataset_metadata"))
         or truthy(manifest.get("dataset_split_evidence"))
         or (str(manifest.get("split") or "").strip().lower() == "test" and truthy(manifest.get("split_metadata_verified"))),
+        "split_consistency_proven": split_consistency_proven(dataset),
         "cross_model_equivalence_proven": truthy(manifest.get("cross_model_equivalence_proven"))
         or str(manifest.get("cross_model_equivalence_status") or "").strip().lower() == "proven",
         "paper_level_candidate_requested": truthy(manifest.get("paper_level_candidate_requested"))
         or truthy(manifest.get("paper_level_evidence_complete")),
+        "winner_claim_paired_gate_ok": winner_claim_requires_paired_gate(dataset),
     }
 
 
@@ -534,11 +633,19 @@ def overall_status(
     if any(not evidence["has_non_diagnostic_comparison_rows"] for evidence in paper_evidence.values()):
         return "internal_diagnostic"
     paper_blocked = [
-        not info["basis_gauge_verified"]
+        not info["central_only"]
+        or not info["geometry_validation_passed"]
+        or not info["unit_metadata_explicit"]
+        or not info["required_hashes_present_and_consistent"]
+        or not info["basis_gauge_verified"]
         or not info["orbital_ordering_verified"]
+        or not info["delta_sensitivity_has_two_deltas"]
+        or not info["delta_sensitivity_study_passed"]
         or not info["delta_stability_converged"]
         or not info["reference_noise_evidence"]
         or not info["independent_dataset_metadata"]
+        or not info["split_consistency_proven"]
+        or not info["winner_claim_paired_gate_ok"]
         for info in paper_evidence.values()
     ]
     if len(datasets) > 1 and not all(info["cross_model_equivalence_proven"] for info in paper_evidence.values()):
@@ -685,6 +792,60 @@ def build_derivative_gate_report(
             )
         )
     for model, info in paper_evidence.items():
+        dataset = next(dataset for dataset in datasets if dataset["model"] == model)
+        manifest_path = dataset["paths"]["manifest"]
+        if not info["central_only"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_central_only_required",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires central finite-difference stencils only.",
+                    evidence_paths=[manifest_path],
+                )
+            )
+        if not info["geometry_validation_passed"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_geometry_validation_failed",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires geometry validation to pass.",
+                    evidence_paths=[dataset["paths"]["geometry_validation"], manifest_path],
+                )
+            )
+        if not info["unit_metadata_explicit"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_unit_metadata_missing",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires explicit Hamiltonian, displacement, and derivative units.",
+                    evidence_paths=[dataset["paths"]["matrix_metrics"], dataset["paths"]["stencil_status"]],
+                )
+            )
+        if not info["required_hashes_present_and_consistent"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_required_hashes_missing_or_inconsistent",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires consistent basis, pseudopotential, orbital-ordering, and material-compatibility hashes.",
+                    evidence_paths=[dataset["paths"]["matrix_metrics"], dataset["paths"]["stencil_status"]],
+                )
+            )
         if not info["delta_sensitivity_study_available"]:
             blockers.append(
                 gate_row(
@@ -695,7 +856,33 @@ def build_derivative_gate_report(
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
                     message="Paper-level candidate status requires a delta sensitivity study.",
-                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                    evidence_paths=[manifest_path],
+                )
+            )
+        elif not info["delta_sensitivity_study_passed"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_delta_sweep_failed",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires the configured delta sensitivity criterion to pass.",
+                    evidence_paths=[dataset["paths"]["delta_stability"], manifest_path],
+                )
+            )
+        elif not info["delta_sensitivity_has_two_deltas"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_delta_sweep_needs_two_deltas",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires a delta sensitivity study with at least two delta values.",
+                    evidence_paths=[dataset["paths"]["delta_stability"], manifest_path],
                 )
             )
         elif not info["delta_stability_converged"]:
@@ -708,7 +895,7 @@ def build_derivative_gate_report(
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
                     message="Paper-level candidate status requires documented delta stability convergence thresholds and convergence evidence.",
-                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                    evidence_paths=[manifest_path],
                 )
             )
         if not info["basis_gauge_verified"] or not info["orbital_ordering_verified"]:
@@ -721,7 +908,7 @@ def build_derivative_gate_report(
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
                     message="Paper-level candidate status requires explicit orbital-ordering and basis/gauge evidence.",
-                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                    evidence_paths=[manifest_path],
                 )
             )
         if not info["reference_noise_evidence"]:
@@ -734,7 +921,7 @@ def build_derivative_gate_report(
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
                     message="Paper-level candidate status requires repeated-reference/noise evidence.",
-                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                    evidence_paths=[manifest_path],
                 )
             )
         if not info["independent_dataset_metadata"]:
@@ -747,7 +934,33 @@ def build_derivative_gate_report(
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
                     message="Paper-level candidate status requires independent dataset/split metadata.",
-                    evidence_paths=[next(dataset for dataset in datasets if dataset["model"] == model)["paths"]["manifest"]],
+                    evidence_paths=[manifest_path],
+                )
+            )
+        if not info["split_consistency_proven"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_split_consistency_missing",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Paper-level derivative candidate status requires proven split consistency.",
+                    evidence_paths=[manifest_path],
+                )
+            )
+        if not info["winner_claim_paired_gate_ok"]:
+            blockers.append(
+                gate_row(
+                    "paper_level_winner_claim_requires_paired_gate",
+                    model=model,
+                    severity="blocker",
+                    status="fail",
+                    blocks_status="paper_level_candidate",
+                    claim_scope="paper_level_only",
+                    message="Derivative winner claims require an explicit paired-comparison gate.",
+                    evidence_paths=[manifest_path],
                 )
             )
 

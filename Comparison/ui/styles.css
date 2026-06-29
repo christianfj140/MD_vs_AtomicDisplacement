@@ -1,4 +1,73 @@
 :root {
+  color-scheme: dark;
+  /* Surfaces */
+  --bg: #0b1118;
+  --bg-grid: rgba(143, 203, 191, 0.035);
+  --surface: #141c26;
+  --surface-raised: #182231;
+  --surface-soft: #121a24;
+  --surface-steel: #101720;
+  --sidebar: #0a1019;
+  --sidebar-soft: #131c27;
+  --sidebar-line: rgba(171, 204, 216, 0.12);
+  /* Text */
+  --text: #f1f5f8;
+  --ink: #eaf0f4;
+  --ink-strong: #ffffff;
+  --muted: #aebcc9;
+  --muted-strong: #c7d3dc;
+  /* Lines / borders */
+  --line: #25313e;
+  --line-strong: #36495a;
+  /* Brand / status */
+  --accent: #2fc7ba;
+  --accent-strong: #1ea69a;
+  --accent-soft: rgba(47, 199, 186, 0.14);
+  --accent-glow: rgba(47, 199, 186, 0.22);
+  --info: #4d9fdb;
+  --info-soft: rgba(77, 159, 219, 0.14);
+  --success: #34c98c;
+  --success-soft: rgba(52, 201, 140, 0.13);
+  --warning: #e3a73c;
+  --warning-soft: rgba(227, 167, 60, 0.14);
+  --danger: #ef6b72;
+  --danger-strong: #d4505a;
+  --danger-soft: rgba(239, 107, 114, 0.13);
+  --focus: rgba(47, 199, 186, 0.32);
+  --code: #060a0f;
+  /* Plot-specific (Plotly reads these via JS, not CSS cascade) */
+  --plot-bg: #121a24;
+  --plot-grid: rgba(231, 238, 243, 0.16);
+  --plot-axis-text: #e7eef3;
+  --plot-font: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --surface-grad-1: rgba(255, 255, 255, 0.03);
+  --surface-grad-2: rgba(255, 255, 255, 0);
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  --shadow-md: 0 16px 38px rgba(0, 0, 0, 0.42);
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  /* Radius */
+  --radius: 10px;
+  --radius-sm: 7px;
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 28px;
+  --space-7: 36px;
+  /* Type scale */
+  --fs-caption: 11px;
+  --fs-body-sm: 12px;
+  --fs-body: 13px;
+  --fs-body-lg: 14px;
+  --fs-h3: 16px;
+  --fs-h2: 22px;
+  --fs-h1: 24px;
+}
+
+[data-theme="light"] {
   color-scheme: light;
   --bg: #e7eef3;
   --bg-grid: rgba(33, 54, 72, 0.055);
@@ -9,6 +78,7 @@
   --sidebar: #101923;
   --sidebar-soft: #182532;
   --sidebar-line: rgba(171, 204, 216, 0.18);
+  --text: #172330;
   --ink: #172330;
   --ink-strong: #07131f;
   --muted: #637181;
@@ -30,6 +100,12 @@
   --danger-soft: #fff0f1;
   --focus: rgba(15, 141, 134, 0.22);
   --code: #0b141e;
+  --plot-bg: #ffffff;
+  --plot-grid: rgba(17, 24, 39, 0.10);
+  --plot-axis-text: #111827;
+  --plot-font: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --surface-grad-1: rgba(255, 255, 255, 0.98);
+  --surface-grad-2: rgba(248, 251, 253, 0.94);
   --shadow-sm: 0 1px 2px rgba(13, 27, 42, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.35) inset;
   --shadow-md: 0 16px 38px rgba(17, 33, 50, 0.12);
   --shadow: 0 18px 50px rgba(17, 33, 50, 0.18);
@@ -50,8 +126,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
-    radial-gradient(circle at 18% 0%, rgba(45, 111, 159, 0.10), transparent 32rem),
-    radial-gradient(circle at 100% 18%, rgba(15, 141, 134, 0.09), transparent 30rem),
+    radial-gradient(circle at 18% 0%, var(--info-soft), transparent 32rem),
+    radial-gradient(circle at 100% 18%, var(--accent-soft), transparent 30rem),
     linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px),
     linear-gradient(180deg, var(--bg-grid) 1px, transparent 1px),
     var(--bg);
@@ -60,6 +136,7 @@ body {
   color: var(--ink);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   letter-spacing: 0;
+  transition: background-color 160ms ease, color 160ms ease;
 }
 
 button,
@@ -84,22 +161,59 @@ p {
 h1 {
   max-width: 100%;
   color: #f7fbfd;
-  font-size: 30px;
-  line-height: 1.05;
-  font-weight: 860;
+  font-size: var(--fs-h1);
+  line-height: 1.15;
+  font-weight: 800;
 }
 
 h2 {
   color: var(--ink-strong);
-  font-size: 28px;
-  line-height: 1.12;
-  font-weight: 840;
+  font-size: var(--fs-h2);
+  line-height: 1.2;
+  font-weight: 760;
 }
 
 h3 {
   color: var(--ink-strong);
-  font-size: 18px;
-  line-height: 1.2;
+  font-size: var(--fs-h3);
+  line-height: 1.3;
+  font-weight: 700;
+}
+
+.caption {
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Theme toggle */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid var(--sidebar-line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.05);
+  color: #d8e6ed;
+  font-size: var(--fs-body-sm);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.theme-toggle:hover {
+  border-color: rgba(143, 203, 191, 0.4);
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+}
+
+.theme-toggle .theme-toggle-icon {
+  font-size: 14px;
+  line-height: 1;
 }
 
 code,
@@ -296,7 +410,7 @@ pre {
   min-height: 66px;
   margin-bottom: 22px;
   padding-bottom: 16px;
-  border-bottom: 1px solid rgba(174, 191, 206, 0.78);
+  border-bottom: 1px solid var(--line);
 }
 
 .panel-heading {
@@ -322,10 +436,11 @@ pre {
 
 .panel,
 .plots-panel {
-  border: 1px solid rgba(174, 191, 206, 0.82);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 253, 0.94));
+    linear-gradient(180deg, var(--surface-grad-1), var(--surface-grad-2)),
+    var(--surface);
   box-shadow: var(--shadow-sm);
 }
 
@@ -445,8 +560,8 @@ pre {
   gap: 8px;
   margin-top: 16px;
   color: var(--muted-strong);
-  font-size: 13px;
-  font-weight: 800;
+  font-size: var(--fs-body);
+  font-weight: 700;
 }
 
 .field > span,
@@ -458,8 +573,8 @@ pre {
 .field small,
 .field-help {
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 550;
+  font-size: var(--fs-body-sm);
+  font-weight: 500;
   line-height: 1.45;
 }
 
@@ -470,10 +585,10 @@ pre {
   min-height: 40px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, #ffffff, #fbfdff);
+  background: var(--surface-raised);
   color: var(--ink);
   padding: 9px 11px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.86);
+  box-shadow: var(--shadow-sm);
   transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
 }
 
@@ -514,10 +629,10 @@ pre {
 
 .field-alert {
   padding: 8px 10px;
-  border: 1px solid #efb9bd;
+  border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
-  color: #7d3036;
+  color: var(--danger-strong);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.4;
@@ -533,7 +648,7 @@ pre {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(241, 247, 250, 0.92)),
+    linear-gradient(180deg, var(--surface-grad-1), var(--surface-grad-2)),
     var(--surface-soft);
 }
 
@@ -549,15 +664,15 @@ pre {
   overflow: auto;
   margin: 0;
   padding: 16px;
-  border: 1px solid #1d2d3b;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
   background:
     linear-gradient(180deg, rgba(38, 57, 73, 0.22), rgba(8, 16, 25, 0.08)),
     var(--code);
   color: #e7f2ef;
   white-space: pre-wrap;
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--fs-body);
+  line-height: 1.5;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
@@ -580,7 +695,8 @@ pre {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(237, 243, 247, 0.86));
+    linear-gradient(180deg, var(--surface-grad-1), var(--surface-grad-2)),
+    var(--surface-soft);
 }
 
 .material-selector-panel {
@@ -590,7 +706,8 @@ pre {
   border-left: 4px solid var(--info);
   border-radius: var(--radius);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(240, 247, 251, 0.90));
+    linear-gradient(180deg, var(--surface-grad-1), var(--surface-grad-2)),
+    var(--surface-soft);
 }
 
 .material-validation {
@@ -605,15 +722,15 @@ pre {
 }
 
 .material-validation.valid {
-  border-color: #acd9c5;
+  border-color: var(--success);
   background: var(--success-soft);
-  color: #1d5f45;
+  color: var(--success);
 }
 
 .material-validation.invalid {
-  border-color: #efb9bd;
+  border-color: var(--danger);
   background: var(--danger-soft);
-  color: #7d3036;
+  color: var(--danger-strong);
 }
 
 .material-validation strong {
@@ -626,7 +743,7 @@ pre {
 
 .method-run-toggle {
   margin-top: 0;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .dataset-method-grid {
@@ -645,7 +762,8 @@ pre {
   border-top: 3px solid var(--accent);
   border-radius: var(--radius);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 250, 252, 0.96));
+    linear-gradient(180deg, var(--surface-grad-1), var(--surface-grad-2)),
+    var(--surface);
   box-shadow: var(--shadow-sm);
 }
 
@@ -706,21 +824,21 @@ pre {
 }
 
 .method-note {
-  border: 1px solid #f1d59b;
+  border: 1px solid var(--warning);
   background: var(--warning-soft);
-  color: #6e4f23;
+  color: var(--warning);
 }
 
 .performance-warning {
   margin-top: 12px;
-  border: 1px solid #efb9bd;
+  border: 1px solid var(--danger);
   background: var(--danger-soft);
-  color: #7d3036;
+  color: var(--danger-strong);
 }
 
 .fc-mode-note {
   margin: 14px 0;
-  border: 1px solid #b7ded5;
+  border: 1px solid var(--accent);
   background: var(--accent-soft);
   color: var(--muted-strong);
   font-size: 13px;
@@ -739,8 +857,8 @@ pre {
   display: grid;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #ffffff, #fbfdff);
-  box-shadow: 0 1px 0 rgba(19, 37, 55, 0.03);
+  background: var(--surface-raised);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
 }
 
 .dataset-card-header {
@@ -924,7 +1042,7 @@ pre {
 
 .mini-button:hover {
   border-color: var(--line-strong);
-  background: #eef5f7;
+  background: var(--surface-soft);
 }
 
 .mini-button.danger {
@@ -934,7 +1052,7 @@ pre {
 .button {
   min-height: 40px;
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, #ffffff, #f4f8fa);
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface-soft));
   color: var(--ink);
   padding: 9px 14px;
   box-shadow: var(--shadow-sm);
@@ -958,7 +1076,7 @@ pre {
 }
 
 .button.secondary {
-  background: linear-gradient(180deg, #ffffff, #f3f7fa);
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface-soft));
 }
 
 .button.secondary:hover {
@@ -997,10 +1115,10 @@ pre {
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, #ffffff, #f8fbfc);
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface-soft));
   color: var(--ink);
-  font-size: 14px;
-  font-weight: 750;
+  font-size: var(--fs-body-lg);
+  font-weight: 700;
   cursor: pointer;
 }
 
@@ -1218,8 +1336,8 @@ pre {
 }
 
 .metric-info-bubble[open] summary {
-  border-color: #8a5b63;
-  color: #6d3d42;
+  border-color: var(--danger-strong);
+  color: var(--danger-strong);
 }
 
 .metric-info-popover {
@@ -1233,7 +1351,7 @@ pre {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: var(--surface);
   box-shadow: var(--shadow);
   color: var(--ink);
 }
@@ -1269,16 +1387,16 @@ pre {
 
 .destructive-panel {
   margin-top: 22px;
-  border-color: #e2a3a8;
-  background: #fffafa;
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .cleanup-table-wrap {
   margin-top: 14px;
   overflow-x: auto;
-  border: 1px solid #ecd3d5;
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .cleanup-table {
@@ -1291,7 +1409,7 @@ pre {
 .cleanup-table th,
 .cleanup-table td {
   padding: 10px 12px;
-  border-bottom: 1px solid #f0dfe1;
+  border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
 }
@@ -1308,7 +1426,7 @@ pre {
 
 .cleanup-table code {
   overflow-wrap: anywhere;
-  color: #6d3d42;
+  color: var(--danger-strong);
 }
 
 .sweep-preview-nav {
@@ -1396,7 +1514,7 @@ pre {
   padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: var(--surface);
   color: var(--muted-strong);
   font-size: 12px;
 }
@@ -1438,11 +1556,11 @@ pre {
   min-width: 0;
   height: 480px;
   min-height: 480px;
-  border: 1px solid rgba(17, 24, 39, 0.16);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--plot-bg);
   overflow: visible;
-  box-shadow: 0 8px 22px rgba(17, 24, 39, 0.05);
+  box-shadow: var(--shadow-sm);
 }
 
 .plot-card.js-plotly-plot,
@@ -1469,12 +1587,28 @@ pre {
 
 .plot-section-heading {
   grid-column: 1 / -1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
   margin: 4px 0 -4px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
   color: var(--muted-strong);
-  font-size: 12px;
+  font-size: var(--fs-caption);
   font-weight: 850;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.plot-section-heading::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .plot-info-bubble {
@@ -1492,7 +1626,7 @@ pre {
   place-items: center;
   border: 1px solid var(--line-strong);
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.96);
+  background: var(--surface);
   color: var(--ink-strong);
   cursor: help;
   font: inherit;
@@ -1515,7 +1649,7 @@ pre {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: var(--surface);
   color: var(--ink);
   box-shadow: var(--shadow);
   opacity: 0;
@@ -1581,11 +1715,13 @@ pre {
 }
 
 .plot-card .modebar-btn path {
-  fill: #374151 !important;
+  fill: var(--plot-axis-text) !important;
+  opacity: 0.72;
 }
 
 .plot-card .modebar-btn:hover path {
-  fill: #111827 !important;
+  fill: var(--accent) !important;
+  opacity: 1;
 }
 
 .api-list {
@@ -1600,16 +1736,16 @@ pre {
   display: block;
   overflow-wrap: anywhere;
   padding: 10px 12px;
-  border: 1px solid #d5e1e6;
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-steel);
-  color: var(--code);
+  color: var(--ink);
   font-size: 12px;
 }
 
 #venv-command-preview {
-  background: #111c27;
-  color: #d7fff4;
+  background: var(--code);
+  color: var(--accent);
 }
 
 .phase-progress {
@@ -1708,8 +1844,8 @@ pre {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #ffffff;
-  box-shadow: 0 1px 0 #f0dfe1;
+  background: var(--surface);
+  box-shadow: 0 1px 0 var(--line);
 }
 
 .g2m-deeph-table {
@@ -1726,7 +1862,7 @@ pre {
 .summary-table th,
 .summary-table td {
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(17, 24, 39, 0.09);
+  border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
 }
@@ -1737,7 +1873,7 @@ pre {
   font-weight: 850;
   text-transform: uppercase;
   letter-spacing: 0.02em;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .summary-table td {
@@ -1780,7 +1916,7 @@ pre {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .dataset-minimum-artifact-card img {
@@ -1843,7 +1979,7 @@ pre {
 
 .comparison-status-banner {
   padding: 12px 14px;
-  border: 1px solid rgba(31, 139, 98, 0.32);
+  border: 1px solid var(--success);
   border-radius: var(--radius-sm);
   background: var(--success-soft);
   color: var(--success);
@@ -1852,15 +1988,15 @@ pre {
 }
 
 .comparison-status-banner.diagnostic {
-  border-color: rgba(159, 91, 0, 0.34);
-  background: #fff7e8;
-  color: #8a5200;
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 
 .comparison-status-banner.invalid {
-  border-color: rgba(178, 70, 82, 0.34);
-  background: #fff1f2;
-  color: #9b1c31;
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
 }
 
 .placeholder-card {

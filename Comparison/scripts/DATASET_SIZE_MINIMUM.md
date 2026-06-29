@@ -4,6 +4,15 @@ Read-only post-processing for Graph2Mat vs DeepH scaling sweeps. It estimates
 `N_min` thresholds from existing metric tables and does **not** train models or
 regenerate datasets.
 
+## Dataset-size axis semantics
+
+The preferred x-axis for `N_min` claims is explicit `N_train`. If `N_train`
+is missing, the analyzer may still use `N_total` as an `n_train` fallback for
+diagnostic plots/tables and records a warning plus axis metadata in the summary
+JSON. Under `claim_mode=paper_candidate`, that fallback adds a paper-level
+blocker; `N_total` fallback points must not be presented as paper-candidate
+`N_train` evidence.
+
 ## Metric-specific threshold presets
 
 `threshold_mev` is now treated as a metric-specific protocol choice rather than
@@ -311,6 +320,13 @@ variation, but it is **not** a temporal/block bootstrap and does not capture:
 When enabled, the summary/report/UI expose those limitations through warnings
 and `limitations`.
 
+The summary also records the inferred resampling unit in
+`replicate_bootstrap.resampling_unit`: `seed`, `config`, `replicate`, or `row`
+(`none` when disabled). If seed/config counts are unbalanced across comparable
+groups, the CI can overweight the over-represented side; paper-candidate mode
+therefore surfaces
+`paper_blocked_if_replicate_bootstrap_unbalanced_seed_or_config_counts`.
+
 `N_min_cost_eff` is handled more conservatively than the nominal-size
 thresholds:
 
@@ -478,5 +494,6 @@ available per-run costs.
   tolerance of the best observed value, using the selected `cost_basis`.
 
 `N_min_rel95` is a deprecated JSON compatibility alias for `N_min_rel_tol`.
-It is not a 95% confidence interval. The only 95% quantity in this analysis is
-the optional replicate resampling confidence interval when `ci_level=0.95`.
+It is not a 95% relative tolerance and not a confidence interval. The only 95%
+quantity in this analysis is the optional replicate resampling confidence
+interval when `ci_level=0.95`.

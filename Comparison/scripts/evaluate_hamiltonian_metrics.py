@@ -246,8 +246,11 @@ def find_prediction(sample_dir: Path) -> Path | None:
     direct = sample_dir / "ML_prediction.HSX"
     if direct.exists():
         return direct
-    matches = sorted(sample_dir.glob("*ML_prediction*.HSX"), key=matrix_sort_key)
-    return matches[0] if matches else None
+    return None
+
+
+def fallback_prediction_candidates(sample_dir: Path) -> list[Path]:
+    return sorted(sample_dir.glob("*ML_prediction*.HSX"), key=matrix_sort_key)
 
 
 def sample_status_row(
@@ -1110,18 +1113,39 @@ def evaluate_sample(
     sample_errors: list[dict[str, Any]] = []
     sample_warnings: list[dict[str, Any]] = []
     predicted_path = find_prediction(prediction_dir) if prediction_dir is not None else None
+    prediction_fallbacks = (
+        fallback_prediction_candidates(prediction_dir)
+        if prediction_dir is not None and predicted_path is None
+        else []
+    )
     reference_selection = choose_reference_matrix(reference_dir) if reference_dir is not None else None
     reference_path = reference_selection.path if reference_selection and reference_selection.ok else None
     if predicted_path is None:
-        sample_errors.append(
-            append_issue(
-                rows,
-                "fatal_errors",
-                sample=sample,
-                kind="missing_prediction",
-                message="Missing predicted Hamiltonian.",
+        if prediction_fallbacks:
+            sample_errors.append(
+                append_issue(
+                    rows,
+                    "fatal_errors",
+                    sample=sample,
+                    kind="noncanonical_prediction",
+                    message=(
+                        "Missing canonical predicted Hamiltonian ML_prediction.HSX; "
+                        "fallback prediction files are not selected automatically."
+                    ),
+                    candidate_count=len(prediction_fallbacks),
+                    candidates=[str(path) for path in prediction_fallbacks],
+                )
             )
-        )
+        else:
+            sample_errors.append(
+                append_issue(
+                    rows,
+                    "fatal_errors",
+                    sample=sample,
+                    kind="missing_prediction",
+                    message="Missing predicted Hamiltonian.",
+                )
+            )
     if reference_selection is None:
         sample_errors.append(
             append_issue(

@@ -45,8 +45,10 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         atom_index_zero_based: int = 0,
         axis: str = "x",
         amplitude_ang: float = 0.5,
+        structure_amplitude_ang: float | None = None,
         include_metadata: bool = True,
         include_matrix_shape: bool = True,
+        include_units: bool = True,
         claim_status: str = "diagnostic_only",
         base_sample_id: str | None = None,
     ) -> None:
@@ -55,7 +57,7 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         axis_index = {"x": 0, "y": 1, "z": 2}[axis]
         coordinates = [0.0, 0.0, 0.0]
         if sign:
-            coordinates[axis_index] = sign * amplitude_ang
+            coordinates[axis_index] = sign * (amplitude_ang if structure_amplitude_ang is None else structure_amplitude_ang)
         (structure_dir / "RUN.fdf").write_text(
             "\n".join(
                 [
@@ -108,6 +110,10 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
             }
             if include_matrix_shape:
                 metadata["matrix_shape"] = [2, 2]
+            if include_units:
+                metadata["hamiltonian_units"] = "eV"
+                metadata["displacement_units"] = "Ang"
+                metadata["derivative_units"] = "eV/Ang"
             if base_sample_id is not None:
                 metadata["base_sample_id"] = base_sample_id
             (structure_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
@@ -141,6 +147,50 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         pred_plus = sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]])
         self.write_sample("base", sign=0, reference=zero, prediction=zero, claim_status=claim_status)
         self.write_sample("plus", sign=1, reference=ref_plus, prediction=pred_plus, claim_status=claim_status)
+        self.write_sample("minus", sign=-1, reference=zero, prediction=zero, claim_status=claim_status)
+
+    def write_central_fixture_missing_units(self, *, claim_status: str = "diagnostic_only") -> None:
+        zero = sparse.csr_matrix((2, 2))
+        ref_plus = sparse.csr_matrix([[2.0, 0.0], [0.0, 2.0]])
+        pred_plus = sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]])
+        self.write_sample(
+            "base",
+            sign=0,
+            reference=zero,
+            prediction=zero,
+            claim_status=claim_status,
+            include_units=False,
+        )
+        self.write_sample(
+            "plus",
+            sign=1,
+            reference=ref_plus,
+            prediction=pred_plus,
+            claim_status=claim_status,
+            include_units=False,
+        )
+        self.write_sample(
+            "minus",
+            sign=-1,
+            reference=zero,
+            prediction=zero,
+            claim_status=claim_status,
+            include_units=False,
+        )
+
+    def write_central_fixture_invalid_geometry(self, *, claim_status: str = "diagnostic_only") -> None:
+        zero = sparse.csr_matrix((2, 2))
+        ref_plus = sparse.csr_matrix([[2.0, 0.0], [0.0, 2.0]])
+        pred_plus = sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]])
+        self.write_sample("base", sign=0, reference=zero, prediction=zero, claim_status=claim_status)
+        self.write_sample(
+            "plus",
+            sign=1,
+            reference=ref_plus,
+            prediction=pred_plus,
+            claim_status=claim_status,
+            structure_amplitude_ang=0.0,
+        )
         self.write_sample("minus", sign=-1, reference=zero, prediction=zero, claim_status=claim_status)
 
     def write_central_fixture_without_matrix_shape(
@@ -220,6 +270,63 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertIsNone(manifest["delta_stability_converged"])
         self.assertEqual(manifest["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
         self.assertEqual(manifest["reference_noise"]["status"], "reference_noise_unavailable")
+
+    def test_cli_missing_unit_metadata_diagnostic_only_warns(self) -> None:
+        self.write_central_fixture_missing_units(claim_status="robust")
+
+        self.run_cli("--method", "central", "--diagnostic-only", "--overwrite")
+
+        metrics_root = self.result_dir / "derivative_metrics"
+        manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
+        with (metrics_root / "stencil_status.csv").open(encoding="utf-8") as handle:
+            status_rows = list(csv.DictReader(handle))
+        with (metrics_root / "derivative_matrix_metrics.csv").open(encoding="utf-8") as handle:
+            metric_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(manifest["scientific_status"], "diagnostic_only")
+        self.assertEqual(manifest["stencils_ok"], 1)
+        self.assertIn("missing_unit_metadata", status_rows[0]["issue_codes"])
+        self.assertEqual(metric_rows[0]["unit_metadata_explicit"], "False")
+        self.assertEqual(metric_rows[0]["comparison_status"], "diagnostic_only")
+
+    def test_cli_missing_unit_metadata_non_diagnostic_fails_closed(self) -> None:
+        self.write_central_fixture_missing_units(claim_status="robust")
+
+        completed = self.run_cli("--method", "central", "--overwrite", check=False)
+
+        manifest = json.loads((self.result_dir / "derivative_metrics" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(manifest["scientific_status"], "diagnostic_only")
+        self.assertEqual(manifest["stencils_ok"], 0)
+        self.assertTrue(manifest["fatal_errors"])
+        self.assertIn("missing_unit_metadata", manifest["fatal_errors"][0]["issue_codes"])
+
+    def test_cli_invalid_geometry_diagnostic_only_marks_metric_row(self) -> None:
+        self.write_central_fixture_invalid_geometry()
+
+        self.run_cli("--method", "central", "--diagnostic-only", "--overwrite")
+
+        metrics_root = self.result_dir / "derivative_metrics"
+        manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
+        with (metrics_root / "derivative_matrix_metrics.csv").open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(manifest["stencils_ok"], 1)
+        self.assertEqual(manifest["geometry_validation"]["errors"], 1)
+        self.assertEqual(rows[0]["invalid_geometry"], "True")
+        self.assertEqual(rows[0]["geometry_validation_failed"], "True")
+        self.assertTrue(rows[0]["geometry_issue_codes"])
+
+    def test_cli_invalid_geometry_non_diagnostic_fails_before_metrics(self) -> None:
+        self.write_central_fixture_invalid_geometry(claim_status="robust")
+
+        completed = self.run_cli("--method", "central", "--overwrite", check=False)
+
+        manifest = json.loads((self.result_dir / "derivative_metrics" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(manifest["stencils_ok"], 0)
+        self.assertTrue(manifest["fatal_errors"])
+        self.assertEqual(manifest["fatal_errors"][0]["kind"], "derivative_geometry_validation_failed")
 
     def test_cli_empty_quantile_support_warns_without_rows(self) -> None:
         zero = sparse.csr_matrix((2, 2))

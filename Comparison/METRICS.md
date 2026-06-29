@@ -327,6 +327,23 @@ promoted only to `presentation_ready` for central finite differences when
 required metadata, unit, shape, sign, finite-value, and Hermiticity gates pass.
 No current derivative evaluator path promotes results to paper-level status.
 
+Derivative plot payloads may also include dataset-size diagnostics. These are
+post-processing plots where each point is usually an aggregate over derivative
+metric rows/stencils for one model and dataset size. `x_dataset_size` should be
+read as `N_train` when frozen split metadata is available; otherwise it falls
+back to `N_total`. The current dataset-size plot families cover:
+
+- primary dH MAE/RMSE and relative Frobenius versus dataset size
+- robust relative Frobenius/L1 versus dataset size
+- derivative correlation and residual summaries/tails versus dataset size
+- delta-conditioned dataset-size trends
+- axis-conditioned trends and guarded displaced-atom trends
+- Hermiticity and onsite/offsite derivative diagnostics versus dataset size
+
+The displaced-atom plot is intentionally skipped when it would create too many
+series. These plots remain diagnostic-only unless the derivative gates pass, and
+they must not be described as paper-ready evidence by themselves.
+
 The fail-closed derivative gate checker consumes those files and emits a report:
 
 ```bash
@@ -378,11 +395,20 @@ Required blockers include:
 
 Paper-level candidate status is additionally blocked without:
 
+- central-only finite-difference stencils for the final claim
+- passing derivative geometry validation
+- explicit `hamiltonian_units`, `displacement_units`, and `derivative_units`
+- consistent `basis_hash`, `pseudopotential_hash`, `orbital_ordering_hash`,
+  and `material_compatibility_hash`
 - basis/gauge evidence
 - orbital ordering evidence
-- delta sensitivity study
+- delta sensitivity study with at least two deltas that passes its configured
+  criterion
+- acceptable repeated-reference/noise evidence
 - independent dataset/split metadata
+- proven split consistency
 - proven Graph2Mat/DeepH equivalence when both are compared
+- an explicit paired-comparison gate before any derivative winner claim
 
 Derivative limitations that must be stated explicitly in reports:
 

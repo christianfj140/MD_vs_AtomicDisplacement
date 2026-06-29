@@ -2454,6 +2454,7 @@ const G2M_DEEPH_DERIVATIVE_FORCE_CONSTANTS = "SIESTA force constants are not tre
 const G2M_DEEPH_DERIVATIVE_DEFAULT_STATUS = "Default status: diagnostic-only unless all scientific gates pass";
 const G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING = "Derivative diagnostics are optional post-processing outputs. If not computed, the benchmark remains valid for H-vs-H metrics.";
 const G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY = "Technical internal diagnostic only. No winner claim comes from derivative metrics.";
+const G2M_DEEPH_DERIVATIVE_DATASET_SIZE_NOTE = "Dataset-size derivative plots show aggregates over derivative metric rows/stencils; x_dataset_size is usually N_train when available, otherwise N_total.";
 const G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS = [
   ["relative_frobenius_union_robust_by_model", "Robust relative Frobenius by model"],
   ["relative_l1_union_robust_by_model", "Robust relative L1 by model"],
@@ -2469,6 +2470,37 @@ const G2M_DEEPH_EXPECTED_DERIVATIVE_PLOTS = [
   ["onsite_offsite_derivative_error", "Onsite/offsite derivative error by model"],
 ];
 const G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS = new Set(["error_vs_delta", "graph2mat_vs_deeph_paired_comparison"]);
+const G2M_DEEPH_DERIVATIVE_DATASET_SIZE_TITLES = {
+  dh_mae_vs_dataset_size: "Mean dH MAE vs dataset size",
+  dh_mae_vs_dataset_size_by_delta: "Mean dH MAE vs dataset size by delta",
+  dh_rmse_vs_dataset_size: "Mean dH RMSE vs dataset size",
+  dh_rmse_vs_dataset_size_by_delta: "Mean dH RMSE vs dataset size by delta",
+  relative_frobenius_vs_dataset_size: "Mean relative Frobenius vs dataset size",
+  relative_frobenius_vs_dataset_size_by_delta: "Mean relative Frobenius vs dataset size by delta",
+};
+const G2M_DEEPH_BASE_DERIVATIVE_DATASET_SIZE_PLOTS = new Set([
+  "dh_mae_vs_dataset_size",
+  "dh_rmse_vs_dataset_size",
+  "relative_frobenius_vs_dataset_size",
+  "support_f1_vs_dataset_size",
+  "support_error_rates_vs_dataset_size",
+]);
+const G2M_DEEPH_OPTIONAL_DERIVATIVE_DATASET_SIZE_PLOTS = [
+  "robust_relative_frobenius_vs_dataset_size",
+  "robust_relative_l1_vs_dataset_size",
+  "derivative_correlation_vs_dataset_size",
+  "derivative_residual_summary_vs_dataset_size",
+  "derivative_residual_tail_vs_dataset_size",
+  "dh_mae_vs_dataset_size_by_delta",
+  "dh_rmse_vs_dataset_size_by_delta",
+  "relative_frobenius_vs_dataset_size_by_delta",
+  "dh_mae_vs_dataset_size_by_axis",
+  "robust_frobenius_vs_dataset_size_by_axis",
+  "dh_mae_vs_dataset_size_by_displaced_atom",
+  "derivative_hermiticity_vs_dataset_size",
+  "onsite_offsite_derivative_error_vs_dataset_size",
+];
+const G2M_DEEPH_DERIVATIVE_DATASET_SIZE_PARTIAL_MESSAGE = "Only base dataset-size derivative plots are present. Regenerate derivative_plot_payload.json from current derivative metric CSV/JSON artifacts to show robust, residual, delta, axis/atom, Hermiticity, and onsite/offsite dataset-size plots. If the payload is current, the optional metric columns are missing or all values are unavailable.";
 
 const G2M_DEEPH_DERIVATIVE_METRIC_HELP = {
   dh_mae_union_eV_per_Ang: {
@@ -2727,20 +2759,47 @@ function g2mDeephDerivativeMetricHelp(metricKey) {
   };
 }
 
+function g2mDeephDerivativeIsDatasetSizePlot(plot = {}) {
+  return Boolean(plot.dataset_size_plot || String(plot.id || "").includes("_vs_dataset_size"));
+}
+
+function g2mDeephDerivativePlotTitle(plot = {}) {
+  return G2M_DEEPH_DERIVATIVE_DATASET_SIZE_TITLES[plot.id] || plot.title || "Derivative diagnostic";
+}
+
+function g2mDeephDerivativeHoverText(row = {}) {
+  const listText = (value) => Array.isArray(value) ? value.join(",") : value;
+  return [
+    row.dataset_ids?.join?.(","),
+    row.dataset_id,
+    row.x_dataset_size != null ? `${row.x_dataset_size_kind || "dataset size"} ${row.x_dataset_size}` : "",
+    row.dataset_size_source ? `source ${row.dataset_size_source}` : "",
+    row.delta_ang != null ? `delta ${row.delta_ang}` : "",
+    listText(row.delta_values) ? `deltas ${listText(row.delta_values)}` : "",
+    row.axes ? `axes ${listText(row.axes)}` : row.axis,
+    row.atom_indices ? `atoms ${listText(row.atom_indices)}` : (row.atom_index_zero_based != null ? `atom ${row.atom_index_zero_based}` : ""),
+    row.finite_difference_method,
+    row.n_rows ? `rows ${row.n_rows}` : "",
+    row.n_stencils ? `stencils ${row.n_stencils}` : "",
+    row.sample,
+  ].filter((item) => item !== undefined && item !== "").join(" | ");
+}
+
 function g2mDeephDerivativePlotInfo(plot = {}) {
   const metrics = (plot.metrics || []).filter((metric) => metric?.key);
   const primaryMetric = metrics[0]?.key || plot.y_key || "";
   const help = g2mDeephDerivativeMetricHelp(primaryMetric);
   const explicit = G2M_DEEPH_DERIVATIVE_PLOT_HELP_BY_ID[plot.id] || {};
+  const datasetSizePlot = g2mDeephDerivativeIsDatasetSizePlot(plot);
   const metricLabel = metrics.length > 1
     ? metrics.map((metric) => g2mDeephDerivativeMetricHelp(metric.key).label || metric.label || metric.key).join(", ")
     : (explicit.metric || help.label || plot.y_title || primaryMetric);
   return {
-    title: plot.title || explicit.title || "Derivative diagnostic",
+    title: explicit.title || g2mDeephDerivativePlotTitle(plot),
     metric: metricLabel,
     formula: explicit.formula || help.formula,
-    description: explicit.description || help.description,
-    purpose: explicit.purpose || help.purpose,
+    description: datasetSizePlot ? G2M_DEEPH_DERIVATIVE_DATASET_SIZE_NOTE : (explicit.description || help.description),
+    purpose: explicit.purpose || (datasetSizePlot ? "Prioritizes how mean derivative errors change with dataset size before lower-level diagnostics." : help.purpose),
     direction: explicit.direction || help.direction || G2M_DEEPH_DERIVATIVE_INTERNAL_ONLY,
   };
 }
@@ -2759,7 +2818,7 @@ function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
   renderPlot(
     card,
     traces,
-    plotLayout(plot.title || "Derivative diagnostic", plot.metrics?.[0]?.unit ? `${plot.metrics[0].label} (${plot.metrics[0].unit})` : "", {
+    plotLayout(g2mDeephDerivativePlotTitle(plot), plot.metrics?.[0]?.unit ? `${plot.metrics[0].label} (${plot.metrics[0].unit})` : "", {
       barmode: "group",
       annotations: finiteValues.length ? [] : [emptyPlotAnnotation("No derivative values available for this plot.")],
       xaxis: { title: "Group", gridcolor: "#edf1f4", zeroline: false },
@@ -2790,7 +2849,7 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
         line: { color: plotColor(index), dash: metricIndex ? "dash" : "solid" },
         x: rows.map((row) => finiteNumber(row[plot.x_key || "x"])),
         y: rows.map((row) => finiteNumber(row[metric.key])),
-        text: rows.map((row) => [row.dataset_ids?.join?.(","), row.sample, row.axis, row.atom_index_zero_based, row.finite_difference_method, row.n_rows ? `rows ${row.n_rows}` : ""].filter((item) => item !== undefined && item !== "").join(" | ")),
+        text: rows.map((row) => g2mDeephDerivativeHoverText(row)),
         hovertemplate: `%{x:.5g}, %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
       });
     });
@@ -2798,7 +2857,7 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   renderPlot(
     card,
     traces,
-    plotLayout(plot.title || "Derivative scatter", plot.y_title || "", {
+    plotLayout(g2mDeephDerivativePlotTitle(plot), plot.y_title || "", {
       annotations: traces.length ? [] : [emptyPlotAnnotation("No derivative scatter rows available.")],
       xaxis: { title: plot.x_title || "x", gridcolor: "#edf1f4", zeroline: false },
       yaxis: { title: plot.y_title || "y", gridcolor: "#edf1f4", zeroline: false },
@@ -2811,9 +2870,10 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
 function renderG2MDeepHDerivativePlotSummary(card, plot, message = "") {
   card.textContent = "";
   const title = document.createElement("h4");
-  title.textContent = plot.title || plot.id || "Derivative diagnostic plot";
+  title.textContent = g2mDeephDerivativePlotTitle(plot) || plot.id || "Derivative diagnostic plot";
   card.appendChild(title);
-  for (const text of [plot.subtitle, plot.reference_label, message].filter(Boolean)) {
+  const datasetSizeNote = g2mDeephDerivativeIsDatasetSizePlot(plot) ? G2M_DEEPH_DERIVATIVE_DATASET_SIZE_NOTE : "";
+  for (const text of [plot.subtitle, plot.reference_label, datasetSizeNote, message].filter(Boolean)) {
     const paragraph = document.createElement("p");
     paragraph.className = "field-help";
     paragraph.textContent = text;
@@ -2851,11 +2911,22 @@ function g2mDeephDerivativePlotSections(plotPayload = {}) {
   }
   const primaryIds = new Set(plotPayload.primary_plot_ids || []);
   const diagnosticIds = new Set(plotPayload.diagnostic_plot_ids || []);
+  const datasetSizeIds = new Set(plotPayload.dataset_size_plot_ids || []);
+  const isDatasetSizePlot = (plot) => datasetSizeIds.has(plot.id) || g2mDeephDerivativeIsDatasetSizePlot(plot);
   return [
-    { title: "Primary derivative metrics", plots: plots.filter((plot) => primaryIds.has(plot.id)) },
-    { title: "Secondary derivative metrics", plots: plots.filter((plot) => !primaryIds.has(plot.id) && !diagnosticIds.has(plot.id)) },
-    { title: "Diagnostic derivative metrics", plots: plots.filter((plot) => !primaryIds.has(plot.id) && diagnosticIds.has(plot.id)) },
+    { title: "Dataset-size derivative metrics", plots: plots.filter(isDatasetSizePlot) },
+    { title: "Primary derivative metrics", plots: plots.filter((plot) => !isDatasetSizePlot(plot) && primaryIds.has(plot.id)) },
+    { title: "Secondary derivative metrics", plots: plots.filter((plot) => !isDatasetSizePlot(plot) && !primaryIds.has(plot.id) && !diagnosticIds.has(plot.id)) },
+    { title: "Diagnostic derivative metrics", plots: plots.filter((plot) => !isDatasetSizePlot(plot) && diagnosticIds.has(plot.id)) },
   ];
+}
+
+function g2mDeephDerivativeDatasetSizeNotice(plotPayload = {}) {
+  const datasetSizeIds = new Set(plotPayload.dataset_size_plot_ids || []);
+  if (!datasetSizeIds.size) return "";
+  const hasBase = Array.from(G2M_DEEPH_BASE_DERIVATIVE_DATASET_SIZE_PLOTS).some((id) => datasetSizeIds.has(id));
+  const hasOptional = G2M_DEEPH_OPTIONAL_DERIVATIVE_DATASET_SIZE_PLOTS.some((id) => datasetSizeIds.has(id));
+  return hasBase && !hasOptional ? G2M_DEEPH_DERIVATIVE_DATASET_SIZE_PARTIAL_MESSAGE : G2M_DEEPH_DERIVATIVE_DATASET_SIZE_NOTE;
 }
 
 function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
@@ -2871,6 +2942,13 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
       : "No derivative plots available yet.";
     container.appendChild(placeholder);
     return;
+  }
+  const datasetSizeNotice = g2mDeephDerivativeDatasetSizeNotice(plotPayload);
+  if (datasetSizeNotice) {
+    const note = document.createElement("div");
+    note.className = "plot-card full placeholder-card";
+    note.textContent = datasetSizeNotice;
+    container.appendChild(note);
   }
   for (const section of g2mDeephDerivativePlotSections(plotPayload)) {
     const heading = document.createElement("h3");
@@ -9003,9 +9081,29 @@ function formatDisplayedMetric(value, metricKey, precision = 4) {
   return formatMetricDisplay(number, unit ? ` ${unit}` : "", precision);
 }
 
-const SCIENCE_PLOT_AXIS_COLOR = "#111827";
-const SCIENCE_PLOT_GRID_COLOR = "rgba(17, 24, 39, 0.10)";
-const SCIENCE_PLOT_FONT_FAMILY = '"STIX Two Text", "Latin Modern Roman", "Times New Roman", Georgia, serif';
+function themeCssVar(name, fallback) {
+  if (typeof window === "undefined" || !window.getComputedStyle) return fallback;
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name);
+  return value && value.trim() ? value.trim() : fallback;
+}
+
+function currentPlotPaperColor() {
+  return themeCssVar("--plot-bg", "#ffffff");
+}
+
+function currentPlotGridColor() {
+  return themeCssVar("--plot-grid", "rgba(17, 24, 39, 0.10)");
+}
+
+function currentPlotAxisColor() {
+  return themeCssVar("--plot-axis-text", "#111827");
+}
+
+// SCIENCE_PLOT_AXIS_COLOR / SCIENCE_PLOT_GRID_COLOR are getters so Plotly layouts
+// always reflect the active theme (dark by default, light via the UI toggle).
+Object.defineProperty(globalThis, "SCIENCE_PLOT_AXIS_COLOR", { get: currentPlotAxisColor });
+Object.defineProperty(globalThis, "SCIENCE_PLOT_GRID_COLOR", { get: currentPlotGridColor });
+const SCIENCE_PLOT_FONT_FAMILY = '"Inter", "STIX Two Text", "Latin Modern Roman", "Times New Roman", Georgia, sans-serif';
 const PLOT_COLORS = [
   "#4477aa",
   "#228833",
@@ -9165,23 +9263,27 @@ function sciencePlotAxis(axis = {}, fallbackTitle = "") {
 
 function sciencePlotLayout(layout = {}) {
   const rawTitle = typeof layout.title === "object" ? layout.title : { text: layout.title || "" };
+  const themedPaperColor = currentPlotPaperColor();
+  const themedAxisColor = currentPlotAxisColor();
   const annotations = (layout.annotations || []).map((annotation) => ({
-    font: { size: 15, color: "#374151", ...(annotation.font || {}) },
+    font: { size: 15, color: themedAxisColor, ...(annotation.font || {}) },
     ...annotation,
   }));
   return {
     colorway: PLOT_COLORS,
     autosize: true,
-    paper_bgcolor: "#ffffff",
-    plot_bgcolor: "#ffffff",
-    font: { family: SCIENCE_PLOT_FONT_FAMILY, color: SCIENCE_PLOT_AXIS_COLOR, size: 15 },
+    font: { family: SCIENCE_PLOT_FONT_FAMILY, color: themedAxisColor, size: 15 },
     ...layout,
+    // Theme colors always win over any caller-supplied bgcolor so plots stay
+    // legible when the user toggles dark/light mode (rendering, not data, logic).
+    paper_bgcolor: themedPaperColor,
+    plot_bgcolor: themedPaperColor,
     margin: { l: 64, r: 24, t: 50, b: 58, ...(layout.margin || {}) },
     title: {
       x: 0.02,
       xanchor: "left",
       ...rawTitle,
-      font: { size: 18, color: SCIENCE_PLOT_AXIS_COLOR, ...(rawTitle.font || {}) },
+      font: { size: 18, color: themedAxisColor, ...(rawTitle.font || {}) },
     },
     legend: {
       orientation: "h",
@@ -9189,15 +9291,15 @@ function sciencePlotLayout(layout = {}) {
       x: 0,
       xanchor: "left",
       yanchor: "top",
-      bgcolor: "rgba(255,255,255,0)",
+      bgcolor: "rgba(0,0,0,0)",
       borderwidth: 0,
-      font: { size: 14, color: SCIENCE_PLOT_AXIS_COLOR },
+      font: { size: 14, color: themedAxisColor },
       ...(layout.legend || {}),
     },
     hoverlabel: {
-      bgcolor: "#ffffff",
-      bordercolor: "rgba(17, 24, 39, 0.22)",
-      font: { family: SCIENCE_PLOT_FONT_FAMILY, size: 15, color: SCIENCE_PLOT_AXIS_COLOR },
+      bgcolor: themedPaperColor,
+      bordercolor: "rgba(128, 128, 128, 0.32)",
+      font: { family: SCIENCE_PLOT_FONT_FAMILY, size: 15, color: themedAxisColor },
       ...(layout.hoverlabel || {}),
     },
     annotations,
@@ -9633,8 +9735,6 @@ function plotLayout(title, yTitle, extra = {}) {
   return sciencePlotLayout({
     title: { text: title, x: 0.02, xanchor: "left", font: { size: 18 } },
     margin: { l: 64, r: 24, t: 50, b: 58 },
-    paper_bgcolor: "#ffffff",
-    plot_bgcolor: "#ffffff",
     xaxis: { title: "Dataset size", showgrid: false, zeroline: false },
     yaxis: { title: yTitle, gridcolor: SCIENCE_PLOT_GRID_COLOR, zeroline: false },
     legend: { orientation: "h", y: -0.25, x: 0 },
@@ -9889,6 +9989,30 @@ function resizePlot(id) {
 function resizeVisiblePlots() {
   if (!state.plotsEnabled) return;
   document.querySelectorAll(".plot-card.js-plotly-plot").forEach((node) => resizePlot(node));
+}
+
+function repaintPlotsForTheme() {
+  if (!window.Plotly?.relayout) return;
+  const paperColor = currentPlotPaperColor();
+  const axisColor = currentPlotAxisColor();
+  const gridColor = currentPlotGridColor();
+  document.querySelectorAll(".plot-card.js-plotly-plot").forEach((node) => {
+    Plotly.relayout(node, {
+      paper_bgcolor: paperColor,
+      plot_bgcolor: paperColor,
+      "font.color": axisColor,
+      "xaxis.color": axisColor,
+      "xaxis.linecolor": axisColor,
+      "xaxis.tickcolor": axisColor,
+      "xaxis.gridcolor": gridColor,
+      "yaxis.color": axisColor,
+      "yaxis.linecolor": axisColor,
+      "yaxis.tickcolor": axisColor,
+      "yaxis.gridcolor": gridColor,
+      "legend.font.color": axisColor,
+      "hoverlabel.bgcolor": paperColor,
+    }).catch(() => {});
+  });
 }
 
 function schedulePlotResize(id = null) {
@@ -10593,14 +10717,12 @@ function renderHeatmap(id, runs) {
     {
       title: { text: "Resumen compacto de metricas", x: 0.02, xanchor: "left", font: { size: 18 } },
       margin: { l: 120, r: 18, t: 74, b: 72 },
-      paper_bgcolor: "#ffffff",
-      plot_bgcolor: "#ffffff",
-      font: { family: "Inter, sans-serif", color: "#17202a" },
+      font: { family: "Inter, sans-serif", color: currentPlotAxisColor() },
       annotations: [
         topPlotAnnotation(
           "Color = valor normalizado por metrica; el tiempo usa log10(segundos). Los valores de las celdas son los valores fisicos.",
           1.08,
-          "#56616f",
+          currentPlotAxisColor(),
         ),
       ],
     },
@@ -10690,8 +10812,6 @@ function renderSensitivitySweeps(id, runs) {
     yaxis2: { title: "DOS Wasserstein (meV)" },
     margin: { l: 56, r: 18, t: 46, b: 48 },
     legend: { orientation: "h", y: -0.25 },
-    paper_bgcolor: "#ffffff",
-    plot_bgcolor: "#ffffff",
   };
   if (!traces.length) layout.annotations = [emptyPlotAnnotation("No hay datos de sensitivity sweep.")];
   layout = withFitSelector(layout, traces);
@@ -11931,6 +12051,44 @@ async function deleteSelectedGeneratedDatasets() {
   await deleteDatasetTargets(selectedDatasetTargetIds(), { all: false });
 }
 
+const THEME_STORAGE_KEY = "ui-theme";
+
+function applyTheme(theme) {
+  const normalized = theme === "light" ? "light" : "dark";
+  if (normalized === "dark") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", "light");
+  }
+  const toggle = document.getElementById("theme-toggle");
+  const label = document.getElementById("theme-toggle-label");
+  if (toggle) toggle.setAttribute("aria-pressed", String(normalized === "light"));
+  if (label) label.textContent = normalized === "light" ? "Dark mode" : "Light mode";
+  repaintPlotsForTheme();
+}
+
+function setupThemeToggle() {
+  const toggle = document.getElementById("theme-toggle");
+  if (!toggle) return;
+  let stored = "dark";
+  try {
+    stored = localStorage.getItem(THEME_STORAGE_KEY) || "dark";
+  } catch (error) {
+    stored = "dark";
+  }
+  applyTheme(stored);
+  toggle.addEventListener("click", () => {
+    const isLight = document.documentElement.getAttribute("data-theme") === "light";
+    const next = isLight ? "dark" : "light";
+    applyTheme(next);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch (error) {
+      /* localStorage unavailable; theme still applies for this session */
+    }
+  });
+}
+
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -12319,6 +12477,7 @@ function setupEvents() {
 }
 
 async function boot() {
+  setupThemeToggle();
   setupTabs();
   setupEvents();
   const venvActivateInput = document.getElementById("venv-activate-command");

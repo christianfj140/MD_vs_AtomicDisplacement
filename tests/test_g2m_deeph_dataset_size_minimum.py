@@ -1542,6 +1542,68 @@ class DatasetSizeMinimumTests(unittest.TestCase):
             self.assertTrue((output_dir / "dataset_size_minimum_summary.json").exists())
             self.assertTrue((output_dir / "dataset_size_minimum_report.md").exists())
 
+    def test_paper_candidate_blocks_n_train_total_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            payload = {
+                "metric_scaling_rows": [
+                    {
+                        "method": "graph2mat",
+                        "n_total": size,
+                        "config_id": f"g{size}",
+                        "epoch_label": "10 epochs",
+                        "metric_key": "h_mae_eV_mean",
+                        "metric_value": value,
+                    }
+                    for size, value in ((10, 0.030), (20, 0.020), (40, 0.012))
+                ]
+            }
+            (root / "summary" / "ranking").mkdir(parents=True)
+            (root / "summary" / "ranking" / "normalized_run_metrics.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+
+            summary = minimum.analyze(
+                make_analyze_args(
+                    run_root=[str(root)],
+                    output_dir=str(base / "out"),
+                    x_axis="n_train",
+                    claim_mode="paper_candidate",
+                    aggregation_mode="mean_seeds_per_config",
+                )
+            )
+
+        self.assertEqual(summary["x_axis_used"], "n_train")
+        self.assertFalse(summary["n_train_explicit"])
+        self.assertTrue(summary["n_train_fallback_used"])
+        self.assertEqual(summary["dataset_size_axis"]["n_train_source"], "n_total_fallback")
+        self.assertEqual(summary["claim_mode_actual"], "diagnostic")
+        self.assertIn(
+            "paper_blocked_if_n_train_missing_and_n_total_fallback_used",
+            summary["paper_level_blockers"],
+        )
+
+    def test_diagnostic_mode_keeps_n_train_total_fallback(self) -> None:
+        rows, warnings = minimum.normalize_rows(
+            [
+                {
+                    "model": "deeph",
+                    "n_total": 12,
+                    "config_id": "cfg",
+                    "h_mae_eV_mean": 0.015,
+                }
+            ],
+            primary_metric="h_mae_eV_mean",
+            x_axis="n_train",
+        )
+
+        self.assertEqual(rows[0]["dataset_size_x"], 12)
+        self.assertFalse(rows[0]["dataset_size_train_explicit"])
+        self.assertEqual(rows[0]["dataset_size_train_source"], "n_total_fallback")
+        self.assertTrue(any("using n_total as n_train fallback" in item for item in warnings))
+
     def test_analyze_summary_records_threshold_protocol_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1841,6 +1903,7 @@ class DatasetSizeMinimumTests(unittest.TestCase):
 
         self.assertEqual(summary["bootstrap_type"], "replicate_resampling")
         self.assertEqual(summary["display_label"], "replicate-resampling CI")
+        self.assertEqual(summary["resampling_unit"], "none")
         self.assertIn("does_not_model_temporal_autocorrelation", summary["limitations"])
 
     def test_bootstrap_is_deterministic_for_fixed_seed(self) -> None:
@@ -1895,6 +1958,7 @@ class DatasetSizeMinimumTests(unittest.TestCase):
 
         ci = result["by_method"]["graph2mat"]["N_min_abs"]
         self.assertTrue(result["enabled"])
+        self.assertEqual(result["resampling_unit"], "seed")
         self.assertGreater(ci["n_bootstrap_successful"], 0)
         self.assertIsNotNone(ci["median"])
         self.assertIsNotNone(ci["lower"])
@@ -2005,6 +2069,74 @@ class DatasetSizeMinimumTests(unittest.TestCase):
         self.assertNotIn("N_min_cost_eff", result["criteria"])
         self.assertEqual(result["cost_eff_diagnostic_label"], "observed_cost_error_behavior_only")
         self.assertIn("observed cost-error behavior", result["cost_eff_diagnostic_note"])
+
+    def test_bootstrap_flags_unbalanced_seed_counts_as_paper_blocker(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=12.0, seed="1", config_id="cfgA-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=11.0, seed="2", config_id="cfgA-seed2"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=14.0, seed="1", config_id="cfgB-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.0, seed="1", config_id="cfgA-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=7.5, seed="2", config_id="cfgA-seed2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=9.0, seed="1", config_id="cfgB-seed1"),
+        ]
+
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=20,
+            seed=5,
+            ci_level=0.95,
+            aggregation_mode="mean_seeds_per_config",
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="observed",
+            n_min_fit_model="linear",
+            moving_average_window=3,
+        )
+
+        self.assertEqual(result["resampling_unit"], "seed")
+        self.assertTrue(result["unbalanced_seed_counts_by_config"])
+        self.assertIn("replicate_bootstrap_unbalanced_seed_or_config_counts", result["warnings"])
+        self.assertIn(
+            "paper_blocked_if_replicate_bootstrap_unbalanced_seed_or_config_counts",
+            result["paper_level_blockers"],
+        )
+
+    def test_bootstrap_equal_seed_per_config_has_no_balance_blocker(self) -> None:
+        rows = [
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=12.0, seed="1", config_id="cfgA-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=11.0, seed="2", config_id="cfgA-seed2"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=14.0, seed="1", config_id="cfgB-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=10, mev=13.0, seed="2", config_id="cfgB-seed2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.0, seed="1", config_id="cfgA-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=7.5, seed="2", config_id="cfgA-seed2"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=9.0, seed="1", config_id="cfgB-seed1"),
+            make_normalized_replicate_row(method="graph2mat", size=20, mev=8.5, seed="2", config_id="cfgB-seed2"),
+        ]
+
+        result = minimum.compute_bootstrap_n_min(
+            rows,
+            methods=["graph2mat"],
+            n_replicates=20,
+            seed=5,
+            ci_level=0.95,
+            aggregation_mode="mean_seeds_per_config",
+            threshold_mev=10.0,
+            relative_tolerance=0.05,
+            plateau_gain=0.05,
+            n_min_source="observed",
+            n_min_fit_model="linear",
+            moving_average_window=3,
+        )
+
+        self.assertEqual(result["resampling_unit"], "seed")
+        self.assertFalse(result["unbalanced_seed_counts_by_config"])
+        self.assertFalse(result["unbalanced_config_counts_by_dataset_size"])
+        self.assertNotIn(
+            "paper_blocked_if_replicate_bootstrap_unbalanced_seed_or_config_counts",
+            result["paper_level_blockers"],
+        )
 
     def test_bootstrap_exposes_missing_cost_warning_for_selected_basis(self) -> None:
         rows = [

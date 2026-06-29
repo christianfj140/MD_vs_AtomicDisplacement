@@ -420,6 +420,8 @@ def _evaluate_discovery(
     try:
         loaded = _load_stencil_matrices(discovery.stencil)
         stencil = _stencil_with_loaded_shapes(discovery.stencil, loaded)
+        if diagnostic_only:
+            stencil = replace(stencil, metadata=replace(stencil.metadata, claim_status="diagnostic_only"))
         validation = validate_derivative_stencil(stencil)
         errors = validation_errors(validation)
         if errors:
@@ -462,6 +464,9 @@ def _evaluate_discovery(
         )
         row.update(
             {
+                "invalid_geometry": bool(geometry_errors),
+                "geometry_validation_failed": bool(geometry_errors),
+                "geometry_issue_codes": ";".join(issue.code for issue in geometry_errors),
                 "dh_support_changed": bool(pair.diagnostics.get("plus_minus_support_changed")),
                 "reference_plus_minus_support_changed": bool(pair.diagnostics.get("reference_plus_minus_support_changed")),
                 "predicted_plus_minus_support_changed": bool(pair.diagnostics.get("predicted_plus_minus_support_changed")),
@@ -962,6 +967,9 @@ def _metric_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "derivative_units",
         "hamiltonian_units",
         "displacement_units",
+        "invalid_geometry",
+        "geometry_validation_failed",
+        "geometry_issue_codes",
         "matrix_metric_target_space",
         "comparison_status",
         "support_threshold",

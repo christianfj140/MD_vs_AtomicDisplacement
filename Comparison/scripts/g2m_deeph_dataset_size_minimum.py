@@ -930,7 +930,7 @@ def infer_size_from_text(value: Any) -> int | None:
     return None
 
 
-def row_dataset_sizes(row: dict[str, Any]) -> tuple[int | None, int | None, list[str]]:
+def row_dataset_sizes(row: dict[str, Any]) -> tuple[int | None, int | None, bool, list[str]]:
     warnings: list[str] = []
     n_total = (
         int_number(row.get("n_total"))
@@ -939,6 +939,7 @@ def row_dataset_sizes(row: dict[str, Any]) -> tuple[int | None, int | None, list
         or int_number(row.get("valid_snapshots"))
     )
     n_train = int_number(row.get("n_train")) or int_number(row.get("train_dataset_size")) or int_number(row.get("train_size"))
+    n_train_explicit = n_train is not None
 
     dataset_root = row.get("dataset_root") or row.get("reference_dir") or row.get("reference_root")
     if n_total is None:
@@ -946,6 +947,7 @@ def row_dataset_sizes(row: dict[str, Any]) -> tuple[int | None, int | None, list
     if n_train is None:
         counts = split_counts_from_dataset_root(dataset_root)
         n_train = counts.get("train") or counts.get("training")
+        n_train_explicit = n_train is not None
     if n_total is None:
         for key in ("dataset_root", "reference_dir", "metrics_root", "run_dir", "prediction_dir", "dataset_id"):
             n_total = infer_size_from_text(row.get(key))
@@ -954,7 +956,7 @@ def row_dataset_sizes(row: dict[str, Any]) -> tuple[int | None, int | None, list
     if n_train is None and n_total is not None:
         warnings.append(f"missing_train_split_count_for_size_{n_total}; using n_total as n_train fallback")
         n_train = n_total
-    return n_total, n_train, warnings
+    return n_total, n_train, n_train_explicit, warnings
 
 
 def load_json_metric_rows(
@@ -1132,7 +1134,7 @@ def normalize_rows(
     warnings: list[str] = []
     for row in raw_rows:
         value_e = metric_value(row, primary_metric)
-        n_total, n_train, row_warnings = row_dataset_sizes(row)
+        n_total, n_train, n_train_explicit, row_warnings = row_dataset_sizes(row)
         if x_axis == "n_train":
             warnings.extend(row_warnings)
         x_value = n_train if x_axis == "n_train" else n_total
@@ -1154,6 +1156,8 @@ def normalize_rows(
                 "dataset_root": row.get("dataset_root") or row.get("reference_dir") or "",
                 "dataset_size_total": n_total,
                 "dataset_size_train": n_train,
+                "dataset_size_train_explicit": n_train_explicit,
+                "dataset_size_train_source": "explicit" if n_train_explicit else "n_total_fallback",
                 "dataset_size_x": int(x_value),
                 "x_axis": x_axis,
                 "config_id": config_id,
@@ -1193,6 +1197,12 @@ def group_config_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "dataset_size_x": size,
                 "dataset_size_total": first.get("dataset_size_total"),
                 "dataset_size_train": first.get("dataset_size_train"),
+                "dataset_size_train_explicit": all(bool(item.get("dataset_size_train_explicit")) for item in items),
+                "dataset_size_train_source": (
+                    "explicit"
+                    if all(bool(item.get("dataset_size_train_explicit")) for item in items)
+                    else "n_total_fallback"
+                ),
                 "config_id": config_id,
                 "epoch_label": epoch_label,
                 "primary_metric": first["primary_metric"],
@@ -4624,6 +4634,8 @@ def scientific_claim_status_payload(
     fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
     hierarchical_uncertainty: dict[str, Any] | None = None,
     threshold_sensitivity: dict[str, Any] | None = None,
+    replicate_bootstrap: dict[str, Any] | None = None,
+    dataset_size_axis: dict[str, Any] | None = None,
     fallback_used: bool,
     fallback_reason: str | None,
 ) -> dict[str, Any]:
@@ -4637,6 +4649,7 @@ def scientific_claim_status_payload(
     warnings: list[str] = [N_MIN_NOMINAL_WARNING]
     temporal_warnings = [str(item) for item in temporal_diagnostics.get("warnings") or []]
     threshold_metadata = dict(threshold_metadata or {})
+    dataset_size_axis = dict(dataset_size_axis or {})
     autocorrelation_available = bool(temporal_diagnostics.get("autocorrelation_available"))
     ratio = n_eff_over_n_nominal(temporal_diagnostics)
     n_eff_by_dataset_size = dict(temporal_diagnostics.get("N_eff_by_dataset_size") or {})
@@ -4758,8 +4771,12 @@ def scientific_claim_status_payload(
         blockers.extend(str(item) for item in (hierarchical_uncertainty.get("paper_level_blockers") or []))
     if threshold_sensitivity:
         blockers.extend(str(item) for item in (threshold_sensitivity.get("paper_level_blockers") or []))
+    if replicate_bootstrap:
+        blockers.extend(str(item) for item in (replicate_bootstrap.get("paper_level_blockers") or []))
 
     if claim_mode_requested == "paper_candidate":
+        if dataset_size_axis.get("n_train_fallback_used"):
+            blockers.append("paper_blocked_if_n_train_missing_and_n_total_fallback_used")
         if actual_aggregation_mode == "best_config_mean":
             blockers.append("paper_blocked_if_best_config_mean_policy_not_documented")
         elif actual_aggregation_mode != PAPER_READY_AGGREGATION_MODE:
@@ -4814,6 +4831,7 @@ def scientific_claim_status_payload(
             "by_method": {},
             "paper_level_blockers": [],
         },
+        "dataset_size_axis": dataset_size_axis,
         "hierarchical_uncertainty": hierarchical_uncertainty or {
             "enabled": False,
             "status": "not_available",
@@ -4941,6 +4959,7 @@ def build_report(
     boot = replicate_bootstrap or disabled_bootstrap_summary()
     lines.append(f"- Label: {boot.get('display_label') or REPLICATE_BOOTSTRAP_LABEL}")
     lines.append(f"- Enabled: {bool(boot.get('enabled'))}")
+    lines.append(f"- Resampling unit: `{boot.get('resampling_unit') or 'row'}`")
     lines.append(
         "- Scope: row-level replicate/seed resampling within `(method, dataset_size_x)`; "
         "not temporal/block bootstrap and not full scientific uncertainty."
@@ -5148,6 +5167,26 @@ def parse_ci_level(value: Any) -> float:
     return level
 
 
+def dataset_size_axis_metadata(rows: list[dict[str, Any]], *, x_axis: str) -> dict[str, Any]:
+    n_train_explicit = all(bool(row.get("dataset_size_train_explicit")) for row in rows) if rows else False
+    n_train_fallback_used = x_axis == "n_train" and any(
+        str(row.get("dataset_size_train_source") or "") == "n_total_fallback"
+        for row in rows
+    )
+    return {
+        "x_axis_used": x_axis,
+        "n_train_explicit": n_train_explicit,
+        "n_train_fallback_used": n_train_fallback_used,
+        "n_train_source": (
+            "explicit"
+            if n_train_explicit
+            else "n_total_fallback"
+            if n_train_fallback_used
+            else "missing_or_not_used"
+        ),
+    }
+
+
 def summary_normalized_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Compact replicate-level rows for UI raw-point overlays."""
     out: list[dict[str, Any]] = []
@@ -5162,6 +5201,8 @@ def summary_normalized_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "dataset_size_x": size,
                 "dataset_size_total": row.get("dataset_size_total"),
                 "dataset_size_train": row.get("dataset_size_train"),
+                "dataset_size_train_explicit": row.get("dataset_size_train_explicit"),
+                "dataset_size_train_source": row.get("dataset_size_train_source"),
                 "primary_metric_mev": metric,
                 "primary_metric_mev_mean": metric,
                 "config_id": row.get("config_id"),
@@ -5177,6 +5218,10 @@ def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float
         "enabled": False,
         "bootstrap_type": "replicate_resampling",
         "display_label": REPLICATE_BOOTSTRAP_LABEL,
+        "resampling_unit": "none",
+        "resampling_unit_label": "bootstrap disabled",
+        "resampling_group_key": ["method", "dataset_size_x"],
+        "paper_level_blockers": [],
         "replicates_requested": replicates_requested,
         "replicates_successful": 0,
         "replicates_failed": 0,
@@ -5221,6 +5266,65 @@ def group_normalized_rows_by_method_size(
             continue
         grouped[(str(row["method"]), int(size))].append(row)
     return grouped
+
+
+def bootstrap_resampling_metadata(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    metric_rows = [
+        row for row in rows
+        if row_primary_metric_mev(row) is not None and int_number(row.get("dataset_size_x")) is not None
+    ]
+    if not metric_rows:
+        return {
+            "resampling_unit": "row",
+            "resampling_unit_label": "row-level resampling",
+            "resampling_group_key": ["method", "dataset_size_x"],
+            "seed_counts_by_method_size_config": {},
+            "config_counts_by_method_size": {},
+            "unbalanced_seed_counts_by_config": False,
+            "unbalanced_config_counts_by_dataset_size": False,
+            "paper_level_blockers": [],
+        }
+
+    has_seed = all(str(row.get("seed") or "").strip() not in {"", "unknown"} for row in metric_rows)
+    has_config = all(str(row.get("config_id") or row.get("base_config_id") or "").strip() for row in metric_rows)
+    unit = "seed" if has_seed else ("config" if has_config else "replicate" if bootstrap_resampling_has_variation(metric_rows) else "row")
+
+    seed_counts: dict[str, int] = {}
+    config_counts_by_size: dict[str, int] = {}
+    grouped = group_normalized_rows_by_method_size(metric_rows)
+    unbalanced_seed_counts = False
+    for (method, size), items in sorted(grouped.items()):
+        by_config: dict[str, set[str]] = defaultdict(set)
+        for index, row in enumerate(items):
+            config_id = extract_base_config_id(row) or str(row.get("config_id") or f"row_{index}")
+            seed = str(row.get("seed") or f"row_{index}")
+            by_config[config_id].add(seed)
+        counts = {config_id: len(seeds) for config_id, seeds in sorted(by_config.items())}
+        if len(set(counts.values())) > 1:
+            unbalanced_seed_counts = True
+        for config_id, count in counts.items():
+            seed_counts[f"{method}:{size}:{config_id}"] = count
+        config_counts_by_size[f"{method}:{size}"] = len(by_config)
+
+    by_method_config_counts: dict[str, set[int]] = defaultdict(set)
+    for key, count in config_counts_by_size.items():
+        method = key.split(":", 1)[0]
+        by_method_config_counts[method].add(count)
+    unbalanced_config_counts = any(len(counts) > 1 for counts in by_method_config_counts.values())
+    blockers = []
+    if unbalanced_seed_counts or unbalanced_config_counts:
+        blockers.append("paper_blocked_if_replicate_bootstrap_unbalanced_seed_or_config_counts")
+
+    return {
+        "resampling_unit": unit,
+        "resampling_unit_label": f"{unit}-level resampling within method/dataset-size groups",
+        "resampling_group_key": ["method", "dataset_size_x"],
+        "seed_counts_by_method_size_config": seed_counts,
+        "config_counts_by_method_size": config_counts_by_size,
+        "unbalanced_seed_counts_by_config": unbalanced_seed_counts,
+        "unbalanced_config_counts_by_dataset_size": unbalanced_config_counts,
+        "paper_level_blockers": blockers,
+    }
 
 
 def bootstrap_resampling_has_variation(rows: list[dict[str, Any]]) -> bool:
@@ -5422,6 +5526,9 @@ def compute_bootstrap_n_min(
         normalized_rows,
         aggregation_mode=aggregation_mode,
     )
+    resampling_meta = bootstrap_resampling_metadata(normalized_rows)
+    if resampling_meta.get("paper_level_blockers"):
+        warnings.append("replicate_bootstrap_unbalanced_seed_or_config_counts")
     cost_eff_meta = replicate_bootstrap_cost_eff_metadata(
         normalized_rows,
         cost_basis=cost_basis,
@@ -5433,6 +5540,7 @@ def compute_bootstrap_n_min(
             "enabled": True,
             "bootstrap_type": "replicate_resampling",
             "display_label": REPLICATE_BOOTSTRAP_LABEL,
+            **resampling_meta,
             "replicates_requested": n_replicates,
             "replicates_successful": 0,
             "replicates_failed": n_replicates,
@@ -5538,6 +5646,7 @@ def compute_bootstrap_n_min(
         "enabled": True,
         "bootstrap_type": "replicate_resampling",
         "display_label": REPLICATE_BOOTSTRAP_LABEL,
+        **resampling_meta,
         "replicates_requested": n_replicates,
         "replicates_successful": replicate_successes,
         "replicates_failed": replicate_failures,
@@ -6100,6 +6209,9 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
     warnings.extend(threshold_sensitivity.get("warnings") or [])
     if aggregation_mode in {"mean_seeds_per_config", "best_config_mean"} and cost_basis == "per_seed_mean":
         warnings.append("paper_level_cost_basis_per_seed_mean_may_underestimate_protocol_cost")
+    dataset_size_axis = dataset_size_axis_metadata(all_normalized_rows, x_axis=args.x_axis)
+    if dataset_size_axis.get("n_train_fallback_used"):
+        warnings.append("missing_explicit_n_train_using_n_total_fallback_for_diagnostic_axis")
 
     outputs: list[str] = []
     write_csv(output_dir / "dataset_size_minimum_results.csv", grouped_rows)
@@ -6170,6 +6282,8 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         fit_predictive_stability_by_left_out_N=fit_stability,
         threshold_sensitivity=threshold_sensitivity,
         hierarchical_uncertainty=hierarchical_uncertainty,
+        replicate_bootstrap=replicate_bootstrap,
+        dataset_size_axis=dataset_size_axis,
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
     )
@@ -6213,6 +6327,11 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "claim_mode_requested": claim_mode,
         "claim_mode_actual": scientific_status.get("claim_mode_actual", "diagnostic"),
         "x_axis": args.x_axis,
+        "x_axis_used": dataset_size_axis.get("x_axis_used"),
+        "dataset_size_axis": dataset_size_axis,
+        "n_train_explicit": dataset_size_axis.get("n_train_explicit"),
+        "n_train_fallback_used": dataset_size_axis.get("n_train_fallback_used"),
+        "n_train_source": dataset_size_axis.get("n_train_source"),
         "fit_models": fit_models,
         "grouped_config_rows": len(grouped_rows),
         "best_by_size_rows": len(best_rows),

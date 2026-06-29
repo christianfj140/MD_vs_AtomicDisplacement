@@ -250,6 +250,15 @@ whether the result should stay at `internal_diagnostic` or
 `technical_presentation`, and why no derivative winner claim is allowed by
 default.
 
+The derivative plot payload can include dataset-size plots for the UI. Each
+point is normally an aggregate over derivative metric rows/stencils for one
+model and dataset size. `x_dataset_size` is preferably `N_train`; if split
+metadata is unavailable, it falls back to `N_total`. Plot families include
+primary dH errors, robust relative errors, correlation/residual diagnostics,
+delta-conditioned trends, guarded axis/atom trends, and Hermiticity plus
+onsite/offsite diagnostics versus dataset size. Treat all of them as
+post-processing diagnostics, not paper-ready winner evidence.
+
 For the paper-ready control plane, use the synthetic staged workflow smoke:
 
 ```bash

@@ -66,6 +66,7 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         include_reference: bool = True,
         forbidden_reference: bool = False,
         include_prediction: bool = True,
+        include_units: bool = True,
         metadata_split: str | None = None,
         base_sample_id: str | None = None,
         source_base_sample_id: str | None = None,
@@ -102,6 +103,10 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
                 "basis_hash": "basis-hash",
                 "pseudopotential_hash": "pseudo-hash",
             }
+            if include_units:
+                metadata["hamiltonian_units"] = "eV"
+                metadata["displacement_units"] = "Ang"
+                metadata["derivative_units"] = "eV/Ang"
             if metadata_split is not None:
                 metadata["split"] = metadata_split
             if base_sample_id is not None:
@@ -209,6 +214,26 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
         stencil = self.stencil(ml_plus=self.matrix("ml_plus", source="graph2mat", hamiltonian_units="Ry"))
 
         self.assertIn("unit_mismatch", self.issue_codes(stencil))
+
+    def test_missing_unit_metadata_warns_for_diagnostic_claim(self) -> None:
+        stencil = self.stencil(metadata=self.metadata(unit_metadata_explicit=False, hamiltonian_units_explicit=False))
+        issues = validate_derivative_stencil(stencil)
+
+        self.assertTrue(stencil_is_valid(issues))
+        self.assertIn("missing_unit_metadata", {issue.code for issue in validation_warnings(issues)})
+
+    def test_missing_unit_metadata_fails_for_non_diagnostic_claim(self) -> None:
+        stencil = self.stencil(
+            metadata=self.metadata(
+                claim_status="robust",
+                unit_metadata_explicit=False,
+                hamiltonian_units_explicit=False,
+                displacement_units_explicit=False,
+                derivative_units_explicit=False,
+            )
+        )
+
+        self.assertIn("missing_unit_metadata", self.issue_codes(stencil))
 
     def test_metadata_hash_mismatch_fails(self) -> None:
         stencil = self.stencil(siesta_plus=self.matrix("siesta_plus", source="siesta", material_compatibility_hash="other"))

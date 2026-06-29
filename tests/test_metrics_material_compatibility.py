@@ -849,6 +849,54 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
         self.assertFalse(selection.ok)
         self.assertEqual(selection.reason, "missing_reference_matrix")
 
+    def test_find_prediction_preserves_canonical_ml_prediction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sample_dir = Path(tmp) / "sample"
+            sample_dir.mkdir()
+            fallback = sample_dir / "backup_ML_prediction_2.HSX"
+            canonical = sample_dir / "ML_prediction.HSX"
+            fallback.write_bytes(b"fallback")
+            canonical.write_bytes(b"prediction")
+
+            prediction = self.module.find_prediction(sample_dir)
+
+        self.assertEqual(prediction, canonical)
+
+    def test_ambiguous_fallback_predictions_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pred_dir = root / "predicted_hamiltonians" / "sample_1"
+            ref_dir = root / "siesta_hamiltonians" / "sample_1"
+            pred_dir.mkdir(parents=True)
+            ref_dir.mkdir(parents=True)
+            (pred_dir / "a_ML_prediction_1.HSX").write_bytes(b"prediction a")
+            (pred_dir / "b_ML_prediction_2.HSX").write_bytes(b"prediction b")
+            (ref_dir / "siesta.TSHS").write_bytes(b"reference")
+
+            with mock.patch.object(
+                self.module,
+                "read_matrix",
+                side_effect=AssertionError("read_matrix called"),
+            ):
+                rows = self.module.evaluate_sample(
+                    "sample_1",
+                    pred_dir,
+                    ref_dir,
+                    root,
+                    {},
+                    low_energy_enabled=False,
+                    low_energy_n_states=2,
+                    low_energy_alignment="none",
+                )
+
+        self.assertEqual(rows["sample_status"][0]["status"], "failed")
+        self.assertIsNone(rows["sample_status"][0]["prediction_path"])
+        issue = rows["fatal_errors"][0]
+        self.assertEqual(issue["kind"], "noncanonical_prediction")
+        self.assertEqual(issue["candidate_count"], 2)
+        self.assertIn("a_ML_prediction_1.HSX", " ".join(issue["candidates"]))
+        self.assertIn("b_ML_prediction_2.HSX", " ".join(issue["candidates"]))
+
     def test_extract_non_gamma_with_flag_writes_kpoint_outputs(self) -> None:
         import numpy as np
         from scipy import sparse

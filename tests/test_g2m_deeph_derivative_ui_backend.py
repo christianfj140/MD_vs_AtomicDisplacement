@@ -495,6 +495,84 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertTrue(all(row["combined_series"] for row in plot["rows"]))
         self.assertEqual(payload["run_ids"], ["run_a", "run_b"])
 
+    def test_derivative_backend_combines_dataset_size_plot_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = []
+            dataset_size_plot_ids = [
+                "dh_mae_vs_dataset_size",
+                "robust_relative_frobenius_vs_dataset_size",
+                "dh_mae_vs_dataset_size_by_delta",
+                "derivative_hermiticity_vs_dataset_size",
+                "onsite_offsite_derivative_error_vs_dataset_size",
+            ]
+            for name, size, value in (("run_a", 20, 0.2), ("run_b", 100, 0.1)):
+                run_root = Path(tmp) / name
+                roots.append(run_root)
+                self.write_derivative_tree(run_root, "graph2mat", source_model="graph2mat")
+                write_json(
+                    run_root / "common_metrics" / "summary" / "derivative_plot_payload.json",
+                    {
+                        "available": True,
+                        "primary_plot_ids": dataset_size_plot_ids,
+                        "dataset_size_plot_ids": dataset_size_plot_ids,
+                        "diagnostic_plot_ids": ["dh_mae_by_model"],
+                        "plots": [
+                            {
+                                "id": plot_id,
+                                "kind": "scatter",
+                                "dataset_size_plot": True,
+                                "x_key": "x_dataset_size",
+                                "x_title": "N_train snapshots",
+                                "y_key": "dh_mae_union_eV_per_Ang",
+                                "series_key": "series_label" if plot_id.endswith("_by_delta") else "model_label",
+                                "rows": [
+                                    {
+                                        "model": "graph2mat",
+                                        "model_label": "Graph2Mat",
+                                        "series_label": "Graph2Mat delta=0.01",
+                                        "x_dataset_size": size,
+                                        "x_dataset_size_kind": "N_train",
+                                        "dataset_size_source": "synthetic_fixture",
+                                        "dh_mae_union_eV_per_Ang": value,
+                                        "dh_relative_frobenius_union_robust": value + 0.1,
+                                        "dH_pred_hermiticity_defect": value + 0.2,
+                                        "dh_onsite_relative_frobenius_robust": value + 0.3,
+                                    }
+                                ],
+                            }
+                            for plot_id in dataset_size_plot_ids
+                        ] + [
+                            {
+                                "id": "dh_mae_by_model",
+                                "kind": "grouped_bar",
+                                "rows": [{"method": "Graph2Mat", "dh_mae_union_eV_per_Ang": value}],
+                            },
+                        ],
+                    },
+                )
+
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", side_effect=roots):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_multi_payload(["run_a", "run_b"])
+
+        plot_payload = payload["plot_payload"]
+        self.assertEqual(plot_payload["primary_plot_ids"], dataset_size_plot_ids)
+        self.assertEqual(plot_payload["dataset_size_plot_ids"], dataset_size_plot_ids)
+        self.assertEqual(plot_payload["diagnostic_plot_ids"], ["dh_mae_by_model"])
+        plots = {plot["id"]: plot for plot in plot_payload["plots"]}
+        for plot_id in dataset_size_plot_ids:
+            plot = plots[plot_id]
+            self.assertTrue(plot["dataset_size_plot"])
+            self.assertEqual(plot["x_key"], "x_dataset_size")
+            self.assertIn(plot["series_key"], {"model_label", "series_label"})
+            self.assertEqual({row["x_dataset_size"] for row in plot["rows"]}, {20, 100})
+            self.assertEqual({row["model_label"] for row in plot["rows"]}, {"Graph2Mat"})
+            self.assertEqual({row["run_id"] for row in plot["rows"]}, {"run_a", "run_b"})
+            self.assertTrue(all(row["combined_series"] for row in plot["rows"]))
+            rows_by_run = {row["run_id"]: row for row in plot["rows"]}
+            self.assertEqual(rows_by_run["run_a"]["x_dataset_size"], 20)
+            self.assertEqual(rows_by_run["run_b"]["x_dataset_size"], 100)
+            self.assertEqual(rows_by_run["run_a"]["dataset_size_source"], "synthetic_fixture")
+
     def test_blocked_gate_report_renders_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_root = Path(tmp) / "run_blocked"

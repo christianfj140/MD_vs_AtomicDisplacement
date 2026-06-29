@@ -380,6 +380,16 @@ produce by default: delta stability, basis/gauge/orbital-order compatibility,
 and reference-noise checks should be documented before treating results as
 paper-level conclusions.
 
+Derivative dataset-size plots are post-processing diagnostics. Each point is
+usually a mean over derivative metric rows/stencils for one model and one
+dataset size. `x_dataset_size` prefers `N_train` from frozen split metadata and
+falls back to `N_total` when only total size is available. The plot payload can
+include primary dH error trends, robust relative-error trends,
+correlation/residual trends, delta-conditioned trends, guarded axis/atom
+breakdowns, and Hermiticity plus onsite/offsite trends. These plots are useful
+for inspecting scaling behavior, but they do not make derivative outputs
+paper-ready or override the derivative gate status.
+
 Expected derivative artifact layout:
 
 ```text

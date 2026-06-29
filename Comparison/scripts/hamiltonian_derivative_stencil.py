@@ -87,6 +87,10 @@ class DerivativeMetadata:
     hamiltonian_units: str = EXPECTED_HAMILTONIAN_UNITS
     displacement_units: str = EXPECTED_DISPLACEMENT_UNITS
     derivative_units: str = EXPECTED_DERIVATIVE_UNITS
+    hamiltonian_units_explicit: bool = True
+    displacement_units_explicit: bool = True
+    derivative_units_explicit: bool = True
+    unit_metadata_explicit: bool = True
     method: str = "central"
     claim_status: str = "diagnostic_only"
     material_compatibility_hash: str | None = None
@@ -113,6 +117,10 @@ class DerivativeMatrixInput:
     hamiltonian_units: str = EXPECTED_HAMILTONIAN_UNITS
     displacement_units: str = EXPECTED_DISPLACEMENT_UNITS
     derivative_units: str = EXPECTED_DERIVATIVE_UNITS
+    hamiltonian_units_explicit: bool = True
+    displacement_units_explicit: bool = True
+    derivative_units_explicit: bool = True
+    unit_metadata_explicit: bool = True
     atom_index_zero_based: int | None = None
     atom_index_one_based: int | None = None
     axis: str | None = None
@@ -1175,6 +1183,10 @@ def _build_discovered_stencil(
         axis=representative.axis,
         axis_index=representative.axis_index,
         delta_ang=representative.delta_ang,
+        hamiltonian_units=_metadata_text(representative.metadata, "hamiltonian_units") or EXPECTED_HAMILTONIAN_UNITS,
+        displacement_units=_metadata_text(representative.metadata, "displacement_units") or EXPECTED_DISPLACEMENT_UNITS,
+        derivative_units=_metadata_text(representative.metadata, "derivative_units") or EXPECTED_DERIVATIVE_UNITS,
+        **_unit_keys_explicit(representative.metadata),
         method=method,
         claim_status=_metadata_text(representative.metadata, "claim_status", "comparison_status") or "diagnostic_only",
         material_compatibility_hash=_group_hash(group_key, 7),
@@ -1319,6 +1331,7 @@ def _matrix_input_from_path(
         hamiltonian_units=str((metadata or {}).get("hamiltonian_units") or EXPECTED_HAMILTONIAN_UNITS),
         displacement_units=str((metadata or {}).get("displacement_units") or EXPECTED_DISPLACEMENT_UNITS),
         derivative_units=str((metadata or {}).get("derivative_units") or EXPECTED_DERIVATIVE_UNITS),
+        **_unit_keys_explicit(metadata),
         atom_index_zero_based=atom_zero,
         atom_index_one_based=atom_one,
         axis=axis,
@@ -1488,6 +1501,19 @@ def _metadata_hashes(metadata: dict[str, Any] | None) -> dict[str, str]:
         if value is not None:
             hashes[field_name] = value
     return hashes
+
+
+def _unit_keys_explicit(metadata: dict[str, Any] | None) -> dict[str, bool]:
+    payload = metadata or {}
+    return {
+        "hamiltonian_units_explicit": bool(payload.get("hamiltonian_units")),
+        "displacement_units_explicit": bool(payload.get("displacement_units")),
+        "derivative_units_explicit": bool(payload.get("derivative_units")),
+        "unit_metadata_explicit": all(
+            bool(payload.get(key))
+            for key in ("hamiltonian_units", "displacement_units", "derivative_units")
+        ),
+    }
 
 
 def _metadata_text(metadata: dict[str, Any] | None, *keys: str) -> str | None:
@@ -1928,6 +1954,10 @@ def _derivative_metric_metadata(
         "derivative_units": metadata.derivative_units if metadata else EXPECTED_DERIVATIVE_UNITS,
         "hamiltonian_units": metadata.hamiltonian_units if metadata else EXPECTED_HAMILTONIAN_UNITS,
         "displacement_units": metadata.displacement_units if metadata else EXPECTED_DISPLACEMENT_UNITS,
+        "unit_metadata_explicit": metadata.unit_metadata_explicit if metadata else False,
+        "hamiltonian_units_explicit": metadata.hamiltonian_units_explicit if metadata else False,
+        "displacement_units_explicit": metadata.displacement_units_explicit if metadata else False,
+        "derivative_units_explicit": metadata.derivative_units_explicit if metadata else False,
         "matrix_metric_target_space": DERIVATIVE_MATRIX_METRIC_TARGET_SPACE,
         "comparison_status": _derivative_comparison_status(metadata),
     }
@@ -1935,6 +1965,8 @@ def _derivative_metric_metadata(
 
 def _derivative_comparison_status(metadata: DerivativeMetadata | None) -> str:
     if metadata is None:
+        return "diagnostic_only"
+    if not metadata.unit_metadata_explicit:
         return "diagnostic_only"
     claim_status = str(metadata.claim_status or "").strip().lower()
     required = (
@@ -2183,6 +2215,7 @@ def _validate_metadata(stencil: DerivativeStencil, issues: list[DerivativeValida
         sample_id=metadata.sample_id,
     )
     claim_status = str(metadata.claim_status or "").strip().lower()
+    _validate_unit_metadata_explicit(metadata, issues, claim_status=claim_status)
     if claim_status in PAPER_LEVEL_STATUSES:
         _issue(
             issues,
@@ -2244,6 +2277,36 @@ def _validate_units(
                 expected=expected,
                 actual=value,
             )
+
+
+def _validate_unit_metadata_explicit(
+    metadata: DerivativeMetadata,
+    issues: list[DerivativeValidationIssue],
+    *,
+    claim_status: str,
+) -> None:
+    missing = [
+        field_name
+        for field_name, explicit in (
+            ("hamiltonian_units", metadata.hamiltonian_units_explicit),
+            ("displacement_units", metadata.displacement_units_explicit),
+            ("derivative_units", metadata.derivative_units_explicit),
+        )
+        if not explicit
+    ]
+    if not missing:
+        return
+    non_diagnostic = claim_status not in DIAGNOSTIC_STATUSES
+    _issue(
+        issues,
+        "error" if non_diagnostic else "warning",
+        "missing_unit_metadata",
+        "Derivative metadata must explicitly record hamiltonian_units, displacement_units, and derivative_units.",
+        field=",".join(missing),
+        sample_id=metadata.sample_id,
+        claim_status=metadata.claim_status,
+        missing_units=missing,
+    )
 
 
 def _validate_operands(stencil: DerivativeStencil, issues: list[DerivativeValidationIssue]) -> None:

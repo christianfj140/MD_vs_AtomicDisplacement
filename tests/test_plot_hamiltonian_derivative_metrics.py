@@ -202,6 +202,27 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertIn("relative_frobenius_by_model", plot_ids)
         self.assertIn("error_by_atom_index_zero_based", plot_ids)
         self.assertIn("error_by_axis", plot_ids)
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        required_semantic_fields = {
+            "data_grain",
+            "aggregation",
+            "x_semantics",
+            "y_semantics",
+            "lower_is_better",
+            "higher_is_better",
+            "units",
+            "diagnostic_only",
+        }
+        for plot in payload["plots"]:
+            self.assertTrue(required_semantic_fields.issubset(plot), plot["id"])
+        self.assertEqual(plots["error_vs_delta"]["data_grain"], "sample_stencil_delta")
+        self.assertEqual(plots["error_vs_delta"]["aggregation"], "none")
+        self.assertEqual(plots["error_vs_delta"]["x_semantics"], "delta Ang")
+        self.assertEqual(plots["error_vs_delta"]["units"]["x"], "Ang")
+        self.assertTrue(plots["error_vs_delta"]["lower_is_better"])
+        self.assertEqual(plots["dh_mae_by_model"]["data_grain"], "model_mean")
+        self.assertEqual(plots["dh_mae_by_model"]["aggregation"], "mean over rows grouped by model")
+        self.assertEqual(plots["dh_mae_by_model"]["units"]["dh_mae_union_eV_per_Ang"], "eV/Ang")
         self.assertNotIn("relative_frobenius_union_robust_by_model", plot_ids)
         self.assertNotIn("derivative_correlation_by_model", plot_ids)
         self.assertNotIn("derivative_error_by_abs_ref_quantile", plot_ids)
@@ -281,6 +302,54 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(plot["rows"][0]["dh_onsite_mae_eV_per_Ang"], 0.04)
         self.assertAlmostEqual(plot["rows"][0]["dh_offsite_mae_eV_per_Ang"], 0.08)
         self.assertNotIn("derivative_onsite_offsite_metrics_missing", {warning["code"] for warning in payload["scientific_warnings"]})
+
+    def test_invalid_geometry_rows_are_marked_and_excluded_from_model_aggregates(self) -> None:
+        derivative_root = self.write_derivative_fixture(
+            "invalid_geometry",
+            source_model="graph2mat",
+            rows=[
+                {
+                    "sample": "valid",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "dh_mae_union_eV_per_Ang": 0.2,
+                    "dh_rmse_union_eV_per_Ang": 0.3,
+                    "dh_relative_frobenius_ref": 0.4,
+                },
+                {
+                    "sample": "invalid",
+                    "source_model": "graph2mat",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "delta_ang": 0.02,
+                    "finite_difference_method": "central",
+                    "invalid_geometry": True,
+                    "geometry_validation_failed": True,
+                    "geometry_issue_codes": "displacement_vector_mismatch",
+                    "dh_mae_union_eV_per_Ang": 9.9,
+                    "dh_rmse_union_eV_per_Ang": 9.9,
+                    "dh_relative_frobenius_ref": 9.9,
+                },
+            ],
+        )
+        output_dir = self.root / "plots_invalid_geometry"
+
+        completed = self.run_script("--derivative-root", str(derivative_root), "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        warnings = {warning["code"]: warning for warning in payload["scientific_warnings"]}
+        self.assertIn("invalid_geometry_rows_excluded_from_aggregates", warnings)
+        self.assertEqual(warnings["invalid_geometry_rows_excluded_from_aggregates"]["severity"], "severe")
+        self.assertEqual(warnings["invalid_geometry_rows_excluded_from_aggregates"]["details"]["invalid_rows"], 1)
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        self.assertAlmostEqual(plots["dh_mae_by_model"]["rows"][0]["dh_mae_union_eV_per_Ang"], 0.2)
+        invalid_points = [row for row in plots["error_vs_delta"]["rows"] if row["sample"] == "invalid"]
+        self.assertEqual(len(invalid_points), 1)
+        self.assertTrue(invalid_points[0]["invalid_geometry"])
 
     def test_onsite_offsite_unavailable_json_warns_without_plot(self) -> None:
         derivative_root = self.write_derivative_fixture(
@@ -813,14 +882,22 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
             "support_error_rates_vs_dataset_size",
         ]
         self.assertEqual([plot["id"] for plot in payload["plots"][:5]], dataset_size_plot_ids)
-        self.assertEqual(payload["primary_plot_ids"], dataset_size_plot_ids)
-        self.assertEqual(payload["dataset_size_plot_ids"], dataset_size_plot_ids)
+        self.assertEqual(payload["primary_plot_ids"], payload["dataset_size_plot_ids"])
+        self.assertEqual(payload["dataset_size_plot_ids"][:5], dataset_size_plot_ids)
         self.assertIn("dh_mae_by_model", payload["diagnostic_plot_ids"])
         plots = {plot["id"]: plot for plot in payload["plots"]}
         self.assertIn("dh_mae_vs_dataset_size", plots)
         self.assertIn("dh_mae_by_model", plots)
         self.assertEqual(plots["dh_mae_vs_dataset_size"]["x_key"], "x_dataset_size")
         self.assertEqual(plots["dh_mae_vs_dataset_size"]["series_key"], "model_label")
+        self.assertEqual(plots["dh_mae_vs_dataset_size"]["data_grain"], "model_dataset_size_mean")
+        self.assertEqual(
+            plots["dh_mae_vs_dataset_size"]["aggregation"],
+            "mean over rows grouped by model and dataset size",
+        )
+        self.assertIn("N_train when available, otherwise N_total", plots["dh_mae_vs_dataset_size"]["x_semantics"])
+        self.assertEqual(plots["dh_mae_vs_dataset_size"]["units"]["x_dataset_size"], "snapshots")
+        self.assertIn("frozen_split_manifest", plots["dh_mae_vs_dataset_size"]["dataset_size_sources"])
         rows = plots["dh_mae_vs_dataset_size"]["rows"]
         self.assertEqual({row["x_dataset_size"] for row in rows}, {12, 50})
         self.assertEqual({row["model_label"] for row in rows}, {"Graph2Mat", "DeepH"})
@@ -830,6 +907,548 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
         self.assertEqual(graph2mat_12["n_stencils"], 2)
         self.assertEqual(graph2mat_12["dataset_ids"], ["n12"])
         self.assertEqual(graph2mat_12["x_dataset_size_kind"], "N_train")
+        self.assertEqual(graph2mat_12["dataset_size_source"], "frozen_split_manifest")
+
+    def test_delta_conditioned_dataset_size_plots_aggregate_by_model_size_and_delta(self) -> None:
+        dataset_12 = self.write_dataset_root("delta_dataset_12", train=12)
+        dataset_50 = self.write_dataset_root("delta_dataset_50", train=50)
+        roots = [
+            self.write_derivative_fixture(
+                "delta_graph2mat_n12",
+                source_model="graph2mat",
+                dataset_root=dataset_12,
+                dataset_id="n12",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.005,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.2,
+                        "dh_rmse_union_eV_per_Ang": 0.3,
+                        "dh_relative_frobenius_ref": 0.4,
+                    },
+                    {
+                        "sample": "s1",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 1,
+                        "axis": "y",
+                        "delta_ang": 0.005,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.4,
+                        "dh_rmse_union_eV_per_Ang": 0.5,
+                        "dh_relative_frobenius_ref": 0.6,
+                    },
+                    {
+                        "sample": "s2",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 2,
+                        "axis": "z",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.6,
+                        "dh_rmse_union_eV_per_Ang": 0.7,
+                        "dh_relative_frobenius_ref": 0.8,
+                    },
+                ],
+            ),
+            self.write_derivative_fixture(
+                "delta_graph2mat_n50",
+                source_model="graph2mat",
+                dataset_root=dataset_50,
+                dataset_id="n50",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.005,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.1,
+                        "dh_rmse_union_eV_per_Ang": 0.2,
+                        "dh_relative_frobenius_ref": 0.3,
+                    },
+                    {
+                        "sample": "s2",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 2,
+                        "axis": "z",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.3,
+                        "dh_rmse_union_eV_per_Ang": 0.4,
+                        "dh_relative_frobenius_ref": 0.5,
+                    },
+                ],
+            ),
+        ]
+        output_dir = self.root / "plots_delta_dataset_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        delta_plot_ids = [
+            "dh_mae_vs_dataset_size_by_delta",
+            "dh_rmse_vs_dataset_size_by_delta",
+            "relative_frobenius_vs_dataset_size_by_delta",
+        ]
+        for plot_id in delta_plot_ids:
+            self.assertIn(plot_id, plots)
+            self.assertEqual(plots[plot_id]["kind"], "scatter")
+            self.assertTrue(plots[plot_id]["dataset_size_plot"])
+            self.assertEqual(plots[plot_id]["x_key"], "x_dataset_size")
+            self.assertEqual(plots[plot_id]["series_key"], "series_label")
+            self.assertIn(plot_id, payload["dataset_size_plot_ids"])
+        self.assertIn("error_vs_delta", plots)
+
+        rows = plots["dh_mae_vs_dataset_size_by_delta"]["rows"]
+        row = next(row for row in rows if row["x_dataset_size"] == 12 and row["delta_ang"] == 0.005)
+        self.assertEqual(row["model"], "graph2mat")
+        self.assertEqual(row["model_label"], "Graph2Mat")
+        self.assertEqual(row["finite_difference_method"], "central")
+        self.assertEqual(row["x_dataset_size_kind"], "N_train")
+        self.assertEqual(row["dataset_size_source"], "frozen_split_manifest")
+        self.assertEqual(row["n_rows"], 2)
+        self.assertEqual(row["n_stencils"], 2)
+        self.assertEqual(row["series_label"], "Graph2Mat Δ=0.005 Å")
+        self.assertAlmostEqual(row["dh_mae_union_eV_per_Ang"], 0.3)
+        self.assertAlmostEqual(row["dh_rmse_union_eV_per_Ang"], 0.4)
+        self.assertAlmostEqual(row["dh_relative_frobenius_ref"], 0.5)
+
+    def test_axis_and_small_atom_dataset_size_plots_aggregate_from_metric_rows(self) -> None:
+        dataset_12 = self.write_dataset_root("axis_atom_dataset_12", train=12)
+        dataset_50 = self.write_dataset_root("axis_atom_dataset_50", train=50)
+        roots = [
+            self.write_derivative_fixture(
+                "axis_atom_graph2mat_n12",
+                source_model="graph2mat",
+                dataset_root=dataset_12,
+                dataset_id="n12",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.2,
+                        "dh_rmse_union_eV_per_Ang": 0.3,
+                        "dh_relative_frobenius_ref": 0.4,
+                        "dh_relative_frobenius_union_robust": 0.5,
+                    },
+                    {
+                        "sample": "s1",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 1,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.4,
+                        "dh_rmse_union_eV_per_Ang": 0.5,
+                        "dh_relative_frobenius_ref": 0.6,
+                        "dh_relative_frobenius_union_robust": 0.7,
+                    },
+                    {
+                        "sample": "s2",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "y",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.8,
+                        "dh_rmse_union_eV_per_Ang": 0.9,
+                        "dh_relative_frobenius_ref": 1.0,
+                        "dh_relative_frobenius_union_robust": 1.1,
+                    },
+                ],
+            ),
+            self.write_derivative_fixture(
+                "axis_atom_graph2mat_n50",
+                source_model="graph2mat",
+                dataset_root=dataset_50,
+                dataset_id="n50",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.1,
+                        "dh_rmse_union_eV_per_Ang": 0.2,
+                        "dh_relative_frobenius_ref": 0.3,
+                        "dh_relative_frobenius_union_robust": 0.4,
+                    },
+                    {
+                        "sample": "s1",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 1,
+                        "axis": "y",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.3,
+                        "dh_rmse_union_eV_per_Ang": 0.4,
+                        "dh_relative_frobenius_ref": 0.5,
+                        "dh_relative_frobenius_union_robust": 0.6,
+                    },
+                ],
+            ),
+        ]
+        output_dir = self.root / "plots_axis_atom_dataset_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        for plot_id in (
+            "dh_mae_vs_dataset_size_by_axis",
+            "robust_frobenius_vs_dataset_size_by_axis",
+            "dh_mae_vs_dataset_size_by_displaced_atom",
+        ):
+            self.assertIn(plot_id, plots)
+            self.assertEqual(plots[plot_id]["kind"], "scatter")
+            self.assertTrue(plots[plot_id]["dataset_size_plot"])
+            self.assertEqual(plots[plot_id]["x_key"], "x_dataset_size")
+            self.assertEqual(plots[plot_id]["series_key"], "series_label")
+            self.assertIn(plot_id, payload["dataset_size_plot_ids"])
+        axis_row = next(row for row in plots["dh_mae_vs_dataset_size_by_axis"]["rows"] if row["axis"] == "x" and row["x_dataset_size"] == 12)
+        self.assertEqual(axis_row["series_label"], "Graph2Mat axis=x")
+        self.assertEqual(axis_row["n_rows"], 2)
+        self.assertEqual(axis_row["n_stencils"], 2)
+        self.assertAlmostEqual(axis_row["dh_mae_union_eV_per_Ang"], 0.3)
+        robust_axis_row = next(row for row in plots["robust_frobenius_vs_dataset_size_by_axis"]["rows"] if row["axis"] == "x" and row["x_dataset_size"] == 12)
+        self.assertAlmostEqual(robust_axis_row["dh_relative_frobenius_union_robust"], 0.6)
+        atom_row = next(
+            row
+            for row in plots["dh_mae_vs_dataset_size_by_displaced_atom"]["rows"]
+            if row["atom_index_zero_based"] == "0" and row["x_dataset_size"] == 12
+        )
+        self.assertEqual(atom_row["series_label"], "Graph2Mat atom=0")
+        self.assertEqual(atom_row["n_rows"], 2)
+        self.assertAlmostEqual(atom_row["dh_mae_union_eV_per_Ang"], 0.5)
+
+    def test_dataset_size_atom_plot_skips_with_warning_when_too_many_atoms(self) -> None:
+        dataset_12 = self.write_dataset_root("many_atom_dataset_12", train=12)
+        dataset_50 = self.write_dataset_root("many_atom_dataset_50", train=50)
+        roots = []
+        for size, dataset_root in ((12, dataset_12), (50, dataset_50)):
+            roots.append(
+                self.write_derivative_fixture(
+                    f"many_atom_graph2mat_n{size}",
+                    source_model="graph2mat",
+                    dataset_root=dataset_root,
+                    dataset_id=f"n{size}",
+                    rows=[
+                        {
+                            "sample": f"s{atom}",
+                            "source_model": "graph2mat",
+                            "atom_index_zero_based": atom,
+                            "axis": "x",
+                            "delta_ang": 0.01,
+                            "finite_difference_method": "central",
+                            "dh_mae_union_eV_per_Ang": atom / 100 + size / 1000,
+                            "dh_rmse_union_eV_per_Ang": 0.2,
+                            "dh_relative_frobenius_ref": 0.3,
+                        }
+                        for atom in range(13)
+                    ],
+                )
+            )
+        output_dir = self.root / "plots_many_atom_dataset_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plot_ids = {plot["id"] for plot in payload["plots"]}
+        self.assertIn("dh_mae_vs_dataset_size_by_axis", plot_ids)
+        self.assertNotIn("dh_mae_vs_dataset_size_by_displaced_atom", plot_ids)
+        warnings = {warning["code"]: warning for warning in payload["scientific_warnings"]}
+        self.assertIn("dataset_size_atom_plot_too_many_series", warnings)
+        self.assertEqual(warnings["dataset_size_atom_plot_too_many_series"]["details"]["unique_displaced_atoms"], 13)
+
+    def test_hermiticity_and_onsite_offsite_dataset_size_plots_use_metadata(self) -> None:
+        dataset_12 = self.write_dataset_root("herm_onsite_dataset_12", train=12)
+        dataset_50 = self.write_dataset_root("herm_onsite_dataset_50", train=50)
+        roots = [
+            self.write_derivative_fixture(
+                "herm_onsite_graph2mat_n12",
+                source_model="graph2mat",
+                dataset_root=dataset_12,
+                dataset_id="n12",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.2,
+                        "dh_rmse_union_eV_per_Ang": 0.3,
+                        "dh_relative_frobenius_ref": 0.4,
+                    }
+                ],
+                hermiticity_rows=[
+                    {
+                        "sample": "s0",
+                        "finite_difference_method": "central",
+                        "dH_ref_hermiticity_defect": 0.0,
+                        "dH_pred_hermiticity_defect": 0.02,
+                        "dH_hermiticity_error_delta": 0.03,
+                    },
+                    {
+                        "sample": "s1",
+                        "finite_difference_method": "central",
+                        "dH_ref_hermiticity_defect": 0.0,
+                        "dH_pred_hermiticity_defect": 0.04,
+                        "dH_hermiticity_error_delta": 0.05,
+                    },
+                ],
+                onsite_offsite_rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_onsite_relative_frobenius_robust": 0.2,
+                        "dh_offsite_relative_frobenius_robust": 0.4,
+                        "dh_onsite_mae_eV_per_Ang": 0.02,
+                        "dh_offsite_mae_eV_per_Ang": 0.04,
+                    },
+                    {
+                        "sample": "s1",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 1,
+                        "axis": "y",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_onsite_relative_frobenius_robust": 0.4,
+                        "dh_offsite_relative_frobenius_robust": 0.6,
+                        "dh_onsite_mae_eV_per_Ang": 0.04,
+                        "dh_offsite_mae_eV_per_Ang": 0.06,
+                    },
+                ],
+            ),
+            self.write_derivative_fixture(
+                "herm_onsite_graph2mat_n50",
+                source_model="graph2mat",
+                dataset_root=dataset_50,
+                dataset_id="n50",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.1,
+                        "dh_rmse_union_eV_per_Ang": 0.2,
+                        "dh_relative_frobenius_ref": 0.3,
+                    }
+                ],
+                hermiticity_rows=[
+                    {
+                        "sample": "s0",
+                        "finite_difference_method": "central",
+                        "dH_ref_hermiticity_defect": 0.0,
+                        "dH_pred_hermiticity_defect": 0.01,
+                        "dH_hermiticity_error_delta": 0.02,
+                    }
+                ],
+                onsite_offsite_rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_onsite_relative_frobenius_robust": 0.1,
+                        "dh_offsite_relative_frobenius_robust": 0.3,
+                        "dh_onsite_mae_eV_per_Ang": 0.01,
+                        "dh_offsite_mae_eV_per_Ang": 0.03,
+                    }
+                ],
+            ),
+        ]
+        output_dir = self.root / "plots_herm_onsite_dataset_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        self.assertIn("hermiticity_defect_by_model", plots)
+        self.assertIn("onsite_offsite_derivative_error", plots)
+        for plot_id in ("derivative_hermiticity_vs_dataset_size", "onsite_offsite_derivative_error_vs_dataset_size"):
+            self.assertIn(plot_id, plots)
+            self.assertEqual(plots[plot_id]["kind"], "scatter")
+            self.assertTrue(plots[plot_id]["dataset_size_plot"])
+            self.assertEqual(plots[plot_id]["x_key"], "x_dataset_size")
+            self.assertEqual(plots[plot_id]["series_key"], "model_label")
+            self.assertIn(plot_id, payload["dataset_size_plot_ids"])
+        herm_row = next(row for row in plots["derivative_hermiticity_vs_dataset_size"]["rows"] if row["x_dataset_size"] == 12)
+        self.assertEqual(herm_row["dataset_ids"], ["n12"])
+        self.assertEqual(herm_row["x_dataset_size_kind"], "N_train")
+        self.assertAlmostEqual(herm_row["dH_pred_hermiticity_defect"], 0.03)
+        self.assertAlmostEqual(herm_row["dH_hermiticity_error_delta"], 0.04)
+        onsite_row = next(row for row in plots["onsite_offsite_derivative_error_vs_dataset_size"]["rows"] if row["x_dataset_size"] == 12)
+        self.assertEqual(onsite_row["dataset_ids"], ["n12"])
+        self.assertAlmostEqual(onsite_row["dh_onsite_relative_frobenius_robust"], 0.3)
+        self.assertAlmostEqual(onsite_row["dh_offsite_relative_frobenius_robust"], 0.5)
+        self.assertAlmostEqual(onsite_row["dh_onsite_mae_eV_per_Ang"], 0.03)
+        self.assertAlmostEqual(onsite_row["dh_offsite_mae_eV_per_Ang"], 0.05)
+
+    def test_extended_dataset_size_plots_aggregate_optional_derivative_metrics(self) -> None:
+        dataset_12 = self.write_dataset_root("extended_dataset_12", train=12)
+        dataset_50 = self.write_dataset_root("extended_dataset_50", train=50)
+        roots = [
+            self.write_derivative_fixture(
+                "extended_graph2mat_n12",
+                source_model="graph2mat",
+                dataset_root=dataset_12,
+                dataset_id="n12",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.2,
+                        "dh_rmse_union_eV_per_Ang": 0.3,
+                        "dh_relative_frobenius_ref": 0.4,
+                        "dh_relative_frobenius_union_robust": 0.2,
+                        "dh_relative_l1_union_robust": 0.4,
+                        "dh_pearson_union": 0.8,
+                        "dh_spearman_union": 0.7,
+                        "dh_residual_mean_union_eV_per_Ang": -0.02,
+                        "dh_residual_std_union_eV_per_Ang": 0.10,
+                        "dh_residual_median_union_eV_per_Ang": -0.01,
+                        "dh_residual_bias_over_mae_union": 0.20,
+                        "dh_residual_abs_p90_union_eV_per_Ang": 0.30,
+                        "dh_residual_abs_p95_union_eV_per_Ang": 0.40,
+                        "dh_residual_abs_p99_union_eV_per_Ang": 0.50,
+                    },
+                    {
+                        "sample": "s1",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 1,
+                        "axis": "y",
+                        "delta_ang": 0.02,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.4,
+                        "dh_rmse_union_eV_per_Ang": 0.5,
+                        "dh_relative_frobenius_ref": 0.6,
+                        "dh_relative_frobenius_union_robust": 0.4,
+                        "dh_relative_l1_union_robust": 0.6,
+                        "dh_pearson_union": 0.6,
+                        "dh_spearman_union": 0.5,
+                        "dh_residual_mean_union_eV_per_Ang": 0.02,
+                        "dh_residual_std_union_eV_per_Ang": 0.20,
+                        "dh_residual_median_union_eV_per_Ang": 0.03,
+                        "dh_residual_bias_over_mae_union": 0.40,
+                        "dh_residual_abs_p90_union_eV_per_Ang": 0.50,
+                        "dh_residual_abs_p95_union_eV_per_Ang": 0.60,
+                        "dh_residual_abs_p99_union_eV_per_Ang": 0.70,
+                    },
+                ],
+            ),
+            self.write_derivative_fixture(
+                "extended_graph2mat_n50",
+                source_model="graph2mat",
+                dataset_root=dataset_50,
+                dataset_id="n50",
+                rows=[
+                    {
+                        "sample": "s0",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "dh_mae_union_eV_per_Ang": 0.1,
+                        "dh_rmse_union_eV_per_Ang": 0.2,
+                        "dh_relative_frobenius_ref": 0.3,
+                        "dh_relative_frobenius_union_robust": 0.1,
+                        "dh_relative_l1_union_robust": 0.3,
+                        "dh_pearson_union": 0.9,
+                        "dh_spearman_union": 0.85,
+                        "dh_residual_mean_union_eV_per_Ang": -0.01,
+                        "dh_residual_std_union_eV_per_Ang": 0.08,
+                        "dh_residual_median_union_eV_per_Ang": 0.0,
+                        "dh_residual_bias_over_mae_union": 0.1,
+                        "dh_residual_abs_p90_union_eV_per_Ang": 0.20,
+                        "dh_residual_abs_p95_union_eV_per_Ang": 0.25,
+                        "dh_residual_abs_p99_union_eV_per_Ang": 0.30,
+                    }
+                ],
+            ),
+        ]
+        output_dir = self.root / "plots_extended_dataset_size"
+        args: list[str] = []
+        for root in roots:
+            args.extend(["--derivative-root", str(root)])
+
+        completed = self.run_script(*args, "--output-dir", str(output_dir))
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads((output_dir / "derivative_plot_payload.json").read_text(encoding="utf-8"))
+        new_plot_ids = [
+            "robust_relative_frobenius_vs_dataset_size",
+            "robust_relative_l1_vs_dataset_size",
+            "derivative_correlation_vs_dataset_size",
+            "derivative_residual_summary_vs_dataset_size",
+            "derivative_residual_tail_vs_dataset_size",
+        ]
+        plots = {plot["id"]: plot for plot in payload["plots"]}
+        for plot_id in new_plot_ids:
+            self.assertIn(plot_id, plots)
+            self.assertEqual(plots[plot_id]["kind"], "scatter")
+            self.assertTrue(plots[plot_id]["dataset_size_plot"])
+            self.assertEqual(plots[plot_id]["x_key"], "x_dataset_size")
+            self.assertEqual(plots[plot_id]["series_key"], "model_label")
+        for plot_id in new_plot_ids:
+            self.assertIn(plot_id, payload["dataset_size_plot_ids"])
+        self.assertEqual(payload["primary_plot_ids"], payload["dataset_size_plot_ids"])
+
+        robust_row = next(row for row in plots["robust_relative_frobenius_vs_dataset_size"]["rows"] if row["x_dataset_size"] == 12)
+        self.assertAlmostEqual(robust_row["dh_relative_frobenius_union_robust"], 0.3)
+        self.assertAlmostEqual(robust_row["dh_relative_l1_union_robust"], 0.5)
+        self.assertAlmostEqual(robust_row["dh_pearson_union"], 0.7)
+        self.assertAlmostEqual(robust_row["dh_spearman_union"], 0.6)
+        self.assertAlmostEqual(robust_row["dh_residual_mean_union_eV_per_Ang"], 0.0)
+        self.assertAlmostEqual(robust_row["dh_residual_std_union_eV_per_Ang"], 0.15)
+        self.assertAlmostEqual(robust_row["dh_residual_median_union_eV_per_Ang"], 0.01)
+        self.assertAlmostEqual(robust_row["dh_residual_bias_over_mae_union"], 0.3)
+        self.assertAlmostEqual(robust_row["dh_residual_abs_p90_union_eV_per_Ang"], 0.4)
+        self.assertAlmostEqual(robust_row["dh_residual_abs_p95_union_eV_per_Ang"], 0.5)
+        self.assertAlmostEqual(robust_row["dh_residual_abs_p99_union_eV_per_Ang"], 0.6)
 
     def test_dataset_size_plots_infer_iid_workflow_size_from_real_sweep_shape(self) -> None:
         roots: list[Path] = []

@@ -277,6 +277,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             1,
         )[0]
         for text in (
+            "Dataset-size derivative metrics",
             "Primary derivative metrics",
             "Secondary derivative metrics",
             "Diagnostic derivative metrics",
@@ -286,6 +287,16 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS",
             "primary_plot_ids",
             "diagnostic_plot_ids",
+            "dataset_size_plot_ids",
+            "G2M_DEEPH_DERIVATIVE_DATASET_SIZE_NOTE",
+            "G2M_DEEPH_BASE_DERIVATIVE_DATASET_SIZE_PLOTS",
+            "G2M_DEEPH_OPTIONAL_DERIVATIVE_DATASET_SIZE_PLOTS",
+            "G2M_DEEPH_DERIVATIVE_DATASET_SIZE_PARTIAL_MESSAGE",
+            "g2mDeephDerivativeIsDatasetSizePlot",
+            "g2mDeephDerivativePlotTitle",
+            "g2mDeephDerivativeHoverText",
+            "g2mDeephDerivativeDatasetSizeNotice",
+            'datasetSizeIds.has(plot.id) || g2mDeephDerivativeIsDatasetSizePlot(plot)',
             'plot.kind === "grouped_bar"',
             'plot.kind === "scatter" || plot.kind === "line"',
             "plot.x_key",
@@ -299,11 +310,38 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2mDeephDerivativePlotInfo",
             "G2M_DEEPH_DERIVATIVE_METRIC_HELP",
             "plotInfo: g2mDeephDerivativePlotInfo(plot)",
+            "row.n_stencils",
+            "row.delta_values",
+            "row.axes",
+            "row.atom_indices",
             "dH_pred/dR frente a dH_ref/dR",
             "g2m-deeph-derivative-plot-${plot.id",
             "Regenerate derivative_plot_payload.json from derivative metric CSV/JSON artifacts.",
         ):
             self.assertIn(text, derivative_js)
+        self.assertIn("Dataset-size derivative plots show aggregates over derivative metric rows/stencils", self.app_js)
+        self.assertIn("x_dataset_size is usually N_train when available, otherwise N_total", self.app_js)
+        self.assertIn("Mean dH MAE vs dataset size", self.app_js)
+        self.assertIn("Mean dH RMSE vs dataset size", self.app_js)
+        self.assertIn("Mean relative Frobenius vs dataset size", self.app_js)
+        self.assertIn("Only base dataset-size derivative plots are present.", self.app_js)
+        self.assertIn("Regenerate derivative_plot_payload.json from current derivative metric CSV/JSON artifacts", self.app_js)
+        for plot_id in (
+            "robust_relative_frobenius_vs_dataset_size",
+            "robust_relative_l1_vs_dataset_size",
+            "derivative_correlation_vs_dataset_size",
+            "derivative_residual_summary_vs_dataset_size",
+            "derivative_residual_tail_vs_dataset_size",
+            "dh_mae_vs_dataset_size_by_delta",
+            "dh_rmse_vs_dataset_size_by_delta",
+            "relative_frobenius_vs_dataset_size_by_delta",
+            "dh_mae_vs_dataset_size_by_axis",
+            "robust_frobenius_vs_dataset_size_by_axis",
+            "dh_mae_vs_dataset_size_by_displaced_atom",
+            "derivative_hermiticity_vs_dataset_size",
+            "onsite_offsite_derivative_error_vs_dataset_size",
+        ):
+            self.assertIn(plot_id, self.app_js)
         mock_payload_plot_ids = (
             "relative_frobenius_union_robust_by_model",
             "relative_l1_union_robust_by_model",
