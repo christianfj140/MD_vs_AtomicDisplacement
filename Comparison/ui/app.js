@@ -666,6 +666,7 @@ const state = {
   g2mDeephSelectedPlotRunIds: [],
   g2mDeephDerivativeRunId: null,
   g2mDeephDerivativeRunIds: [],
+  g2mDeephDerivativeDatasetSizeAxis: "n_train",
   datasetMinimumPayload: null,
   datasetMinimumRunRootSelection: null,
   datasetMinimumThresholdPresetKey: "h_mae_relaxed_10",
@@ -2773,6 +2774,8 @@ function g2mDeephDerivativeHoverText(row = {}) {
     row.dataset_ids?.join?.(","),
     row.dataset_id,
     row.x_dataset_size != null ? `${row.x_dataset_size_kind || "dataset size"} ${row.x_dataset_size}` : "",
+    row.n_train != null ? `N_train ${row.n_train}` : "",
+    row.n_total != null ? `N_total ${row.n_total}` : "",
     row.dataset_size_source ? `source ${row.dataset_size_source}` : "",
     row.delta_ang != null ? `delta ${row.delta_ang}` : "",
     listText(row.delta_values) ? `deltas ${listText(row.delta_values)}` : "",
@@ -2828,6 +2831,28 @@ function renderG2MDeepHDerivativeGroupedBarPlot(card, plot) {
   );
 }
 
+function g2mDeephDerivativeDatasetSizeAxisField() {
+  return state.g2mDeephDerivativeDatasetSizeAxis === "n_total" ? "n_total" : "n_train";
+}
+
+function g2mDeephDerivativeXValue(row, plot) {
+  if (g2mDeephDerivativeIsDatasetSizePlot(plot)) {
+    const field = g2mDeephDerivativeDatasetSizeAxisField();
+    const value = finiteNumber(row[field]);
+    if (value != null) return value;
+  }
+  return finiteNumber(row[plot.x_key || "x"]);
+}
+
+function g2mDeephDerivativeXAxisTitle(plot) {
+  if (g2mDeephDerivativeIsDatasetSizePlot(plot)) {
+    return g2mDeephDerivativeDatasetSizeAxisField() === "n_total"
+      ? "N_total snapshots (train+val+test)"
+      : "N_train snapshots";
+  }
+  return plot.x_title || "x";
+}
+
 function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   const grouped = new Map();
   for (const row of plot.rows || []) {
@@ -2838,32 +2863,171 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   }
   const metrics = (plot.metrics && plot.metrics.length) ? plot.metrics : [{ key: plot.y_key, label: plot.y_title || plot.y_key }];
   const mode = G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS.has(plot.id) ? "markers" : null;
+  const series = Array.from(grouped.entries()).flatMap(([key, rows], index) => metrics.map((metric, metricIndex) => ({
+    key,
+    rows,
+    metric,
+    color: plotColor(index),
+    name: metrics.length > 1 ? `${key} · ${metric.label || metric.key}` : key,
+    dash: metricIndex ? "dash" : "solid",
+    xValues: rows.map((row) => g2mDeephDerivativeXValue(row, plot)),
+    yValues: rows.map((row) => finiteNumber(row[metric.key])),
+  })));
+  const allYValues = series.flatMap((entry) => entry.yValues.filter((value) => value != null));
+  const fitYMin = valuesAreNonNegative(allYValues) ? 0 : null;
   const traces = [];
-  Array.from(grouped.entries()).forEach(([key, rows], index) => {
-    metrics.forEach((metric, metricIndex) => {
-      traces.push({
-        type: "scatter",
-        mode: mode || (rows.length > 1 ? "lines+markers" : "markers"),
-        name: metrics.length > 1 ? `${key} · ${metric.label || metric.key}` : key,
-        marker: { symbol: g2mDeephIsDeepH(key) ? "triangle-up" : "circle", size: 9, color: plotColor(index) },
-        line: { color: plotColor(index), dash: metricIndex ? "dash" : "solid" },
-        x: rows.map((row) => finiteNumber(row[plot.x_key || "x"])),
-        y: rows.map((row) => finiteNumber(row[metric.key])),
-        text: rows.map((row) => g2mDeephDerivativeHoverText(row)),
-        hovertemplate: `%{x:.5g}, %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
-      });
+  for (const entry of series) {
+    traces.push({
+      type: "scatter",
+      mode: mode || (entry.rows.length > 1 ? "lines+markers" : "markers"),
+      name: entry.name,
+      marker: { symbol: g2mDeephIsDeepH(entry.key) ? "triangle-up" : "circle", size: 9, color: entry.color },
+      line: { color: entry.color, dash: entry.dash },
+      x: entry.xValues,
+      y: entry.yValues,
+      text: entry.rows.map((row) => g2mDeephDerivativeHoverText(row)),
+      hovertemplate: `%{x:.5g}, %{y:.5g}<br>%{text}<extra>%{fullData.name}</extra>`,
+    });
+  }
+  // Fits are computed on the pooled data of every visible sweep/run sharing
+  // the same metric AND model (graph2mat vs deeph stay separate fits).
+  const combinedFitGroups = new Map();
+  for (const entry of series) {
+    const modelKey = String(entry.rows[0]?.model || entry.rows[0]?.model_label || entry.key);
+    const modelLabel = String(entry.rows[0]?.model_label || modelKey);
+    const groupKey = `${entry.metric.key}|${modelKey}`;
+    if (!combinedFitGroups.has(groupKey)) {
+      combinedFitGroups.set(groupKey, { metric: entry.metric, modelLabel, points: [] });
+    }
+    const bucket = combinedFitGroups.get(groupKey);
+    entry.xValues.forEach((x, position) => {
+      const y = entry.yValues[position];
+      if (x != null && y != null) bucket.points.push({ x, y });
+    });
+  }
+  const COMBINED_FIT_COLORS = ["#374151", "#7c3aed", "#0f766e", "#b45309"];
+  Array.from(combinedFitGroups.values()).forEach((group, index) => {
+    const name = metrics.length > 1
+      ? `${group.modelLabel} · ${group.metric.label || group.metric.key} combined`
+      : `${group.modelLabel} combined`;
+    addFitTraces(traces, group.points, name, COMBINED_FIT_COLORS[index % COMBINED_FIT_COLORS.length], {
+      legendgroup: `combined|${group.metric.key}|${group.modelLabel}`,
+      fitYMin,
     });
   });
+  const diagonalShapes = [];
+  const diagonalAnnotations = [];
+  let pairedAxisRange = null;
+  if (plot.id === "graph2mat_vs_deeph_paired_comparison") {
+    const allXValues = series.flatMap((entry) => entry.xValues.filter((value) => value != null));
+    if (allXValues.length && allYValues.length) {
+      const diagonalMax = Math.max(0, ...allXValues, ...allYValues);
+      if (Number.isFinite(diagonalMax) && diagonalMax > 0) {
+        pairedAxisRange = [0, diagonalMax * 1.06];
+        diagonalShapes.push({
+          type: "line",
+          xref: "x",
+          yref: "y",
+          x0: 0,
+          y0: 0,
+          x1: diagonalMax,
+          y1: diagonalMax,
+          line: { color: "#9ca3af", width: 1.5, dash: "dot" },
+          layer: "below",
+        });
+        diagonalAnnotations.push({
+          x: diagonalMax,
+          y: diagonalMax,
+          xref: "x",
+          yref: "y",
+          text: "y = x",
+          showarrow: false,
+          xanchor: "left",
+          yanchor: "bottom",
+          font: { size: 12 },
+        });
+      }
+    }
+  }
+  let layout = plotLayout(g2mDeephDerivativePlotTitle(plot), plot.y_title || "", {
+    annotations: traces.length ? diagonalAnnotations : [emptyPlotAnnotation("No derivative scatter rows available.")],
+    shapes: diagonalShapes,
+    xaxis: {
+      title: g2mDeephDerivativeXAxisTitle(plot),
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      ...(pairedAxisRange ? { range: pairedAxisRange } : {}),
+    },
+    yaxis: {
+      title: plot.y_title || "y",
+      gridcolor: "#edf1f4",
+      zeroline: false,
+      ...(pairedAxisRange ? { range: pairedAxisRange } : (fitYMin === 0 ? { range: paddedLinearRange(allYValues, { forceZeroMin: true }) } : {})),
+    },
+    legend: { orientation: "h", y: -0.24 },
+  });
+  layout = withFitSelector(layout, traces);
   renderPlot(
     card,
     traces,
-    plotLayout(g2mDeephDerivativePlotTitle(plot), plot.y_title || "", {
-      annotations: traces.length ? [] : [emptyPlotAnnotation("No derivative scatter rows available.")],
-      xaxis: { title: plot.x_title || "x", gridcolor: "#edf1f4", zeroline: false },
-      yaxis: { title: plot.y_title || "y", gridcolor: "#edf1f4", zeroline: false },
-      legend: { orientation: "h", y: -0.24 },
-    }),
+    layout,
     { plotInfo: g2mDeephDerivativePlotInfo(plot) },
+  );
+}
+
+function g2mDeephDerivativePairedAboveBelowCounts(plot) {
+  const metricKey = plot.metrics?.[0]?.key || plot.y_key;
+  let below = 0;
+  let above = 0;
+  let onLine = 0;
+  for (const row of plot.rows || []) {
+    const x = finiteNumber(row[plot.x_key || "x"]);
+    const y = finiteNumber(row[metricKey]);
+    if (x == null || y == null) continue;
+    if (y < x) below += 1;
+    else if (y > x) above += 1;
+    else onLine += 1;
+  }
+  return { below, above, onLine };
+}
+
+function renderG2MDeepHDerivativePairedAboveBelowPlot(card, plot) {
+  const counts = g2mDeephDerivativePairedAboveBelowCounts(plot);
+  const total = counts.below + counts.above + counts.onLine;
+  const labels = ["Below y=x<br>(DeepH better)", "Above y=x<br>(Graph2Mat better)"];
+  const values = [counts.below, counts.above];
+  const colors = [plotColor(1), plotColor(0)];
+  const trace = {
+    type: "bar",
+    x: labels,
+    y: values,
+    marker: { color: colors },
+    text: values.map((value) => String(value)),
+    textposition: "outside",
+    hovertemplate: "%{x}<br>points: %{y}<extra></extra>",
+  };
+  const subtitle = total
+    ? `${counts.below} below, ${counts.above} above${counts.onLine ? `, ${counts.onLine} on the line` : ""} (of ${total} stencils)`
+    : "";
+  renderPlot(
+    card,
+    [trace],
+    plotLayout("Points above vs below y = x", "Stencil count", {
+      annotations: total ? [] : [emptyPlotAnnotation("No paired comparison rows available.")],
+      xaxis: { title: "", gridcolor: "#edf1f4", zeroline: false },
+      yaxis: { title: "Stencil count", gridcolor: "#edf1f4", zeroline: false, rangemode: "tozero" },
+      showlegend: false,
+      margin: { l: 56, r: 16, t: 50, b: 70 },
+    }),
+    {
+      plotInfo: {
+        title: "Points above vs below y = x",
+        metric: "Stencil count",
+        description: subtitle || "Counts how many graph2mat-vs-deeph paired stencils fall below vs above the y = x diagonal.",
+        purpose: "Summarizes the paired-comparison scatter into a single per-model win/loss tally on dH MAE.",
+        direction: "Below the line favors DeepH; above the line favors Graph2Mat. Diagnostic only.",
+      },
+    },
   );
 }
 
@@ -2929,6 +3093,33 @@ function g2mDeephDerivativeDatasetSizeNotice(plotPayload = {}) {
   return hasBase && !hasOptional ? G2M_DEEPH_DERIVATIVE_DATASET_SIZE_PARTIAL_MESSAGE : G2M_DEEPH_DERIVATIVE_DATASET_SIZE_NOTE;
 }
 
+function renderG2MDeepHDerivativeDatasetSizeAxisControl(container, plotPayload) {
+  if (!(plotPayload.dataset_size_plot_ids || []).length) return;
+  const bar = document.createElement("div");
+  bar.className = "plot-card full dataset-size-axis-control";
+  const label = document.createElement("label");
+  label.setAttribute("for", "g2m-deeph-derivative-dataset-size-axis");
+  label.textContent = "Dataset-size x-axis: ";
+  const select = document.createElement("select");
+  select.id = "g2m-deeph-derivative-dataset-size-axis";
+  for (const [value, text] of [
+    ["n_train", "N_train (training snapshots)"],
+    ["n_total", "N_total (train + validation + test snapshots)"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    if (g2mDeephDerivativeDatasetSizeAxisField() === value) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => {
+    state.g2mDeephDerivativeDatasetSizeAxis = select.value;
+    renderG2MDeepHDerivativePlotsPayload(state.g2mDeephDerivativePayload || {});
+  });
+  bar.append(label, select);
+  container.appendChild(bar);
+}
+
 function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
   const container = document.getElementById("g2m-deeph-derivative-plots");
   if (!container) return;
@@ -2943,6 +3134,7 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
     container.appendChild(placeholder);
     return;
   }
+  renderG2MDeepHDerivativeDatasetSizeAxisControl(container, plotPayload);
   const datasetSizeNotice = g2mDeephDerivativeDatasetSizeNotice(plotPayload);
   if (datasetSizeNotice) {
     const note = document.createElement("div");
@@ -2963,10 +3155,18 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
       continue;
     }
     for (const plot of section.plots) {
+      const hasSideBySideCompanion = plot.id === "graph2mat_vs_deeph_paired_comparison" && (plot.rows || []).length;
+      let host = container;
+      if (hasSideBySideCompanion) {
+        const row = document.createElement("div");
+        row.className = "plot-card-row";
+        container.appendChild(row);
+        host = row;
+      }
       const card = document.createElement("div");
       card.id = `g2m-deeph-derivative-plot-${plot.id || container.children.length}`;
-      card.className = "plot-card wide";
-      container.appendChild(card);
+      card.className = hasSideBySideCompanion ? "plot-card wide plot-card-row-main" : "plot-card wide";
+      host.appendChild(card);
       if (!(plot.rows || []).length) {
         renderG2MDeepHDerivativePlotSummary(card, plot, plot.unavailable_message || "No data available for this metric");
       } else if (window.Plotly && plot.kind === "grouped_bar") {
@@ -2975,6 +3175,13 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
         renderG2MDeepHDerivativeScatterPlot(card, plot);
       } else {
         renderG2MDeepHDerivativePlotSummary(card, plot);
+      }
+      if (hasSideBySideCompanion && window.Plotly) {
+        const sideCard = document.createElement("div");
+        sideCard.id = `g2m-deeph-derivative-plot-${plot.id}-above-below`;
+        sideCard.className = "plot-card plot-card-row-side";
+        host.appendChild(sideCard);
+        renderG2MDeepHDerivativePairedAboveBelowPlot(sideCard, plot);
       }
     }
   }
@@ -9522,9 +9729,9 @@ function fitTrace(points, name, color, kind, extra = {}) {
       width: 2,
       dash: fitKindDash(kind),
     },
-    opacity: 0.42,
+    opacity: 1,
     hoverinfo: "skip",
-    visible: kind === "linear",
+    visible: false,
     showlegend: false,
     meta: {
       role: "fit",
@@ -9550,12 +9757,39 @@ function addFitTraces(traces, points, name, color, extra = {}) {
   }
 }
 
+const FIT_ACTIVE_DATA_OPACITY = 0.65;
+
 function fitVisibility(traces, fitKind) {
   return traces.map((trace) => {
     if (trace.meta?.role !== "fit") return true;
     if (fitKind === "none") return false;
     return trace.meta.fitKind === fitKind;
   });
+}
+
+function fitOpacities(traces, fitKind) {
+  const fitActive = Boolean(fitKind) && fitKind !== "none";
+  return traces.map((trace) => {
+    if (trace.meta?.role === "fit") return typeof trace.opacity === "number" ? trace.opacity : 1;
+    return fitActive ? FIT_ACTIVE_DATA_OPACITY : 1;
+  });
+}
+
+function fitModes(traces, fitKind) {
+  const fitActive = Boolean(fitKind) && fitKind !== "none";
+  return traces.map((trace) => {
+    if (trace.meta?.role === "fit") return trace.mode || "lines";
+    if (!fitActive) return trace.mode;
+    return trace.mode === "markers" ? "markers" : "lines+markers";
+  });
+}
+
+function fitSelectorArgs(traces, fitKind) {
+  return [{
+    visible: fitVisibility(traces, fitKind),
+    opacity: fitOpacities(traces, fitKind),
+    mode: fitModes(traces, fitKind),
+  }];
 }
 
 function withFitSelector(layout, traces) {
@@ -9576,13 +9810,14 @@ function withFitSelector(layout, traces) {
       y: 1.16,
       xanchor: "right",
       yanchor: "top",
+      active: standardFitKinds.length,
       buttons: [
         ...standardFitKinds.map(([fitKind, label]) => ({
           label: label.replace(/\bfit$/i, "fit"),
           method: "update",
-          args: [{ visible: fitVisibility(traces, fitKind) }],
+          args: fitSelectorArgs(traces, fitKind),
         })),
-        { label: "No fit", method: "update", args: [{ visible: fitVisibility(traces, "none") }] },
+        { label: "No fit", method: "update", args: fitSelectorArgs(traces, "none") },
       ],
     },
   ];
@@ -9597,7 +9832,7 @@ function withFitSelector(layout, traces) {
       buttons: polynomialFitKinds.map(([fitKind, label]) => ({
         label: label.replace(/\bfit$/i, "fit"),
         method: "update",
-        args: [{ visible: fitVisibility(traces, fitKind) }],
+        args: fitSelectorArgs(traces, fitKind),
       })),
     });
   }
@@ -10004,13 +10239,30 @@ function repaintPlotsForTheme() {
       "xaxis.color": axisColor,
       "xaxis.linecolor": axisColor,
       "xaxis.tickcolor": axisColor,
+      "xaxis.tickfont.color": axisColor,
+      "xaxis.title.font.color": axisColor,
       "xaxis.gridcolor": gridColor,
       "yaxis.color": axisColor,
       "yaxis.linecolor": axisColor,
       "yaxis.tickcolor": axisColor,
+      "yaxis.tickfont.color": axisColor,
+      "yaxis.title.font.color": axisColor,
       "yaxis.gridcolor": gridColor,
+      "xaxis2.color": axisColor,
+      "xaxis2.linecolor": axisColor,
+      "xaxis2.tickcolor": axisColor,
+      "xaxis2.tickfont.color": axisColor,
+      "xaxis2.title.font.color": axisColor,
+      "xaxis2.gridcolor": gridColor,
+      "yaxis2.color": axisColor,
+      "yaxis2.linecolor": axisColor,
+      "yaxis2.tickcolor": axisColor,
+      "yaxis2.tickfont.color": axisColor,
+      "yaxis2.title.font.color": axisColor,
+      "yaxis2.gridcolor": gridColor,
       "legend.font.color": axisColor,
       "hoverlabel.bgcolor": paperColor,
+      "hoverlabel.font.color": axisColor,
     }).catch(() => {});
   });
 }

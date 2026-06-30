@@ -1580,6 +1580,29 @@ pre {
   min-height: 520px;
 }
 
+.plot-card-row {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 22px;
+  min-width: 0;
+}
+
+.plot-card-row .plot-card {
+  width: auto;
+  min-width: 0;
+}
+
+.plot-card-row-main {
+  flex: 3 1 0%;
+}
+
+.plot-card-row-side {
+  flex: 1 1 0%;
+  min-width: 240px;
+  height: 520px;
+  min-height: 520px;
+}
+
 .plot-card.full {
   height: 580px;
   min-height: 580px;
@@ -2007,6 +2030,23 @@ pre {
   font-weight: 750;
 }
 
+.dataset-size-axis-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: auto;
+  padding: 10px 14px;
+}
+
+.dataset-size-axis-control label {
+  font-weight: 650;
+  color: var(--ink-strong);
+}
+
+.dataset-size-axis-control select {
+  font: inherit;
+}
+
 .toast {
   position: fixed;
   right: 18px;
@@ -2076,6 +2116,14 @@ pre {
 
   .plot-grid {
     grid-template-columns: 1fr;
+  }
+
+  .plot-card-row {
+    flex-direction: column;
+  }
+
+  .plot-card-row-side {
+    min-width: 0;
   }
 
   .content-header,
