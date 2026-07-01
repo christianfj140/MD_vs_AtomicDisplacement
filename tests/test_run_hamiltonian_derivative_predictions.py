@@ -24,6 +24,7 @@ from run_hamiltonian_derivative_predictions import (  # noqa: E402
     DerivativePredictionStageError,
     build_deeph_derivative_raw_mirror,
     discover_siesta_reference_samples,
+    reconstruct_deeph_sparse_layout_prediction,
     run_derivative_predictions,
 )
 from deeph_prediction_adapter import DeepHPredictionAdapterResult  # noqa: E402
@@ -437,6 +438,156 @@ class DerivativePredictionStageTests(unittest.TestCase):
             self.assertTrue(hsx_link.is_symlink())
             self.assertIn(str(deeph_siesta), str(hsx_link.resolve()))
             self.assertEqual(hsx_link.read_text(encoding="utf-8"), "valid-deeph .HSX\n")
+
+    def test_reconstruction_uses_siesta_reference_supercell_order_not_r_list(self) -> None:
+        import h5py
+        import numpy as np
+        from scipy import sparse
+
+        processed = self.root / "processed"
+        processed.mkdir(parents=True, exist_ok=True)
+        # Two atoms, one s orbital each -> unit_orbitals = 2.
+        (processed / "orbital_types.dat").write_text("0\n0\n", encoding="utf-8")
+        # DeepH R_list order puts (0,0,0) first, (1,0,0) second.
+        (processed / "R_list.dat").write_text("0 0 0\n1 0 0\n", encoding="utf-8")
+        prediction_h5 = processed / "hamiltonians_pred.h5"
+        with h5py.File(prediction_h5, "w") as handle:
+            # onsite block at R=0 (atoms are 1-indexed in the key)
+            handle.create_dataset("[0, 0, 0, 1, 1]", data=np.array([[10.0]]))
+            # hopping block at R=(1,0,0)
+            handle.create_dataset("[1, 0, 0, 1, 2]", data=np.array([[20.0]]))
+
+        siesta_ref = self.root / "siesta_reference"
+        siesta_ref.mkdir(parents=True, exist_ok=True)
+        (siesta_ref / "ref.ORB_INDX").write_text("stub\n", encoding="utf-8")
+        output_path = self.root / "ML_prediction.HSX"
+
+        # SIESTA reference supercell order is the OPPOSITE of R_list: (1,0,0) is column-block 0.
+        supercell_order = [(1, 0, 0), (0, 0, 0)]
+        with mock.patch(
+            "run_hamiltonian_derivative_predictions.siesta_reference_supercell_order",
+            return_value=(supercell_order, siesta_ref / "ref.HSX"),
+        ), mock.patch(
+            "run_hamiltonian_derivative_predictions.derive_deeph_to_siesta_basis_transform",
+            return_value={"permutation": [0, 1], "signs": [1.0, 1.0]},
+        ):
+            info = reconstruct_deeph_sparse_layout_prediction(
+                prediction_h5=prediction_h5,
+                processed_sample_dir=processed,
+                siesta_reference_dir=siesta_ref,
+                output_path=output_path,
+            )
+
+        self.assertEqual(info["column_layout"], "siesta_reference_sc_off")
+        self.assertEqual(info["n_supercells"], 2)
+        self.assertEqual(info["blocks_placed"], 2)
+        self.assertEqual(info["blocks_outside_reference_supercell"], 0)
+
+        matrix = sparse.load_npz(output_path).tocsr().toarray()
+        self.assertEqual(matrix.shape, (2, 4))
+        # Column-block 0 == R=(1,0,0): the hopping value 20 sits at atom0-row, atom1-col.
+        self.assertAlmostEqual(matrix[0, 1], 20.0)
+        # Column-block 1 == R=(0,0,0): the onsite value 10 sits at atom0-row, atom0-col.
+        self.assertAlmostEqual(matrix[0, 2], 10.0)
+        # If R_list ordering had been used, the onsite value would sit in column-block 0 instead.
+        self.assertAlmostEqual(matrix[0, 0], 0.0)
+
+    def test_reconstruction_drops_blocks_outside_reference_supercell(self) -> None:
+        import h5py
+        import numpy as np
+        from scipy import sparse
+
+        processed = self.root / "processed_drop"
+        processed.mkdir(parents=True, exist_ok=True)
+        (processed / "orbital_types.dat").write_text("0\n0\n", encoding="utf-8")
+        (processed / "R_list.dat").write_text("0 0 0\n5 0 0\n", encoding="utf-8")
+        prediction_h5 = processed / "hamiltonians_pred.h5"
+        with h5py.File(prediction_h5, "w") as handle:
+            handle.create_dataset("[0, 0, 0, 1, 1]", data=np.array([[10.0]]))
+            # R=(5,0,0) is outside the reference supercell below -> must be dropped, not raise.
+            handle.create_dataset("[5, 0, 0, 1, 2]", data=np.array([[20.0]]))
+
+        siesta_ref = self.root / "siesta_reference_drop"
+        siesta_ref.mkdir(parents=True, exist_ok=True)
+        (siesta_ref / "ref.ORB_INDX").write_text("stub\n", encoding="utf-8")
+        output_path = self.root / "ML_prediction_drop.HSX"
+
+        with mock.patch(
+            "run_hamiltonian_derivative_predictions.siesta_reference_supercell_order",
+            return_value=([(0, 0, 0)], siesta_ref / "ref.HSX"),
+        ), mock.patch(
+            "run_hamiltonian_derivative_predictions.derive_deeph_to_siesta_basis_transform",
+            return_value={"permutation": [0, 1], "signs": [1.0, 1.0]},
+        ):
+            info = reconstruct_deeph_sparse_layout_prediction(
+                prediction_h5=prediction_h5,
+                processed_sample_dir=processed,
+                siesta_reference_dir=siesta_ref,
+                output_path=output_path,
+            )
+
+        self.assertEqual(info["blocks_placed"], 1)
+        self.assertEqual(info["blocks_outside_reference_supercell"], 1)
+        matrix = sparse.load_npz(output_path).tocsr().toarray()
+        self.assertEqual(matrix.shape, (2, 2))
+        self.assertAlmostEqual(matrix[0, 0], 10.0)
+
+    def test_reconstruction_swaps_cleanly_reversed_deeph_derivative_pair(self) -> None:
+        import h5py
+        import numpy as np
+        from scipy import sparse
+
+        root = self.root / "inference"
+        minus = root / "000000_md_1_atom0000_z_d0.005_minus"
+        plus = root / "000001_md_1_atom0000_z_d0.005_plus"
+        for sample_dir in (minus, plus):
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            (sample_dir / "orbital_types.dat").write_text("0\n", encoding="utf-8")
+            (sample_dir / "R_list.dat").write_text("0 0 0\n", encoding="utf-8")
+
+        with h5py.File(minus / "hamiltonians.h5", "w") as handle:
+            handle.create_dataset("[0, 0, 0, 1, 1]", data=np.array([[1.0]]))
+        with h5py.File(plus / "hamiltonians.h5", "w") as handle:
+            handle.create_dataset("[0, 0, 0, 1, 1]", data=np.array([[3.0]]))
+        with h5py.File(minus / "hamiltonians_pred.h5", "w") as handle:
+            handle.create_dataset("[0, 0, 0, 1, 1]", data=np.array([[30.0]]))
+        with h5py.File(plus / "hamiltonians_pred.h5", "w") as handle:
+            handle.create_dataset("[0, 0, 0, 1, 1]", data=np.array([[10.0]]))
+
+        siesta_ref = self.root / "siesta_reference_swap"
+        siesta_ref.mkdir(parents=True, exist_ok=True)
+        (siesta_ref / "ref.ORB_INDX").write_text("stub\n", encoding="utf-8")
+        minus_out = self.root / "minus_prediction.HSX"
+        plus_out = self.root / "plus_prediction.HSX"
+
+        with mock.patch(
+            "run_hamiltonian_derivative_predictions.siesta_reference_supercell_order",
+            return_value=([(0, 0, 0)], siesta_ref / "ref.HSX"),
+        ), mock.patch(
+            "run_hamiltonian_derivative_predictions.derive_deeph_to_siesta_basis_transform",
+            return_value={"permutation": [0], "signs": [1.0]},
+        ):
+            minus_info = reconstruct_deeph_sparse_layout_prediction(
+                prediction_h5=minus / "hamiltonians_pred.h5",
+                processed_sample_dir=minus,
+                siesta_reference_dir=siesta_ref,
+                output_path=minus_out,
+            )
+            plus_info = reconstruct_deeph_sparse_layout_prediction(
+                prediction_h5=plus / "hamiltonians_pred.h5",
+                processed_sample_dir=plus,
+                siesta_reference_dir=siesta_ref,
+                output_path=plus_out,
+            )
+
+        self.assertEqual(minus_info["derivative_orientation_correction"], "swapped_plus_minus")
+        self.assertEqual(plus_info["derivative_orientation_correction"], "swapped_plus_minus")
+        self.assertLess(minus_info["derivative_orientation_cosine"], 0.0)
+        minus_matrix = sparse.load_npz(minus_out).toarray()
+        plus_matrix = sparse.load_npz(plus_out).toarray()
+        self.assertAlmostEqual(minus_matrix[0, 0], 10.0)
+        self.assertAlmostEqual(plus_matrix[0, 0], 30.0)
+        self.assertGreater((plus_matrix - minus_matrix)[0, 0], 0.0)
 
 
 if __name__ == "__main__":

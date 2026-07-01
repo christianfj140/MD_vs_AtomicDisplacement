@@ -473,6 +473,81 @@ def finite_difference_derivative(
     return DerivativeMatrixResult(matrix=derivative, metadata=result_metadata)
 
 
+def derivative_signal_to_noise_metrics(
+    *,
+    method: str,
+    reference_plus: sparse.spmatrix | None,
+    reference_minus: sparse.spmatrix | None,
+    reference_base: sparse.spmatrix | None,
+    predicted_plus: sparse.spmatrix | None,
+    predicted_minus: sparse.spmatrix | None,
+    predicted_base: sparse.spmatrix | None,
+) -> dict[str, Any]:
+    """Diagnostics on whether the finite-difference derivative is above the model noise floor.
+
+    The finite difference ``dH/dR = (H_plus - H_minus) / (2*delta)`` subtracts two nearly
+    identical absolute Hamiltonians, so the *physical signal* ``||H_plus - H_minus||`` can be
+    much smaller than the model's *absolute-H prediction error* ``||H_pred - H_ref||``. When the
+    signal-to-noise ratio is below ~1 the predicted derivative is dominated by prediction noise
+    rather than the displacement response, which shows up downstream as a large
+    ``dh_relative_frobenius_ref`` and an essentially random (often near +-1) cosine. These fields
+    are diagnostic only: they contextualise the derivative error, they do not change any winner.
+    """
+
+    def _pick_operands(
+        plus: sparse.spmatrix | None,
+        minus: sparse.spmatrix | None,
+        base: sparse.spmatrix | None,
+    ) -> tuple[sparse.spmatrix | None, sparse.spmatrix | None]:
+        if method == "central":
+            return plus, minus
+        if method == "forward":
+            return plus, base
+        if method == "backward":
+            return base, minus
+        return None, None
+
+    ref_left, ref_right = _pick_operands(reference_plus, reference_minus, reference_base)
+    pred_left, pred_right = _pick_operands(predicted_plus, predicted_minus, predicted_base)
+
+    metrics: dict[str, Any] = {
+        "dh_signal_norm_fro": math.nan,
+        "dh_signal_over_abs_h_ref": math.nan,
+        "dh_abs_h_pred_error_norm_fro": math.nan,
+        "dh_abs_h_pred_rel_error_ref": math.nan,
+        "dh_signal_to_noise_ratio": math.nan,
+        "dh_signal_below_noise_floor": None,
+        "dh_signal_to_noise_unavailable_reason": "",
+    }
+
+    if ref_left is None or ref_right is None:
+        metrics["dh_signal_to_noise_unavailable_reason"] = "missing_reference_operands"
+        return metrics
+
+    signal_norm = sparse_frobenius_norm((ref_left - ref_right).tocsr())
+    abs_h_ref_norm = sparse_frobenius_norm(ref_left.tocsr())
+    metrics["dh_signal_norm_fro"] = signal_norm
+    metrics["dh_signal_over_abs_h_ref"] = signal_norm / abs_h_ref_norm if abs_h_ref_norm else math.nan
+
+    if pred_left is None or pred_right is None:
+        metrics["dh_signal_to_noise_unavailable_reason"] = "missing_predicted_operands"
+        return metrics
+
+    left_error = sparse_frobenius_norm((pred_left - ref_left).tocsr())
+    right_error = sparse_frobenius_norm((pred_right - ref_right).tocsr())
+    noise_norm = 0.5 * (left_error + right_error)
+    metrics["dh_abs_h_pred_error_norm_fro"] = noise_norm
+    metrics["dh_abs_h_pred_rel_error_ref"] = noise_norm / abs_h_ref_norm if abs_h_ref_norm else math.nan
+    if noise_norm:
+        snr = signal_norm / noise_norm
+        metrics["dh_signal_to_noise_ratio"] = snr
+        metrics["dh_signal_below_noise_floor"] = bool(snr < 1.0)
+    else:
+        metrics["dh_signal_to_noise_ratio"] = math.inf if signal_norm else math.nan
+        metrics["dh_signal_below_noise_floor"] = False if signal_norm else None
+    return metrics
+
+
 def finite_difference_derivative_pair(
     *,
     method: str,
@@ -511,7 +586,17 @@ def finite_difference_derivative_pair(
         metadata=metadata,
     )
     _require_matching_shapes(("reference_derivative", "predicted_derivative"), reference.matrix, predicted.matrix)
+    signal_to_noise = derivative_signal_to_noise_metrics(
+        method=method,
+        reference_plus=reference_plus,
+        reference_minus=reference_minus,
+        reference_base=reference_base,
+        predicted_plus=predicted_plus,
+        predicted_minus=predicted_minus,
+        predicted_base=predicted_base,
+    )
     diagnostics = {
+        **signal_to_noise,
         "dH_ref_hermiticity_defect": reference.metadata["dH_hermiticity_defect"],
         "dH_pred_hermiticity_defect": predicted.metadata["dH_hermiticity_defect"],
         "plus_minus_support_changed": bool(

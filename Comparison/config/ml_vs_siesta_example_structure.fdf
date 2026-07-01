@@ -1,0 +1,23 @@
+# Minimal graphene primitive cell (Ang coordinates) used as a self-contained
+# example input for the ML vs SIESTA benchmark dry-run. Not a production input.
+SystemName        graphene_primitive_example
+SystemLabel       graphene_primitive_example
+NumberOfAtoms     2
+NumberOfSpecies   1
+
+%block ChemicalSpeciesLabel
+  1  6  C
+%endblock ChemicalSpeciesLabel
+
+LatticeConstant   1.0 Ang
+%block LatticeVectors
+   2.460000   0.000000   0.000000
+   1.230000   2.130422   0.000000
+   0.000000   0.000000  20.000000
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+   0.000000   0.000000  10.000000  1  # C
+   1.230000   0.710141  10.000000  1  # C
+%endblock AtomicCoordinatesAndAtomicSpecies

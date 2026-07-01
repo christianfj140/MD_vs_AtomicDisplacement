@@ -1,0 +1,34 @@
+# Example configuration for the ML vs SIESTA benchmark flow.
+# This file is only parsed/validated: nothing here launches SIESTA or trains.
+# See docs/ml_vs_siesta_benchmark.md for the full workflow.
+
+system:
+  # Self-contained 2-atom graphene primitive cell shipped next to this config.
+  input_structure: Comparison/config/ml_vs_siesta_example_structure.fdf
+  supercell: [5, 5, 1]
+  central_atom: auto        # "auto" (closest to geometric center) or an integer index
+
+derivatives:
+  enabled: true
+  displacement: 0.01        # Angstrom, ±h finite difference
+  directions: ["x", "y", "z"]
+
+models:
+  enabled: ["graph2mat", "deeph"]
+
+matrices:
+  targets: ["hamiltonian", "density_matrix", "overlap"]
+
+dataset_mixing:
+  enabled: false
+
+species_transfer:
+  enabled: false
+  base_species: ["C"]
+  new_species: ["H"]
+  initialize_new_embeddings: random
+  freeze_backbone_initially: true
+  replay_old_species_data: true
+
+ui:
+  enable_matrix_viewer: true

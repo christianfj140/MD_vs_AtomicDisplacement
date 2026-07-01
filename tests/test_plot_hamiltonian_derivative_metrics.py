@@ -878,12 +878,13 @@ class PlotHamiltonianDerivativeMetricsTests(unittest.TestCase):
             "dh_mae_vs_dataset_size",
             "dh_rmse_vs_dataset_size",
             "relative_frobenius_vs_dataset_size",
+            "signal_to_noise_vs_dataset_size",
             "support_f1_vs_dataset_size",
             "support_error_rates_vs_dataset_size",
         ]
-        self.assertEqual([plot["id"] for plot in payload["plots"][:5]], dataset_size_plot_ids)
+        self.assertEqual([plot["id"] for plot in payload["plots"][:6]], dataset_size_plot_ids)
         self.assertEqual(payload["primary_plot_ids"], payload["dataset_size_plot_ids"])
-        self.assertEqual(payload["dataset_size_plot_ids"][:5], dataset_size_plot_ids)
+        self.assertEqual(payload["dataset_size_plot_ids"][:6], dataset_size_plot_ids)
         self.assertIn("dh_mae_by_model", payload["diagnostic_plot_ids"])
         plots = {plot["id"]: plot for plot in payload["plots"]}
         self.assertIn("dh_mae_vs_dataset_size", plots)

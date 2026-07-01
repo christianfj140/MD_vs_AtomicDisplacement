@@ -95,6 +95,17 @@ HERMITICITY_FIELDS = [
     "dH_hermiticity_error_delta",
     "finite_values",
 ]
+# Diagnostic-only: contextualises dh_relative_frobenius_ref by reporting whether the physical
+# derivative signal ||H_plus - H_minus|| is above the model's absolute-H prediction error.
+DERIVATIVE_SIGNAL_TO_NOISE_FIELDS = [
+    "dh_signal_norm_fro",
+    "dh_signal_over_abs_h_ref",
+    "dh_abs_h_pred_error_norm_fro",
+    "dh_abs_h_pred_rel_error_ref",
+    "dh_signal_to_noise_ratio",
+    "dh_signal_below_noise_floor",
+    "dh_signal_to_noise_unavailable_reason",
+]
 GEOMETRY_VALIDATION_FIELDS = [
     "sample",
     "status",
@@ -470,6 +481,13 @@ def _evaluate_discovery(
                 "dh_support_changed": bool(pair.diagnostics.get("plus_minus_support_changed")),
                 "reference_plus_minus_support_changed": bool(pair.diagnostics.get("reference_plus_minus_support_changed")),
                 "predicted_plus_minus_support_changed": bool(pair.diagnostics.get("predicted_plus_minus_support_changed")),
+            }
+        )
+        row.update(
+            {
+                key: pair.diagnostics[key]
+                for key in DERIVATIVE_SIGNAL_TO_NOISE_FIELDS
+                if key in pair.diagnostics
             }
         )
         metric_rows.append(row)
@@ -985,6 +1003,7 @@ def _metric_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "dh_relative_frobenius_union",
         "dh_relative_l1_union",
         "dh_cosine_similarity_union",
+        *DERIVATIVE_SIGNAL_TO_NOISE_FIELDS,
         "dh_support_precision",
         "dh_support_recall",
         "dh_support_f1",

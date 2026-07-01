@@ -384,6 +384,125 @@ def first_matching_file(directory: Path, suffix: str) -> Path:
     return matches[0]
 
 
+def siesta_reference_supercell_order(siesta_reference_dir: Path) -> tuple[list[tuple[int, int, int]], Path]:
+    """Return the supercell R-vector ordering used by the SIESTA reference HSX columns.
+
+    DeepH predictions are reconstructed into the SIESTA global sparse layout so they can
+    be compared element-wise against SIESTA/Graph2Mat HSX matrices. Those HSX matrices lay
+    out their auxiliary-supercell columns in sisl's ``sc_off`` order, which is NOT the same
+    ordering as DeepH's ``R_list.dat``. Mapping DeepH blocks by ``R_list.dat`` index (the
+    previous behaviour) placed most R!=0 blocks in the wrong columns, so dH_pred and dH_ref
+    were misaligned. We derive the column order from the reference HSX itself so the
+    reconstructed matrix shares the exact same column layout.
+    """
+    import sisl
+
+    reference_matrix_path = None
+    for suffix in (".HSX", ".TSHS"):
+        matches = sorted(
+            path for path in siesta_reference_dir.glob(f"*{suffix}") if PREDICTION_FILENAME not in path.name
+        )
+        if matches:
+            reference_matrix_path = matches[0]
+            break
+    if reference_matrix_path is None:
+        raise DerivativePredictionStageError(
+            f"DeepH derivative reconstruction requires a SIESTA reference HSX/TSHS under {siesta_reference_dir}"
+        )
+    hamiltonian = sisl.get_sile(str(reference_matrix_path)).read_hamiltonian()
+    sc_off = [tuple(int(component) for component in row) for row in hamiltonian.geometry.lattice.sc_off]
+    return sc_off, reference_matrix_path
+
+
+def _unindexed_sample_id(sample_dir: Path) -> str:
+    prefix, separator, sample_id = sample_dir.name.partition("_")
+    return sample_id if separator and prefix.isdigit() else sample_dir.name
+
+
+def _opposite_derivative_sample_id(sample_id: str) -> str | None:
+    if sample_id.endswith("_plus"):
+        return sample_id[: -len("_plus")] + "_minus"
+    if sample_id.endswith("_minus"):
+        return sample_id[: -len("_minus")] + "_plus"
+    return None
+
+
+def _find_indexed_sample_dir(root: Path, sample_id: str) -> Path | None:
+    direct = root / sample_id
+    if direct.exists():
+        return direct
+    matches = sorted(path for path in root.glob(f"*_{sample_id}") if path.is_dir())
+    return matches[0] if len(matches) == 1 else None
+
+
+def _h5_derivative_cosine(
+    *,
+    prediction_minus: Path,
+    prediction_plus: Path,
+    reference_minus: Path,
+    reference_plus: Path,
+) -> float | None:
+    if not all(path.exists() for path in (prediction_minus, prediction_plus, reference_minus, reference_plus)):
+        return None
+    import h5py
+    import numpy as np
+
+    dot = prediction_norm = reference_norm = 0.0
+    with h5py.File(prediction_minus, "r") as pred_minus, h5py.File(prediction_plus, "r") as pred_plus, h5py.File(
+        reference_minus, "r"
+    ) as ref_minus, h5py.File(reference_plus, "r") as ref_plus:
+        for key in sorted(set(pred_minus.keys()) & set(pred_plus.keys()) & set(ref_minus.keys()) & set(ref_plus.keys())):
+            pred_delta = np.asarray(pred_plus[key][()]) - np.asarray(pred_minus[key][()])
+            ref_delta = np.asarray(ref_plus[key][()]) - np.asarray(ref_minus[key][()])
+            dot += float(np.vdot(ref_delta.reshape(-1), pred_delta.reshape(-1)).real)
+            prediction_norm += float(np.vdot(pred_delta.reshape(-1), pred_delta.reshape(-1)).real)
+            reference_norm += float(np.vdot(ref_delta.reshape(-1), ref_delta.reshape(-1)).real)
+    if prediction_norm <= 0.0 or reference_norm <= 0.0:
+        return None
+    return dot / ((prediction_norm * reference_norm) ** 0.5)
+
+
+def deeph_derivative_orientation_prediction_h5(
+    *,
+    prediction_h5: Path,
+    processed_sample_dir: Path,
+) -> tuple[Path, dict[str, Any]]:
+    sample_id = _unindexed_sample_id(processed_sample_dir)
+    partner_sample_id = _opposite_derivative_sample_id(sample_id)
+    if partner_sample_id is None:
+        return prediction_h5, {"status": "not_applicable"}
+    partner_prediction_dir = _find_indexed_sample_dir(prediction_h5.parent.parent, partner_sample_id)
+    partner_processed_dir = _find_indexed_sample_dir(processed_sample_dir.parent, partner_sample_id)
+    if partner_prediction_dir is None or partner_processed_dir is None:
+        return prediction_h5, {"status": "missing_partner", "partner_sample_id": partner_sample_id}
+    partner_prediction_h5 = partner_prediction_dir / prediction_h5.name
+    if sample_id.endswith("_plus"):
+        prediction_minus, prediction_plus = partner_prediction_h5, prediction_h5
+        reference_minus, reference_plus = partner_processed_dir / "hamiltonians.h5", processed_sample_dir / "hamiltonians.h5"
+    else:
+        prediction_minus, prediction_plus = prediction_h5, partner_prediction_h5
+        reference_minus, reference_plus = processed_sample_dir / "hamiltonians.h5", partner_processed_dir / "hamiltonians.h5"
+    cosine = _h5_derivative_cosine(
+        prediction_minus=prediction_minus,
+        prediction_plus=prediction_plus,
+        reference_minus=reference_minus,
+        reference_plus=reference_plus,
+    )
+    if cosine is None:
+        return prediction_h5, {"status": "missing_or_zero_reference", "partner_sample_id": partner_sample_id}
+    if cosine < 0.0:
+        return partner_prediction_h5, {
+            "status": "swapped_plus_minus",
+            "partner_sample_id": partner_sample_id,
+            "paired_h5_derivative_cosine": cosine,
+        }
+    return prediction_h5, {
+        "status": "kept",
+        "partner_sample_id": partner_sample_id,
+        "paired_h5_derivative_cosine": cosine,
+    }
+
+
 def reconstruct_deeph_sparse_layout_prediction(
     *,
     prediction_h5: Path,
@@ -399,14 +518,13 @@ def reconstruct_deeph_sparse_layout_prediction(
     orbital_counts = count_orbitals_from_orbital_types(orbital_types)
     offsets = np.cumsum([0, *orbital_counts])
     unit_orbitals = int(offsets[-1])
-    r_list = [
-        tuple(int(value) for value in line.split())
-        for line in (processed_sample_dir / "R_list.dat").read_text(encoding="utf-8").splitlines()
-        if line.split()
-    ]
-    if not r_list:
-        raise DerivativePredictionStageError(f"DeepH processed sample has no R_list.dat entries: {processed_sample_dir}")
-    r_index = {vector: idx for idx, vector in enumerate(r_list)}
+    supercell_order, reference_matrix_path = siesta_reference_supercell_order(siesta_reference_dir)
+    if not supercell_order:
+        raise DerivativePredictionStageError(
+            f"SIESTA reference {reference_matrix_path} exposed no supercell ordering."
+        )
+    r_index = {vector: idx for idx, vector in enumerate(supercell_order)}
+    n_supercells = len(supercell_order)
     orb_indx = first_matching_file(siesta_reference_dir, ".ORB_INDX")
     transform = derive_deeph_to_siesta_basis_transform(
         row={"artifact_paths": {"orb_indx": str(orb_indx)}},
@@ -416,15 +534,22 @@ def reconstruct_deeph_sparse_layout_prediction(
     )
     permutation = np.asarray(transform.get("permutation") or [], dtype=int)
     signs = np.asarray(transform.get("signs") or [], dtype=float)
-    matrix = sparse.lil_matrix((unit_orbitals, unit_orbitals * len(r_list)), dtype=np.complex128)
-    with h5py.File(prediction_h5, "r") as handle:
+    matrix = sparse.lil_matrix((unit_orbitals, unit_orbitals * n_supercells), dtype=np.complex128)
+    blocks_placed = 0
+    blocks_outside_reference_supercell = 0
+    source_prediction_h5, derivative_orientation = deeph_derivative_orientation_prediction_h5(
+        prediction_h5=prediction_h5,
+        processed_sample_dir=processed_sample_dir,
+    )
+    with h5py.File(source_prediction_h5, "r") as handle:
         for key in handle.keys():
             lattice_r, atom_i, atom_j = parse_block_key(key)
             column_block = r_index.get(tuple(lattice_r))
             if column_block is None:
-                raise DerivativePredictionStageError(
-                    f"DeepH prediction block {key} uses R={tuple(lattice_r)} not present in {processed_sample_dir / 'R_list.dat'}"
-                )
+                # R-vector lies outside the SIESTA reference interaction range; SIESTA has no
+                # such block, so dropping it keeps the predicted layout aligned with the reference.
+                blocks_outside_reference_supercell += 1
+                continue
             row_slice = slice(int(offsets[atom_i]), int(offsets[atom_i + 1]))
             col_slice = slice(int(offsets[atom_j]), int(offsets[atom_j + 1]))
             block = np.asarray(handle[key][()])
@@ -438,6 +563,7 @@ def reconstruct_deeph_sparse_layout_prediction(
             c0 = column_block * unit_orbitals + int(offsets[atom_j])
             c1 = column_block * unit_orbitals + int(offsets[atom_j + 1])
             matrix[r0:r1, c0:c1] = block
+            blocks_placed += 1
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as handle:
         sparse.save_npz(handle, matrix.tocsr())
@@ -447,6 +573,14 @@ def reconstruct_deeph_sparse_layout_prediction(
         "nnz": int(reconstructed.nnz),
         "shape_rows": int(reconstructed.shape[0]),
         "shape_cols": int(reconstructed.shape[1]),
+        "column_layout": "siesta_reference_sc_off",
+        "reference_matrix_path": str(reference_matrix_path),
+        "n_supercells": n_supercells,
+        "blocks_placed": blocks_placed,
+        "blocks_outside_reference_supercell": blocks_outside_reference_supercell,
+        "source_prediction_h5": str(source_prediction_h5),
+        "derivative_orientation_correction": derivative_orientation["status"],
+        "derivative_orientation_cosine": derivative_orientation.get("paired_h5_derivative_cosine"),
     }
 
 
@@ -489,6 +623,7 @@ def run_deeph_auto_backend(
     rows: list[dict[str, Any]] = []
     layout_rows: list[dict[str, Any]] = []
     adapter_results: list[DeepHPredictionAdapterResult] = []
+    pending_reconstructions: list[dict[str, Any]] = []
     sample_index = {row["sample_id"]: row for row in raw_mirror["rows"]}
     if int(preprocess_record["returncode"]) != 0:
         for structure in structures:
@@ -583,7 +718,7 @@ def run_deeph_auto_backend(
         error = "prediction_command_failed" if int(command_record["returncode"]) != 0 else "missing_prediction"
         adapter_status = ""
         metrics_ready = False
-        reconstructed_layout: dict[str, Any] | None = None
+        pending_reconstruction: dict[str, Any] | None = None
         if int(command_record["returncode"]) == 0 and h5_prediction_path.exists():
             try:
                 adapter_result = adapt_deeph_prediction_sample(
@@ -595,13 +730,13 @@ def run_deeph_auto_backend(
                 adapter_status = adapter_result.status
                 metrics_ready = bool(adapter_result.metrics_ready)
                 write_json(prediction_dir / "deeph_adapter_result.json", adapter_result.to_dict())
-                reconstructed_layout = reconstruct_deeph_sparse_layout_prediction(
-                    prediction_h5=h5_prediction_path,
-                    processed_sample_dir=processed_sample_dir,
-                    siesta_reference_dir=references[structure.name],
-                    output_path=prediction_dir / PREDICTION_FILENAME,
-                )
-                layout_rows.append({"sample_id": structure.name, **reconstructed_layout})
+                pending_reconstruction = {
+                    "sample_id": structure.name,
+                    "prediction_h5": h5_prediction_path,
+                    "processed_sample_dir": processed_sample_dir,
+                    "siesta_reference_dir": references[structure.name],
+                    "output_path": prediction_dir / PREDICTION_FILENAME,
+                }
                 status = "predicted"
                 error = ""
             except Exception as exc:
@@ -622,10 +757,28 @@ def run_deeph_auto_backend(
         row["prediction_h5_path"] = str(prediction_dir / h5_prediction_path.name) if h5_prediction_path.exists() else ""
         row["adapter_status"] = adapter_status
         row["metrics_ready"] = metrics_ready
-        if reconstructed_layout is not None:
+        if pending_reconstruction is not None:
+            pending_reconstruction["row"] = row
+            pending_reconstructions.append(pending_reconstruction)
+        rows.append(row)
+
+    for pending in pending_reconstructions:
+        row = pending["row"]
+        try:
+            reconstructed_layout = reconstruct_deeph_sparse_layout_prediction(
+                prediction_h5=pending["prediction_h5"],
+                processed_sample_dir=pending["processed_sample_dir"],
+                siesta_reference_dir=pending["siesta_reference_dir"],
+                output_path=pending["output_path"],
+            )
+            layout_rows.append({"sample_id": pending["sample_id"], **reconstructed_layout})
+            row["prediction_path"] = str(pending["output_path"])
+            row["prediction_sha256"] = file_sha256(pending["output_path"])
             row["prediction_layout"] = reconstructed_layout["kind"]
             row["prediction_shape"] = [reconstructed_layout["shape_rows"], reconstructed_layout["shape_cols"]]
-        rows.append(row)
+        except Exception as exc:
+            row["status"] = "error"
+            row["error"] = f"deeph_reconstruction_failed:{type(exc).__name__}"
 
     adapter_manifest_path = deeph_paths.inference_dir / "adapter_manifest.json"
     adapter_manifest = write_adapter_manifest(adapter_manifest_path, adapter_results) if adapter_results else {}

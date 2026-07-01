@@ -492,7 +492,7 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(plot["id"], "dh_mae_by_model")
         self.assertEqual(len(plot["rows"]), 2)
         self.assertEqual({row["run_id"] for row in plot["rows"]}, {"run_a", "run_b"})
-        self.assertTrue(all(row["combined_series"] for row in plot["rows"]))
+        self.assertEqual({row["combined_series"] for row in plot["rows"]}, {"Graph2Mat"})
         self.assertEqual(payload["run_ids"], ["run_a", "run_b"])
 
     def test_derivative_backend_combines_dataset_size_plot_payloads(self) -> None:
@@ -567,7 +567,10 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
             self.assertEqual({row["x_dataset_size"] for row in plot["rows"]}, {20, 100})
             self.assertEqual({row["model_label"] for row in plot["rows"]}, {"Graph2Mat"})
             self.assertEqual({row["run_id"] for row in plot["rows"]}, {"run_a", "run_b"})
-            self.assertTrue(all(row["combined_series"] for row in plot["rows"]))
+            self.assertEqual(
+                {row["combined_series"] for row in plot["rows"]},
+                {"Graph2Mat delta=0.01"} if plot["series_key"] == "series_label" else {"Graph2Mat"},
+            )
             rows_by_run = {row["run_id"]: row for row in plot["rows"]}
             self.assertEqual(rows_by_run["run_a"]["x_dataset_size"], 20)
             self.assertEqual(rows_by_run["run_b"]["x_dataset_size"], 100)

@@ -33,6 +33,7 @@
           <button class="tab hidden" data-view="run" data-icon="RN" aria-hidden="true" tabindex="-1">Run</button>
           <button class="tab active" data-view="experiment" data-icon="EX">Experiment</button>
           <button class="tab" data-view="g2m-deeph" data-icon="GD">G2M vs DeepH</button>
+          <button class="tab" data-view="ml-vs-siesta" data-icon="MS">ML vs SIESTA</button>
           <button class="tab" data-view="results" data-icon="RS">Results</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -1361,6 +1362,154 @@
           </section>
         </section>
 
+        <section id="view-ml-vs-siesta" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Comparación ML vs SIESTA</p>
+              <h2>ML vs SIESTA benchmark</h2>
+              <p class="field-help">
+                Infraestructura de benchmark: genera inputs SIESTA 5×5×1, compara matrices y sus derivadas,
+                mezcla datasets small/large y diagnostica transferencia de especies.
+                No lanza SIESTA ni entrena modelos.
+              </p>
+            </div>
+            <div class="button-row">
+              <button id="mvs-load-template" class="button secondary" type="button">Cargar plantilla</button>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">1 · Generación SIESTA 5×5×1</p>
+                <h3>Inputs de referencia y ±h</h3>
+                <p class="field-help">Escribe reference/ y x_plus…z_minus con metadata.json. Dry-run solo lista ficheros.</p>
+              </div>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Input structure (.fdf)</span>
+                <input id="mvs-input-structure" type="text" value="Comparison/config/ml_vs_siesta_example_structure.fdf" /></label>
+              <label class="field"><span>Supercell</span>
+                <input id="mvs-supercell" type="text" value="5,5,1" /></label>
+              <label class="field"><span>Central atom</span>
+                <input id="mvs-central-atom" type="text" value="auto" /></label>
+              <label class="field"><span>Displacement (Å)</span>
+                <input id="mvs-displacement" type="number" step="0.001" min="0.0001" value="0.01" /></label>
+              <label class="field"><span>Directions</span>
+                <input id="mvs-directions" type="text" value="x,y,z" /></label>
+            </div>
+            <div class="button-row">
+              <button id="mvs-generate-dryrun" class="button secondary" type="button">Dry-run (listar ficheros)</button>
+              <button id="mvs-validate-plan" class="button secondary" type="button">Validar plan completo</button>
+            </div>
+            <pre id="mvs-generate-output" class="log-output">—</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">2 · Matrices</p>
+                <h3>Matrix Viewer</h3>
+                <p class="field-help">Mapa de calor de SIESTA / Graph2Mat / DeepH y sus diferencias, con MAE/RMSE/max.</p>
+              </div>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Matriz</span>
+                <select id="mvs-matrix-select">
+                  <option value="siesta">SIESTA</option>
+                  <option value="graph2mat" selected>Graph2Mat</option>
+                  <option value="deeph">DeepH</option>
+                  <option value="graph2mat_minus_siesta">Δ Graph2Mat − SIESTA</option>
+                  <option value="deeph_minus_siesta">Δ DeepH − SIESTA</option>
+                </select></label>
+              <label class="field"><span>Target</span>
+                <select id="mvs-target-select">
+                  <option value="hamiltonian" selected>Hamiltonian</option>
+                  <option value="density_matrix">Density matrix</option>
+                  <option value="overlap">Overlap</option>
+                </select></label>
+              <label class="field"><span>Escala</span>
+                <select id="mvs-scale-select">
+                  <option value="linear" selected>Lineal</option>
+                  <option value="log_abs">log(abs)</option>
+                </select></label>
+            </div>
+            <div class="button-row">
+              <button id="mvs-load-demo" class="button secondary" type="button">Cargar demo (payload fake)</button>
+            </div>
+            <div id="mvs-matrix-metrics" class="result-list"></div>
+            <div id="mvs-matrix-heatmap" class="plot-card full"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">3 · Derivadas</p>
+                <h3>Derivada ML vs SIESTA</h3>
+                <p class="field-help">
+                  Reutiliza el Matrix Viewer para mostrar la matriz derivada d(matrix)/d(pos): átomo desplazado,
+                  dirección, h, target y error contra SIESTA cuando existe. La demo usa el átomo central del plan.
+                </p>
+              </div>
+            </div>
+            <div id="mvs-derivative-info" class="result-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">4 · Datasets small/large</p>
+                <h3>Mixing manifest</h3>
+                <p class="field-help">Prepara manifiestos small/large reproducibles (add / replace). No entrena.</p>
+              </div>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Small dataset IDs</span>
+                <input id="mvs-small-ids" type="text" value="s0,s1,s2,s3" /></label>
+              <label class="field"><span>Large dataset IDs</span>
+                <input id="mvs-large-ids" type="text" value="l0,l1,l2,l3" /></label>
+              <label class="field"><span>Modo</span>
+                <select id="mvs-mix-mode">
+                  <option value="add" selected>add</option>
+                  <option value="replace">replace</option>
+                </select></label>
+              <label class="field"><span>Ratios</span>
+                <input id="mvs-ratios" type="text" value="0.0,0.1,0.25,0.5,0.75,1.0" /></label>
+              <label class="field"><span>Seed</span>
+                <input id="mvs-seed" type="number" step="1" value="0" /></label>
+            </div>
+            <div class="button-row">
+              <button id="mvs-mix" class="button secondary" type="button">Generar manifest (dry-run)</button>
+            </div>
+            <pre id="mvs-mix-output" class="log-output">—</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">5 · Transferencia de especies</p>
+                <h3>Species support diagnostic</h3>
+                <p class="field-help">Diagnostica si el modelo soporta una nueva especie (p.ej. C→H). No modifica pesos.</p>
+              </div>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Especies actuales</span>
+                <input id="mvs-base-species" type="text" value="C" /></label>
+              <label class="field"><span>Nueva especie</span>
+                <input id="mvs-new-species" type="text" value="H" /></label>
+              <label class="field"><span>Expandible</span>
+                <select id="mvs-expandable">
+                  <option value="false" selected>no</option>
+                  <option value="true">sí</option>
+                </select></label>
+            </div>
+            <div class="button-row">
+              <button id="mvs-inspect-species" class="button secondary" type="button">Diagnosticar</button>
+            </div>
+            <div id="mvs-species-output" class="result-list"></div>
+          </section>
+        </section>
+
         <section id="view-performance" class="view">
           <header class="content-header">
             <div>
@@ -1753,6 +1902,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260629-ui-theme"></script>
+    <script src="/app.js?v=20260701-derivative-sort"></script>
   </body>
 </html>

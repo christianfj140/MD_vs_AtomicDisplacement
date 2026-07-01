@@ -2478,11 +2478,13 @@ const G2M_DEEPH_DERIVATIVE_DATASET_SIZE_TITLES = {
   dh_rmse_vs_dataset_size_by_delta: "Mean dH RMSE vs dataset size by delta",
   relative_frobenius_vs_dataset_size: "Mean relative Frobenius vs dataset size",
   relative_frobenius_vs_dataset_size_by_delta: "Mean relative Frobenius vs dataset size by delta",
+  signal_to_noise_vs_dataset_size: "Mean dH signal-to-noise ratio vs dataset size",
 };
 const G2M_DEEPH_BASE_DERIVATIVE_DATASET_SIZE_PLOTS = new Set([
   "dh_mae_vs_dataset_size",
   "dh_rmse_vs_dataset_size",
   "relative_frobenius_vs_dataset_size",
+  "signal_to_noise_vs_dataset_size",
   "support_f1_vs_dataset_size",
   "support_error_rates_vs_dataset_size",
 ]);
@@ -2523,7 +2525,14 @@ const G2M_DEEPH_DERIVATIVE_METRIC_HELP = {
     formula: "\\frac{\\|dH^{pred}/dR-dH^{ref}/dR\\|_{F,R}}{\\|dH^{ref}/dR\\|_{F,R}}",
     description: "Norma Frobenius relativa del error de derivada sobre el soporte de referencia.",
     purpose: "Mide el error global normalizado por la escala de la derivada SIESTA.",
-    direction: "Menor es mejor; valores cercanos a 0 indican derivadas de matriz mas parecidas.",
+    direction: "Menor es mejor; valores cercanos a 0 indican derivadas de matriz mas parecidas. Si dh_signal_to_noise_ratio < 1, un valor alto refleja piso de ruido del modelo, no necesariamente peor derivada.",
+  },
+  dh_signal_to_noise_ratio: {
+    label: "dH signal-to-noise ratio",
+    formula: "\\frac{\\|H_{+}-H_{-}\\|_{F}}{\\tfrac12(\\|H^{pred}_{+}-H^{ref}_{+}\\|_{F}+\\|H^{pred}_{-}-H^{ref}_{-}\\|_{F})}",
+    description: "Senal fisica del desplazamiento (||H+ - H-||) dividida por el error de prediccion del H absoluto del modelo.",
+    purpose: "Contextualiza dh_relative_frobenius_ref: la diferencia finita resta dos H casi identicos, asi que si el error de H absoluto supera la senal, la derivada predicha es ruido.",
+    direction: "Mayor es mejor. SNR < 1 (dh_signal_below_noise_floor=true) => la derivada esta enterrada bajo el error del modelo; el error alto no es un bug sino falta de resolucion.",
   },
   dh_relative_frobenius_union_robust: {
     label: "Robust dH relative Frobenius",
@@ -2681,6 +2690,14 @@ const G2M_DEEPH_DERIVATIVE_PLOT_HELP_BY_ID = {
     description: "Resume cambios de soporte sparse y errores de ceros/no-ceros en dH/dR.",
     purpose: "Distingue fallos de patron sparse de fallos de magnitud.",
     direction: "Menor es mejor para las tres tasas.",
+  },
+  signal_to_noise_vs_dataset_size: {
+    metric: "dH signal-to-noise ratio",
+    title: "dH signal-to-noise ratio vs dataset size",
+    formula: "\\mathrm{SNR}=\\frac{\\|H_{+}-H_{-}\\|_{F}}{\\tfrac12(\\|H^{pred}_{+}-H^{ref}_{+}\\|_{F}+\\|H^{pred}_{-}-H^{ref}_{-}\\|_{F})}",
+    description: "Senal fisica del desplazamiento dividida por el error de prediccion del H absoluto del modelo, promediada por tamano de dataset.",
+    purpose: "Contextualiza el Relative Frobenius de arriba: la diferencia finita resta dos H casi identicos, asi que si el error de H absoluto supera la senal la derivada predicha es ruido.",
+    direction: "Mayor es mejor. SNR < 1 significa que la derivada esta enterrada bajo el error del modelo: un Relative Frobenius alto refleja falta de resolucion, no necesariamente peor modelo.",
   },
 };
 
@@ -2863,16 +2880,26 @@ function renderG2MDeepHDerivativeScatterPlot(card, plot) {
   }
   const metrics = (plot.metrics && plot.metrics.length) ? plot.metrics : [{ key: plot.y_key, label: plot.y_title || plot.y_key }];
   const mode = G2M_DEEPH_DERIVATIVE_MARKER_ONLY_PLOTS.has(plot.id) ? "markers" : null;
-  const series = Array.from(grouped.entries()).flatMap(([key, rows], index) => metrics.map((metric, metricIndex) => ({
-    key,
-    rows,
-    metric,
-    color: plotColor(index),
-    name: metrics.length > 1 ? `${key} · ${metric.label || metric.key}` : key,
-    dash: metricIndex ? "dash" : "solid",
-    xValues: rows.map((row) => g2mDeephDerivativeXValue(row, plot)),
-    yValues: rows.map((row) => finiteNumber(row[metric.key])),
-  })));
+  const series = Array.from(grouped.entries()).flatMap(([key, rows], index) => {
+    const sortedRows = [...rows].sort((left, right) => {
+      const leftX = g2mDeephDerivativeXValue(left, plot);
+      const rightX = g2mDeephDerivativeXValue(right, plot);
+      if (leftX == null && rightX == null) return 0;
+      if (leftX == null) return 1;
+      if (rightX == null) return -1;
+      return leftX - rightX;
+    });
+    return metrics.map((metric, metricIndex) => ({
+      key,
+      rows: sortedRows,
+      metric,
+      color: plotColor(index),
+      name: metrics.length > 1 ? `${key} · ${metric.label || metric.key}` : key,
+      dash: metricIndex ? "dash" : "solid",
+      xValues: sortedRows.map((row) => g2mDeephDerivativeXValue(row, plot)),
+      yValues: sortedRows.map((row) => finiteNumber(row[metric.key])),
+    }));
+  });
   const allYValues = series.flatMap((entry) => entry.yValues.filter((value) => value != null));
   const fitYMin = valuesAreNonNegative(allYValues) ? 0 : null;
   const traces = [];
@@ -9784,11 +9811,20 @@ function fitModes(traces, fitKind) {
   });
 }
 
+function fitShowLegend(traces, fitKind) {
+  return traces.map((trace) => {
+    if (trace.meta?.role !== "fit") return trace.showlegend !== false;
+    if (fitKind === "none") return false;
+    return trace.meta.fitKind === fitKind;
+  });
+}
+
 function fitSelectorArgs(traces, fitKind) {
   return [{
     visible: fitVisibility(traces, fitKind),
     opacity: fitOpacities(traces, fitKind),
     mode: fitModes(traces, fitKind),
+    showlegend: fitShowLegend(traces, fitKind),
   }];
 }
 
@@ -12341,6 +12377,267 @@ function setupThemeToggle() {
   });
 }
 
+// --------------------------------------------------------------------------- //
+// ML vs SIESTA benchmark view (Comparación ML vs SIESTA).
+// Thin client over /api/ml-vs-siesta/* endpoints. No SIESTA, no training.
+// --------------------------------------------------------------------------- //
+let mlVsSiestaMatrixPayload = null;
+let mlVsSiestaTemplateLoaded = false;
+
+function mvsValue(id, fallback = "") {
+  const node = document.getElementById(id);
+  return node ? String(node.value ?? "").trim() : fallback;
+}
+
+function mvsParseIntList(text) {
+  return String(text || "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length)
+    .map((token) => parseInt(token, 10));
+}
+
+function mvsParseIdList(text) {
+  return String(text || "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length)
+    .map((id) => ({ id }));
+}
+
+function mvsCollectConfig() {
+  const supercell = mvsParseIntList(mvsValue("mvs-supercell", "5,5,1"));
+  const centralRaw = mvsValue("mvs-central-atom", "auto");
+  const directions = String(mvsValue("mvs-directions", "x,y,z"))
+    .split(",")
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length);
+  return {
+    system: {
+      input_structure: mvsValue("mvs-input-structure") || null,
+      supercell: supercell.length === 3 ? supercell : [5, 5, 1],
+      central_atom: centralRaw === "auto" || centralRaw === "" ? "auto" : Number(centralRaw),
+    },
+    derivatives: {
+      enabled: true,
+      displacement: Number(mvsValue("mvs-displacement", "0.01")) || 0.01,
+      directions: directions.length ? directions : ["x", "y", "z"],
+    },
+    models: { enabled: ["graph2mat", "deeph"] },
+    matrices: { targets: ["hamiltonian", "density_matrix", "overlap"] },
+    dataset_mixing: { enabled: false },
+    species_transfer: { enabled: false, base_species: ["C"], new_species: ["H"] },
+    ui: { enable_matrix_viewer: true },
+  };
+}
+
+function mvsRenderPills(containerId, entries) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = "";
+  entries.forEach(([label, value]) => {
+    const pill = document.createElement("div");
+    pill.className = "result-pill";
+    const strong = document.createElement("strong");
+    strong.textContent = label;
+    const span = document.createElement("span");
+    span.textContent = value;
+    pill.append(strong, span);
+    container.appendChild(pill);
+  });
+}
+
+async function loadMlVsSiestaTemplate() {
+  if (mlVsSiestaTemplateLoaded) return;
+  const payload = await request("/api/ml-vs-siesta/config-template");
+  mlVsSiestaTemplateLoaded = true;
+  const output = document.getElementById("mvs-generate-output");
+  if (output) {
+    output.textContent =
+      `Plantilla cargada (${payload.example_config_path}). ` +
+      `Dry-run del plan: ok=${payload.dry_run?.ok}. Pulsa "Dry-run" o "Cargar demo".`;
+  }
+  mvsUpdateDerivativeInfo(payload.dry_run);
+}
+
+function mvsUpdateDerivativeInfo(dryRun) {
+  const central = dryRun?.checks?.central_atom?.detail;
+  const disp = dryRun?.checks?.displacements?.detail;
+  const targets = dryRun?.checks?.targets?.detail;
+  mvsRenderPills("mvs-derivative-info", [
+    ["Átomo desplazado", central ? `${central.index} (${central.symbol ?? "?"})` : "—"],
+    ["Direcciones", disp?.directions ? disp.directions.join(", ") : "—"],
+    ["Displacement h (Å)", disp?.displacement ?? "—"],
+    ["Targets", Array.isArray(targets) ? targets.join(", ") : "—"],
+    ["Render", "Reutiliza el Matrix Viewer (sección 2) para la matriz derivada."],
+  ]);
+}
+
+async function mvsGenerateDryRun() {
+  const config = mvsCollectConfig();
+  const payload = await request("/api/ml-vs-siesta/generate-displacements", {
+    method: "POST",
+    body: JSON.stringify({ config, dry_run: true }),
+  });
+  const output = document.getElementById("mvs-generate-output");
+  if (output) {
+    const files = Object.keys(payload.generated_files || {});
+    output.textContent =
+      `Átomo central: ${payload.central_atom_index} (${payload.central_atom_symbol}). ` +
+      `Supercell atoms: ${payload.supercell_atom_count}.\n` +
+      `Ficheros que se generarían (${files.length}):\n  ` +
+      files.map((label) => payload.generated_files[label].fdf).join("\n  ");
+  }
+}
+
+async function mvsValidatePlan() {
+  const config = mvsCollectConfig();
+  const payload = await request("/api/ml-vs-siesta/dry-run", {
+    method: "POST",
+    body: JSON.stringify({ config }),
+  });
+  const output = document.getElementById("mvs-generate-output");
+  if (output) {
+    const lines = Object.entries(payload.checks || {}).map(
+      ([name, entry]) => `  ${entry.ok ? "✓" : "✗"} ${name}`
+    );
+    output.textContent =
+      `Plan válido: ${payload.ok}. ` +
+      (payload.warnings?.length ? `Warnings: ${payload.warnings.join("; ")}\n` : "\n") +
+      lines.join("\n");
+  }
+  mvsUpdateDerivativeInfo(payload);
+}
+
+function mvsSelectedMatrixValues(payload, key) {
+  if (payload.matrices && payload.matrices[key]?.matrix) {
+    return payload.matrices[key].matrix.values;
+  }
+  if (payload.differences && payload.differences[key]?.matrix) {
+    return payload.differences[key].matrix.values;
+  }
+  return null;
+}
+
+function mvsApplyScale(values, scale) {
+  if (scale !== "log_abs") return values;
+  return values.map((row) => row.map((v) => Math.log10(Math.abs(v) + 1e-9)));
+}
+
+async function mvsRenderMatrix() {
+  const payload = mlVsSiestaMatrixPayload;
+  if (!payload) return;
+  const key = mvsValue("mvs-matrix-select", "graph2mat");
+  const scale = mvsValue("mvs-scale-select", "linear");
+  const values = mvsSelectedMatrixValues(payload, key);
+  const metricsHost = document.getElementById("mvs-matrix-metrics");
+  if (metricsHost) {
+    const entries = [["Target", payload.target]];
+    Object.entries(payload.metrics || {}).forEach(([model, m]) => {
+      entries.push([`${model} MAE`, Number(m.mae).toExponential(3)]);
+      entries.push([`${model} RMSE`, Number(m.rmse).toExponential(3)]);
+      entries.push([`${model} max|err|`, Number(m.max_abs_error).toExponential(3)]);
+    });
+    mvsRenderPills("mvs-matrix-metrics", entries);
+  }
+  const host = document.getElementById("mvs-matrix-heatmap");
+  if (!host || !values) return;
+  await ensurePlotlyLoaded();
+  const z = mvsApplyScale(values, scale);
+  window.Plotly.newPlot(
+    host,
+    [{ z, type: "heatmap", colorscale: "RdBu", reversescale: true }],
+    {
+      title: `${key} · ${payload.target} · ${scale}`,
+      margin: { l: 40, r: 20, t: 40, b: 40 },
+      height: 420,
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+async function mvsLoadDemo() {
+  mlVsSiestaMatrixPayload = await request("/api/ml-vs-siesta/matrix-viewer-demo");
+  await mvsRenderMatrix();
+  showToast("Matrix Viewer demo cargado (payload sintético).");
+}
+
+async function mvsMixDatasets() {
+  const body = {
+    small: mvsParseIdList(mvsValue("mvs-small-ids")),
+    large: mvsParseIdList(mvsValue("mvs-large-ids")),
+    mode: mvsValue("mvs-mix-mode", "add"),
+    ratios: String(mvsValue("mvs-ratios", "0.0,0.5,1.0"))
+      .split(",")
+      .map((token) => Number(token.trim()))
+      .filter((value) => !Number.isNaN(value)),
+    seed: Number(mvsValue("mvs-seed", "0")) || 0,
+  };
+  const payload = await request("/api/ml-vs-siesta/mix-datasets", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  const output = document.getElementById("mvs-mix-output");
+  if (output) {
+    const lines = (payload.partitions || []).map(
+      (p) => `  ${p.label} ratio=${p.ratio} → ${p.n_selected} (${p.n_large_selected} large)`
+    );
+    output.textContent =
+      `mode=${payload.mode} seed=${payload.seed} small=${payload.n_small} large=${payload.n_large}\n` +
+      lines.join("\n");
+  }
+}
+
+async function mvsInspectSpecies() {
+  const base = mvsValue("mvs-base-species", "C")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length);
+  const newSpecies = mvsValue("mvs-new-species", "H")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length);
+  const expandable = mvsValue("mvs-expandable", "false") === "true";
+  const payload = await request("/api/ml-vs-siesta/inspect-species", {
+    method: "POST",
+    body: JSON.stringify({
+      config: { supported_species: base, expandable },
+      new_species: newSpecies,
+    }),
+  });
+  mvsRenderPills("mvs-species-output", [
+    ["Estado", payload.status],
+    ["Soportadas", (payload.supported_species || []).join(", ") || "—"],
+    ["Faltan (especies)", (payload.missing_species || []).join(", ") || "—"],
+    ["Pares faltantes", (payload.missing_species_pairs || []).map((p) => p.join("-")).join(", ") || "—"],
+    ["Requiere embeddings", String(payload.requires_new_embeddings)],
+    ["Requiere heads", String(payload.requires_new_heads)],
+  ]);
+}
+
+function mvsBind(id, event, handler) {
+  const node = document.getElementById(id);
+  if (node) {
+    node.addEventListener(event, () => {
+      Promise.resolve(handler()).catch((error) => showToast(error.message));
+    });
+  }
+}
+
+function setupMlVsSiesta() {
+  mvsBind("mvs-load-template", "click", () => {
+    mlVsSiestaTemplateLoaded = false;
+    return loadMlVsSiestaTemplate();
+  });
+  mvsBind("mvs-generate-dryrun", "click", mvsGenerateDryRun);
+  mvsBind("mvs-validate-plan", "click", mvsValidatePlan);
+  mvsBind("mvs-load-demo", "click", mvsLoadDemo);
+  mvsBind("mvs-matrix-select", "change", mvsRenderMatrix);
+  mvsBind("mvs-scale-select", "change", mvsRenderMatrix);
+  mvsBind("mvs-mix", "click", mvsMixDatasets);
+  mvsBind("mvs-inspect-species", "click", mvsInspectSpecies);
+}
+
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -12360,6 +12657,8 @@ function setupTabs() {
           .then(() => loadG2MDeepHDerivativeMetrics())
           .catch((error) => showToast(error.message));
         loadDatasetMinimum().catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "ml-vs-siesta") {
+        loadMlVsSiestaTemplate().catch((error) => showToast(error.message));
       }
     });
   });
@@ -12732,6 +13031,7 @@ async function boot() {
   setupThemeToggle();
   setupTabs();
   setupEvents();
+  setupMlVsSiesta();
   const venvActivateInput = document.getElementById("venv-activate-command");
   if (venvActivateInput && !String(venvActivateInput.value || "").trim()) {
     venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;

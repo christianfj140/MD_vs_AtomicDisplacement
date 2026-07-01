@@ -8728,7 +8728,7 @@ def g2m_deeph_derivative_metrics_multi_payload(run_ids: list[str]) -> dict[str, 
                         **row,
                         "run_id": run_id,
                         "run_label": run_id,
-                        "combined_series": f"{series} | {run_id}" if series else run_id,
+                        "combined_series": series or method or "diagnostic",
                     }
                 )
     plot_payload = {
@@ -16026,6 +16026,94 @@ def bounded_log_payload(
     }
 
 
+# --------------------------------------------------------------------------- #
+# ML vs SIESTA benchmark backend (thin bridge to the ml_vs_siesta package).
+# All handlers are lightweight: no SIESTA, no training, no heavy model loading.
+# --------------------------------------------------------------------------- #
+ML_VS_SIESTA_EXAMPLE_CONFIG = COMPARISON_ROOT / "config" / "ml_vs_siesta_benchmark_example.yaml"
+ML_VS_SIESTA_DEFAULT_OUTPUT = RESULTS_ROOT / "ml_vs_siesta_displacements"
+
+
+def _ml_vs_siesta_module():
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    import ml_vs_siesta  # noqa: PLC0415 - lazy import keeps startup light
+
+    return ml_vs_siesta
+
+
+def ml_vs_siesta_config_template_payload() -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    config = mvs.load_benchmark_config(ML_VS_SIESTA_EXAMPLE_CONFIG)
+    return {
+        "config": config.to_dict(),
+        "dry_run": mvs.benchmark_dry_run(config, siesta_output_dir=None),
+        "example_config_path": str(ML_VS_SIESTA_EXAMPLE_CONFIG.relative_to(REPO_ROOT)),
+    }
+
+
+def ml_vs_siesta_dry_run_payload(body: dict[str, Any]) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    config = mvs.parse_benchmark_config(body.get("config") or {})
+    return mvs.benchmark_dry_run(config, siesta_output_dir=body.get("output_dir"))
+
+
+def ml_vs_siesta_generate_payload(body: dict[str, Any]) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    config = mvs.parse_benchmark_config(body.get("config") or {})
+    dry_run = parse_bool(body.get("dry_run"), True)
+    output_dir = Path(body.get("output_dir") or ML_VS_SIESTA_DEFAULT_OUTPUT)
+    if not dry_run:
+        resolved = output_dir.expanduser().resolve()
+        results_root = RESULTS_ROOT.resolve()
+        if resolved != results_root and results_root not in resolved.parents:
+            raise RuntimeError(
+                "output_dir must be under Comparison/results when dry_run is false."
+            )
+    return mvs.generate_siesta_displacement_inputs(config, output_dir, dry_run=dry_run)
+
+
+def ml_vs_siesta_mix_payload(body: dict[str, Any]) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    small = body.get("small") or []
+    large = body.get("large") or []
+    ratios = body.get("ratios") or [0.0, 0.1, 0.25, 0.5, 0.75, 1.0]
+    mode = body.get("mode") or "add"
+    seed = int(body.get("seed") or 0)
+    return mvs.make_mixed_dataset_manifest(small, large, ratios=ratios, mode=mode, seed=seed)
+
+
+def ml_vs_siesta_inspect_species_payload(body: dict[str, Any]) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    config = body.get("config") or {}
+    report = mvs.inspect_species_support(config, new_species=body.get("new_species"))
+    return report.to_dict()
+
+
+def ml_vs_siesta_matrix_viewer_demo_payload() -> dict[str, Any]:
+    """Deterministic fake payload so the Matrix Viewer renders without SIESTA."""
+    mvs = _ml_vs_siesta_module()
+    import numpy as np  # noqa: PLC0415
+
+    rng = np.random.default_rng(0)
+    n = 12
+    base = rng.standard_normal((n, n))
+    base = (base + base.T) / 2.0
+    siesta = mvs.MatrixData(values=base, target="hamiltonian")
+    graph2mat = mvs.MatrixData(
+        values=base + 0.05 * rng.standard_normal((n, n)), target="hamiltonian"
+    )
+    deeph = mvs.MatrixData(
+        values=base + 0.12 * rng.standard_normal((n, n)), target="hamiltonian"
+    )
+    payload = mvs.build_matrix_viewer_payload(
+        target="hamiltonian", siesta=siesta, graph2mat=graph2mat, deeph=deeph
+    )
+    payload["note"] = "Synthetic demo payload (no SIESTA run); wire real matrices later."
+    return payload
+
+
 class ComparisonUIHandler(BaseHTTPRequestHandler):
     server_version = "ComparisonPipelineUI/1.0"
 
@@ -16159,6 +16247,10 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 if artifact_path is None:
                     raise FileNotFoundError(kind)
                 self._serve_file(artifact_path, content_type=str(artifact_meta["mime_type"]))
+            elif path == "/api/ml-vs-siesta/config-template":
+                json_response(self, ml_vs_siesta_config_template_payload())
+            elif path == "/api/ml-vs-siesta/matrix-viewer-demo":
+                json_response(self, ml_vs_siesta_matrix_viewer_demo_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum":
                 json_response(self, dataset_size_minimum_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum/artifact":
@@ -16242,6 +16334,22 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                     G2M_DEEPH_RUNNER.stop(),
                     status=HTTPStatus.ACCEPTED,
                 )
+            elif path == "/api/ml-vs-siesta/dry-run":
+                payload = read_json_body(self)
+                json_response(self, ml_vs_siesta_dry_run_payload(payload))
+            elif path == "/api/ml-vs-siesta/generate-displacements":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    ml_vs_siesta_generate_payload(payload),
+                    status=HTTPStatus.CREATED,
+                )
+            elif path == "/api/ml-vs-siesta/mix-datasets":
+                payload = read_json_body(self)
+                json_response(self, ml_vs_siesta_mix_payload(payload))
+            elif path == "/api/ml-vs-siesta/inspect-species":
+                payload = read_json_body(self)
+                json_response(self, ml_vs_siesta_inspect_species_payload(payload))
             elif path == "/api/g2m-deeph/dataset-size-minimum/analyze":
                 payload = read_json_body(self)
                 json_response(
