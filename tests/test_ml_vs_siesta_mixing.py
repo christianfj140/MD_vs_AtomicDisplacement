@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -141,14 +143,37 @@ def test_incompatible_basis_raises(tmp_path):
         )
 
 
-def test_incompatible_species_raises(tmp_path):
+def test_incompatible_real_species_raises(tmp_path):
+    # A genuine *real* species mismatch (adds N) must still raise.
+    small = _make_dataset(tmp_path / "small", n_snapshots=4, n_atoms=2)
+    large = _make_dataset(tmp_path / "large", n_snapshots=4, n_atoms=50)
+    prov = json.loads((large / "material_provenance.json").read_text())
+    prov["species"] = [
+        {"index": 1, "atomic_number": 6, "label": "C"},
+        {"index": 2, "atomic_number": 7, "label": "N"},
+    ]
+    (large / "material_provenance.json").write_text(json.dumps(prov), encoding="utf-8")
+    with pytest.raises(mvs.DatasetCompatibilityError):
+        mvs.validate_datasets_compatible(small, large)
+
+
+def test_ghost_species_do_not_block_compatibility(tmp_path):
+    # 2-atom cell has [C, Ghost-H]; 5x5x1 supercell often has only [C].
     small = _make_dataset(tmp_path / "small", n_snapshots=4, n_atoms=2)
     large = _make_dataset(tmp_path / "large", n_snapshots=4, n_atoms=50)
     prov = json.loads((large / "material_provenance.json").read_text())
     prov["species"] = [{"index": 1, "atomic_number": 6, "label": "C"}]
+    prov["basis_file_sha256"] = {"C.ion.xml": small_basis_hash(small)}
     (large / "material_provenance.json").write_text(json.dumps(prov), encoding="utf-8")
-    with pytest.raises(mvs.DatasetCompatibilityError):
-        mvs.validate_datasets_compatible(small, large)
+    result = mvs.validate_datasets_compatible(small, large)
+    assert result["compatible"] is True
+    assert result["species"] == ["C"]
+    assert result["ghost_species_ignored"] == ["Ghost-H"]
+
+
+def small_basis_hash(dataset_root: Path) -> str:
+    prov = json.loads((dataset_root / "material_provenance.json").read_text())
+    return prov["basis_file_sha256"]["C.ion.xml"]
 
 
 def test_dataset_atom_count(small_large):
@@ -262,7 +287,7 @@ def test_build_mae_vs_size_from_sweep(small_large, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# backend payloads (pipeline_ui bridge)
+# backend payloads + HTTP endpoints (pipeline_ui bridge)
 # --------------------------------------------------------------------------- #
 def test_backend_mixing_plan_and_demo(small_large):
     import pipeline_ui as ui
@@ -279,4 +304,102 @@ def test_backend_mixing_plan_and_demo(small_large):
     assert plan["n_permutations"] == 4
     demo = ui.mixing_metrics_demo_payload()
     assert demo["n_curves"] > 0
+
+
+def test_backend_mixing_discover(small_large, monkeypatch):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    # Point discovery at a scratch datasets root containing our two fakes.
+    datasets_root = small.parent
+    monkeypatch.setattr(ui, "DATASETS_ROOT", datasets_root)
+    payload = ui.mixing_discover_payload(threshold_atoms=10)
+    small_atoms = [d["n_atoms"] for d in payload["small"]]
+    large_atoms = [d["n_atoms"] for d in payload["large"]]
+    assert 2 in small_atoms  # 2-atom cell classified as small
+    assert 50 in large_atoms  # 50-atom supercell classified as large
+
+
+def test_backend_mixing_launch_dry_run_and_status(small_large):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    runner = ui.MixingSweepRunner()  # fresh instance, does not touch the singleton
+    runner.start(
+        {
+            "small": {"8": str(small)},
+            "large": {"8": str(large)},
+            "modes": ["add"],
+            "ratios": [0.0, 1.0],
+            "action": "preview",  # dry-run: no training, no writes
+        }
+    )
+    for _ in range(100):
+        status = runner.status()
+        if status["state"] in ("completed", "error"):
+            break
+        time.sleep(0.05)
+    status = runner.status()
+    assert status["state"] == "completed", status
+    assert status["n_permutations"] == 2
+    assert not status["summary"]["records"]  # preview never trains
+
+
+def test_backend_mixing_launch_rejects_concurrent(small_large):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    runner = ui.MixingSweepRunner()
+    body = {"small": {"8": str(small)}, "large": {"8": str(large)}, "action": "preview"}
+    # Force a "running" state and confirm a second start is rejected.
+    with runner._lock:
+        runner._thread = threading.current_thread()
+        runner._status = {"state": "running"}
+    with pytest.raises(RuntimeError):
+        runner.start(body)
+
+
+def test_extract_model_h_mae_eV_shapes():
+    import pipeline_ui as ui
+
+    keyed = {"results": {"graph2mat": {"h_mae_eV": 0.03}, "deeph": {"h_mae_eV": 0.07}}}
+    assert ui._extract_model_h_mae_eV(keyed, ("graph2mat", "deeph")) == {
+        "graph2mat": {"h_mae_eV": 0.03},
+        "deeph": {"h_mae_eV": 0.07},
+    }
+    listed = {"results": [{"method": "graph2mat", "h_mae_eV": 0.05}]}
+    assert ui._extract_model_h_mae_eV(listed, ("graph2mat",)) == {"graph2mat": {"h_mae_eV": 0.05}}
+    assert ui._extract_model_h_mae_eV({"results": None}, ("graph2mat",)) == {}
+
+
+def test_http_dispatch_mixing_routes(small_large):
+    """Exercise the real do_GET/do_POST route wiring over a live server."""
+    import http.client
+    import json as _json
+    from http.server import ThreadingHTTPServer
+
+    import pipeline_ui as ui
+
+    small, large = small_large
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ui.ComparisonUIHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+
+        conn.request("GET", "/api/mixing/metrics-demo")
+        demo = _json.loads(conn.getresponse().read())
+        assert demo["n_curves"] > 0
+
+        body = _json.dumps(
+            {"small": {"8": str(small)}, "large": {"8": str(large)}, "modes": ["add"], "ratios": [0.0, 1.0]}
+        )
+        conn.request("POST", "/api/mixing/plan", body, {"Content-Type": "application/json"})
+        plan = _json.loads(conn.getresponse().read())
+        assert plan["n_permutations"] == 2
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 

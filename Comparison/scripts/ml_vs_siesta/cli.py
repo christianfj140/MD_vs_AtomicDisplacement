@@ -17,6 +17,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Allow direct execution (`python3 Comparison/scripts/ml_vs_siesta/cli.py ...`) in
+# addition to module use (`python -m Comparison.scripts.ml_vs_siesta.cli ...`).
+# When run as a script, __package__ is empty and the relative imports below would
+# fail, so we put the package parent on sys.path and set __package__ first.
+if __package__ in (None, ""):  # pragma: no cover - exercised via subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # Comparison/scripts
+    __package__ = "ml_vs_siesta"
+
 from .config import load_benchmark_config
 from .dataset_mixing import (
     generate_mixed_dataset_configs,

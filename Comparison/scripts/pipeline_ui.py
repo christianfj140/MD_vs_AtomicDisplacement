@@ -16125,6 +16125,14 @@ MIXING_SWEEP_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_mixing_sweep"
 MIXING_SMALL_ATOM_THRESHOLD = 10
 
 
+def _display_path(path: Path) -> str:
+    """Repo-relative path when possible, else the absolute path."""
+    try:
+        return str(Path(path).relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def mixing_discover_payload(threshold_atoms: int = MIXING_SMALL_ATOM_THRESHOLD) -> dict[str, Any]:
     mvs = _ml_vs_siesta_module()
     small: list[dict[str, Any]] = []
@@ -16143,7 +16151,7 @@ def mixing_discover_payload(threshold_atoms: int = MIXING_SMALL_ATOM_THRESHOLD) 
             except Exception:  # noqa: BLE001 - skip unreadable datasets
                 continue
             entry = {
-                "root": str(dataset_root.relative_to(REPO_ROOT)),
+                "root": _display_path(dataset_root),
                 "n_snapshots": len(samples),
                 "n_atoms": n_atoms,
             }
@@ -16155,7 +16163,7 @@ def mixing_discover_payload(threshold_atoms: int = MIXING_SMALL_ATOM_THRESHOLD) 
         "threshold_atoms": threshold_atoms,
         "small": small,
         "large": large,
-        "datasets_root": str(DATASETS_ROOT.relative_to(REPO_ROOT)),
+        "datasets_root": _display_path(DATASETS_ROOT),
     }
 
 
@@ -16208,6 +16216,76 @@ def mixing_metrics_demo_payload() -> dict[str, Any]:
     return payload
 
 
+# Dedicated runner instance for the mixing sweep so it never clobbers the
+# Graph2Mat-vs-DeepH tab's shared G2M_DEEPH_RUNNER state. Permutations are trained
+# sequentially, so a single dedicated runner is sufficient.
+_MIXING_TRAINING_RUNNER: Graph2MatDeepHBenchmarkRunner | None = None
+_MIXING_TRAINING_POLL_SECONDS = 5.0
+
+
+def _mixing_training_runner() -> Graph2MatDeepHBenchmarkRunner:
+    global _MIXING_TRAINING_RUNNER
+    if _MIXING_TRAINING_RUNNER is None:
+        _MIXING_TRAINING_RUNNER = Graph2MatDeepHBenchmarkRunner()
+    return _MIXING_TRAINING_RUNNER
+
+
+def _extract_model_h_mae_eV(results_payload: Any, models: tuple[str, ...]) -> dict[str, Any]:
+    """Best-effort per-model ``h_mae_eV`` extraction from a runner results dict.
+
+    Recursively walks the results/plot payload looking for nodes that carry both
+    a method/model identifier and an ``h_mae_eV`` value. Returns
+    ``{model: {"h_mae_eV": float}}`` for the requested models; missing metrics are
+    simply omitted (run_mixing_sweep skips records without an MAE).
+    """
+    models_lower = {m.lower(): m for m in models}
+    found: dict[str, Any] = {}
+
+    def visit(node: Any, method_hint: str | None) -> None:
+        if isinstance(node, dict):
+            method = node.get("method") or node.get("model") or method_hint
+            value = node.get("h_mae_eV")
+            key = str(method or "").lower()
+            if value is not None and key in models_lower:
+                try:
+                    found.setdefault(models_lower[key], {})["h_mae_eV"] = float(value)
+                except (TypeError, ValueError):
+                    pass
+            for child_key, child in node.items():
+                child_hint = child_key if str(child_key).lower() in models_lower else method
+                visit(child, child_hint)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item, method_hint)
+
+    visit(results_payload, None)
+    return found
+
+
+def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
+    """Synchronously drive the real Graph2Mat/DeepH runner for one merged dataset.
+
+    Starts the runner on the merged ``dataset_root`` payload built by
+    ``run_mixing_sweep``, blocks until training finishes, then extracts per-model
+    ``h_mae_eV``. This spawns real training subprocesses (Graph2Mat / DeepH) and
+    therefore needs the models installed and, for a full sweep, a GPU.
+    """
+    runner = _mixing_training_runner()
+    models = tuple(payload.get("models") or payload.get("selected_methods") or ("graph2mat", "deeph"))
+    runner.start(payload)
+    while True:
+        status = runner.status()
+        if not status.get("running"):
+            break
+        time.sleep(_MIXING_TRAINING_POLL_SECONDS)
+    results = runner.results()
+    metrics = _extract_model_h_mae_eV(results, models)
+    return {
+        "metrics": metrics,
+        "runner_status": results.get("status"),
+    }
+
+
 class MixingSweepRunner:
     """Minimal background runner for the mixing sweep (preview / materialize)."""
 
@@ -16246,10 +16324,14 @@ class MixingSweepRunner:
             sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
             seed = int(body.get("seed") or 0)
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
-            # "materialize" writes merged datasets; "preview" only plans. Real
-            # training is intentionally opt-in and not auto-started here.
+            # Actions:
+            #   "preview"     -> plan only (no writes).
+            #   "materialize" -> build merged datasets, no training.
+            #   "train"       -> materialize + drive the real Graph2Mat/DeepH runner
+            #                    per permutation (needs models installed + GPU).
             action = str(body.get("action") or "preview")
-            dry_run = action != "materialize"
+            dry_run = action == "preview"
+            launch_fn = _mixing_runner_launch_fn if action == "train" else None
 
             def progress(entry: dict[str, Any]) -> None:
                 with self._lock:
@@ -16269,7 +16351,7 @@ class MixingSweepRunner:
                 seed=seed,
                 models=models,
                 dry_run=dry_run,
-                launch_fn=None,
+                launch_fn=launch_fn,
                 progress_fn=progress,
             )
             with self._lock:

@@ -1519,7 +1519,7 @@
               <p class="field-help">
                 Mezcla datasets pequeños (2 átomos) con grandes 5×5×1 por tamaño N, modo add/replace y ratio,
                 materializa cada permutación como dataset_root entrenable y traza MAE vs tamaño total.
-                No lanza SIESTA ni entrena automáticamente (el entrenamiento real se conecta vía el runner).
+                No lanza SIESTA. El entrenamiento real (Graph2Mat/DeepH) es opt-in vía «Entrenar sweep».
               </p>
             </div>
             <div class="button-row">
@@ -1572,12 +1572,17 @@
             </div>
             <div class="button-row">
               <button id="mix-preview" class="button secondary" type="button">Previsualizar (dry-run)</button>
-              <button id="mix-materialize" class="button primary" type="button">Materializar merged datasets</button>
+              <button id="mix-materialize" class="button secondary" type="button">Materializar merged datasets</button>
+              <button id="mix-train" class="button primary" type="button">Entrenar sweep (real)</button>
               <span class="inline-status">
                 <span id="mix-status-dot" class="status-dot"></span>
                 <span id="mix-status-text">Idle</span>
               </span>
             </div>
+            <p class="field-help">
+              «Entrenar sweep» lanza Graph2Mat/DeepH reales por permutación (requiere los modelos
+              instalados y GPU para el sweep completo). «Materializar» solo prepara los dataset_root.
+            </p>
           </section>
 
           <section class="panel">

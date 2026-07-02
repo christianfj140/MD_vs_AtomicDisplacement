@@ -12733,15 +12733,29 @@ async function mixPreview() {
   }
 }
 
-async function mixMaterialize() {
+async function mixLaunch(action, statusText) {
   const body = mixCollectBody();
-  body.action = "materialize";
+  body.action = action;
   await request("/api/mixing/launch", { method: "POST", body: JSON.stringify(body) });
-  mixSetStatus("Materializando…", "running");
+  mixSetStatus(statusText, "running");
   if (mixStatusTimer) clearInterval(mixStatusTimer);
   mixStatusTimer = setInterval(() => {
     mixPollStatus().catch(() => {});
-  }, 1000);
+  }, 1500);
+}
+
+async function mixMaterialize() {
+  await mixLaunch("materialize", "Materializando…");
+}
+
+async function mixTrain() {
+  if (!window.confirm(
+    "Entrenar el sweep lanza Graph2Mat/DeepH reales por permutación " +
+      "(requiere modelos instalados y GPU). ¿Continuar?"
+  )) {
+    return;
+  }
+  await mixLaunch("train", "Entrenando sweep…");
 }
 
 async function mixPollStatus() {
@@ -12751,6 +12765,9 @@ async function mixPollStatus() {
     mixSetStatus(`Completado (${status.n_permutations} permutaciones)`, "ok");
     if (mixStatusTimer) clearInterval(mixStatusTimer);
     mixStatusTimer = null;
+    if (status.action === "train") {
+      mixLoadMetrics(false).catch(() => {});
+    }
   } else if (status.state === "error") {
     mixSetStatus(`Error: ${status.error || ""}`, "error");
     if (mixStatusTimer) clearInterval(mixStatusTimer);
@@ -12807,6 +12824,7 @@ function setupMixingDatasets() {
   mvsBind("mix-discover", "click", mixDiscover);
   mvsBind("mix-preview", "click", mixPreview);
   mvsBind("mix-materialize", "click", mixMaterialize);
+  mvsBind("mix-train", "click", mixTrain);
   mvsBind("mix-metrics-demo", "click", () => mixLoadMetrics(true));
   mvsBind("mix-metrics-real", "click", () => mixLoadMetrics(false));
 }

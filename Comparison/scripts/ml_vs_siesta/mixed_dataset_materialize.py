@@ -107,37 +107,77 @@ def dataset_atom_count(dataset_root: str | Path) -> int | None:
     return None
 
 
+def _real_species_labels(provenance: dict[str, Any]) -> list[str]:
+    """Real (non-ghost) species labels. Ghost atoms have atomic_number < 0."""
+    return sorted(
+        str(s.get("label"))
+        for s in (provenance.get("species") or [])
+        if int(s.get("atomic_number", 0)) >= 0
+    )
+
+
+def _ghost_species_labels(provenance: dict[str, Any]) -> list[str]:
+    return sorted(
+        str(s.get("label"))
+        for s in (provenance.get("species") or [])
+        if int(s.get("atomic_number", 0)) < 0
+    )
+
+
+def _basis_for_real_species(
+    basis: dict[str, Any],
+    real_labels: set[str],
+) -> dict[str, Any]:
+    """Keep only basis entries whose file belongs to a real species.
+
+    Basis keys look like ``"C.ion.xml"`` / ``"Ghost-H.ion.xml"``; the species
+    label is the stem before the first dot.
+    """
+    kept: dict[str, Any] = {}
+    for key, value in (basis or {}).items():
+        stem = str(key).split(".", 1)[0]
+        if stem in real_labels:
+            kept[key] = value
+    return kept
+
+
 def validate_datasets_compatible(
     small_root: str | Path,
     large_root: str | Path,
 ) -> dict[str, Any]:
     """Validate that two datasets share species + basis so they can be mixed.
 
-    Compares ``material_provenance.json`` species labels and basis file hashes.
-    Raises :class:`DatasetCompatibilityError` on any mismatch.
+    Compares only the *real* species and their basis files. Ghost atoms
+    (``atomic_number < 0``, e.g. Wannier projection centers like ``Ghost-H``)
+    are not part of the Graph2Mat/DeepH representation, so they are ignored:
+    a 2-atom ``["C", "Ghost-H"]`` cell is compatible with a ``["C"]`` supercell.
+    Raises :class:`DatasetCompatibilityError` on a real mismatch.
     """
     small = _load_json(Path(small_root) / "material_provenance.json")
     large = _load_json(Path(large_root) / "material_provenance.json")
 
-    small_species = sorted(str(s.get("label")) for s in (small.get("species") or []))
-    large_species = sorted(str(s.get("label")) for s in (large.get("species") or []))
+    small_species = _real_species_labels(small)
+    large_species = _real_species_labels(large)
     if small_species != large_species:
         raise DatasetCompatibilityError(
-            f"Species differ between datasets: {small_species} vs {large_species}. "
-            "Mixing requires the same species set."
+            f"Real species differ between datasets: {small_species} vs {large_species}. "
+            "Mixing requires the same real (non-ghost) species set."
         )
 
-    small_basis = small.get("basis_file_sha256") or {}
-    large_basis = large.get("basis_file_sha256") or {}
+    real_set = set(small_species)
+    small_basis = _basis_for_real_species(small.get("basis_file_sha256") or {}, real_set)
+    large_basis = _basis_for_real_species(large.get("basis_file_sha256") or {}, real_set)
     if small_basis and large_basis and small_basis != large_basis:
         raise DatasetCompatibilityError(
-            "Orbital basis differs between datasets (basis_file_sha256 mismatch); "
-            "Graph2Mat/DeepH cannot train on a heterogeneous basis pool. "
-            f"small={small_basis} large={large_basis}."
+            "Orbital basis differs between datasets for the real species "
+            "(basis_file_sha256 mismatch); Graph2Mat/DeepH cannot train on a "
+            f"heterogeneous basis pool. small={small_basis} large={large_basis}."
         )
+    ghost_ignored = sorted(set(_ghost_species_labels(small)) | set(_ghost_species_labels(large)))
     return {
         "species": small_species,
         "basis_file_sha256": small_basis or large_basis,
+        "ghost_species_ignored": ghost_ignored,
         "compatible": True,
     }
 
