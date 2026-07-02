@@ -16262,6 +16262,28 @@ def _extract_model_h_mae_eV(results_payload: Any, models: tuple[str, ...]) -> di
     return found
 
 
+def _mixing_run_ok(status: Any) -> bool:
+    """Whether a terminal runner status represents a successful training run.
+
+    Mirrors the runner's own convention (returncode 0 or 2 == ok) and treats an
+    error message or a stop request as failure.
+    """
+    if not isinstance(status, dict):
+        return False
+    if status.get("error"):
+        return False
+    if status.get("stop_requested"):
+        return False
+    returncode = status.get("returncode")
+    if returncode is not None:
+        try:
+            if int(returncode) not in (0, 2):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     """Synchronously drive the real Graph2Mat/DeepH runner for one merged dataset.
 
@@ -16269,6 +16291,10 @@ def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     ``run_mixing_sweep``, blocks until training finishes, then extracts per-model
     ``h_mae_eV``. This spawns real training subprocesses (Graph2Mat / DeepH) and
     therefore needs the models installed and, for a full sweep, a GPU.
+
+    Returns ``ok=False`` (with an ``error``) when the runner failed or produced no
+    ``h_mae_eV`` for the requested models, so a failed permutation is never
+    silently reported as "trained".
     """
     runner = _mixing_training_runner()
     models = tuple(payload.get("models") or payload.get("selected_methods") or ("graph2mat", "deeph"))
@@ -16279,10 +16305,20 @@ def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
             break
         time.sleep(_MIXING_TRAINING_POLL_SECONDS)
     results = runner.results()
+    runner_status = results.get("status") or {}
     metrics = _extract_model_h_mae_eV(results, models)
+    ok = _mixing_run_ok(runner_status)
+    error: str | None = runner_status.get("error") if isinstance(runner_status, dict) else None
+    missing_models = [model for model in models if model not in metrics]
+    if ok and missing_models:
+        ok = False
+        error = error or f"runner produced no h_mae_eV for models: {missing_models}"
     return {
+        "ok": ok,
+        "error": error,
         "metrics": metrics,
-        "runner_status": results.get("status"),
+        "missing_models": missing_models,
+        "runner_status": runner_status,
     }
 
 
@@ -16361,6 +16397,9 @@ class MixingSweepRunner:
                         "finished_at": time.time(),
                         "summary": summary,
                         "n_permutations": summary.get("n_permutations"),
+                        "n_trained": summary.get("n_trained", 0),
+                        "n_partial": summary.get("n_partial", 0),
+                        "n_failed": summary.get("n_failed", 0),
                     }
                 )
         except Exception as exc:  # noqa: BLE001 - surface to UI

@@ -12762,7 +12762,15 @@ async function mixPollStatus() {
   const status = await request("/api/mixing/status");
   const done = status.permutations_done || 0;
   if (status.state === "completed") {
-    mixSetStatus(`Completado (${status.n_permutations} permutaciones)`, "ok");
+    const failed = status.n_failed || 0;
+    const partial = status.n_partial || 0;
+    let text = `Completado (${status.n_permutations} permutaciones)`;
+    let level = "ok";
+    if (failed || partial) {
+      text += ` · ${failed} fallidas, ${partial} parciales`;
+      level = failed ? "error" : "warning";
+    }
+    mixSetStatus(text, level);
     if (mixStatusTimer) clearInterval(mixStatusTimer);
     mixStatusTimer = null;
     if (status.action === "train") {

@@ -244,13 +244,15 @@ def run_mixing_sweep(
                         epochs=epochs,
                         system_label=system_label,
                     )
-                    launch_result = launch_fn(payload)
+                    launch_result = launch_fn(payload) or {}
                     entry["launch"] = launch_result
-                    metrics = (launch_result or {}).get("metrics") or {}
+                    metrics = launch_result.get("metrics") or {}
+                    recorded_models: list[str] = []
                     for model, model_metrics in metrics.items():
                         h_mae = (model_metrics or {}).get("h_mae_eV")
                         if h_mae is None:
                             continue
+                        recorded_models.append(model)
                         records.append(
                             {
                                 "size": size,
@@ -262,12 +264,29 @@ def run_mixing_sweep(
                                 "output_root": str(merged_dir),
                             }
                         )
-                    entry["status"] = "trained"
+                    # A launch_fn may signal failure explicitly via ok=False; if it
+                    # omits ok (e.g. test fakes), infer success from produced MAE.
+                    launch_ok = launch_result.get("ok", True)
+                    requested_models = list(models)
+                    if not launch_ok or not recorded_models:
+                        entry["status"] = "failed"
+                        entry["error"] = launch_result.get("error") or "no h_mae_eV produced"
+                    elif len(recorded_models) < len(requested_models):
+                        entry["status"] = "partial"
+                        entry["error"] = launch_result.get("error") or (
+                            "missing h_mae_eV for: "
+                            + ", ".join(m for m in requested_models if m not in recorded_models)
+                        )
+                    else:
+                        entry["status"] = "trained"
                 else:
                     entry["status"] = "materialized"
                 permutation_results.append(entry)
                 if progress_fn is not None:
                     progress_fn(dict(entry))
+
+    def _count(status: str) -> int:
+        return sum(1 for entry in permutation_results if entry.get("status") == status)
 
     summary = {
         "schema": "ml_vs_siesta_mixing_sweep_summary_v1",
@@ -278,6 +297,9 @@ def run_mixing_sweep(
         "models": list(models),
         "plan_warnings": plan["warnings"],
         "n_permutations": len(permutation_results),
+        "n_trained": _count("trained"),
+        "n_partial": _count("partial"),
+        "n_failed": _count("failed"),
         "permutations": permutation_results,
         "records": records,
     }

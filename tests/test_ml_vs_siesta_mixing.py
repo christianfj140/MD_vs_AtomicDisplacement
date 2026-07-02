@@ -241,7 +241,45 @@ def test_run_mixing_sweep_materialize_and_train(small_large, tmp_path):
     )
     assert summary["dry_run"] is False
     assert len(summary["records"]) == 2 * 2  # 2 permutations x 2 models
+    assert summary["n_trained"] == 2
+    assert summary["n_failed"] == 0
+    assert all(p["status"] == "trained" for p in summary["permutations"])
     assert (tmp_path / "out" / "mixing_sweep_summary.json").is_file()
+
+
+def test_run_mixing_sweep_marks_failed_when_launch_fails(small_large, tmp_path):
+    small, large = small_large
+
+    def failing_launch(payload):
+        # Runner ran but produced no MAE / signalled failure.
+        return {"ok": False, "error": "runner returncode 1", "metrics": {}}
+
+    summary = mvs.run_mixing_sweep(
+        {8: small}, {8: large}, tmp_path / "out",
+        modes=("add",), ratios=(0.0, 1.0), seed=0,
+        models=("graph2mat", "deeph"), dry_run=False, launch_fn=failing_launch,
+    )
+    assert summary["n_failed"] == 2
+    assert summary["n_trained"] == 0
+    assert not summary["records"]
+    assert all(p["status"] == "failed" and p.get("error") for p in summary["permutations"])
+
+
+def test_run_mixing_sweep_marks_partial_when_one_model_missing(small_large, tmp_path):
+    small, large = small_large
+
+    def partial_launch(payload):
+        # Only graph2mat produced MAE; deeph is missing -> partial.
+        return {"ok": True, "metrics": {"graph2mat": {"h_mae_eV": 0.05}}}
+
+    summary = mvs.run_mixing_sweep(
+        {8: small}, {8: large}, tmp_path / "out",
+        modes=("add",), ratios=(1.0,), seed=0,
+        models=("graph2mat", "deeph"), dry_run=False, launch_fn=partial_launch,
+    )
+    assert summary["n_partial"] == 1
+    assert summary["permutations"][0]["status"] == "partial"
+    assert "deeph" in summary["permutations"][0]["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -398,8 +436,44 @@ def test_http_dispatch_mixing_routes(small_large):
         conn.request("POST", "/api/mixing/plan", body, {"Content-Type": "application/json"})
         plan = _json.loads(conn.getresponse().read())
         assert plan["n_permutations"] == 2
+
+        # Launch (preview action = dry-run, no training) + poll status over HTTP.
+        launch_body = _json.dumps(
+            {
+                "small": {"8": str(small)},
+                "large": {"8": str(large)},
+                "modes": ["add"],
+                "ratios": [0.0, 1.0],
+                "action": "preview",
+            }
+        )
+        conn.request("POST", "/api/mixing/launch", launch_body, {"Content-Type": "application/json"})
+        launch_resp = conn.getresponse()
+        assert launch_resp.status == 202
+        assert _json.loads(launch_resp.read())["state"] == "started"
+
+        final_status = None
+        for _ in range(100):
+            conn.request("GET", "/api/mixing/status")
+            final_status = _json.loads(conn.getresponse().read())
+            if final_status["state"] in ("completed", "error"):
+                break
+            time.sleep(0.05)
+        assert final_status is not None and final_status["state"] == "completed", final_status
+        assert final_status["n_permutations"] == 2
         conn.close()
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_mixing_run_ok_helper():
+    import pipeline_ui as ui
+
+    assert ui._mixing_run_ok({"returncode": 0}) is True
+    assert ui._mixing_run_ok({"returncode": 2}) is True  # runner treats 2 as ok
+    assert ui._mixing_run_ok({"returncode": 1}) is False
+    assert ui._mixing_run_ok({"returncode": 0, "error": "boom"}) is False
+    assert ui._mixing_run_ok({"returncode": 0, "stop_requested": True}) is False
+    assert ui._mixing_run_ok(None) is False
 
