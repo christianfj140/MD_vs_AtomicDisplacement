@@ -16390,17 +16390,33 @@ def _run_mixing_sweep_parallel(
         for i, p in enumerate(materialized)
     ]
 
+    thread_count = None
+    if performance:
+        thread_count = (
+            performance.get("deeph_num_threads")
+            or performance.get("torch_num_threads")
+            or performance.get("omp_num_threads")
+        )
+
     manual_runs: list[dict[str, Any]] = []
     for i, _perm in enumerate(materialized):
         dataset_id = f"perm_{i}"
         for model in models:
+            overrides: dict[str, Any] = {}
+            if epochs is not None:
+                if model == "graph2mat":
+                    overrides["max_epochs"] = int(epochs)
+                elif model == "deeph":
+                    overrides["epochs"] = int(epochs)
+            if model == "deeph" and thread_count not in (None, "", "null"):
+                overrides["num_threads"] = int(thread_count)
             manual_runs.append(
                 {
                     "model": model,
                     "dataset_id": dataset_id,
                     "config_id": f"{model}_{dataset_id}",
                     "seed": seed,
-                    "overrides": {},
+                    "overrides": overrides,
                 }
             )
 
@@ -16414,6 +16430,7 @@ def _run_mixing_sweep_parallel(
         "training_sweep": {
             "enabled": True,
             "error_policy": "continue_on_error",
+            "search_policy": {"strategy": "manual", "random_seed": seed},
             "manual_runs": manual_runs,
         },
         # Inject the full datasets list so expand_training_sweep resolves
@@ -16426,6 +16443,8 @@ def _run_mixing_sweep_parallel(
         runner_payload["epochs"] = int(epochs)
         runner_payload["graph2mat_overrides"] = {"max_epochs": int(epochs)}
         runner_payload["deeph"] = {"epochs": int(epochs)}
+    if thread_count not in (None, "", "null"):
+        runner_payload.setdefault("deeph", {})["num_threads"] = int(thread_count)
 
     # Patch the runner so it uses our datasets list in expand_training_sweep.
     # We monkey-patch _training_sweep_datasets on the instance only.
