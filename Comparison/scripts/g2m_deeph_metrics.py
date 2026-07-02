@@ -748,7 +748,11 @@ def dataset_status(dataset_manifest: dict[str, Any]) -> tuple[str, list[dict[str
 
 
 def build_recommendation(summary_rows: list[dict[str, Any]], status: str, warnings: list[dict[str, Any]]) -> dict[str, Any]:
-    severe = [warning for warning in warnings if str(warning.get("severity") or "").lower() == "severe"]
+    severe = [
+        warning
+        for warning in warnings
+        if isinstance(warning, dict) and str(warning.get("severity") or "").lower() == "severe"
+    ]
     if status != "valid_joint_one_pass_dataset" and status != "valid_reused_joint_dataset":
         return {
             "winner": None,

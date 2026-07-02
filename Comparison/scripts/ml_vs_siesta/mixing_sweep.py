@@ -137,7 +137,8 @@ def _build_runner_payload(
     models: tuple[str, ...],
     *,
     epochs: int | None,
-    system_label: str,
+    system_label: str | None,
+    performance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Minimal 'reuse_validated' payload pointing at a merged dataset_root."""
     payload: dict[str, Any] = {
@@ -146,11 +147,28 @@ def _build_runner_payload(
         "selected_methods": list(models),
         "models": list(models),
         "output_root": str(result_dir),
-        "system_label": system_label,
         "allow_regenerate_siesta": False,
     }
+    if system_label:
+        payload["system_label"] = system_label
+    deeph_options: dict[str, Any] = {}
     if epochs is not None:
-        payload["epochs"] = int(epochs)
+        epochs = int(epochs)
+        payload["epochs"] = epochs
+        payload["graph2mat_overrides"] = {"max_epochs": epochs}
+        deeph_options["epochs"] = epochs
+    if performance:
+        thread_count = (
+            performance.get("deeph_num_threads")
+            or performance.get("torch_num_threads")
+            or performance.get("omp_num_threads")
+        )
+        if thread_count not in (None, "", "null"):
+            deeph_options["num_threads"] = int(thread_count)
+    if performance:
+        payload["performance"] = performance
+    if deeph_options:
+        payload["deeph"] = deeph_options
     return payload
 
 
@@ -171,7 +189,8 @@ def run_mixing_sweep(
     seed: int = 0,
     models: tuple[str, ...] = ("graph2mat", "deeph"),
     epochs: int | None = None,
-    system_label: str = "graphene",
+    system_label: str | None = None,
+    performance: dict[str, Any] | None = None,
     dry_run: bool = True,
     launch_fn: LaunchFn | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
@@ -243,6 +262,7 @@ def run_mixing_sweep(
                         models,
                         epochs=epochs,
                         system_label=system_label,
+                        performance=performance,
                     )
                     launch_result = launch_fn(payload) or {}
                     entry["launch"] = launch_result

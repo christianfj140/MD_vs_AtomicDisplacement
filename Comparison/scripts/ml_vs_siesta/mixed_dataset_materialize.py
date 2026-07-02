@@ -55,6 +55,26 @@ def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _atom_count_from_fdf(fdf_path: Path) -> int | None:
+    """Read ``NumberOfAtoms`` from a SIESTA ``.fdf`` (real datasets omit it from
+    metadata.json, so this is the reliable fallback)."""
+    if not fdf_path.is_file():
+        return None
+    try:
+        text = fdf_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].lower() == "numberofatoms":
+            try:
+                return int(parts[1])
+            except ValueError:
+                return None
+    return None
+
+
 def _snapshot_atom_count(sample_dir: Path) -> int | None:
     meta = sample_dir / "metadata.json"
     if meta.is_file():
@@ -68,7 +88,9 @@ def _snapshot_atom_count(sample_dir: Path) -> int | None:
                     return int(payload[key])
                 except (TypeError, ValueError):
                     pass
-    return None
+    # Real datasets don't store an atom count in metadata.json; fall back to the
+    # snapshot's RUN.fdf.
+    return _atom_count_from_fdf(sample_dir / "RUN.fdf")
 
 
 def read_dataset_samples(dataset_root: str | Path) -> list[DatasetSample]:
@@ -224,8 +246,12 @@ def _link_or_copy(src: Path, dst: Path, *, link: bool) -> None:
 
 
 def _copy_dataset_level_files(small_root: Path, output_root: Path) -> None:
-    """Copy provenance / basis / pseudos / RUN.fdf so provenance validates."""
-    for name in ("material_provenance.json", "RUN.fdf", "RUN.out"):
+    """Copy dataset-level provenance / basis / pseudos.
+
+    RUN.fdf/RUN.out stay inside snapshot dirs; a root RUN.fdf makes the shared
+    validator treat the dataset root itself as a snapshot.
+    """
+    for name in ("material_provenance.json",):
         src = small_root / name
         if src.is_file():
             shutil.copy2(src, output_root / name)

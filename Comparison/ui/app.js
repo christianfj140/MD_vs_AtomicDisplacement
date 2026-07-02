@@ -12680,6 +12680,24 @@ function mixCollectBody() {
     ratios: ratios.length ? ratios : [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
     seed: Number(mvsValue("mix-seed", "0")) || 0,
     models: models.length ? models : ["graph2mat", "deeph"],
+    performance: {
+      compute_accelerator: "gpu",
+      max_parallel_graph2mat_training_jobs: 7,
+      max_parallel_deeph_training_jobs: 5,
+      model_batch_schedule: "alternating",
+      model_batch_start: "deeph",
+      omp_num_threads: 2,
+      mkl_num_threads: 2,
+      openblas_num_threads: 2,
+      numexpr_num_threads: 2,
+      torch_num_threads: 2,
+      torch_float32_matmul_precision: "high",
+      torch_mixed_precision: "bf16-mixed",
+      graph2mat_log_every_n_steps: 1,
+      graph2mat_check_val_every_n_epoch: 1,
+      graph2mat_checkpoint_every_n_epochs: 1,
+      graph2mat_require_cuequivariance: true,
+    },
   };
   if (sizes && sizes.length) body.sizes = sizes;
   return body;

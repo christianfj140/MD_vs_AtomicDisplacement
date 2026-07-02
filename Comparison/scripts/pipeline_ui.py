@@ -16216,18 +16216,7 @@ def mixing_metrics_demo_payload() -> dict[str, Any]:
     return payload
 
 
-# Dedicated runner instance for the mixing sweep so it never clobbers the
-# Graph2Mat-vs-DeepH tab's shared G2M_DEEPH_RUNNER state. Permutations are trained
-# sequentially, so a single dedicated runner is sufficient.
-_MIXING_TRAINING_RUNNER: Graph2MatDeepHBenchmarkRunner | None = None
 _MIXING_TRAINING_POLL_SECONDS = 5.0
-
-
-def _mixing_training_runner() -> Graph2MatDeepHBenchmarkRunner:
-    global _MIXING_TRAINING_RUNNER
-    if _MIXING_TRAINING_RUNNER is None:
-        _MIXING_TRAINING_RUNNER = Graph2MatDeepHBenchmarkRunner()
-    return _MIXING_TRAINING_RUNNER
 
 
 def _extract_model_h_mae_eV(results_payload: Any, models: tuple[str, ...]) -> dict[str, Any]:
@@ -16284,6 +16273,27 @@ def _mixing_run_ok(status: Any) -> bool:
     return True
 
 
+def _mixing_metrics_from_common_csv(run_root: Any, models: tuple[str, ...]) -> dict[str, Any]:
+    if not run_root:
+        return {}
+    path = Path(str(run_root)) / "common_metrics" / "summary" / "common_method_metrics.csv"
+    if not path.is_file():
+        return {}
+    wanted = {model.lower(): model for model in models}
+    found: dict[str, Any] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            model = str(row.get("method") or row.get("model") or "").lower()
+            value = row.get("h_mae_eV") or row.get("h_mae_eV_mean")
+            if model not in wanted or value in (None, ""):
+                continue
+            try:
+                found[wanted[model]] = {"h_mae_eV": float(value)}
+            except ValueError:
+                pass
+    return found
+
+
 def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     """Synchronously drive the real Graph2Mat/DeepH runner for one merged dataset.
 
@@ -16296,7 +16306,7 @@ def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     ``h_mae_eV`` for the requested models, so a failed permutation is never
     silently reported as "trained".
     """
-    runner = _mixing_training_runner()
+    runner = Graph2MatDeepHBenchmarkRunner()
     models = tuple(payload.get("models") or payload.get("selected_methods") or ("graph2mat", "deeph"))
     runner.start(payload)
     while True:
@@ -16307,6 +16317,8 @@ def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     results = runner.results()
     runner_status = results.get("status") or {}
     metrics = _extract_model_h_mae_eV(results, models)
+    if len(metrics) < len(models):
+        metrics.update(_mixing_metrics_from_common_csv(runner_status.get("run_root"), models))
     ok = _mixing_run_ok(runner_status)
     error: str | None = runner_status.get("error") if isinstance(runner_status, dict) else None
     missing_models = [model for model in models if model not in metrics]
@@ -16360,6 +16372,8 @@ class MixingSweepRunner:
             sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
             seed = int(body.get("seed") or 0)
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
+            epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
+            performance = body.get("performance") or None
             # Actions:
             #   "preview"     -> plan only (no writes).
             #   "materialize" -> build merged datasets, no training.
@@ -16386,6 +16400,8 @@ class MixingSweepRunner:
                 ratios=ratios,
                 seed=seed,
                 models=models,
+                epochs=epochs,
+                performance=performance,
                 dry_run=dry_run,
                 launch_fn=launch_fn,
                 progress_fn=progress,

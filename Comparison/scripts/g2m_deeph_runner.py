@@ -2349,6 +2349,27 @@ def _strict_dataset_validation_kwargs(
     }
 
 
+def _frozen_split_snapshot_dirs(dataset_root: Path) -> list[Path] | None:
+    manifest_path = dataset_root / "frozen_split_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        rows = _load_json(manifest_path).get("rows") or []
+    except Exception:
+        return None
+    dirs: list[Path] = []
+    for row in rows:
+        sample_dir = row.get("sample_dir") if isinstance(row, dict) else None
+        if not sample_dir:
+            continue
+        path = Path(str(sample_dir))
+        if not path.is_absolute():
+            path = dataset_root / path
+        if path.is_dir():
+            dirs.append(path)
+    return dirs or None
+
+
 class Graph2MatDeepHBenchmarkRunner:
     """Dedicated backend runner for the joint Graph2Mat/DeepH workflow."""
 
@@ -2623,10 +2644,11 @@ class Graph2MatDeepHBenchmarkRunner:
             dataset_root=dataset_root,
             snapshot_root=snapshot_root,
         )
+        snapshot_dirs = _frozen_split_snapshot_dirs(dataset_root) if snapshot_root == dataset_root else None
         validation_root = snapshot_root if snapshot_root != dataset_root else dataset_root
         result = validate_dataset(
             validation_root,
-            snapshot_dirs=None if snapshot_root == dataset_root else None,
+            snapshot_dirs=snapshot_dirs,
             **validate_kwargs,
         )
 

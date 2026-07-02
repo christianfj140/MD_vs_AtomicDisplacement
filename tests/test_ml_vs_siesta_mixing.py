@@ -107,6 +107,7 @@ def test_materialize_produces_runner_ready_dataset(small_large, tmp_path):
         output_root=out, seed=1,
     )
     assert summary["total"] == 12
+    assert not (out / "RUN.fdf").exists()
     frozen = json.loads((out / "frozen_split_manifest.json").read_text())
     assert frozen["valid"] is True
     assert all(frozen["split_counts"][s] > 0 for s in ("train", "validation", "test"))
@@ -114,6 +115,24 @@ def test_materialize_produces_runner_ready_dataset(small_large, tmp_path):
     assert bench["benchmark_ready"] is True
     for split in ("train", "validation", "test"):
         assert list((out / "splits" / split).glob("*/RUN.fdf"))
+
+
+def test_runner_validates_mixed_dataset_splits_from_frozen_manifest(small_large, tmp_path):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "merged"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=out, seed=1,
+    )
+    payload = ui.Graph2MatDeepHBenchmarkRunner().validate_dataset_payload(
+        {"dataset_root": str(out), "strict_dataset_validation": False}
+    )
+    assert payload["artifact_summary"]["total_snapshots"] == 12
+    assert payload["artifact_summary"]["invalid_snapshots"] == 0
 
 
 def test_materialize_split_proportions_roughly_match(small_large, tmp_path):
@@ -182,6 +201,17 @@ def test_dataset_atom_count(small_large):
     assert mvs.dataset_atom_count(large) == 50
 
 
+def test_dataset_atom_count_falls_back_to_fdf(tmp_path):
+    # Real datasets omit n_atoms from metadata.json; NumberOfAtoms in RUN.fdf is
+    # the reliable fallback used for small/large classification.
+    dataset = _make_dataset(tmp_path / "ds", n_snapshots=3, n_atoms=50)
+    for meta in dataset.glob("MD_steps/*/metadata.json"):
+        payload = json.loads(meta.read_text())
+        payload.pop("n_atoms", None)
+        meta.write_text(json.dumps(payload), encoding="utf-8")
+    assert mvs.dataset_atom_count(dataset) == 50
+
+
 # --------------------------------------------------------------------------- #
 # plan
 # --------------------------------------------------------------------------- #
@@ -229,6 +259,11 @@ def test_run_mixing_sweep_materialize_and_train(small_large, tmp_path):
     small, large = small_large
 
     def fake_launch(payload):
+        assert "system_label" not in payload
+        assert payload["epochs"] == 10
+        assert payload["graph2mat_overrides"]["max_epochs"] == 10
+        assert payload["deeph"]["epochs"] == 10
+        assert payload["deeph"]["num_threads"] == 4
         frozen = json.loads((Path(payload["dataset_root"]) / "frozen_split_manifest.json").read_text())
         total = sum(frozen["split_counts"].values())
         return {"metrics": {"graph2mat": {"h_mae_eV": 1.0 / total},
@@ -237,7 +272,11 @@ def test_run_mixing_sweep_materialize_and_train(small_large, tmp_path):
     summary = mvs.run_mixing_sweep(
         {8: small}, {8: large}, tmp_path / "out",
         modes=("add",), ratios=(0.0, 1.0), seed=0,
-        models=("graph2mat", "deeph"), dry_run=False, launch_fn=fake_launch,
+        models=("graph2mat", "deeph"),
+        epochs=10,
+        performance={"torch_num_threads": 4},
+        dry_run=False,
+        launch_fn=fake_launch,
     )
     assert summary["dry_run"] is False
     assert len(summary["records"]) == 2 * 2  # 2 permutations x 2 models
@@ -410,6 +449,23 @@ def test_extract_model_h_mae_eV_shapes():
     assert ui._extract_model_h_mae_eV({"results": None}, ("graph2mat",)) == {}
 
 
+def test_mixing_metrics_from_common_csv(tmp_path):
+    import pipeline_ui as ui
+
+    summary = tmp_path / "run" / "common_metrics" / "summary"
+    summary.mkdir(parents=True)
+    (summary / "common_method_metrics.csv").write_text(
+        "method,h_mae_eV_mean\n"
+        "graph2mat,0.12\n"
+        "deeph,0.34\n",
+        encoding="utf-8",
+    )
+    assert ui._mixing_metrics_from_common_csv(tmp_path / "run", ("graph2mat", "deeph")) == {
+        "graph2mat": {"h_mae_eV": 0.12},
+        "deeph": {"h_mae_eV": 0.34},
+    }
+
+
 def test_http_dispatch_mixing_routes(small_large):
     """Exercise the real do_GET/do_POST route wiring over a live server."""
     import http.client
@@ -419,12 +475,19 @@ def test_http_dispatch_mixing_routes(small_large):
     import pipeline_ui as ui
 
     small, large = small_large
+    original_datasets_root = ui.DATASETS_ROOT
+    ui.DATASETS_ROOT = small.parent
     server = ThreadingHTTPServer(("127.0.0.1", 0), ui.ComparisonUIHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         port = server.server_address[1]
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+
+        conn.request("GET", "/api/mixing/discover?threshold_atoms=10")
+        discover = _json.loads(conn.getresponse().read())
+        assert [d["n_atoms"] for d in discover["small"]] == [2]
+        assert [d["n_atoms"] for d in discover["large"]] == [50]
 
         conn.request("GET", "/api/mixing/metrics-demo")
         demo = _json.loads(conn.getresponse().read())
@@ -463,6 +526,7 @@ def test_http_dispatch_mixing_routes(small_large):
         assert final_status["n_permutations"] == 2
         conn.close()
     finally:
+        ui.DATASETS_ROOT = original_datasets_root
         server.shutdown()
         server.server_close()
 
@@ -476,4 +540,3 @@ def test_mixing_run_ok_helper():
     assert ui._mixing_run_ok({"returncode": 0, "error": "boom"}) is False
     assert ui._mixing_run_ok({"returncode": 0, "stop_requested": True}) is False
     assert ui._mixing_run_ok(None) is False
-

@@ -361,6 +361,28 @@ class Graph2MatDeepHCommonMetricsTests(unittest.TestCase):
             self.assertTrue((root / "summary" / "common_method_metrics.csv").exists())
             self.assertTrue((root / "summary" / "common_summary.json").exists())
 
+    def test_string_dataset_warnings_do_not_break_recommendation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_manifest, split_manifest = write_valid_dataset_manifests(root, ["s0", "s1"])
+            payload = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+            payload["warnings"] = ["mixed dataset contains selected rows from multiple roots"]
+            write_json(dataset_manifest, payload)
+            write_method_metrics(root / "g2m", sample_ids=["s0", "s1"], h_mae=0.2)
+            write_method_metrics(root / "deeph", sample_ids=["s0", "s1"], h_mae=0.1)
+            write_deeph_adapter_manifest(root / "deeph", proven=True)
+
+            manifest = aggregate_common_metrics(
+                graph2mat_metrics_root=root / "g2m",
+                deeph_metrics_root=root / "deeph",
+                output_dir=root / "summary",
+                frozen_split_manifest_path=split_manifest,
+                dataset_manifest_path=dataset_manifest,
+            )
+
+            self.assertEqual(manifest["status"], "valid_joint_one_pass_dataset")
+            self.assertEqual(manifest["recommendation"]["winner"], "deeph")
+
     def test_aggregate_common_metrics_includes_derivative_diagnostics_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
