@@ -12799,7 +12799,11 @@ async function mixPollStatus() {
     if (mixStatusTimer) clearInterval(mixStatusTimer);
     mixStatusTimer = null;
   } else if (status.state === "running" || status.state === "starting") {
-    mixSetStatus(`En curso… ${done} materializadas`, "running");
+    const trained = (status.live_records || []).length;
+    mixSetStatus(`En curso… ${done} permutaciones · ${trained} MAE registrados`, "running");
+    if (status.action === "train" && trained > 0) {
+      mixLoadMetrics(false).catch(() => {});
+    }
   } else {
     mixSetStatus("Idle", "");
   }

@@ -16350,7 +16350,9 @@ class MixingSweepRunner:
         mvs = _ml_vs_siesta_module()
         with self._lock:
             summary = self._status.get("summary") or {}
-        records = summary.get("records") or []
+            live_records = self._status.get("live_records") or []
+        # Use final records when complete, live accumulation while running.
+        records = summary.get("records") or live_records
         return mvs.aggregate_mae_vs_size(records)
 
     def start(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -16383,10 +16385,28 @@ class MixingSweepRunner:
             dry_run = action == "preview"
             launch_fn = _mixing_runner_launch_fn if action == "train" else None
 
+            live_records: list[dict[str, Any]] = []
+
             def progress(entry: dict[str, Any]) -> None:
+                # Accumulate MAE records as they arrive so /metrics is live.
+                launch = entry.get("launch") or {}
+                for model, model_metrics in (launch.get("metrics") or {}).items():
+                    h_mae = (model_metrics or {}).get("h_mae_eV")
+                    if h_mae is not None:
+                        live_records.append(
+                            {
+                                "size": entry.get("size"),
+                                "mode": entry.get("mode"),
+                                "ratio": entry.get("ratio"),
+                                "total_size": entry.get("total_size"),
+                                "model": model,
+                                "h_mae_eV": float(h_mae),
+                            }
+                        )
                 with self._lock:
                     self._status["permutations_done"] = self._status.get("permutations_done", 0) + 1
                     self._status["last_permutation"] = entry
+                    self._status["live_records"] = list(live_records)
 
             with self._lock:
                 self._status["state"] = "running"
