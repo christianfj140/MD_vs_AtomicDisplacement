@@ -16334,6 +16334,151 @@ def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_mixing_sweep_parallel(
+    small: dict[int, str],
+    large: dict[int, str],
+    output_root: Path,
+    *,
+    sizes: list[int] | None,
+    modes: tuple[str, ...],
+    ratios: tuple[float, ...],
+    seed: int,
+    models: tuple[str, ...],
+    epochs: int | None,
+    performance: dict[str, Any] | None,
+    progress_fn: Callable[[dict[str, Any]], None] | None,
+) -> dict[str, Any]:
+    """Materialize ALL permutation datasets, then train with ONE runner invocation.
+
+    The runner handles g2m_parallelism / deeph_parallelism internally, so all
+    permutations run with true parallel training (e.g. 7 Graph2Mat + 5 DeepH at
+    a time) instead of one permutation at a time.
+    """
+    mvs = _ml_vs_siesta_module()
+
+    # ── Phase 1: materialise all datasets ──────────────────────────────────────
+    summary_permutations = mvs.run_mixing_sweep(
+        small,
+        large,
+        output_root,
+        sizes=sizes,
+        modes=modes,
+        ratios=ratios,
+        seed=seed,
+        models=models,
+        epochs=epochs,
+        performance=performance,
+        dry_run=False,
+        launch_fn=None,          # materialise only, no training yet
+        progress_fn=progress_fn,
+    )
+
+    materialized = [
+        p for p in (summary_permutations.get("permutations") or [])
+        if p.get("status") == "materialized"
+    ]
+    if not materialized:
+        summary_permutations["n_trained"] = 0
+        return summary_permutations
+
+    # ── Phase 2: one runner invocation with ALL datasets ──────────────────────
+    datasets_list = [
+        {
+            "dataset_id": f"perm_{i}",
+            "dataset_root": p["output_root"],
+        }
+        for i, p in enumerate(materialized)
+    ]
+
+    manual_runs: list[dict[str, Any]] = []
+    for i, _perm in enumerate(materialized):
+        dataset_id = f"perm_{i}"
+        for model in models:
+            manual_runs.append(
+                {
+                    "model": model,
+                    "dataset_id": dataset_id,
+                    "config_id": f"{model}_{dataset_id}",
+                    "seed": seed,
+                    "overrides": {},
+                }
+            )
+
+    runner_payload: dict[str, Any] = {
+        "dataset_mode": "reuse_validated",
+        # Point at the first dataset so the runner passes validation;
+        # per-run dataset_root is overridden via the training_sweep datasets list.
+        "dataset_root": materialized[0]["output_root"],
+        "output_root": str(output_root / "parallel_run"),
+        "allow_regenerate_siesta": False,
+        "training_sweep": {
+            "enabled": True,
+            "error_policy": "continue_on_error",
+            "manual_runs": manual_runs,
+        },
+        # Inject the full datasets list so expand_training_sweep resolves
+        # each planned_run's dataset_root correctly.
+        "_mixing_datasets_list": datasets_list,
+    }
+    if performance:
+        runner_payload["performance"] = performance
+    if epochs is not None:
+        runner_payload["epochs"] = int(epochs)
+        runner_payload["graph2mat_overrides"] = {"max_epochs": int(epochs)}
+        runner_payload["deeph"] = {"epochs": int(epochs)}
+
+    # Patch the runner so it uses our datasets list in expand_training_sweep.
+    # We monkey-patch _training_sweep_datasets on the instance only.
+    runner = Graph2MatDeepHBenchmarkRunner()
+
+    def _patched_training_sweep_datasets(validation: dict[str, Any]) -> list[dict[str, Any]]:  # noqa: ANN001
+        return datasets_list
+
+    runner._training_sweep_datasets = _patched_training_sweep_datasets  # type: ignore[method-assign]
+
+    runner.start(runner_payload)
+    while True:
+        status = runner.status()
+        if not status.get("running"):
+            break
+        time.sleep(_MIXING_TRAINING_POLL_SECONDS)
+
+    results = runner.results()
+    runner_status = results.get("status") or {}
+    run_root = runner_status.get("run_root") or str(output_root / "parallel_run")
+
+    # ── Phase 3: collect per-permutation MAE from the common_metrics CSV ───────
+    records: list[dict[str, Any]] = []
+    for i, perm in enumerate(materialized):
+        dataset_id = f"perm_{i}"
+        # The runner writes per-run metrics under run_root/sweep/<model>/<dataset_id>/…
+        for model in models:
+            sweep_run_root = Path(run_root) / "sweep" / model / dataset_id
+            m = _mixing_metrics_from_common_csv(str(sweep_run_root), (model,))
+            if not m:
+                # Fallback: scan inside the materialized output_root itself
+                m = _mixing_metrics_from_common_csv(perm["output_root"], (model,))
+            if model in m:
+                records.append(
+                    {
+                        "size": perm.get("size"),
+                        "mode": perm.get("mode"),
+                        "ratio": perm.get("ratio"),
+                        "total_size": perm.get("total_size"),
+                        "model": model,
+                        "h_mae_eV": m[model]["h_mae_eV"],
+                        "output_root": perm["output_root"],
+                    }
+                )
+
+    summary_permutations["records"] = records
+    summary_permutations["n_trained"] = len(
+        {(r["size"], r["mode"], r["ratio"]) for r in records}
+    )
+    summary_permutations["parallel_run_root"] = run_root
+    return summary_permutations
+
+
 class MixingSweepRunner:
     """Minimal background runner for the mixing sweep (preview / materialize)."""
 
@@ -16411,21 +16556,38 @@ class MixingSweepRunner:
             with self._lock:
                 self._status["state"] = "running"
                 self._status["action"] = action
-            summary = mvs.run_mixing_sweep(
-                small,
-                large,
-                MIXING_SWEEP_OUTPUT_ROOT,
-                sizes=sizes,
-                modes=modes,
-                ratios=ratios,
-                seed=seed,
-                models=models,
-                epochs=epochs,
-                performance=performance,
-                dry_run=dry_run,
-                launch_fn=launch_fn,
-                progress_fn=progress,
-            )
+            if action == "train":
+                # Parallel path: materialise all datasets, then one runner
+                # invocation with full g2m/deeph parallelism.
+                summary = _run_mixing_sweep_parallel(
+                    small,
+                    large,
+                    MIXING_SWEEP_OUTPUT_ROOT,
+                    sizes=sizes,
+                    modes=modes,
+                    ratios=ratios,
+                    seed=seed,
+                    models=models,
+                    epochs=epochs,
+                    performance=performance,
+                    progress_fn=progress,
+                )
+            else:
+                summary = mvs.run_mixing_sweep(
+                    small,
+                    large,
+                    MIXING_SWEEP_OUTPUT_ROOT,
+                    sizes=sizes,
+                    modes=modes,
+                    ratios=ratios,
+                    seed=seed,
+                    models=models,
+                    epochs=epochs,
+                    performance=performance,
+                    dry_run=dry_run,
+                    launch_fn=launch_fn,
+                    progress_fn=progress,
+                )
             with self._lock:
                 self._status.update(
                     {
