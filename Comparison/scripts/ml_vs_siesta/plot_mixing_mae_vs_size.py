@@ -1,0 +1,116 @@
+"""Aggregate mixing-sweep records into MAE vs total-dataset-size curves.
+
+One curve per ``(mode, ratio, model)``. Emits a JSON payload (for the UI chart)
+and, optionally, a PNG (matplotlib import guarded so the JSON path needs no
+plotting backend).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Iterable
+
+
+def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Group ``h_mae_eV`` records into MAE-vs-total-size curves.
+
+    Each record needs ``mode``, ``ratio``, ``model``, ``total_size``,
+    ``h_mae_eV``. Points within a curve are sorted by total size; duplicate
+    sizes are averaged.
+    """
+    curves: dict[tuple[str, float, str], dict[int, list[float]]] = {}
+    for record in records:
+        try:
+            key = (
+                str(record["mode"]),
+                round(float(record["ratio"]), 6),
+                str(record["model"]),
+            )
+            total_size = int(record["total_size"])
+            mae = float(record["h_mae_eV"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        curves.setdefault(key, {}).setdefault(total_size, []).append(mae)
+
+    curve_list: list[dict[str, Any]] = []
+    for (mode, ratio, model), by_size in sorted(curves.items()):
+        points = [
+            {"total_size": size, "mae": sum(values) / len(values)}
+            for size, values in sorted(by_size.items())
+        ]
+        curve_list.append(
+            {
+                "mode": mode,
+                "ratio": ratio,
+                "model": model,
+                "label": f"{model} · {mode} · ratio={ratio:g}",
+                "points": points,
+            }
+        )
+    return {
+        "schema": "ml_vs_siesta_mae_vs_size_v1",
+        "metric": "h_mae_eV",
+        "x": "total_dataset_size",
+        "n_curves": len(curve_list),
+        "curves": curve_list,
+    }
+
+
+def build_mae_vs_size_from_sweep(sweep_summary: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate directly from a ``run_mixing_sweep`` summary dict."""
+    return aggregate_mae_vs_size(sweep_summary.get("records") or [])
+
+
+def plot_mae_vs_size(aggregated: dict[str, Any], output_png: str | Path) -> str:
+    """Render the aggregated curves to a PNG. Returns the written path."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:  # pragma: no cover - env dependent
+        raise RuntimeError("matplotlib is required to plot MAE vs size.") from exc
+
+    output_png = Path(output_png)
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for curve in aggregated.get("curves", []):
+        points = curve.get("points") or []
+        if not points:
+            continue
+        xs = [p["total_size"] for p in points]
+        ys = [p["mae"] for p in points]
+        linestyle = "--" if curve.get("mode") == "replace" else "-"
+        ax.plot(xs, ys, marker="o", linestyle=linestyle, label=curve.get("label"))
+    ax.set_xlabel("Total dataset size (snapshots)")
+    ax.set_ylabel("Hamiltonian MAE (eV)")
+    ax.set_title("MAE vs dataset size — small/large mixing")
+    if aggregated.get("curves"):
+        ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=150)
+    plt.close(fig)
+    return str(output_png)
+
+
+def write_mae_vs_size_outputs(
+    records: Iterable[dict[str, Any]],
+    output_dir: str | Path,
+    *,
+    write_png: bool = True,
+) -> dict[str, Any]:
+    """Write ``mae_vs_size.json`` (+ optional PNG) and return the aggregate."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    aggregated = aggregate_mae_vs_size(records)
+    json_path = output_dir / "mae_vs_size.json"
+    json_path.write_text(json.dumps(aggregated, indent=2), encoding="utf-8")
+    aggregated["json_path"] = str(json_path)
+    if write_png and aggregated["curves"]:
+        try:
+            aggregated["png_path"] = plot_mae_vs_size(aggregated, output_dir / "mae_vs_size.png")
+        except RuntimeError:
+            aggregated["png_path"] = None
+    return aggregated

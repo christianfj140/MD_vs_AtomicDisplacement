@@ -16114,6 +16114,181 @@ def ml_vs_siesta_matrix_viewer_demo_payload() -> dict[str, Any]:
     return payload
 
 
+# --------------------------------------------------------------------------- #
+# Mixing datasets sweep backend (small + 5x5x1 large -> merged -> MAE vs size).
+# discover/plan are synchronous; launch runs in a background thread. Training is
+# never auto-launched here: launch materializes merged datasets (dry-run/preview
+# by default). Real training is wired via run_mixing_sweep(launch_fn=...).
+# --------------------------------------------------------------------------- #
+DATASETS_ROOT = COMPARISON_ROOT / "datasets"
+MIXING_SWEEP_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_mixing_sweep"
+MIXING_SMALL_ATOM_THRESHOLD = 10
+
+
+def mixing_discover_payload(threshold_atoms: int = MIXING_SMALL_ATOM_THRESHOLD) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    small: list[dict[str, Any]] = []
+    large: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if DATASETS_ROOT.exists():
+        for manifest_path in sorted(DATASETS_ROOT.rglob("frozen_split_manifest.json")):
+            dataset_root = manifest_path.parent
+            key = str(dataset_root)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                samples = mvs.read_dataset_samples(dataset_root)
+                n_atoms = mvs.dataset_atom_count(dataset_root)
+            except Exception:  # noqa: BLE001 - skip unreadable datasets
+                continue
+            entry = {
+                "root": str(dataset_root.relative_to(REPO_ROOT)),
+                "n_snapshots": len(samples),
+                "n_atoms": n_atoms,
+            }
+            if n_atoms is not None and n_atoms >= threshold_atoms:
+                large.append(entry)
+            else:
+                small.append(entry)
+    return {
+        "threshold_atoms": threshold_atoms,
+        "small": small,
+        "large": large,
+        "datasets_root": str(DATASETS_ROOT.relative_to(REPO_ROOT)),
+    }
+
+
+def _mixing_roots_from_body(body: dict[str, Any], key: str) -> dict[int, str]:
+    raw = body.get(key) or {}
+    result: dict[int, str] = {}
+    for size, root in raw.items():
+        resolved = Path(root)
+        if not resolved.is_absolute():
+            resolved = REPO_ROOT / resolved
+        result[int(size)] = str(resolved)
+    return result
+
+
+def mixing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    small = _mixing_roots_from_body(body, "small")
+    large = _mixing_roots_from_body(body, "large")
+    modes = tuple(body.get("modes") or ("add", "replace"))
+    ratios = tuple(float(r) for r in (body.get("ratios") or (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)))
+    sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
+    seed = int(body.get("seed") or 0)
+    return mvs.plan_mixing_sweep_from_roots(
+        small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed
+    )
+
+
+def mixing_metrics_demo_payload() -> dict[str, Any]:
+    """Synthetic MAE-vs-size curves so the chart renders before real training."""
+    mvs = _ml_vs_siesta_module()
+    records: list[dict[str, Any]] = []
+    for size in (20, 40, 60, 100):
+        for mode in ("add", "replace"):
+            for ratio in (0.0, 0.5, 1.0):
+                total = size + (round(ratio * size) if mode == "add" else 0)
+                for model, base in (("graph2mat", 0.9), ("deeph", 1.4)):
+                    mae = base / (total ** 0.5) * (1.0 - 0.15 * ratio)
+                    records.append(
+                        {
+                            "size": size,
+                            "mode": mode,
+                            "ratio": ratio,
+                            "total_size": total,
+                            "model": model,
+                            "h_mae_eV": round(mae, 5),
+                        }
+                    )
+    payload = mvs.aggregate_mae_vs_size(records)
+    payload["note"] = "Synthetic demo curves (no training); replace with real sweep records."
+    return payload
+
+
+class MixingSweepRunner:
+    """Minimal background runner for the mixing sweep (preview / materialize)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._status: dict[str, Any] = {"state": "idle"}
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._status)
+
+    def metrics(self) -> dict[str, Any]:
+        mvs = _ml_vs_siesta_module()
+        with self._lock:
+            summary = self._status.get("summary") or {}
+        records = summary.get("records") or []
+        return mvs.aggregate_mae_vs_size(records)
+
+    def start(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("A mixing sweep is already running.")
+            self._status = {"state": "starting", "started_at": time.time(), "permutations_done": 0}
+            self._thread = threading.Thread(target=self._run, args=(dict(body),), daemon=True)
+            self._thread.start()
+        return {"state": "started"}
+
+    def _run(self, body: dict[str, Any]) -> None:
+        mvs = _ml_vs_siesta_module()
+        try:
+            small = _mixing_roots_from_body(body, "small")
+            large = _mixing_roots_from_body(body, "large")
+            modes = tuple(body.get("modes") or ("add", "replace"))
+            ratios = tuple(float(r) for r in (body.get("ratios") or (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)))
+            sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
+            seed = int(body.get("seed") or 0)
+            models = tuple(body.get("models") or ("graph2mat", "deeph"))
+            # "materialize" writes merged datasets; "preview" only plans. Real
+            # training is intentionally opt-in and not auto-started here.
+            action = str(body.get("action") or "preview")
+            dry_run = action != "materialize"
+
+            def progress(entry: dict[str, Any]) -> None:
+                with self._lock:
+                    self._status["permutations_done"] = self._status.get("permutations_done", 0) + 1
+                    self._status["last_permutation"] = entry
+
+            with self._lock:
+                self._status["state"] = "running"
+                self._status["action"] = action
+            summary = mvs.run_mixing_sweep(
+                small,
+                large,
+                MIXING_SWEEP_OUTPUT_ROOT,
+                sizes=sizes,
+                modes=modes,
+                ratios=ratios,
+                seed=seed,
+                models=models,
+                dry_run=dry_run,
+                launch_fn=None,
+                progress_fn=progress,
+            )
+            with self._lock:
+                self._status.update(
+                    {
+                        "state": "completed",
+                        "finished_at": time.time(),
+                        "summary": summary,
+                        "n_permutations": summary.get("n_permutations"),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - surface to UI
+            with self._lock:
+                self._status.update({"state": "error", "error": str(exc), "finished_at": time.time()})
+
+
+MIXING_SWEEP_RUNNER = MixingSweepRunner()
+
+
 class ComparisonUIHandler(BaseHTTPRequestHandler):
     server_version = "ComparisonPipelineUI/1.0"
 
@@ -16251,6 +16426,16 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, ml_vs_siesta_config_template_payload())
             elif path == "/api/ml-vs-siesta/matrix-viewer-demo":
                 json_response(self, ml_vs_siesta_matrix_viewer_demo_payload())
+            elif path == "/api/mixing/discover":
+                query = parse_qs(parsed_url.query)
+                threshold = parse_query_int(query, "threshold_atoms", MIXING_SMALL_ATOM_THRESHOLD, minimum=1)
+                json_response(self, mixing_discover_payload(threshold))
+            elif path == "/api/mixing/status":
+                json_response(self, MIXING_SWEEP_RUNNER.status())
+            elif path == "/api/mixing/metrics":
+                json_response(self, MIXING_SWEEP_RUNNER.metrics())
+            elif path == "/api/mixing/metrics-demo":
+                json_response(self, mixing_metrics_demo_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum":
                 json_response(self, dataset_size_minimum_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum/artifact":
@@ -16350,6 +16535,12 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/ml-vs-siesta/inspect-species":
                 payload = read_json_body(self)
                 json_response(self, ml_vs_siesta_inspect_species_payload(payload))
+            elif path == "/api/mixing/plan":
+                payload = read_json_body(self)
+                json_response(self, mixing_plan_payload(payload))
+            elif path == "/api/mixing/launch":
+                payload = read_json_body(self)
+                json_response(self, MIXING_SWEEP_RUNNER.start(payload), status=HTTPStatus.ACCEPTED)
             elif path == "/api/g2m-deeph/dataset-size-minimum/analyze":
                 payload = read_json_body(self)
                 json_response(

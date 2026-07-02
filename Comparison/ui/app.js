@@ -12638,6 +12638,179 @@ function setupMlVsSiesta() {
   mvsBind("mvs-inspect-species", "click", mvsInspectSpecies);
 }
 
+// --------------------------------------------------------------------------- //
+// Mixing datasets view: small + 5x5x1 large sweep -> MAE vs dataset size.
+// --------------------------------------------------------------------------- //
+let mixDiscoverLoaded = false;
+let mixStatusTimer = null;
+
+function mixParseMap(text) {
+  const map = {};
+  String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length && line.includes("="))
+    .forEach((line) => {
+      const [size, root] = line.split("=", 2);
+      const n = parseInt(size.trim(), 10);
+      if (!Number.isNaN(n)) map[n] = root.trim();
+    });
+  return map;
+}
+
+function mixCollectBody() {
+  const modes = [];
+  if (document.getElementById("mix-mode-add")?.checked) modes.push("add");
+  if (document.getElementById("mix-mode-replace")?.checked) modes.push("replace");
+  const models = [];
+  if (document.getElementById("mix-model-g2m")?.checked) models.push("graph2mat");
+  if (document.getElementById("mix-model-deeph")?.checked) models.push("deeph");
+  const ratios = String(mvsValue("mix-ratios", "0.0,0.2,0.4,0.6,0.8,1.0"))
+    .split(",")
+    .map((token) => Number(token.trim()))
+    .filter((value) => !Number.isNaN(value));
+  const sizesText = mvsValue("mix-sizes", "");
+  const sizes = sizesText
+    ? sizesText.split(",").map((token) => parseInt(token.trim(), 10)).filter((v) => !Number.isNaN(v))
+    : null;
+  const body = {
+    small: mixParseMap(mvsValue("mix-small-map")),
+    large: mixParseMap(mvsValue("mix-large-map")),
+    modes: modes.length ? modes : ["add", "replace"],
+    ratios: ratios.length ? ratios : [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    seed: Number(mvsValue("mix-seed", "0")) || 0,
+    models: models.length ? models : ["graph2mat", "deeph"],
+  };
+  if (sizes && sizes.length) body.sizes = sizes;
+  return body;
+}
+
+function mixSetStatus(text, state) {
+  const dot = document.getElementById("mix-status-dot");
+  const label = document.getElementById("mix-status-text");
+  if (label) label.textContent = text;
+  if (dot) dot.dataset.state = state || "";
+}
+
+async function mixDiscover() {
+  const payload = await request("/api/mixing/discover");
+  mixDiscoverLoaded = true;
+  mvsRenderPills("mix-discover-output", [
+    ["Small (2 átomos)", String(payload.small.length)],
+    ["Large (5×5×1)", String(payload.large.length)],
+    ["Umbral átomos", String(payload.threshold_atoms)],
+    ["Datasets root", payload.datasets_root],
+  ]);
+  const smallBox = document.getElementById("mix-small-map");
+  if (smallBox && !smallBox.value.trim() && payload.small.length) {
+    smallBox.value = payload.small
+      .slice(0, 40)
+      .map((d) => `${d.n_snapshots}=${d.root}`)
+      .join("\n");
+  }
+  const largeBox = document.getElementById("mix-large-map");
+  if (largeBox && !largeBox.value.trim() && payload.large.length) {
+    largeBox.value = payload.large.map((d) => `${d.n_snapshots}=${d.root}`).join("\n");
+  }
+}
+
+async function mixPreview() {
+  const plan = await request("/api/mixing/plan", {
+    method: "POST",
+    body: JSON.stringify(mixCollectBody()),
+  });
+  const output = document.getElementById("mix-plan-output");
+  if (output) {
+    const lines = (plan.permutations || []).map(
+      (p) =>
+        `  size=${p.size} ${p.mode} ratio=${p.ratio} → total=${p.total_size} ` +
+        `(small=${p.n_small_selected}, large=${p.n_large_selected})`
+    );
+    output.textContent =
+      `Permutaciones: ${plan.n_permutations} · sizes=${(plan.sizes || []).join(",")}\n` +
+      (plan.warnings?.length ? `Warnings: ${plan.warnings.join("; ")}\n` : "") +
+      lines.join("\n");
+  }
+}
+
+async function mixMaterialize() {
+  const body = mixCollectBody();
+  body.action = "materialize";
+  await request("/api/mixing/launch", { method: "POST", body: JSON.stringify(body) });
+  mixSetStatus("Materializando…", "running");
+  if (mixStatusTimer) clearInterval(mixStatusTimer);
+  mixStatusTimer = setInterval(() => {
+    mixPollStatus().catch(() => {});
+  }, 1000);
+}
+
+async function mixPollStatus() {
+  const status = await request("/api/mixing/status");
+  const done = status.permutations_done || 0;
+  if (status.state === "completed") {
+    mixSetStatus(`Completado (${status.n_permutations} permutaciones)`, "ok");
+    if (mixStatusTimer) clearInterval(mixStatusTimer);
+    mixStatusTimer = null;
+  } else if (status.state === "error") {
+    mixSetStatus(`Error: ${status.error || ""}`, "error");
+    if (mixStatusTimer) clearInterval(mixStatusTimer);
+    mixStatusTimer = null;
+  } else if (status.state === "running" || status.state === "starting") {
+    mixSetStatus(`En curso… ${done} materializadas`, "running");
+  } else {
+    mixSetStatus("Idle", "");
+  }
+}
+
+async function mixRenderChart(payload) {
+  const host = document.getElementById("mix-mae-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const traces = (payload.curves || [])
+    .filter((curve) => (curve.points || []).length)
+    .map((curve) => ({
+      x: curve.points.map((p) => p.total_size),
+      y: curve.points.map((p) => p.mae),
+      mode: "lines+markers",
+      name: curve.label,
+      line: { dash: curve.mode === "replace" ? "dash" : "solid" },
+    }));
+  if (!traces.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">Sin datos de MAE todavía (entrena el sweep o carga la demo).</p>';
+    return;
+  }
+  window.Plotly.newPlot(
+    host,
+    traces,
+    {
+      title: "MAE vs tamaño de dataset (mixing)",
+      xaxis: { title: "Total dataset size (snapshots)" },
+      yaxis: { title: "Hamiltonian MAE (eV)" },
+      margin: { l: 60, r: 20, t: 40, b: 50 },
+      height: 460,
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+async function mixLoadMetrics(demo) {
+  const path = demo ? "/api/mixing/metrics-demo" : "/api/mixing/metrics";
+  const payload = await request(path);
+  await mixRenderChart(payload);
+  if (!demo && !(payload.curves || []).length) {
+    showToast("Sin métricas reales todavía; usa la demo o entrena el sweep.");
+  }
+}
+
+function setupMixingDatasets() {
+  mvsBind("mix-discover", "click", mixDiscover);
+  mvsBind("mix-preview", "click", mixPreview);
+  mvsBind("mix-materialize", "click", mixMaterialize);
+  mvsBind("mix-metrics-demo", "click", () => mixLoadMetrics(true));
+  mvsBind("mix-metrics-real", "click", () => mixLoadMetrics(false));
+}
+
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -12659,6 +12832,10 @@ function setupTabs() {
         loadDatasetMinimum().catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "ml-vs-siesta") {
         loadMlVsSiestaTemplate().catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "mixing-datasets") {
+        if (!mixDiscoverLoaded) {
+          mixDiscover().catch((error) => showToast(error.message));
+        }
       }
     });
   });
@@ -13032,6 +13209,7 @@ async function boot() {
   setupTabs();
   setupEvents();
   setupMlVsSiesta();
+  setupMixingDatasets();
   const venvActivateInput = document.getElementById("venv-activate-command");
   if (venvActivateInput && !String(venvActivateInput.value || "").trim()) {
     venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;

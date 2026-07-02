@@ -113,6 +113,71 @@ Validates config → structure → supercell → central atom → displacements 
 expected SIESTA paths → predictors → targets → UI options → dataset/species
 options, and prints a JSON summary. Nothing heavy runs.
 
+## Mixing datasets sweep (small + 5×5×1 large → MAE vs size)
+
+Study whether mixing small-cell (2-atom) datasets with large 5×5×1 supercell
+datasets improves Hamiltonian prediction. For each dataset size `N`, two mixing
+modes are swept:
+
+- **add**: keep 100% of small(N), append a fraction of large(N) → total grows.
+- **replace**: hold the total at `N`, sweep composition 100/0 → 0/100 small/large.
+
+Each permutation becomes a real, runner-ready merged `dataset_root` (its own
+combined train/val/test split), so Graph2Mat + DeepH can train/predict/evaluate
+per permutation and the result is plotted as **MAE vs total dataset size**, one
+curve per `(mode, ratio, model)`.
+
+### Modules
+
+- `Comparison/scripts/ml_vs_siesta/mixed_dataset_materialize.py` —
+  `materialize_mixed_dataset(...)` turns a selection of small/large sample ids
+  into a merged `dataset_root` (merged frozen split + regenerated benchmark
+  manifests, reusing `shared/benchmark_manifest.write_benchmark_manifests`). It
+  validates species/basis compatibility first (`validate_datasets_compatible`).
+- `Comparison/scripts/ml_vs_siesta/mixing_sweep.py` — `plan_mixing_sweep` (pure)
+  and `run_mixing_sweep` (materialize + train via an injectable `launch_fn`).
+- `Comparison/scripts/ml_vs_siesta/plot_mixing_mae_vs_size.py` —
+  `aggregate_mae_vs_size` / `write_mae_vs_size_outputs` (JSON + PNG).
+
+### CLI (dry-run preview)
+
+```bash
+python Comparison/scripts/ml_vs_siesta_benchmark.py mixing-sweep \
+    --small 20=Comparison/datasets/.../graphene_w90_scale_iid20 \
+    --large 20=Comparison/datasets/.../graphene_5x5x1_iid20 \
+    --modes add,replace --ratios 0.0,0.2,0.4,0.6,0.8,1.0 --dry-run
+```
+
+Drop `--dry-run` and pass `--output-root runs/mix` to materialize the merged
+datasets (still no training — training is launched via the runner / UI).
+
+### Placing datasets
+
+- **Small** datasets already exist (`Comparison/datasets/graphene_*_scale_iidN`).
+- **Large 5×5×1** datasets do not exist yet: generate the 5×5×1 references with
+  SIESTA (heavy, done by you), then place each size-`N` dataset the same way. The
+  small and large datasets **must share the carbon PAO basis and species**
+  (validated automatically; a mismatch raises a clear error).
+
+### One-click flow (UI)
+
+Open the **Mixing datasets** sidebar tab:
+
+1. *Descubrir datasets* — lists available small (2-atom) and large (5×5×1)
+   datasets grouped by snapshot count.
+2. *Configurar sweep* — small/large `N=path` maps, modes, ratios, seed, models.
+3. *Previsualizar (dry-run)* — shows the permutation table (`/api/mixing/plan`).
+4. *Materializar merged datasets* — builds the merged `dataset_root`s in the
+   background (`/api/mixing/launch`, polled via `/api/mixing/status`).
+5. *MAE vs tamaño* — chart of `h_mae_eV` vs total size; *Cargar demo* shows a
+   synthetic curve, *Cargar métricas reales* reads `/api/mixing/metrics` once
+   training has produced records.
+
+> Training is **not** auto-launched by the UI. Materialization is cheap
+> (snapshots are symlinked). Wire real per-permutation training by passing a
+> `launch_fn` to `run_mixing_sweep` that drives the existing Graph2Mat/DeepH
+> runner and returns `{"metrics": {model: {"h_mae_eV": ...}}}`.
+
 ## UI section
 
 Open the pipeline UI and select the **ML vs SIESTA** sidebar tab. It has five

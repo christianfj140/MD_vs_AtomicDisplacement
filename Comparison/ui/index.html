@@ -34,6 +34,7 @@
           <button class="tab active" data-view="experiment" data-icon="EX">Experiment</button>
           <button class="tab" data-view="g2m-deeph" data-icon="GD">G2M vs DeepH</button>
           <button class="tab" data-view="ml-vs-siesta" data-icon="MS">ML vs SIESTA</button>
+          <button class="tab" data-view="mixing-datasets" data-icon="MX">Mixing datasets</button>
           <button class="tab" data-view="results" data-icon="RS">Results</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -1507,6 +1508,101 @@
               <button id="mvs-inspect-species" class="button secondary" type="button">Diagnosticar</button>
             </div>
             <div id="mvs-species-output" class="result-list"></div>
+          </section>
+        </section>
+
+        <section id="view-mixing-datasets" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Small + 5×5×1 large → MAE vs dataset size</p>
+              <h2>Mixing datasets</h2>
+              <p class="field-help">
+                Mezcla datasets pequeños (2 átomos) con grandes 5×5×1 por tamaño N, modo add/replace y ratio,
+                materializa cada permutación como dataset_root entrenable y traza MAE vs tamaño total.
+                No lanza SIESTA ni entrena automáticamente (el entrenamiento real se conecta vía el runner).
+              </p>
+            </div>
+            <div class="button-row">
+              <button id="mix-discover" class="button secondary" type="button">Descubrir datasets</button>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">1 · Datasets disponibles</p>
+                <h3>Small (2 átomos) y Large (5×5×1)</h3>
+                <p class="field-help">Clasificados por número de átomos. Los large 5×5×1 aparecerán aquí cuando los añadas.</p>
+              </div>
+            </div>
+            <div id="mix-discover-output" class="result-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">2 · Configurar sweep</p>
+                <h3>Tamaños × modos × ratios</h3>
+                <p class="field-help">Una línea <code>N=ruta</code> por dataset. Small y large deben compartir tamaño N para mezclarse.</p>
+              </div>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field"><span>Small datasets (N=ruta)</span>
+                <textarea id="mix-small-map" rows="5" placeholder="20=Comparison/datasets/.../graphene_w90_scale_iid20"></textarea></label>
+              <label class="field"><span>Large datasets 5×5×1 (N=ruta)</span>
+                <textarea id="mix-large-map" rows="5" placeholder="20=Comparison/datasets/.../graphene_5x5x1_iid20"></textarea></label>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Modos</span>
+                <span class="checkbox-row">
+                  <label><input id="mix-mode-add" type="checkbox" checked /> add</label>
+                  <label><input id="mix-mode-replace" type="checkbox" checked /> replace</label>
+                </span></label>
+              <label class="field"><span>Ratios</span>
+                <input id="mix-ratios" type="text" value="0.0,0.2,0.4,0.6,0.8,1.0" /></label>
+              <label class="field"><span>Seed</span>
+                <input id="mix-seed" type="number" step="1" value="0" /></label>
+              <label class="field"><span>Modelos</span>
+                <span class="checkbox-row">
+                  <label><input id="mix-model-g2m" type="checkbox" checked /> graph2mat</label>
+                  <label><input id="mix-model-deeph" type="checkbox" checked /> deeph</label>
+                </span></label>
+              <label class="field"><span>Sizes (opcional)</span>
+                <input id="mix-sizes" type="text" placeholder="p.ej. 20,40,60 (vacío = intersección)" /></label>
+            </div>
+            <div class="button-row">
+              <button id="mix-preview" class="button secondary" type="button">Previsualizar (dry-run)</button>
+              <button id="mix-materialize" class="button primary" type="button">Materializar merged datasets</button>
+              <span class="inline-status">
+                <span id="mix-status-dot" class="status-dot"></span>
+                <span id="mix-status-text">Idle</span>
+              </span>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">3 · Permutaciones</p>
+                <h3>Plan del sweep</h3>
+              </div>
+            </div>
+            <pre id="mix-plan-output" class="log-output">—</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">4 · MAE vs tamaño de dataset</p>
+                <h3>Una curva por (modo, ratio, modelo)</h3>
+                <p class="field-help">Carga la demo sintética o las métricas reales del sweep cuando el entrenamiento haya producido h_mae_eV.</p>
+              </div>
+            </div>
+            <div class="button-row">
+              <button id="mix-metrics-demo" class="button secondary" type="button">Cargar demo</button>
+              <button id="mix-metrics-real" class="button secondary" type="button">Cargar métricas reales</button>
+            </div>
+            <div id="mix-mae-chart" class="plot-card full"></div>
           </section>
         </section>
 

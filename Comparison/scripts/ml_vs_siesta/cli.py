@@ -23,6 +23,7 @@ from .dataset_mixing import (
     make_mixed_dataset_manifest,
 )
 from .fdf_io import generate_siesta_displacement_inputs
+from .mixing_sweep import plan_mixing_sweep_from_roots, run_mixing_sweep
 from .pipeline import benchmark_dry_run
 from .species_transfer import inspect_species_support
 
@@ -87,6 +88,44 @@ def _cmd_inspect_species(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_size_root_pairs(values: list[str] | None) -> dict[int, str]:
+    result: dict[int, str] = {}
+    for item in values or []:
+        if "=" not in item:
+            raise ValueError(f"Expected SIZE=path, got {item!r}.")
+        size_text, root = item.split("=", 1)
+        result[int(size_text.strip())] = root.strip()
+    return result
+
+
+def _cmd_mixing_sweep(args: argparse.Namespace) -> int:
+    small_by_size = _parse_size_root_pairs(args.small)
+    large_by_size = _parse_size_root_pairs(args.large)
+    sizes = [int(s) for s in args.sizes.split(",")] if args.sizes else None
+    modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
+    ratios = tuple(float(r) for r in args.ratios.split(",")) if args.ratios else (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    if args.dry_run or not args.output_root:
+        plan = plan_mixing_sweep_from_roots(
+            small_by_size, large_by_size, sizes=sizes, modes=modes, ratios=ratios, seed=args.seed
+        )
+        _print_json(plan)
+        return 0
+    summary = run_mixing_sweep(
+        small_by_size,
+        large_by_size,
+        args.output_root,
+        sizes=sizes,
+        modes=modes,
+        ratios=ratios,
+        seed=args.seed,
+        models=tuple(m.strip() for m in args.models.split(",") if m.strip()),
+        dry_run=False,
+        launch_fn=None,  # CLI materializes only; training is launched via the UI/runner.
+    )
+    _print_json(summary)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ml-vs-siesta",
@@ -123,6 +162,21 @@ def build_parser() -> argparse.ArgumentParser:
     insp.add_argument("--config", required=True, help="Model/species config (YAML/JSON).")
     insp.add_argument("--new-species", default=None, help="Comma-separated new species.")
     insp.set_defaults(func=_cmd_inspect_species)
+
+    sweep = sub.add_parser(
+        "mixing-sweep",
+        help="Plan (or materialize) a small/large mixing sweep. Never trains here.",
+    )
+    sweep.add_argument("--small", action="append", metavar="SIZE=ROOT", help="Small dataset per size.")
+    sweep.add_argument("--large", action="append", metavar="SIZE=ROOT", help="Large dataset per size.")
+    sweep.add_argument("--sizes", default=None, help="Comma-separated sizes (default: intersection).")
+    sweep.add_argument("--modes", default="add,replace", help="Comma-separated modes.")
+    sweep.add_argument("--ratios", default=None, help="Comma-separated ratios.")
+    sweep.add_argument("--seed", type=int, default=0)
+    sweep.add_argument("--models", default="graph2mat,deeph", help="Comma-separated models.")
+    sweep.add_argument("--output-root", default=None, help="Materialize merged datasets here.")
+    sweep.add_argument("--dry-run", action="store_true", help="Only print the permutation plan.")
+    sweep.set_defaults(func=_cmd_mixing_sweep)
 
     return parser
 
