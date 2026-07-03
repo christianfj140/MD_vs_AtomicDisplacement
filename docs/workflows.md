@@ -11,6 +11,11 @@ The repository has three main usage patterns:
 3. Run the Graph2Mat-vs-DeepH benchmark tooling for paper-ready comparison
    workflows and diagnostics.
 
+In practice, the main `Comparison` UI is the front door for most of the active
+workflow surface. It now includes experiment orchestration, material
+validation, Graph2Mat-vs-DeepH runs, `ML vs SIESTA`, mixed-dataset helpers, and
+dataset-size-minimum analysis.
+
 ## Comparison UI Workflow
 
 Start the main UI with:
@@ -29,6 +34,27 @@ The server listens on `127.0.0.1:8770` by default.
 - External executables such as `siesta`, `graph2mat`, and any DeepH commands
   required by the selected run mode.
 
+### UI / API Surfaces
+
+The backend in `Comparison/scripts/pipeline_ui.py` currently serves:
+
+- `/api/material/presets`
+- `/api/material/validate`
+- `/api/g2m-deeph/validate-dataset`
+- `/api/g2m-deeph/run`
+- `/api/g2m-deeph/results`
+- `/api/g2m-deeph/derivative-metrics`
+- `/api/g2m-deeph/dataset-size-minimum`
+- `/api/ml-vs-siesta/config-template`
+- `/api/ml-vs-siesta/dry-run`
+- `/api/ml-vs-siesta/generate-displacements`
+- `/api/ml-vs-siesta/mix-datasets`
+- `/api/ml-vs-siesta/inspect-species`
+- `/api/mixing/discover`
+- `/api/mixing/plan`
+- `/api/mixing/launch`
+- `/api/mixing/metrics`
+
 ### Typical Order
 
 1. Choose one or more canonical methods: `md`, `siesta_fc_cartesian`, or
@@ -37,6 +63,8 @@ The server listens on `127.0.0.1:8770` by default.
    - `dataset_only`
    - `full_strict_pipeline`
    - `train_test_metrics_plots_only`
+   - `deeph_comparison`
+   - `graph2mat_deeph_comparison`
 3. Adjust dataset recipes, splits, and training settings.
 4. Validate the material bundle.
 5. Launch the experiment.
@@ -48,6 +76,8 @@ The server listens on `127.0.0.1:8770` by default.
 - `Comparison/results/<run_id>/summary/recommendation.json`
 - `Comparison/results/<run_id>/metrics/*.csv`
 - `Comparison/results/results_<method>/<dataset_label>/run_<run_id>/manifest.json`
+- optional `Comparison/results/dataset_size_minimum_*/` summaries and report
+  bundles
 
 ### Common Failure Points
 
@@ -56,6 +86,7 @@ The server listens on `127.0.0.1:8770` by default.
 - Missing SIESTA, Graph2Mat, or DeepH executables.
 - Reused archived datasets missing the required manifests or split files.
 - Old datasets with incompatible provenance hashes or missing joint artifacts.
+- Rebuilding splits for reused datasets without compatible archived manifests.
 
 ## MD Standalone Workflow
 
@@ -150,6 +181,9 @@ from `pipeline_config.yaml`.
 - `AtomDisplacement/dataset/samples_manifest.json`
 - `AtomDisplacement/dataset/run_summary.json`
 - `AtomDisplacement/training/`
+
+When the generic material-aware path is used, the effective source of truth is
+the validated `material` bundle rather than the historical H2O-only defaults.
 
 ### Common Failure Points
 
@@ -461,6 +495,51 @@ python3 -m unittest tests/test_comparison_workflow.py
 
 The smoke scripts are useful for plumbing validation, but they do not prove
 scientific accuracy by themselves.
+
+## ML vs SIESTA Toolkit Workflow
+
+The repository also ships a lighter `ML vs SIESTA` toolkit. Its CLI lives at:
+
+```bash
+python3 Comparison/scripts/ml_vs_siesta_benchmark.py --help
+```
+
+This toolkit is intentionally narrow:
+
+- it prepares displacement inputs and dry-run payloads;
+- it validates dataset-mixing and species-transfer plans;
+- it does not launch SIESTA, train Graph2Mat, or run DeepH by itself.
+
+Typical entrypoints:
+
+```bash
+python3 Comparison/scripts/ml_vs_siesta_benchmark.py benchmark-dry-run \
+  --config Comparison/config/ml_vs_siesta_benchmark_example.yaml
+
+python3 Comparison/scripts/ml_vs_siesta_benchmark.py generate-siesta-displacements \
+  --config Comparison/config/ml_vs_siesta_benchmark_example.yaml \
+  --output Comparison/results/ml_vs_siesta_displacements
+
+python3 Comparison/scripts/ml_vs_siesta_benchmark.py mixing-sweep \
+  --small 20=Comparison/datasets/... \
+  --large 20=Comparison/datasets/... \
+  --modes add,replace \
+  --ratios 0.0,0.5,1.0 \
+  --dry-run
+```
+
+## Dataset Size Minimum Workflow
+
+The `G2M vs DeepH` area also exposes a dataset-size-minimum postprocess over
+archived runs. The CLI entrypoint is:
+
+```bash
+python3 Comparison/scripts/g2m_deeph_dataset_size_minimum.py --help
+```
+
+The UI/API can discover archived summaries, preview compatible run-root
+combinations, and materialize new reports under
+`Comparison/results/dataset_size_minimum_*/`.
 
 ### Minimal Derivative Smoke Check
 

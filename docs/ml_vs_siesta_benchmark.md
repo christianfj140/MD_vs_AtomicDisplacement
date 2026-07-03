@@ -9,6 +9,12 @@ predictions (and their finite-difference derivatives) against SIESTA references.
 > stay in the existing `Comparison/scripts` runners and are plugged in through
 > thin adapters.
 
+Current integration points:
+
+- CLI: `Comparison/scripts/ml_vs_siesta_benchmark.py`
+- UI/API bridge: `Comparison/scripts/pipeline_ui.py`
+- Routes: `/api/ml-vs-siesta/*` and `/api/mixing/*`
+
 ## Where things live
 
 - Package: `Comparison/scripts/ml_vs_siesta/`

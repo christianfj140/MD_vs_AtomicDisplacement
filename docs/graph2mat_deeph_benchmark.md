@@ -6,6 +6,12 @@ The goal is not to reproduce the DeepH paper exactly. The goal is a
 cross-architecture benchmark where the DFT backend, basis, pseudopotentials,
 snapshots, splits, references, overlap policy, and metrics are fixed.
 
+Companion documents:
+
+- `README.md` for the repository entrypoints and material-bundle overview.
+- `docs/workflows.md` for the UI/API workflow map.
+- `docs/data_and_outputs.md` for the artifact and result layout.
+
 ## Why The Joint Artifact Contract Exists
 
 Graph2Mat can train from SIESTA snapshots that contain only the artifacts used

@@ -4,6 +4,12 @@ This benchmark compares the corrected H-only Graph2Mat baseline against
 Hamiltonian-specific architecture options exposed by an editable Graph2Mat
 checkout.
 
+Related documents:
+
+- `README.md` for the current repository scope and common validation commands.
+- `docs/workflows.md` for the main comparison UI flow.
+- `docs/graph2mat_deeph_benchmark.md` for the stricter joint benchmark rules.
+
 ## Payload
 
 Use:

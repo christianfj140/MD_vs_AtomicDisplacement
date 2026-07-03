@@ -42,6 +42,9 @@ python3 -m unittest tests/test_method_provenance_fairness.py
 python3 -m unittest tests/test_material_agnostic_smoke.py
 python3 -m unittest tests/test_three_method_scientific_smoke.py
 python3 -m unittest tests/test_metrics_material_compatibility.py
+python3 -m unittest tests/test_material_ui_api.py
+python3 -m unittest tests/test_g2m_deeph_docs.py
+python3 -m unittest tests/test_g2m_deeph_documentation.py
 python3 -m py_compile Comparison/scripts/pipeline_ui.py Comparison/scripts/evaluate_hamiltonian_metrics.py Comparison/scripts/cleanup_generated_datasets.py
 node --check Comparison/ui/app.js
 ```
@@ -71,6 +74,21 @@ When extending the repository, prefer these patterns:
 5. Add focused `unittest` coverage for any new workflow branch or manifest
    field.
 
+## Documentation Maintenance Checklist
+
+When the repository surface changes, check these files together:
+
+- `README.md` for the top-level map and user entrypoints.
+- `docs/architecture.md` for module responsibilities.
+- `docs/workflows.md` for run modes, APIs, and artifact flow.
+- `docs/data_and_outputs.md` for manifests and result locations.
+- `docs/known_limitations.md` for scientific or operational caveats.
+- any benchmark-specific page under `docs/` when a specialized workflow moves.
+
+The test suite already encodes part of this contract through string-based
+documentation assertions, so documentation edits should be treated as interface
+changes, not only prose changes.
+
 ## Practical Notes
 
 - The comparison workflows are stateful and file-driven, so accidental reuse of
@@ -79,3 +97,6 @@ When extending the repository, prefer these patterns:
   root.
 - If you change a file path, config key, or manifest field, search the tests and
   docs together; many assertions are string-based and intentionally strict.
+- Many documented shell examples use POSIX activation syntax
+  (`source .venv/bin/activate`). On Windows or custom shells, keep the command
+  semantics aligned even if the activation command itself differs locally.

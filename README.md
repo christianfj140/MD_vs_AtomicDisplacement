@@ -13,6 +13,21 @@ canonicos y permite ejecutar cualquier subconjunto de ellos.
 - [Development](docs/development.md)
 - [Known limitations](docs/known_limitations.md)
 - [Graph2Mat vs DeepH benchmark runbook](docs/graph2mat_deeph_benchmark.md)
+- [ML vs SIESTA benchmark toolkit](docs/ml_vs_siesta_benchmark.md)
+- [Phase 6 H2O Hamiltonian architecture benchmark](docs/phase6_hamiltonian_architecture_benchmark.md)
+- [Derivative smoke validation note](docs/derivative_smoke_validation_note.md)
+
+## Current scope
+
+This repository now covers more than the original `MD vs AtomDisplacement`
+comparison:
+
+- the main `Comparison` UI can run `md`, `siesta_fc_cartesian`, and
+  `random_cartesian` experiments;
+- the same UI also exposes `Graph2Mat vs DeepH`, `Graph2Mat sweep + DeepH`,
+  `ML vs SIESTA`, and dataset-size-minimum analysis surfaces;
+- the repository ships versioned material bundles for `h2o`, `graphene`,
+  `graphene_5x2`, `graphene_5x5`, `si_amorphous`, and `si_vacancy`.
 
 ## Quick start
 
@@ -80,6 +95,17 @@ backend usa el default historico `["md", "siesta_fc_cartesian"]`.
 El flujo dedicado `G2M vs DeepH` vive en una pestaña propia de la UI. Su guia
 operativa y el checklist paper-ready estan en
 `docs/graph2mat_deeph_benchmark.md`.
+
+La misma UI expone tambien:
+
+- `DeepH comparison`: ejecuta el flujo justo de comparacion Graph2Mat vs DeepH;
+- `Graph2Mat sweep + DeepH comparison`: combina barrido Graph2Mat y comparacion
+  posterior contra DeepH;
+- `ML vs SIESTA`: toolkit ligero para preparar entradas, validaciones y
+  payloads de UI sin lanzar SIESTA ni entrenamientos pesados;
+- `dataset size minimum`: analisis postproceso sobre barridos archivados para
+  estimar el tamano minimo de dataset segun metrica, presupuesto y criterio de
+  claim.
 
 Los datasets reutilizables de este flujo viven por defecto en
 `Comparison/datasets/`, separados de `Comparison/workspaces/` y
@@ -200,6 +226,15 @@ ver especies, cobertura de pseudopotenciales, basis y warnings antes de lanzar
 el experimento. Si seleccionas un bundle custom invalido, la UI/API no vuelve a
 H2O de forma silenciosa; el inicio del experimento falla con el error de
 validacion del backend.
+
+Presets versionados actualmente en `materials/`:
+
+- `h2o`
+- `graphene`
+- `graphene_5x2`
+- `graphene_5x5`
+- `si_amorphous`
+- `si_vacancy`
 
 Tambien existe una primera receta material-agnostica para AtomicDisplacement:
 `AtomDisplacement/scripts/generate_generic_cartesian_displacement_dataset.py`.
@@ -517,6 +552,9 @@ resumenes con `UNSAFE_UNVALIDATED_MATRIX_REFERENCE`.
 ```bash
 python3 Comparison/scripts/material_agnostic_smoke.py --case both
 python3 Comparison/scripts/g2m_deeph_smoke.py --dry-run
+python3 Comparison/scripts/g2m_deeph_final_workflow.py --help
+python3 Comparison/scripts/ml_vs_siesta_benchmark.py --help
+python3 Comparison/scripts/g2m_deeph_dataset_size_minimum.py --help
 python3 Comparison/scripts/verify_dataset_integrity.py --dry-run
 python3 Comparison/scripts/validate_sample_bundle.py --help
 python3 Comparison/scripts/check_geometry_leakage.py --help
@@ -557,6 +595,9 @@ python3 -m unittest tests/test_method_provenance_fairness.py
 python3 -m unittest tests/test_material_agnostic_smoke.py
 python3 -m unittest tests/test_three_method_scientific_smoke.py
 python3 -m unittest tests/test_metrics_material_compatibility.py
+python3 -m unittest tests/test_material_ui_api.py
+python3 -m unittest tests/test_g2m_deeph_docs.py
+python3 -m unittest tests/test_g2m_deeph_documentation.py
 ```
 
 Chequeos rapidos de la UI:

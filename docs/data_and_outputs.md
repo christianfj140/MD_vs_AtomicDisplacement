@@ -31,6 +31,14 @@ Graph2Mat-vs-DeepH protocol.
 
 The material bundle validator expects the FDF file, pseudopotential coverage,
 and optional basis coverage to match the species declared in the FDF file.
+Versioned presets currently shipped in-tree are:
+
+- `materials/h2o/`
+- `materials/graphene/`
+- `materials/graphene_5x2/`
+- `materials/graphene_5x5/`
+- `materials/si_amorphous/`
+- `materials/si_vacancy/`
 
 ### Snapshot And Dataset Artifacts
 
@@ -83,6 +91,8 @@ The atom-displacement config also names these summary files explicitly in
 - `Comparison/results/results_md/`
 - `Comparison/results/results_atomdisp/`
 - `Comparison/results/results_random_cartesian/`
+- `Comparison/results/dataset_size_minimum_*/` for dataset-size-minimum
+  summaries, reports, PDFs, and PNGs
 
 The benchmark runner writes structured manifests, metrics CSVs, and summary
 JSON files into these directories.
@@ -116,6 +126,10 @@ and the test suite.
 - `recommendation.json` captures the comparison summary written by the main
   comparison workflow.
 - `performance_report.json` records performance-oriented run information.
+- staged `stages/<stage>.json` files record Graph2Mat-vs-DeepH final-workflow
+  status transitions.
+- `dataset_size_minimum_summary.json` and
+  `dataset_size_minimum_report.md` summarize postprocessed minimum-size claims.
 
 ### Metrics And Plots
 
@@ -129,6 +143,14 @@ Comparison runs write metric CSV files such as:
 - `metrics/orbital_pair_summary.csv`
 
 The exact set depends on the workflow stage and the available artifacts.
+Derivative-specific layouts can additionally write:
+
+- `derivative_stencil_manifest.json`
+- `derivative_geometry_validation.json`
+- `derivative_metrics/<model>/manifest.json`
+- `derivative_metrics/<model>/derivative_matrix_metrics.csv`
+- `derivative_metrics/<model>/derivative_hermiticity.csv`
+- `derivative_metrics/summary/derivative_gate_report.json`
 
 ### Logs And Intermediate Files
 
@@ -138,6 +160,8 @@ The workflow runners also create:
 - staged configs in the relevant workspace
 - prediction outputs such as `ML_prediction.HSX`
 - frozen test manifests under `common_tests/`
+- optional mixed-dataset manifests and staging payloads for `ML vs SIESTA`
+  helpers
 
 ## Reproducibility Notes
 

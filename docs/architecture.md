@@ -10,6 +10,13 @@ This repository contains three related but distinct workflow families:
 - `Comparison/` for the main comparison UI, comparison runners, metrics, and
   Graph2Mat-vs-DeepH benchmark tooling.
 
+Around those families, the repository also carries:
+
+- `materials/` as the versioned source of truth for bundled materials;
+- `shared/` validators for material bundles, SIESTA FDF materialization, and
+  joint Graph2Mat/DeepH dataset contracts;
+- `docs/` as the user-facing map of the current workflow surface.
+
 The repository is organized as a file-driven workflow system. The Python
 scripts read YAML or JSON configuration, validate local SIESTA artifacts,
 launch external tools, and write manifests, metrics, and reports back to the
@@ -23,7 +30,7 @@ workspace.
 | `AtomDisplacement/` | Standalone atom-displacement pipeline, relaxed/base inputs, dataset, and UI. |
 | `Comparison/` | Shared comparison workflows, benchmark configs, datasets, UI, results, and docs. |
 | `shared/` | Common validation and material-bundle helpers used by more than one workflow family. |
-| `materials/` | Versioned material bundles and example FDF/pseudopotential inputs. |
+| `materials/` | Versioned material bundles such as `h2o`, `graphene`, `graphene_5x2`, `graphene_5x5`, `si_amorphous`, and `si_vacancy`. |
 | `configs/` | Auxiliary Graph2Mat config files. |
 | `scripts/` | Environment helpers and Torch serialization compatibility shims. |
 | `tests/` | `unittest`-style regression tests for the workflows and helper modules. |
@@ -37,12 +44,21 @@ workspace.
   an API for reading and patching run payloads, starting runs, and streaming
   logs. It writes per-run configuration snapshots into the selected workspace
   and result directories.
+- `Comparison/ui/` is the browser client for the comparison UI, including
+  experiment orchestration, `G2M vs DeepH`, `ML vs SIESTA`, and
+  dataset-size-minimum panels.
 - `Comparison/scripts/g2m_deeph_runner.py` is the backend runner for the
   Graph2Mat-vs-DeepH benchmark. It stages datasets, runs Graph2Mat and DeepH
   phases, and writes manifests and metrics.
 - `Comparison/scripts/g2m_deeph_final_workflow.py` implements the staged
   public/final workflow with explicit stages such as protocol validation,
   search, selection, final runs, final-test evaluation, and report generation.
+- `Comparison/scripts/g2m_deeph_dataset_size_minimum.py` performs the
+  postprocessed dataset-size-minimum analysis used by the UI and archived
+  summaries.
+- `Comparison/scripts/ml_vs_siesta_benchmark.py` is a lightweight CLI and UI
+  bridge for `ML vs SIESTA` planning, displacement generation, mixing, and
+  dry-run validation.
 - `Comparison/scripts/g2m_deeph_protocol.py` validates the paper-ready
   benchmark protocol schema.
 - `Comparison/scripts/deeph_config.py` builds DeepH preprocess/train/
@@ -72,6 +88,8 @@ workspace.
 - `shared/material_presets.py` resolves named presets such as `h2o`.
 - `shared/joint_artifact_contract.py` validates the benchmark snapshot contract
   used by the Graph2Mat-vs-DeepH workflow.
+- `shared/benchmark_manifest.py` centralizes dataset/run manifest generation
+  for benchmark-style outputs and dataset reuse.
 - `shared/siesta_run_fdf.py` and related helpers materialize SIESTA FDF inputs
   and preserve provenance.
 
@@ -88,6 +106,14 @@ The main comparison flow is:
    `Comparison/results/<run_id>/`.
 6. Aggregate the outputs into comparison summaries and UI-visible tables.
 
+The same `Comparison` surface also serves auxiliary API families such as:
+
+- `/api/material/*` for preset discovery and bundle validation;
+- `/api/g2m-deeph/*` for joint-dataset validation, benchmark runs, plots,
+  derivative metrics, and dataset-size-minimum summaries;
+- `/api/ml-vs-siesta/*` and `/api/mixing/*` for the lightweight benchmark
+  helpers and mixed-dataset planning/materialization.
+
 The MD and AtomDisplacement flows follow the same pattern on a smaller scale:
 configuration is read from the local `pipeline_config.yaml`, the pipeline runs
 the declared step scripts, and outputs are written into the corresponding
@@ -103,6 +129,8 @@ the declared step scripts, and outputs are written into the corresponding
 - `Comparison/scripts/g2m_deeph_final_workflow.py`
 - `Comparison/scripts/g2m_deeph_protocol.py`
 - `Comparison/scripts/g2m_deeph_smoke.py`
+- `Comparison/scripts/g2m_deeph_dataset_size_minimum.py`
+- `Comparison/scripts/ml_vs_siesta_benchmark.py`
 - `Comparison/scripts/verify_dataset_integrity.py`
 - `Comparison/scripts/evaluate_hamiltonian_metrics.py`
 - `MD/scripts/main_md.py`

@@ -13,6 +13,8 @@
 - `ML_prediction.HSX` is not automatically safe to treat as a standalone
   Hamiltonian+overlap reference. The benchmark code and docs explicitly warn
   that spectral metrics may need the SIESTA reference overlap instead.
+- Several user-facing flows are file-driven and manifest-driven, so moving or
+  partially editing archived run directories can invalidate reuse.
 
 ## Scientific And Computational Caveats
 
@@ -26,6 +28,11 @@
 - Cross-material plots and mixed-provenance comparisons are useful for
   inspection, but they are not a substitute for a compatibility-hash matched
   benchmark.
+- The `ML vs SIESTA` toolkit is infrastructure and validation glue; it is not a
+  full training or production inference runner.
+- Dataset-size-minimum reports are postprocessed summaries over archived runs;
+  they do not repair weak provenance or upgrade exploratory runs into
+  publication-ready evidence.
 
 ## Fragile Areas
 
@@ -36,6 +43,8 @@
   `artifact_validation.json`, and `frozen_split_manifest.json`.
 - Generated results are only as trustworthy as the external SIESTA and DeepH
   runs that produced them.
+- Some workflows assume POSIX-style command examples in docs even when the
+  local operator is on Windows or another shell environment.
 
 ## Validation Gaps
 
@@ -56,3 +65,6 @@
   outputs were produced with the same toolchain.
 - Runtime, throughput, and scientific comparability can vary substantially with
   the local machine and the installed external dependencies.
+- Not every archived dataset necessarily satisfies the latest joint artifact,
+  material-provenance, derivative, or H-only/S_ref expectations until it is
+  explicitly revalidated or re-evaluated.
