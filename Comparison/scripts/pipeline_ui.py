@@ -16560,6 +16560,18 @@ def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any
     return {model: {"h_mae_eV": sum(values) / len(values)}}
 
 
+def _persist_mixing_summary(output_root: Path, summary: dict[str, Any]) -> None:
+    """Write the canonical mixing summary (and chart payload) for UI consumers."""
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "mixing_sweep_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    records = summary.get("records") or []
+    if records:
+        mvs = _ml_vs_siesta_module()
+        mvs.write_mae_vs_size_outputs(records, output_root, write_png=True)
+
+
 def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     """Synchronously drive the real Graph2Mat/DeepH runner for one merged dataset.
 
@@ -16763,6 +16775,7 @@ def _run_mixing_sweep_parallel(
         {(r["size"], r["mode"], r["ratio"]) for r in records}
     )
     summary_permutations["parallel_run_root"] = run_root
+    _persist_mixing_summary(output_root, summary_permutations)
     return summary_permutations
 
 
@@ -16778,6 +16791,22 @@ class MixingSweepRunner:
         with self._lock:
             return dict(self._status)
 
+    def _latest_persisted_summary(self) -> dict[str, Any]:
+        candidates = sorted(
+            RESULTS_ROOT.glob("ml_vs_siesta_mixing_sweep*/mixing_sweep_summary.json"),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+            reverse=True,
+        )
+        for summary_path in candidates:
+            try:
+                payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                payload.setdefault("_summary_path", str(summary_path))
+                return payload
+        return {}
+
     def metrics(self) -> dict[str, Any]:
         with self._lock:
             summary = self._status.get("summary") or {}
@@ -16786,14 +16815,10 @@ class MixingSweepRunner:
         # Use final records when complete, live accumulation while running.
         records = summary.get("records") or live_records
         if not records:
-            summary_path = MIXING_SWEEP_OUTPUT_ROOT / "mixing_sweep_summary.json"
-            try:
-                persisted = json.loads(summary_path.read_text(encoding="utf-8"))
-                records = persisted.get("records") or []
-                if not summary:
-                    summary = persisted
-            except (OSError, json.JSONDecodeError):
-                records = []
+            persisted = self._latest_persisted_summary()
+            records = persisted.get("records") or []
+            if not summary:
+                summary = persisted
         payload = _mixing_metrics_payload(records, summary)
         if live_payloads:
             by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
