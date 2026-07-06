@@ -482,8 +482,6 @@ def _manual_training_sweep(
             raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}].model must be graph2mat or deeph.")
         common_combo = dict(raw_row.get("common") or {})
         model_combo = dict(raw_row.get("overrides") or {})
-        if not model_combo:
-            raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}].overrides must not be empty.")
         config_label = str(raw_row.get("config_id") or raw_row.get("id") or f"{model_name}_manual_{row_index:03d}").strip()
         if not config_label:
             raise RuntimeError(f"training_sweep.manual_runs[{row_index - 1}].config_id must not be empty.")

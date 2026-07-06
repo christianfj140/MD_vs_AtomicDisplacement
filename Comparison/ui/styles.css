@@ -1245,6 +1245,20 @@ pre {
   gap: 8px;
 }
 
+.mix-payload-log {
+  height: 320px;
+  min-height: 320px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.checkbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .button.small {
   min-height: 30px;
   padding: 6px 10px;

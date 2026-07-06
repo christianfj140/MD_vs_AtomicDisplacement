@@ -1,0 +1,10 @@
+{
+  "description": "One-shot wrapper payload: ensure graphene_5x5 iid80 exists, then launch the mixing datasets sweep for nominal sizes 20/50/80.",
+  "generation_payload": "Comparison/config/graphene_5x5_snapshot_scaling_20_50_80_payload.json",
+  "mixing_payload": "Comparison/config/ml_vs_siesta_mixing_sweep_20_50_80_train_payload.json",
+  "expected_paths": [
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid80"
+  ],
+  "skip_generation_if_present": true,
+  "mixing_output_root": "Comparison/results/ml_vs_siesta_mixing_sweep_20_50_80"
+}

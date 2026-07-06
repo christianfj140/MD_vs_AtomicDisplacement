@@ -12643,6 +12643,11 @@ function setupMlVsSiesta() {
 // --------------------------------------------------------------------------- //
 let mixDiscoverLoaded = false;
 let mixStatusTimer = null;
+let mixLastStatusSignature = "";
+let mixMetricsPayload = null;
+let mixSelectedPayloadIds = new Set();
+let mixPayloadSelectionInitialized = false;
+let mixKnownPayloadIds = new Set();
 
 function mixParseMap(text) {
   const map = {};
@@ -12707,11 +12712,152 @@ function mixSetStatus(text, state) {
   const dot = document.getElementById("mix-status-dot");
   const label = document.getElementById("mix-status-text");
   if (label) label.textContent = text;
-  if (dot) dot.dataset.state = state || "";
+  if (dot) {
+    dot.classList.toggle("running", state === "running" || state === "ok");
+    dot.classList.toggle("error", state === "error");
+  }
+}
+
+function mixAppendPayload(label, payload) {
+  const log = document.getElementById("mix-payload-log");
+  if (!log) return;
+  const text = JSON.stringify(payload, null, 2);
+  const stamp = new Date().toLocaleTimeString();
+  const prefix = log.textContent.trim() === "Esperando acciones en Mixing datasets." ? "" : `${log.textContent}\n\n`;
+  log.textContent = `${prefix}[${stamp}] ${label}\n${text}`;
+  log.scrollTop = log.scrollHeight;
+}
+
+function mixScrollPayloadLogToBottom() {
+  const log = document.getElementById("mix-payload-log");
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function mixClearPayloadLog() {
+  const log = document.getElementById("mix-payload-log");
+  if (log) log.textContent = "Esperando acciones en Mixing datasets.";
+}
+
+function mixPayloadsForMetrics(payload) {
+  const fromPayload = Array.isArray(payload?.payloads) ? payload.payloads : [];
+  if (fromPayload.length) return fromPayload;
+  const seen = new Map();
+  for (const curve of payload?.curves || []) {
+    for (const point of curve.points || []) {
+      const id = point.payload_id;
+      if (!id || seen.has(id)) continue;
+      seen.set(id, { id, label: id, total_size: point.total_size });
+    }
+  }
+  return Array.from(seen.values());
+}
+
+function mixPayloadModels(payload, payloadId) {
+  return Array.from(
+    new Set(
+      (payload?.curves || [])
+        .filter((curve) => (curve.points || []).some((point) => point.payload_id === payloadId))
+        .map((curve) => curve.model)
+        .filter(Boolean)
+    )
+  );
+}
+
+function mixRatioSlug(ratio) {
+  return `r${Number(ratio).toFixed(3)}`.replace(".", "p");
+}
+
+// Ids must match the backend's canonical (size, mode, ratio) scheme
+// (see pipeline_ui._mixing_payload_id) so plan-preview payloads merge with
+// payloads coming from /api/mixing/metrics instead of appearing as duplicates.
+function mixPlanPayloads(plan) {
+  return (plan?.permutations || []).map((item) => ({
+    id: `size${item.size}_${item.mode}_${mixRatioSlug(item.ratio)}`,
+    label: `size=${item.size} ${item.mode} ratio=${item.ratio}`,
+    size: item.size,
+    mode: item.mode,
+    ratio: item.ratio,
+    total_size: item.total_size,
+    status: item.status || "planned",
+    output_root: item.output_root,
+  }));
+}
+
+function mixMergePayloadLists(existing, extra) {
+  const byId = new Map();
+  for (const item of [...(existing || []), ...(extra || [])]) {
+    if (item?.id == null) continue;
+    byId.set(String(item.id), { ...(byId.get(String(item.id)) || {}), ...item, id: String(item.id) });
+  }
+  return Array.from(byId.values()).sort((a, b) => (
+    (Number(a.size || 0) - Number(b.size || 0)) ||
+    String(a.mode || "").localeCompare(String(b.mode || "")) ||
+    (Number(a.ratio || 0) - Number(b.ratio || 0)) ||
+    String(a.id || "").localeCompare(String(b.id || ""))
+  ));
+}
+
+function mixSetMetricsPayload(payload, extraPayloads = []) {
+  mixMetricsPayload = {
+    ...(payload || {}),
+    payloads: mixMergePayloadLists(payload?.payloads || [], extraPayloads),
+  };
+  mixRenderPayloadSelector(mixMetricsPayload);
+  return mixRenderChart(mixMetricsPayload);
+}
+
+function mixRenderPayloadSelector(payload) {
+  const list = document.getElementById("mix-payload-list");
+  const status = document.getElementById("mix-payload-status");
+  if (!list || !status) return;
+  const payloads = mixPayloadsForMetrics(payload);
+  const ids = payloads.map((item) => String(item.id));
+  if (!payloads.length) {
+    list.innerHTML = "";
+    status.textContent = "No hay payloads disponibles todavia.";
+    mixSelectedPayloadIds = new Set();
+    mixKnownPayloadIds = new Set();
+    return;
+  }
+  const previous = mixSelectedPayloadIds;
+  const allKnownSelected = mixKnownPayloadIds.size > 0 && Array.from(mixKnownPayloadIds).every((id) => previous.has(id));
+  if (!mixPayloadSelectionInitialized) {
+    mixSelectedPayloadIds = new Set(ids);
+    mixPayloadSelectionInitialized = true;
+  } else if (allKnownSelected) {
+    mixSelectedPayloadIds = new Set(ids);
+  } else {
+    mixSelectedPayloadIds = new Set(ids.filter((id) => previous.has(id)));
+  }
+  mixKnownPayloadIds = new Set(ids);
+  status.textContent = `${mixSelectedPayloadIds.size}/${payloads.length} payload(s) seleccionados.`;
+  list.innerHTML = payloads
+    .map((item) => {
+      const id = String(item.id);
+      const label = item.label || id;
+      const models = mixPayloadModels(payload, id).map(methodDisplayLabel).join("+") || "sin metricas";
+      const detail = [
+        models,
+        item.status ? `status=${item.status}` : "",
+        item.mode ? `mode=${item.mode}` : "",
+        item.ratio !== undefined ? `ratio=${item.ratio}` : "",
+        item.size !== undefined ? `size=${item.size}` : "",
+        item.total_size !== undefined ? `total=${item.total_size}` : "",
+        item.output_root || "",
+      ].filter(Boolean).join(" | ");
+      return `
+        <label class="plot-run-option">
+          <input class="mix-payload-checkbox" type="checkbox" value="${escapeHtml(id)}" ${mixSelectedPayloadIds.has(id) ? "checked" : ""} />
+          <span><strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span></span>
+        </label>
+      `;
+    })
+    .join("");
 }
 
 async function mixDiscover() {
   const payload = await request("/api/mixing/discover");
+  mixAppendPayload("GET /api/mixing/discover", payload);
   mixDiscoverLoaded = true;
   mvsRenderPills("mix-discover-output", [
     ["Small (2 átomos)", String(payload.small.length)],
@@ -12730,13 +12876,17 @@ async function mixDiscover() {
   if (largeBox && !largeBox.value.trim() && payload.large.length) {
     largeBox.value = payload.large.map((d) => `${d.n_snapshots}=${d.root}`).join("\n");
   }
+  await mixRefreshAvailablePayloads({ silent: true });
 }
 
 async function mixPreview() {
+  const body = mixCollectBody();
+  mixAppendPayload("POST /api/mixing/plan request", body);
   const plan = await request("/api/mixing/plan", {
     method: "POST",
-    body: JSON.stringify(mixCollectBody()),
+    body: JSON.stringify(body),
   });
+  mixAppendPayload("POST /api/mixing/plan response", plan);
   const output = document.getElementById("mix-plan-output");
   if (output) {
     const lines = (plan.permutations || []).map(
@@ -12749,12 +12899,16 @@ async function mixPreview() {
       (plan.warnings?.length ? `Warnings: ${plan.warnings.join("; ")}\n` : "") +
       lines.join("\n");
   }
+  await mixSetMetricsPayload(mixMetricsPayload || {}, mixPlanPayloads(plan));
 }
 
 async function mixLaunch(action, statusText) {
   const body = mixCollectBody();
   body.action = action;
-  await request("/api/mixing/launch", { method: "POST", body: JSON.stringify(body) });
+  mixAppendPayload("POST /api/mixing/launch request", body);
+  const payload = await request("/api/mixing/launch", { method: "POST", body: JSON.stringify(body) });
+  mixAppendPayload("POST /api/mixing/launch response", payload);
+  mixLastStatusSignature = "";
   mixSetStatus(statusText, "running");
   if (mixStatusTimer) clearInterval(mixStatusTimer);
   mixStatusTimer = setInterval(() => {
@@ -12778,6 +12932,19 @@ async function mixTrain() {
 
 async function mixPollStatus() {
   const status = await request("/api/mixing/status");
+  const signature = JSON.stringify({
+    state: status.state,
+    action: status.action,
+    done: status.permutations_done,
+    failed: status.n_failed,
+    partial: status.n_partial,
+    records: (status.live_records || []).length,
+    error: status.error || "",
+  });
+  if (signature !== mixLastStatusSignature) {
+    mixAppendPayload("GET /api/mixing/status", status);
+    mixLastStatusSignature = signature;
+  }
   const done = status.permutations_done || 0;
   if (status.state === "completed") {
     const failed = status.n_failed || 0;
@@ -12791,9 +12958,9 @@ async function mixPollStatus() {
     mixSetStatus(text, level);
     if (mixStatusTimer) clearInterval(mixStatusTimer);
     mixStatusTimer = null;
-    if (status.action === "train") {
-      mixLoadMetrics(false).catch(() => {});
-    }
+    // Refresh regardless of action: materialize updates payload status/output_root,
+    // train additionally produces new MAE records.
+    mixLoadMetrics(false).catch(() => {});
   } else if (status.state === "error") {
     mixSetStatus(`Error: ${status.error || ""}`, "error");
     if (mixStatusTimer) clearInterval(mixStatusTimer);
@@ -12814,17 +12981,30 @@ async function mixRenderChart(payload) {
   if (!host) return;
   await ensurePlotlyLoaded();
   const traces = (payload.curves || [])
-    .filter((curve) => (curve.points || []).length)
-    .map((curve) => ({
-      x: curve.points.map((p) => p.total_size),
-      y: curve.points.map((p) => p.mae),
+    .map((curve) => {
+      const points = (curve.points || []).filter((point) => mixSelectedPayloadIds.has(point.payload_id));
+      return {
+        curve,
+        points,
+      };
+    })
+    .filter((item) => item.points.length)
+    .map(({ curve, points }) => ({
+      x: points.map((p) => p.total_size),
+      y: points.map((p) => p.mae),
       mode: "lines+markers",
       name: curve.label,
       line: { dash: curve.mode === "replace" ? "dash" : "solid" },
     }));
   if (!traces.length) {
     window.Plotly.purge(host);
-    host.innerHTML = '<p class="field-help">Sin datos de MAE todavía (entrena el sweep o carga la demo).</p>';
+    host.innerHTML = `<p class="field-help">${
+      !(payload.curves || []).length
+        ? "Sin datos de MAE todavía (entrena el sweep o carga la demo)."
+        : mixSelectedPayloadIds.size
+          ? "Los payloads seleccionados no tienen metricas disponibles todavia."
+          : "Selecciona al menos un payload para ver sus metricas en el plot."
+    }</p>`;
     return;
   }
   window.Plotly.newPlot(
@@ -12841,13 +13021,34 @@ async function mixRenderChart(payload) {
   );
 }
 
-async function mixLoadMetrics(demo) {
+async function mixLoadMetrics(demo, { silent = false } = {}) {
   const path = demo ? "/api/mixing/metrics-demo" : "/api/mixing/metrics";
   const payload = await request(path);
-  await mixRenderChart(payload);
-  if (!demo && !(payload.curves || []).length) {
+  mixAppendPayload(`GET ${path}`, payload);
+  await mixSetMetricsPayload(payload);
+  if (!silent && !demo && !(payload.curves || []).length) {
     showToast("Sin métricas reales todavía; usa la demo o entrena el sweep.");
   }
+}
+
+async function mixRefreshAvailablePayloads({ silent = false } = {}) {
+  await mixLoadMetrics(false, { silent });
+  const body = mixCollectBody();
+  if (!Object.keys(body.small || {}).length || !Object.keys(body.large || {}).length) return;
+  const plan = await request("/api/mixing/plan", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!silent) mixAppendPayload("POST /api/mixing/plan response", plan);
+  await mixSetMetricsPayload(mixMetricsPayload || {}, mixPlanPayloads(plan));
+}
+
+function mixSetAllPayloads(selected) {
+  const payloads = mixPayloadsForMetrics(mixMetricsPayload);
+  mixPayloadSelectionInitialized = true;
+  mixSelectedPayloadIds = new Set(selected ? payloads.map((item) => String(item.id)) : []);
+  mixRenderPayloadSelector(mixMetricsPayload);
+  mixRenderChart(mixMetricsPayload || {}).catch((error) => showToast(error.message));
 }
 
 function setupMixingDatasets() {
@@ -12857,6 +13058,21 @@ function setupMixingDatasets() {
   mvsBind("mix-train", "click", mixTrain);
   mvsBind("mix-metrics-demo", "click", () => mixLoadMetrics(true));
   mvsBind("mix-metrics-real", "click", () => mixLoadMetrics(false));
+  mvsBind("mix-payload-bottom", "click", mixScrollPayloadLogToBottom);
+  mvsBind("mix-payload-clear", "click", mixClearPayloadLog);
+  mvsBind("mix-payloads-all", "click", () => mixSetAllPayloads(true));
+  mvsBind("mix-payloads-clear", "click", () => mixSetAllPayloads(false));
+  document.getElementById("mix-payload-list")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!target?.classList?.contains("mix-payload-checkbox")) return;
+    if (target.checked) {
+      mixSelectedPayloadIds.add(target.value);
+    } else {
+      mixSelectedPayloadIds.delete(target.value);
+    }
+    mixRenderPayloadSelector(mixMetricsPayload);
+    mixRenderChart(mixMetricsPayload || {}).catch((error) => showToast(error.message));
+  });
 }
 
 function setupTabs() {
@@ -12883,6 +13099,8 @@ function setupTabs() {
       } else if (tab.dataset.view === "mixing-datasets") {
         if (!mixDiscoverLoaded) {
           mixDiscover().catch((error) => showToast(error.message));
+        } else {
+          mixRefreshAvailablePayloads({ silent: true }).catch((error) => showToast(error.message));
         }
       }
     });

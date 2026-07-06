@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from .mixing_sweep import _ratio_slug
+
 
 def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Group ``h_mae_eV`` records into MAE-vs-total-size curves.
@@ -19,7 +21,8 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     ``h_mae_eV``. Points within a curve are sorted by total size; duplicate
     sizes are averaged.
     """
-    curves: dict[tuple[str, float, str], dict[int, list[float]]] = {}
+    curves: dict[tuple[str, float, str], dict[str, dict[str, Any]]] = {}
+    payloads: dict[str, dict[str, Any]] = {}
     for record in records:
         try:
             key = (
@@ -27,17 +30,49 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 round(float(record["ratio"]), 6),
                 str(record["model"]),
             )
+            size = int(record.get("size", record["total_size"]))
+            mode = str(record["mode"])
+            ratio = round(float(record["ratio"]), 6)
             total_size = int(record["total_size"])
             mae = float(record["h_mae_eV"])
         except (KeyError, TypeError, ValueError):
             continue
-        curves.setdefault(key, {}).setdefault(total_size, []).append(mae)
+        # Derive from (size, mode, ratio), not output_root: output_root is a
+        # deterministic function of this triple but its full path varies
+        # across machines/tmp dirs, which would break id-based merging with
+        # payload lists computed elsewhere (see pipeline_ui._mixing_payload_id).
+        payload_id = str(record.get("payload_id") or f"size{size}_{mode}_{_ratio_slug(ratio)}")
+        payloads.setdefault(
+            payload_id,
+            {
+                "id": payload_id,
+                "label": record.get("payload_label") or f"size={size} {mode} ratio={ratio:g}",
+                "size": size,
+                "mode": mode,
+                "ratio": ratio,
+                "total_size": total_size,
+                "output_root": record.get("output_root"),
+            },
+        )
+        bucket = curves.setdefault(key, {}).setdefault(
+            payload_id,
+            {
+                "payload_id": payload_id,
+                "total_size": total_size,
+                "values": [],
+            },
+        )
+        bucket["values"].append(mae)
 
     curve_list: list[dict[str, Any]] = []
-    for (mode, ratio, model), by_size in sorted(curves.items()):
+    for (mode, ratio, model), by_payload in sorted(curves.items()):
         points = [
-            {"total_size": size, "mae": sum(values) / len(values)}
-            for size, values in sorted(by_size.items())
+            {
+                "payload_id": item["payload_id"],
+                "total_size": item["total_size"],
+                "mae": sum(item["values"]) / len(item["values"]),
+            }
+            for item in sorted(by_payload.values(), key=lambda value: (value["total_size"], value["payload_id"]))
         ]
         curve_list.append(
             {
@@ -53,6 +88,7 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "metric": "h_mae_eV",
         "x": "total_dataset_size",
         "n_curves": len(curve_list),
+        "payloads": sorted(payloads.values(), key=lambda item: (item["size"], item["mode"], item["ratio"], item["id"])),
         "curves": curve_list,
     }
 

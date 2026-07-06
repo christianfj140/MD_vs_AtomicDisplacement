@@ -1517,9 +1517,8 @@
               <p class="eyebrow">Small + 5×5×1 large → MAE vs dataset size</p>
               <h2>Mixing datasets</h2>
               <p class="field-help">
-                Mezcla datasets pequeños (2 átomos) con grandes 5×5×1 por tamaño N, modo add/replace y ratio,
-                materializa cada permutación como dataset_root entrenable y traza MAE vs tamaño total.
-                No lanza SIESTA. El entrenamiento real (Graph2Mat/DeepH) es opt-in vía «Entrenar sweep».
+                Flujo: descubre datasets, revisa el plan, materializa las mezclas y carga las métricas. No lanza SIESTA;
+                el entrenamiento real Graph2Mat/DeepH solo empieza con «Entrenar sweep».
               </p>
             </div>
             <div class="button-row">
@@ -1532,10 +1531,10 @@
               <div>
                 <p class="eyebrow">1 · Datasets disponibles</p>
                 <h3>Small (2 átomos) y Large (5×5×1)</h3>
-                <p class="field-help">Clasificados por número de átomos. Los large 5×5×1 aparecerán aquí cuando los añadas.</p>
+                <p class="field-help">Primero carga esta lista. Si los campos del paso 2 están vacíos, se rellenan automáticamente.</p>
               </div>
             </div>
-            <div id="mix-discover-output" class="result-list"></div>
+            <div id="mix-discover-output" class="result-list" aria-live="polite"></div>
           </section>
 
           <section class="panel">
@@ -1543,32 +1542,36 @@
               <div>
                 <p class="eyebrow">2 · Configurar sweep</p>
                 <h3>Tamaños × modos × ratios</h3>
-                <p class="field-help">Una línea <code>N=ruta</code> por dataset. Small y large deben compartir tamaño N para mezclarse.</p>
+                <p class="field-help">Una línea <code>N=ruta</code> por dataset. Small y Large deben compartir tamaño N para poder mezclarse.</p>
               </div>
             </div>
             <div class="grid two split-grid">
-              <label class="field"><span>Small datasets (N=ruta)</span>
-                <textarea id="mix-small-map" rows="5" placeholder="20=Comparison/datasets/.../graphene_w90_scale_iid20"></textarea></label>
-              <label class="field"><span>Large datasets 5×5×1 (N=ruta)</span>
-                <textarea id="mix-large-map" rows="5" placeholder="20=Comparison/datasets/.../graphene_5x5x1_iid20"></textarea></label>
+              <label class="field"><span>Small datasets, formato N=ruta</span>
+                <textarea id="mix-small-map" rows="5" spellcheck="false" placeholder="20=Comparison/datasets/.../graphene_w90_scale_iid20"></textarea>
+                <small>Datasets base pequeños. El número antes de <code>=</code> es el tamaño N.</small></label>
+              <label class="field"><span>Large datasets 5×5×1, formato N=ruta</span>
+                <textarea id="mix-large-map" rows="5" spellcheck="false" placeholder="20=Comparison/datasets/.../graphene_5x5x1_iid20"></textarea>
+                <small>Datasets grandes para mezclar contra el mismo N del campo Small.</small></label>
             </div>
             <div class="grid three split-grid">
               <label class="field"><span>Modos</span>
-                <span class="checkbox-row">
-                  <label><input id="mix-mode-add" type="checkbox" checked /> add</label>
-                  <label><input id="mix-mode-replace" type="checkbox" checked /> replace</label>
+                <span class="checkbox-row" role="group" aria-label="Mixing modes">
+                  <label class="toggle-field inline-toggle"><input id="mix-mode-add" type="checkbox" checked /> <span>add</span></label>
+                  <label class="toggle-field inline-toggle"><input id="mix-mode-replace" type="checkbox" checked /> <span>replace</span></label>
                 </span></label>
               <label class="field"><span>Ratios</span>
-                <input id="mix-ratios" type="text" value="0.0,0.2,0.4,0.6,0.8,1.0" /></label>
+                <input id="mix-ratios" type="text" value="0.0,0.2,0.4,0.6,0.8,1.0" />
+                <small>Lista separada por comas; 0.0 usa solo small y 1.0 prioriza large.</small></label>
               <label class="field"><span>Seed</span>
                 <input id="mix-seed" type="number" step="1" value="0" /></label>
               <label class="field"><span>Modelos</span>
-                <span class="checkbox-row">
-                  <label><input id="mix-model-g2m" type="checkbox" checked /> graph2mat</label>
-                  <label><input id="mix-model-deeph" type="checkbox" checked /> deeph</label>
+                <span class="checkbox-row" role="group" aria-label="Models to train">
+                  <label class="toggle-field inline-toggle"><input id="mix-model-g2m" type="checkbox" checked /> <span>graph2mat</span></label>
+                  <label class="toggle-field inline-toggle"><input id="mix-model-deeph" type="checkbox" checked /> <span>deeph</span></label>
                 </span></label>
               <label class="field"><span>Sizes (opcional)</span>
-                <input id="mix-sizes" type="text" placeholder="p.ej. 20,40,60 (vacío = intersección)" /></label>
+                <input id="mix-sizes" type="text" placeholder="p.ej. 20,40,60 (vacío = intersección)" />
+                <small>Vacío usa solo los N presentes en Small y Large.</small></label>
             </div>
             <div class="button-row">
               <button id="mix-preview" class="button secondary" type="button">Previsualizar (dry-run)</button>
@@ -1588,17 +1591,37 @@
           <section class="panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">3 · Permutaciones</p>
-                <h3>Plan del sweep</h3>
+                <p class="eyebrow">3 · Payloads</p>
+                <h3>Terminal de acciones</h3>
+                <p class="field-help">Registra los payloads enviados y recibidos desde esta pestaña.</p>
               </div>
             </div>
-            <pre id="mix-plan-output" class="log-output">—</pre>
+            <div class="terminal-frame">
+              <div class="terminal-navbar">
+                <span>Mixing datasets payload log</span>
+                <div class="terminal-actions">
+                  <button id="mix-payload-bottom" class="button ghost small" type="button">Bottom</button>
+                  <button id="mix-payload-clear" class="button ghost small" type="button">Clear view</button>
+                </div>
+              </div>
+              <pre id="mix-payload-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando acciones en Mixing datasets.</pre>
+            </div>
           </section>
 
           <section class="panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">4 · MAE vs tamaño de dataset</p>
+                <p class="eyebrow">4 · Permutaciones</p>
+                <h3>Plan del sweep</h3>
+              </div>
+            </div>
+            <pre id="mix-plan-output" class="log-output" aria-live="polite">—</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">5 · MAE vs tamaño de dataset</p>
                 <h3>Una curva por (modo, ratio, modelo)</h3>
                 <p class="field-help">Carga la demo sintética o las métricas reales del sweep cuando el entrenamiento haya producido h_mae_eV.</p>
               </div>
@@ -1606,6 +1629,20 @@
             <div class="button-row">
               <button id="mix-metrics-demo" class="button secondary" type="button">Cargar demo</button>
               <button id="mix-metrics-real" class="button secondary" type="button">Cargar métricas reales</button>
+            </div>
+            <div class="g2m-deeph-run-selector" aria-label="Mixing payloads to plot">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Payloads a plotear</strong>
+                  <p class="field-help">Selecciona payloads completos. El plot muestra todas las métricas/modelos disponibles para cada payload marcado.</p>
+                </div>
+                <div class="run-selector-actions">
+                  <button id="mix-payloads-all" class="button ghost small" type="button">All</button>
+                  <button id="mix-payloads-clear" class="button ghost small" type="button">Clear</button>
+                </div>
+              </div>
+              <div id="mix-payload-status" class="muted-text">Carga métricas demo o reales para elegir payloads.</div>
+              <div id="mix-payload-list" class="plot-run-list"></div>
             </div>
             <div id="mix-mae-chart" class="plot-card full"></div>
           </section>
@@ -2003,6 +2040,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260701-derivative-sort"></script>
+    <script src="/app.js?v=20260706-mixing-payloads"></script>
   </body>
 </html>

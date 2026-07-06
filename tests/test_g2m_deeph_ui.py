@@ -72,6 +72,28 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("Selecciona un dataset joint ya validado", self.index_html)
         self.assertIn("Full strict pipeline: generate + train/test sweep", self.index_html)
 
+    def test_mixing_datasets_accessibility_controls_exist(self) -> None:
+        for control_id in (
+            "mix-payload-log",
+            "mix-payload-bottom",
+            "mix-payload-clear",
+            "mix-payload-status",
+            "mix-payload-list",
+            "mix-payloads-all",
+            "mix-payloads-clear",
+        ):
+            self.assertIn(f'id="{control_id}"', self.index_html)
+        for token in (
+            "mixAppendPayload",
+            "mixPayloadsForMetrics",
+            "mixRenderPayloadSelector",
+            "mix-payload-checkbox",
+            "POST /api/mixing/plan request",
+            "GET /api/mixing/status",
+        ):
+            self.assertIn(token, self.app_js)
+        self.assertIn(".mix-payload-log", self.styles_css)
+
     def test_dataset_sweep_controls_are_in_g2m_deeph_tab(self) -> None:
         for control_id in (
             "g2m-deeph-dataset-sweep-max",

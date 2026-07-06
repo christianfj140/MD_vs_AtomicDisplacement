@@ -332,6 +332,8 @@ def test_aggregate_mae_vs_size():
     ]
     agg = mvs.aggregate_mae_vs_size(records)
     assert agg["n_curves"] == 2
+    assert len(agg["payloads"]) == 2
+    assert all(point.get("payload_id") for curve in agg["curves"] for point in curve["points"])
     g2m = next(c for c in agg["curves"] if c["model"] == "graph2mat")
     assert [p["total_size"] for p in g2m["points"]] == [20, 40]
 
@@ -397,10 +399,14 @@ def test_backend_mixing_discover(small_large, monkeypatch):
     assert 50 in large_atoms  # 50-atom supercell classified as large
 
 
-def test_backend_mixing_launch_dry_run_and_status(small_large):
+def test_backend_mixing_launch_dry_run_and_status(small_large, tmp_path, monkeypatch):
     import pipeline_ui as ui
 
     small, large = small_large
+    # Isolate from any real mixing-sweep history on disk (e.g. a developer's
+    # own past runs) so the persisted-summary fallback in metrics() only
+    # ever sees this test's own payloads.
+    monkeypatch.setattr(ui, "MIXING_SWEEP_OUTPUT_ROOT", tmp_path / "mixing_sweep_output")
     runner = ui.MixingSweepRunner()  # fresh instance, does not touch the singleton
     runner.start(
         {
@@ -420,6 +426,98 @@ def test_backend_mixing_launch_dry_run_and_status(small_large):
     assert status["state"] == "completed", status
     assert status["n_permutations"] == 2
     assert not status["summary"]["records"]  # preview never trains
+    metrics = runner.metrics()
+    assert len(metrics["payloads"]) == 2
+    assert {item["size"] for item in metrics["payloads"]} == {8}
+
+
+def test_mixing_metrics_surfaces_historical_payload_without_records(tmp_path, monkeypatch):
+    """A payload materialized in a previous session (e.g. size=50, no training
+    yet) must still show up in the payload selector, just without metrics."""
+    import pipeline_ui as ui
+
+    output_root = tmp_path / "mixing_sweep_output"
+    monkeypatch.setattr(ui, "MIXING_SWEEP_OUTPUT_ROOT", output_root)
+    output_root.mkdir(parents=True)
+    (output_root / "mixing_sweep_summary.json").write_text(
+        json.dumps(
+            {
+                "records": [],
+                "permutations": [
+                    {
+                        "size": 50,
+                        "mode": "add",
+                        "ratio": 0.0,
+                        "total_size": 48,
+                        "status": "materialized",
+                        "output_root": str(output_root / "size50_add_r0p000"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = ui.MixingSweepRunner()  # fresh, idle instance; never started
+    metrics = runner.metrics()
+    assert len(metrics["payloads"]) == 1
+    payload = metrics["payloads"][0]
+    assert payload["size"] == 50
+    assert payload["status"] == "materialized"
+    assert not any(curve["points"] for curve in metrics["curves"])
+
+
+def test_mixing_metrics_payload_status_trained_when_metrics_exist(tmp_path, monkeypatch):
+    """A payload with real MAE records should be marked as trained, while a
+    sibling payload from the same historical summary with no records yet
+    keeps its own (non-trained) status."""
+    import pipeline_ui as ui
+
+    output_root = tmp_path / "mixing_sweep_output"
+    monkeypatch.setattr(ui, "MIXING_SWEEP_OUTPUT_ROOT", output_root)
+    output_root.mkdir(parents=True)
+    (output_root / "mixing_sweep_summary.json").write_text(
+        json.dumps(
+            {
+                "records": [
+                    {
+                        "size": 50,
+                        "mode": "add",
+                        "ratio": 0.0,
+                        "total_size": 48,
+                        "model": "graph2mat",
+                        "h_mae_eV": 0.42,
+                    }
+                ],
+                "permutations": [
+                    {
+                        "size": 50,
+                        "mode": "add",
+                        "ratio": 0.0,
+                        "total_size": 48,
+                        "status": "materialized",
+                        "output_root": str(output_root / "size50_add_r0p000"),
+                    },
+                    {
+                        "size": 80,
+                        "mode": "add",
+                        "ratio": 0.0,
+                        "total_size": 78,
+                        "status": "planned",
+                        "output_root": str(output_root / "size80_add_r0p000"),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = ui.MixingSweepRunner()
+    metrics = runner.metrics()
+    by_size = {item["size"]: item for item in metrics["payloads"]}
+    assert by_size[50]["status"] == "trained"
+    assert by_size[80]["status"] == "planned"
+    assert any(curve["points"] for curve in metrics["curves"])
 
 
 def test_backend_mixing_launch_rejects_concurrent(small_large):
@@ -463,6 +561,23 @@ def test_mixing_metrics_from_common_csv(tmp_path):
     assert ui._mixing_metrics_from_common_csv(tmp_path / "run", ("graph2mat", "deeph")) == {
         "graph2mat": {"h_mae_eV": 0.12},
         "deeph": {"h_mae_eV": 0.34},
+    }
+
+
+def test_mixing_metrics_from_run_metrics_csv(tmp_path):
+    import pipeline_ui as ui
+
+    metrics = tmp_path / "run" / "metrics" / "graph2mat" / "eval" / "metrics"
+    metrics.mkdir(parents=True)
+    (metrics / "kpoint_matrix_metrics.csv").write_text(
+        "sample,row_type,h_mae_eV\n"
+        "s0,per_k,0.10\n"
+        "s0,per_k,0.20\n",
+        encoding="utf-8",
+    )
+
+    assert ui._mixing_metrics_from_run_metrics(tmp_path / "run", "graph2mat") == {
+        "graph2mat": {"h_mae_eV": pytest.approx(0.15)}
     }
 
 

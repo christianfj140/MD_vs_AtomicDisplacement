@@ -1,0 +1,72 @@
+{
+  "description": "Launch payload for the mixing datasets sweep over nominal sizes 20, 50 and 80 using existing W90 datasets plus graphene_5x5 datasets. Intended for end-to-end smoke once graphene_5x5_scale_iid80 exists.",
+  "action": "train",
+  "sizes": [
+    20,
+    50,
+    80
+  ],
+  "modes": [
+    "add",
+    "replace"
+  ],
+  "ratios": [
+    0.0,
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0
+  ],
+  "seed": 0,
+  "models": [
+    "graph2mat",
+    "deeph"
+  ],
+  "small": {
+    "20": "Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid20",
+    "50": "Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid50",
+    "80": "Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid80"
+  },
+  "large": {
+    "20": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50/graphene_5x5_scale_iid20",
+    "50": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50/graphene_5x5_scale_iid50",
+    "80": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid80"
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "notes": {
+    "run_order": [
+      "1. Generate graphene_5x5 iid80 with Comparison/config/graphene_5x5_snapshot_scaling_20_50_80_payload.json",
+      "2. Launch this payload through /api/mixing/launch",
+      "3. Expect 3 sizes x 2 modes x 6 ratios = 36 permutations, and 72 model runs for Graph2Mat+DeepH"
+    ],
+    "nominal_size_note": "The mixing backend keys permutations by the declared nominal size (20/50/80), even if the frozen manifests contain slightly fewer effective snapshots after blocked-with-gap splitting."
+  }
+}

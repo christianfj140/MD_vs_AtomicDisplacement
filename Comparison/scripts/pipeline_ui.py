@@ -2071,6 +2071,172 @@ class PipelineRunner:
 RUNNERS = {key: PipelineRunner(spec) for key, spec in PIPELINES.items()}
 
 
+@dataclass(frozen=True)
+class ScriptRunnerSpec:
+    key: str
+    label: str
+    script_path: Path
+    default_payload: Path
+    default_manifest: Path
+
+
+MIXING_E2E_RUNNER_SPEC = ScriptRunnerSpec(
+    key="mixing_e2e",
+    label="MixingE2E",
+    script_path=REPO_ROOT / "Comparison" / "scripts" / "run_mixing_e2e_payload_once.py",
+    default_payload=REPO_ROOT / "Comparison" / "config" / "ml_vs_siesta_mixing_e2e_20_50_80_payload.json",
+    default_manifest=REPO_ROOT / "Comparison" / "results" / "ml_vs_siesta_mixing_e2e_20_50_80_manifest.json",
+)
+
+
+class ScriptPayloadRunner:
+    def __init__(self, spec: ScriptRunnerSpec) -> None:
+        self.spec = spec
+        self._lock = threading.RLock()
+        self._process: subprocess.Popen[str] | None = None
+        self._logs: list[str] = []
+        self._started_at: float | None = None
+        self._finished_at: float | None = None
+        self._returncode: int | None = None
+        self._command: list[str] | None = None
+        self._payload_path: Path | None = None
+        self._manifest_path: Path | None = None
+
+    def start(
+        self,
+        *,
+        payload_path: str | Path | None = None,
+        manifest_path: str | Path | None = None,
+        poll_seconds: float = 30.0,
+    ) -> dict[str, Any]:
+        payload = Path(payload_path).expanduser() if payload_path else self.spec.default_payload
+        manifest = Path(manifest_path).expanduser() if manifest_path else self.spec.default_manifest
+        if not payload.is_absolute():
+            payload = REPO_ROOT / payload
+        if not manifest.is_absolute():
+            manifest = REPO_ROOT / manifest
+        if not payload.exists():
+            raise RuntimeError(f"{self.spec.label}: payload no encontrado: {payload}")
+        python = DEFAULT_VENV_PYTHON if DEFAULT_VENV_PYTHON.exists() else Path(sys.executable)
+        self._logs = [
+            f"[UI] Ejecutando {self.spec.label}: {self.spec.script_path}\n",
+            f"[UI] Payload: {payload}\n",
+            f"[UI] Manifest: {manifest}\n",
+            f"[UI] Poll seconds: {poll_seconds}\n",
+            "[UI] ETA: sin estimacion inicial para ejecuciones individuales.\n",
+        ]
+        self._started_at = time.time()
+        self._finished_at = None
+        self._returncode = None
+        self._payload_path = payload
+        self._manifest_path = manifest
+        self._command = [
+            str(python),
+            str(self.spec.script_path),
+            str(payload),
+            "--manifest-json",
+            str(manifest),
+            "--poll-seconds",
+            str(float(poll_seconds)),
+        ]
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError(f"{self.spec.label}: ya se esta ejecutando.")
+            master_fd: int | None = None
+            if pty is not None:
+                master_fd, slave_fd = pty.openpty()
+                self._process = subprocess.Popen(
+                    self._command,
+                    cwd=REPO_ROOT,
+                    stdin=subprocess.DEVNULL,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+                os.close(slave_fd)
+            else:
+                self._process = subprocess.Popen(
+                    self._command,
+                    cwd=REPO_ROOT,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+            process = self._process
+            self._logs.append(f"[UI] PID: {process.pid}\n")
+            self._logs.append(f"[RUN] {' '.join(self._command)}\n")
+        threading.Thread(target=self._collect_output, args=(process, master_fd), daemon=True).start()
+        return self.status()
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            process = self._process
+            if process is None or process.poll() is not None:
+                return self.status()
+            process.terminate()
+            self._logs.append("\n[UI] Solicitud de parada enviada.\n")
+        return self.status()
+
+    def _collect_output(self, process: subprocess.Popen[str], master_fd: int | None) -> None:
+        try:
+            returncode = stream_process_output(
+                process,
+                lambda line: self._append_log(line),
+                label=self.spec.label,
+                master_fd=master_fd,
+            )
+        finally:
+            if master_fd is not None:
+                os.close(master_fd)
+        with self._lock:
+            self._returncode = returncode
+            self._finished_at = time.time()
+            elapsed = self._finished_at - (self._started_at or self._finished_at)
+            if self._process is process:
+                self._process = None
+            self._logs.append(
+                f"\n[UI] {self.spec.label} finalizado con codigo {returncode} "
+                f"en {format_duration(elapsed)}.\n"
+            )
+
+    def _append_log(self, line: str) -> None:
+        with self._lock:
+            self._logs.append(line)
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            running = self._process is not None and self._process.poll() is None
+            return {
+                "key": self.spec.key,
+                "label": self.spec.label,
+                "running": running,
+                "returncode": None if running else self._returncode,
+                "started_at": self._started_at,
+                "finished_at": self._finished_at,
+                "command": self._command,
+                "payload_path": str(self._payload_path) if self._payload_path else None,
+                "manifest_path": str(self._manifest_path) if self._manifest_path else None,
+                "elapsed_seconds": None
+                if self._started_at is None
+                else (time.time() if running else self._finished_at or time.time()) - self._started_at,
+                "eta_seconds": None,
+                "log_size": len(self._logs),
+            }
+
+    def logs(self, since: int = 0, limit: int | None = DEFAULT_LOG_RESPONSE_LIMIT) -> dict[str, Any]:
+        with self._lock:
+            log_payload = bounded_log_payload(self._logs, since=since, limit=limit)
+            log_payload["status"] = self.status()
+            return {
+                **log_payload,
+            }
+
+
+MIXING_E2E_RUNNER = ScriptPayloadRunner(MIXING_E2E_RUNNER_SPEC)
+
+
 def read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0"))
     body = handler.rfile.read(length).decode("utf-8")
@@ -15478,8 +15644,9 @@ G2M_DEEPH_RUNNER = Graph2MatDeepHBenchmarkRunner()
 def all_status() -> dict[str, Any]:
     statuses = {key: runner.status() for key, runner in RUNNERS.items()}
     return {
-        "running": any(status["running"] for status in statuses.values()),
+        "running": any(status["running"] for status in statuses.values()) or MIXING_E2E_RUNNER.status().get("running"),
         "pipelines": statuses,
+        "mixing_e2e": MIXING_E2E_RUNNER.status(),
     }
 
 
@@ -15865,6 +16032,7 @@ def run_all(*, venv_activate_command: str | None = None) -> dict[str, Any]:
 def stop_all() -> dict[str, Any]:
     for runner in RUNNERS.values():
         runner.stop()
+    MIXING_E2E_RUNNER.stop()
     return all_status()
 
 
@@ -16216,6 +16384,83 @@ def mixing_metrics_demo_payload() -> dict[str, Any]:
     return payload
 
 
+def _mixing_payload_id(item: dict[str, Any]) -> str:
+    """Stable id for a mixing payload, derived from (size, mode, ratio).
+
+    This triple is the true identity of a mixing permutation (the
+    materialized output_root is a deterministic function of it), so it must
+    be computed the same way regardless of whether the caller is a bare
+    plan/permutation dict, a live training record, or a persisted summary.
+    Using output_root as the id instead would vary across machines/tmp dirs
+    and fail to merge with canonical ids from other sources.
+    """
+    explicit = item.get("payload_id")
+    if explicit:
+        return str(explicit)
+    size, mode, ratio = item.get("size"), item.get("mode"), item.get("ratio")
+    if size is not None and mode is not None and ratio is not None:
+        mvs = _ml_vs_siesta_module()
+        return f"size{int(size)}_{mode}_{mvs.mixing_sweep._ratio_slug(float(ratio))}"
+    return str(item.get("output_root") or "")
+
+
+def _mixing_payloads_from_permutations(permutations: Any) -> list[dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    if not isinstance(permutations, list):
+        return []
+    for item in permutations:
+        if not isinstance(item, dict):
+            continue
+        payload_id = _mixing_payload_id(item)
+        payloads[payload_id] = {
+            "id": payload_id,
+            "label": f"size={item.get('size')} {item.get('mode')} ratio={item.get('ratio')}",
+            "size": item.get("size"),
+            "mode": item.get("mode"),
+            "ratio": item.get("ratio"),
+            "total_size": item.get("total_size"),
+            "status": item.get("status"),
+            "output_root": item.get("output_root"),
+        }
+    return sorted(
+        payloads.values(),
+        key=lambda item: (
+            int(item["size"] or 0),
+            str(item["mode"] or ""),
+            float(item["ratio"] or 0),
+            str(item["id"]),
+        ),
+    )
+
+
+def _mixing_metrics_payload(records: list[dict[str, Any]], summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    payload = mvs.aggregate_mae_vs_size(records)
+    by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
+    metric_ids = set(by_id)
+    for item in _mixing_payloads_from_permutations((summary or {}).get("permutations")):
+        key = str(item["id"])
+        if key in by_id:
+            # aggregate_mae_vs_size's entry (has real metrics) wins on overlap;
+            # fields unique to the permutation, like "status", still fill in.
+            by_id[key] = {**item, **by_id[key]}
+        else:
+            by_id[key] = item
+    for key, item in by_id.items():
+        if key in metric_ids:
+            item["status"] = "trained"
+    payload["payloads"] = sorted(
+        by_id.values(),
+        key=lambda item: (
+            int(item.get("size") or 0),
+            str(item.get("mode") or ""),
+            float(item.get("ratio") or 0),
+            str(item.get("id") or ""),
+        ),
+    )
+    return payload
+
+
 _MIXING_TRAINING_POLL_SECONDS = 5.0
 
 
@@ -16292,6 +16537,27 @@ def _mixing_metrics_from_common_csv(run_root: Any, models: tuple[str, ...]) -> d
             except ValueError:
                 pass
     return found
+
+
+def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any]:
+    if not run_root:
+        return {}
+    root = Path(str(run_root))
+    candidates = sorted(root.rglob("kpoint_matrix_metrics.csv"))
+    values: list[float] = []
+    for path in candidates:
+        try:
+            with path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    value = row.get("h_mae_eV")
+                    if value in (None, ""):
+                        continue
+                    values.append(float(value))
+        except (OSError, ValueError):
+            continue
+    if not values:
+        return {}
+    return {model: {"h_mae_eV": sum(values) / len(values)}}
 
 
 def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
@@ -16477,6 +16743,8 @@ def _run_mixing_sweep_parallel(
             if not m:
                 # Fallback: scan inside the materialized output_root itself
                 m = _mixing_metrics_from_common_csv(perm["output_root"], (model,))
+            if not m:
+                m = _mixing_metrics_from_run_metrics(sweep_run_root, model)
             if model in m:
                 records.append(
                     {
@@ -16511,13 +16779,29 @@ class MixingSweepRunner:
             return dict(self._status)
 
     def metrics(self) -> dict[str, Any]:
-        mvs = _ml_vs_siesta_module()
         with self._lock:
             summary = self._status.get("summary") or {}
             live_records = self._status.get("live_records") or []
+            live_payloads = self._status.get("payloads") or []
         # Use final records when complete, live accumulation while running.
         records = summary.get("records") or live_records
-        return mvs.aggregate_mae_vs_size(records)
+        if not records:
+            summary_path = MIXING_SWEEP_OUTPUT_ROOT / "mixing_sweep_summary.json"
+            try:
+                persisted = json.loads(summary_path.read_text(encoding="utf-8"))
+                records = persisted.get("records") or []
+                if not summary:
+                    summary = persisted
+            except (OSError, json.JSONDecodeError):
+                records = []
+        payload = _mixing_metrics_payload(records, summary)
+        if live_payloads:
+            by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
+            for item in live_payloads:
+                if isinstance(item, dict) and item.get("id") is not None:
+                    by_id.setdefault(str(item["id"]), item)
+            payload["payloads"] = list(by_id.values())
+        return payload
 
     def start(self, body: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -16575,6 +16859,13 @@ class MixingSweepRunner:
             with self._lock:
                 self._status["state"] = "running"
                 self._status["action"] = action
+                try:
+                    plan = mvs.plan_mixing_sweep_from_roots(
+                        small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed
+                    )
+                    self._status["payloads"] = _mixing_payloads_from_permutations(plan.get("permutations"))
+                except Exception:
+                    self._status["payloads"] = []
             if action == "train":
                 # Parallel path: materialise all datasets, then one runner
                 # invocation with full g2m/deeph parallelism.
@@ -16770,6 +17061,19 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, mixing_discover_payload(threshold))
             elif path == "/api/mixing/status":
                 json_response(self, MIXING_SWEEP_RUNNER.status())
+            elif path == "/api/mixing-e2e/status":
+                json_response(self, MIXING_E2E_RUNNER.status())
+            elif path == "/api/mixing-e2e/logs":
+                query = parse_qs(parsed_url.query)
+                since = int(query.get("since", ["0"])[0])
+                limit = parse_query_int(
+                    query,
+                    "limit",
+                    DEFAULT_LOG_RESPONSE_LIMIT,
+                    minimum=1,
+                    maximum=MAX_LOG_RESPONSE_LIMIT,
+                )
+                json_response(self, MIXING_E2E_RUNNER.logs(since=since, limit=limit))
             elif path == "/api/mixing/metrics":
                 json_response(self, MIXING_SWEEP_RUNNER.metrics())
             elif path == "/api/mixing/metrics-demo":
@@ -16879,6 +17183,19 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/mixing/launch":
                 payload = read_json_body(self)
                 json_response(self, MIXING_SWEEP_RUNNER.start(payload), status=HTTPStatus.ACCEPTED)
+            elif path == "/api/mixing-e2e/start":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    MIXING_E2E_RUNNER.start(
+                        payload_path=payload.get("payload"),
+                        manifest_path=payload.get("manifest_json"),
+                        poll_seconds=float(payload.get("poll_seconds") or 30.0),
+                    ),
+                    status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/mixing-e2e/stop":
+                json_response(self, MIXING_E2E_RUNNER.stop(), status=HTTPStatus.ACCEPTED)
             elif path == "/api/g2m-deeph/dataset-size-minimum/analyze":
                 payload = read_json_body(self)
                 json_response(
