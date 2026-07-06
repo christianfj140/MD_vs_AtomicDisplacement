@@ -25,14 +25,22 @@ if str(SCRIPT_DIR) not in sys.path:
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DERIVATIVE_SUPPORT_THRESHOLD,
     EXPECTED_DERIVATIVE_UNITS,
+    GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD,
+    GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
+    PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
+    REFERENCE_DERIVATIVE_METHOD_SIESTA,
+    VALID_GRAPH2MAT_PREDICTION_METHODS,
     DerivativeMatrixInput,
     DerivativeMetadata,
     DerivativeStencil,
     DerivativeStencilDiscovery,
     derivative_ref_abs_quantile_metrics,
     derivative_sparse_metrics,
+    direct_predicted_derivative_pair,
     discover_derivative_stencils,
+    find_direct_derivative_prediction,
     finite_difference_derivative_pair,
+    load_direct_sparse_derivative,
     validate_derivative_geometry,
     validate_derivative_stencil,
     validation_errors,
@@ -242,9 +250,25 @@ def evaluate_derivative_metrics(
     max_stencils: int | None = None,
     output_dir: Path | None = None,
     source_model: str = "graph2mat",
+    graph2mat_prediction_method: str = GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
 ) -> dict[str, Any]:
     result_dir = Path(result_dir)
     output_dir = Path(output_dir) if output_dir is not None else result_dir / "derivative_metrics"
+
+    graph2mat_prediction_method = str(
+        graph2mat_prediction_method or GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE
+    ).strip().lower()
+    if graph2mat_prediction_method not in VALID_GRAPH2MAT_PREDICTION_METHODS:
+        raise DerivativeMetricEvaluationError(
+            f"Unsupported graph2mat_prediction_method {graph2mat_prediction_method!r}. "
+            f"Use one of: {', '.join(sorted(VALID_GRAPH2MAT_PREDICTION_METHODS))}."
+        )
+    direct_prediction_mode = graph2mat_prediction_method == GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD
+    if direct_prediction_mode and source_model != "graph2mat":
+        raise DerivativeMetricEvaluationError(
+            "graph2mat_prediction_method='autograd_vectorized' only applies to "
+            f"source_model='graph2mat', got source_model={source_model!r}."
+        )
     ensure_output_dir(output_dir, overwrite=overwrite)
 
     discoveries = discover_derivative_stencils(
@@ -253,6 +277,7 @@ def evaluate_derivative_metrics(
         split=split,
         finite_difference_method=method,
         require_central=require_central,
+        require_ml_predictions=not direct_prediction_mode,
     )
     if max_stencils is not None:
         discoveries = discoveries[: max(0, int(max_stencils))]
@@ -273,6 +298,8 @@ def evaluate_derivative_metrics(
             source_model=source_model,
             support_threshold=support_threshold,
             diagnostic_only=diagnostic_only,
+            result_dir=result_dir,
+            direct_prediction_mode=direct_prediction_mode,
         )
         stencil_rows.append(row)
         metric_rows.extend(metrics)
@@ -327,6 +354,11 @@ def evaluate_derivative_metrics(
         "derivative_group_metrics": str(output_dir / "derivative_group_metrics.json"),
         "derivative_onsite_offsite_metrics": str(output_dir / "derivative_onsite_offsite_metrics.json"),
     }
+    predicted_derivative_method = (
+        PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT
+        if direct_prediction_mode
+        else f"finite_difference_{source_model}"
+    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "scientific_status": scientific_status,
@@ -334,6 +366,12 @@ def evaluate_derivative_metrics(
         "finite_difference_method": method,
         "force_constants_used": False,
         "reference_definition": REFERENCE_DEFINITION,
+        "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
+        "predicted_derivative_method": predicted_derivative_method,
+        "graph2mat_prediction_method": graph2mat_prediction_method
+        if source_model == "graph2mat"
+        else None,
+        "predicted_delta_ang": None if direct_prediction_mode else "per_stencil_delta_ang",
         "derivative_units": EXPECTED_DERIVATIVE_UNITS,
         "result_dir": str(result_dir),
         "split": split,
@@ -381,6 +419,8 @@ def _evaluate_discovery(
     source_model: str,
     support_threshold: float,
     diagnostic_only: bool,
+    result_dir: Path | None = None,
+    direct_prediction_mode: bool = False,
 ) -> tuple[
     list[Any] | dict[str, Any],
     list[dict[str, Any]],
@@ -433,7 +473,9 @@ def _evaluate_discovery(
         stencil = _stencil_with_loaded_shapes(discovery.stencil, loaded)
         if diagnostic_only:
             stencil = replace(stencil, metadata=replace(stencil.metadata, claim_status="diagnostic_only"))
-        validation = validate_derivative_stencil(stencil)
+        validation = validate_derivative_stencil(
+            stencil, require_predicted_operands=not direct_prediction_mode
+        )
         errors = validation_errors(validation)
         if errors:
             status_row = _stencil_status_row(
@@ -450,20 +492,59 @@ def _evaluate_discovery(
             )
             return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
         metadata = _metadata_for_status(stencil.metadata, diagnostic_only=diagnostic_only)
-        pair = finite_difference_derivative_pair(
-            method=method,
-            delta_ang=float(metadata.delta_ang),
-            reference_plus=loaded.get("siesta_plus"),
-            reference_minus=loaded.get("siesta_minus"),
-            reference_base=loaded.get("siesta_base"),
-            predicted_plus=loaded.get("ml_plus"),
-            predicted_minus=loaded.get("ml_minus"),
-            predicted_base=loaded.get("ml_base"),
-            predicted_source=source_model,
-            reference_hashes=_matrix_hashes(stencil, prefix="siesta"),
-            predicted_hashes=_matrix_hashes(stencil, prefix="ml"),
-            metadata=metadata,
-        )
+        direct_prediction_path: Path | None = None
+        if direct_prediction_mode:
+            candidate_base_ids = [
+                str(metadata.base_sample_id or ""),
+                f"{_group_base_id(discovery)}_base",
+                _group_base_id(discovery),
+            ]
+            direct_prediction_path = find_direct_derivative_prediction(
+                result_dir if result_dir is not None else Path("."),
+                candidate_base_sample_ids=candidate_base_ids,
+                atom_index_zero_based=int(metadata.atom_index_zero_based),
+                axis_index=int(metadata.axis_index),
+            )
+            if direct_prediction_path is None:
+                status_row = _stencil_status_row(discovery, status="failed")
+                fatal_errors.append(
+                    _discovery_error(
+                        discovery,
+                        "missing_direct_derivative_prediction",
+                        "No direct dH_pred/dR matrix was found for this stencil; "
+                        "run run_graph2mat_autograd_derivative_predictions.py first.",
+                        candidate_base_sample_ids=[c for c in candidate_base_ids if c],
+                    )
+                )
+                return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+            predicted_matrix, direct_metadata = load_direct_sparse_derivative(direct_prediction_path)
+            pair = direct_predicted_derivative_pair(
+                method=method,
+                delta_ang=float(metadata.delta_ang),
+                reference_plus=loaded.get("siesta_plus"),
+                reference_minus=loaded.get("siesta_minus"),
+                reference_base=loaded.get("siesta_base"),
+                predicted_matrix=predicted_matrix,
+                predicted_source=source_model,
+                reference_hashes=_matrix_hashes(stencil, prefix="siesta"),
+                predicted_matrix_metadata=direct_metadata,
+                metadata=metadata,
+            )
+        else:
+            pair = finite_difference_derivative_pair(
+                method=method,
+                delta_ang=float(metadata.delta_ang),
+                reference_plus=loaded.get("siesta_plus"),
+                reference_minus=loaded.get("siesta_minus"),
+                reference_base=loaded.get("siesta_base"),
+                predicted_plus=loaded.get("ml_plus"),
+                predicted_minus=loaded.get("ml_minus"),
+                predicted_base=loaded.get("ml_base"),
+                predicted_source=source_model,
+                reference_hashes=_matrix_hashes(stencil, prefix="siesta"),
+                predicted_hashes=_matrix_hashes(stencil, prefix="ml"),
+                metadata=metadata,
+            )
         row = derivative_sparse_metrics(
             pair.reference.matrix,
             pair.predicted.matrix,
@@ -481,6 +562,24 @@ def _evaluate_discovery(
                 "dh_support_changed": bool(pair.diagnostics.get("plus_minus_support_changed")),
                 "reference_plus_minus_support_changed": bool(pair.diagnostics.get("reference_plus_minus_support_changed")),
                 "predicted_plus_minus_support_changed": bool(pair.diagnostics.get("predicted_plus_minus_support_changed")),
+                "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
+                "predicted_derivative_method": (
+                    PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT
+                    if direct_prediction_mode
+                    else f"finite_difference_{source_model}"
+                ),
+                "reference_delta_ang": float(metadata.delta_ang),
+                "predicted_delta_ang": None if direct_prediction_mode else float(metadata.delta_ang),
+                "graph2mat_prediction_method": (
+                    (
+                        GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD
+                        if direct_prediction_mode
+                        else GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE
+                    )
+                    if source_model == "graph2mat"
+                    else None
+                ),
+                "direct_prediction_path": str(direct_prediction_path) if direct_prediction_path else "",
             }
         )
         row.update(
@@ -549,6 +648,14 @@ def _evaluate_discovery(
         status_row = _stencil_status_row(discovery, status="failed")
         fatal_errors.append(_discovery_error(discovery, "derivative_metric_evaluation_failed", str(exc)))
     return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
+
+
+def _group_base_id(discovery: DerivativeStencilDiscovery) -> str:
+    """First component of the discovery group key: the displaced samples' base id."""
+
+    if discovery.group_key:
+        return str(discovery.group_key[0] or "")
+    return ""
 
 
 def _load_stencil_matrices(stencil: DerivativeStencil) -> dict[str, sparse.csr_matrix]:
@@ -1032,6 +1139,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-stencils", type=int, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--source-model", choices=["graph2mat", "deeph"], default="graph2mat")
+    parser.add_argument(
+        "--graph2mat-prediction-method",
+        choices=sorted(VALID_GRAPH2MAT_PREDICTION_METHODS),
+        default=GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
+        help=(
+            "How the predicted Graph2Mat derivative is obtained: 'finite_difference' "
+            "(legacy, from displaced ML_prediction.HSX pairs) or 'autograd_vectorized' "
+            "(direct dH_pred/dR matrices from run_graph2mat_autograd_derivative_predictions.py)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1048,6 +1165,7 @@ def main() -> int:
         max_stencils=args.max_stencils,
         output_dir=args.output_dir,
         source_model=args.source_model,
+        graph2mat_prediction_method=args.graph2mat_prediction_method,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=True, allow_nan=False))
     return 0 if not manifest["fatal_errors"] else 2

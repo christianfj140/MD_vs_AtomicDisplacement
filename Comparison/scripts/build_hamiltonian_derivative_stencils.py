@@ -457,8 +457,10 @@ def build_derivative_stencils(
             or base_metadata.get("system_group_label")
             or base_id
         )
+        # The displaced samples reference this id even when the base structure
+        # itself is not materialized (include_base=False).
+        base_sample = safe_sample_id(base_id, "base")
         if include_base:
-            base_sample = safe_sample_id(base_id, "base")
             metadata = {
                 "id": base_sample,
                 "sample_id": base_sample,

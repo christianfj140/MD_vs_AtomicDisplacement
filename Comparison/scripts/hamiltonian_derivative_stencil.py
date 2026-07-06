@@ -25,6 +25,15 @@ from reference_selection import choose_reference_matrix, file_sha256
 VALID_AXES = {"x": 0, "y": 1, "z": 2}
 VALID_METHODS = {"central", "forward", "backward"}
 VALID_SOURCES = {"siesta", "graph2mat", "deeph"}
+REFERENCE_DERIVATIVE_METHOD_SIESTA = "finite_difference_siesta"
+PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT = "autograd_graph2mat_vectorized"
+GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE = "finite_difference"
+GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD = "autograd_vectorized"
+VALID_GRAPH2MAT_PREDICTION_METHODS = {
+    GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
+    GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD,
+}
+DIRECT_DERIVATIVE_PREDICTION_DIRNAME = "predicted_derivative_hamiltonians"
 EXPECTED_HAMILTONIAN_UNITS = "eV"
 EXPECTED_DISPLACEMENT_UNITS = "Ang"
 EXPECTED_DERIVATIVE_UNITS = "eV/Ang"
@@ -618,6 +627,189 @@ def finite_difference_derivative_pair(
     return DerivativeComparisonResult(reference=reference, predicted=predicted, diagnostics=diagnostics)
 
 
+def direct_derivative_prediction_basename(atom_index_zero_based: int, axis_index: int) -> str:
+    """Canonical basename for direct dH_pred/dR files (without suffix)."""
+
+    return f"dH_pred_atom{int(atom_index_zero_based)}_axis{int(axis_index)}"
+
+
+def direct_derivative_prediction_paths(
+    result_dir: Path | str,
+    *,
+    base_sample_id: str,
+    atom_index_zero_based: int,
+    axis_index: int,
+) -> tuple[Path, Path]:
+    """Return the (matrix .npz, metadata .json) paths for a direct prediction."""
+
+    base = (
+        Path(result_dir)
+        / DIRECT_DERIVATIVE_PREDICTION_DIRNAME
+        / str(base_sample_id)
+        / direct_derivative_prediction_basename(atom_index_zero_based, axis_index)
+    )
+    return base.with_suffix(".npz"), base.with_suffix(".json")
+
+
+def find_direct_derivative_prediction(
+    result_dir: Path | str,
+    *,
+    candidate_base_sample_ids: list[str],
+    atom_index_zero_based: int,
+    axis_index: int,
+) -> Path | None:
+    """Locate a direct dH_pred/dR matrix for any of the candidate base ids."""
+
+    seen: set[str] = set()
+    for candidate in candidate_base_sample_ids:
+        candidate = str(candidate or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        matrix_path, _ = direct_derivative_prediction_paths(
+            result_dir,
+            base_sample_id=candidate,
+            atom_index_zero_based=atom_index_zero_based,
+            axis_index=axis_index,
+        )
+        if matrix_path.exists():
+            return matrix_path
+    return None
+
+
+def load_direct_sparse_derivative(path: Path | str) -> tuple[sparse.csr_matrix, dict[str, Any]]:
+    """Load a direct sparse dH_pred/dR matrix and its sibling JSON metadata."""
+
+    path = Path(path)
+    matrix = sparse.load_npz(path).tocsr()
+    metadata_path = path.with_suffix(".json")
+    metadata: dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HamiltonianDerivativeError(
+                f"Direct derivative metadata is unreadable: {metadata_path}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HamiltonianDerivativeError(
+                f"Direct derivative metadata must be a JSON object: {metadata_path}"
+            )
+        metadata = payload
+    return matrix, metadata
+
+
+def direct_predicted_derivative_pair(
+    *,
+    method: str,
+    delta_ang: float,
+    reference_plus: sparse.spmatrix | None = None,
+    reference_minus: sparse.spmatrix | None = None,
+    reference_base: sparse.spmatrix | None = None,
+    predicted_matrix: sparse.spmatrix,
+    predicted_source: str = "graph2mat",
+    predicted_derivative_method: str = PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
+    reference_hashes: dict[str, str | None] | None = None,
+    predicted_matrix_metadata: dict[str, Any] | None = None,
+    metadata: DerivativeMetadata | None = None,
+) -> DerivativeComparisonResult:
+    """Pair a finite-difference SIESTA reference with a direct dH_pred/dR matrix.
+
+    The reference derivative is computed with the existing finite-difference
+    stencil (``reference_delta_ang = delta_ang``). The predicted derivative is
+    taken directly from the model (autograd), so it has no displacement delta
+    (``predicted_delta_ang = None``); it must already be in the same sparse
+    layout/shape as the reference.
+    """
+
+    reference = finite_difference_derivative(
+        method=method,
+        delta_ang=delta_ang,
+        plus=reference_plus,
+        minus=reference_minus,
+        base=reference_base,
+        source="siesta",
+        matrix_hashes=reference_hashes,
+        metadata=metadata,
+    )
+    predicted_csr = predicted_matrix.tocsr(copy=True)
+    predicted_csr.eliminate_zeros()
+    _require_matching_shapes(
+        ("reference_derivative", "predicted_derivative"), reference.matrix, predicted_csr
+    )
+    predicted_finite = _sparse_finite_values(predicted_csr)
+    predicted_metadata = {
+        "method": predicted_derivative_method,
+        "reference_delta_ang": float(delta_ang),
+        "predicted_delta_ang": None,
+        "hamiltonian_units": EXPECTED_HAMILTONIAN_UNITS,
+        "displacement_units": EXPECTED_DISPLACEMENT_UNITS,
+        "derivative_units": EXPECTED_DERIVATIVE_UNITS,
+        "source": str(predicted_source or "").strip().lower(),
+        "matrix_hashes": {},
+        "validation_status": "valid" if predicted_finite else "invalid_nonfinite_derivative",
+        "operand_roles": ["direct_predicted_derivative"],
+        "plus_minus_support_changed": False,
+        "derivative_nnz": int(predicted_csr.nnz),
+        "derivative_density": sparse_density(predicted_csr),
+        "finite_values": predicted_finite,
+        "dH_hermiticity_defect": sparse_hermiticity_defect(predicted_csr),
+        "direct_prediction_metadata": dict(predicted_matrix_metadata or {}),
+    }
+    if metadata is not None:
+        predicted_metadata.update(
+            {
+                "sample_id": metadata.sample_id,
+                "base_sample_id": metadata.base_sample_id,
+                "atom_index_zero_based": metadata.atom_index_zero_based,
+                "axis": metadata.axis,
+                "axis_index": metadata.axis_index,
+                "claim_status": metadata.claim_status,
+            }
+        )
+    predicted = DerivativeMatrixResult(matrix=predicted_csr, metadata=predicted_metadata)
+
+    signal_to_noise = derivative_signal_to_noise_metrics(
+        method=method,
+        reference_plus=reference_plus,
+        reference_minus=reference_minus,
+        reference_base=reference_base,
+        predicted_plus=None,
+        predicted_minus=None,
+        predicted_base=None,
+    )
+    if not signal_to_noise.get("dh_signal_to_noise_unavailable_reason"):
+        signal_to_noise["dh_signal_to_noise_unavailable_reason"] = (
+            "direct_predicted_derivative_has_no_displaced_predictions"
+        )
+    diagnostics = {
+        **signal_to_noise,
+        "dH_ref_hermiticity_defect": reference.metadata["dH_hermiticity_defect"],
+        "dH_pred_hermiticity_defect": predicted.metadata["dH_hermiticity_defect"],
+        "plus_minus_support_changed": bool(reference.metadata["plus_minus_support_changed"]),
+        "reference_plus_minus_support_changed": reference.metadata["plus_minus_support_changed"],
+        "predicted_plus_minus_support_changed": False,
+        "derivative_nnz": int((reference.matrix != 0).maximum(predicted.matrix != 0).nnz),
+        "reference_derivative_nnz": reference.metadata["derivative_nnz"],
+        "predicted_derivative_nnz": predicted.metadata["derivative_nnz"],
+        "derivative_density": sparse_density(
+            ((reference.matrix != 0).maximum(predicted.matrix != 0)).tocsr()
+        ),
+        "reference_derivative_density": reference.metadata["derivative_density"],
+        "predicted_derivative_density": predicted.metadata["derivative_density"],
+        "finite_values": bool(
+            reference.metadata["finite_values"] and predicted.metadata["finite_values"]
+        ),
+        "reference_validation_status": reference.metadata["validation_status"],
+        "predicted_validation_status": predicted.metadata["validation_status"],
+        "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
+        "predicted_derivative_method": predicted_derivative_method,
+        "reference_delta_ang": float(delta_ang),
+        "predicted_delta_ang": None,
+    }
+    return DerivativeComparisonResult(reference=reference, predicted=predicted, diagnostics=diagnostics)
+
+
 def derivative_sparse_metrics(
     reference: sparse.spmatrix,
     predicted: sparse.spmatrix,
@@ -1021,12 +1213,19 @@ def discover_derivative_stencils(
     split: str = "all",
     finite_difference_method: str | None = None,
     require_central: bool = False,
+    require_ml_predictions: bool = True,
 ) -> list[DerivativeStencilDiscovery]:
     """Group existing result directories into finite-difference derivative stencils.
 
     The expected layout is the staged comparison layout:
     structures/<sample>/metadata.json, siesta_hamiltonians/<sample>/*.HSX|*.TSHS,
     and predicted_hamiltonians/<sample>/ML_prediction.HSX.
+
+    With ``require_ml_predictions=False`` the discovery skips the per-sample
+    ``ML_prediction.HSX`` requirement entirely: stencils then describe only the
+    SIESTA reference operands. This is used when the predicted derivative comes
+    from a direct (autograd) dH_pred/dR matrix instead of displaced ML
+    predictions.
     """
 
     result_dir = Path(result_dir)
@@ -1054,7 +1253,15 @@ def discover_derivative_stencils(
 
     samples = [
         sample
-        for sample in (_discover_sample(sample_dir, result_dir=result_dir, source_model=source_model) for sample_dir in sorted(structures_root.iterdir()))
+        for sample in (
+            _discover_sample(
+                sample_dir,
+                result_dir=result_dir,
+                source_model=source_model,
+                require_ml_predictions=require_ml_predictions,
+            )
+            for sample_dir in sorted(structures_root.iterdir())
+        )
         if sample is not None
     ]
     discoveries: list[DerivativeStencilDiscovery] = []
@@ -1111,7 +1318,17 @@ def discover_derivative_stencils(
             discoveries.append(_incomplete_discovery_for_group(group_key, plus, minus, base_match, requested_method or "central"))
             continue
         for method_name in methods:
-            discoveries.append(_build_discovered_stencil(group_key, method_name, plus, minus, base_match, source_model))
+            discoveries.append(
+                _build_discovered_stencil(
+                    group_key,
+                    method_name,
+                    plus,
+                    minus,
+                    base_match,
+                    source_model,
+                    require_predicted_operands=require_ml_predictions,
+                )
+            )
     return discoveries
 
 
@@ -1151,7 +1368,13 @@ class _DiscoveredDerivativeSample:
         )
 
 
-def _discover_sample(sample_dir: Path, *, result_dir: Path, source_model: str) -> _DiscoveredDerivativeSample | None:
+def _discover_sample(
+    sample_dir: Path,
+    *,
+    result_dir: Path,
+    source_model: str,
+    require_ml_predictions: bool = True,
+) -> _DiscoveredDerivativeSample | None:
     if not sample_dir.is_dir():
         return None
     sample_id = sample_dir.name
@@ -1210,19 +1433,22 @@ def _discover_sample(sample_dir: Path, *, result_dir: Path, source_model: str) -
         axis_index=axis_index,
         delta_ang=delta_ang,
     )
-    ml_matrix, ml_issue = _discover_prediction_matrix(
-        result_dir / "predicted_hamiltonians" / sample_id,
-        sample_id=sample_id,
-        source_model=source_model,
-        metadata=metadata,
-        matrix_shape=matrix_shape,
-        hash_values=hash_values,
-        atom_zero=atom_zero,
-        atom_one=atom_one,
-        axis=axis,
-        axis_index=axis_index,
-        delta_ang=delta_ang,
-    )
+    if require_ml_predictions:
+        ml_matrix, ml_issue = _discover_prediction_matrix(
+            result_dir / "predicted_hamiltonians" / sample_id,
+            sample_id=sample_id,
+            source_model=source_model,
+            metadata=metadata,
+            matrix_shape=matrix_shape,
+            hash_values=hash_values,
+            atom_zero=atom_zero,
+            atom_one=atom_one,
+            axis=axis,
+            axis_index=axis_index,
+            delta_ang=delta_ang,
+        )
+    else:
+        ml_matrix, ml_issue = None, None
     return _DiscoveredDerivativeSample(
         sample_id=sample_id,
         structure_dir=sample_dir,
@@ -1254,6 +1480,8 @@ def _build_discovered_stencil(
     minus: _DiscoveredDerivativeSample | None,
     base: _DiscoveredDerivativeSample | None,
     source_model: str,
+    *,
+    require_predicted_operands: bool = True,
 ) -> DerivativeStencilDiscovery:
     representative = plus or minus or base
     if representative is None:
@@ -1293,7 +1521,11 @@ def _build_discovered_stencil(
         plus_structure_path=plus.structure_path if plus else None,
         minus_structure_path=minus.structure_path if minus else None,
     )
-    issues = list(validate_derivative_stencil(stencil))
+    issues = list(
+        validate_derivative_stencil(
+            stencil, require_predicted_operands=require_predicted_operands
+        )
+    )
     issues.extend(_sample_matrix_issues(plus, minus, base))
     status = _discovery_status(issues)
     return DerivativeStencilDiscovery(
@@ -1960,10 +2192,14 @@ def sparse_value_dict(matrix: sparse.spmatrix, *, threshold: float = DERIVATIVE_
     }
 
 
-def validate_derivative_stencil(stencil: DerivativeStencil) -> list[DerivativeValidationIssue]:
+def validate_derivative_stencil(
+    stencil: DerivativeStencil,
+    *,
+    require_predicted_operands: bool = True,
+) -> list[DerivativeValidationIssue]:
     issues: list[DerivativeValidationIssue] = []
     _validate_metadata(stencil, issues)
-    _validate_operands(stencil, issues)
+    _validate_operands(stencil, issues, require_predicted_operands=require_predicted_operands)
     _validate_matrix_shapes(stencil, issues)
     _validate_operand_metadata(stencil, issues)
     _validate_comparability_hashes(stencil, issues)
@@ -2394,13 +2630,22 @@ def _validate_unit_metadata_explicit(
     )
 
 
-def _validate_operands(stencil: DerivativeStencil, issues: list[DerivativeValidationIssue]) -> None:
+def _validate_operands(
+    stencil: DerivativeStencil,
+    issues: list[DerivativeValidationIssue],
+    *,
+    require_predicted_operands: bool = True,
+) -> None:
     method = str(stencil.metadata.method or "").strip().lower()
     required_roles = {
         "central": ("siesta_plus", "siesta_minus", "ml_plus", "ml_minus"),
         "forward": ("siesta_base", "siesta_plus", "ml_base", "ml_plus"),
         "backward": ("siesta_base", "siesta_minus", "ml_base", "ml_minus"),
     }.get(method, ())
+    if not require_predicted_operands:
+        # Direct predicted derivatives (autograd) replace the displaced ML
+        # prediction operands; only the SIESTA reference stencil is required.
+        required_roles = tuple(role for role in required_roles if not role.startswith("ml_"))
     for role in required_roles:
         if stencil.matrix_inputs()[role] is None:
             _issue(issues, "error", "missing_derivative_operand", f"Missing required {method} derivative operand: {role}.", matrix_role=role)
