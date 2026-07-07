@@ -23,6 +23,7 @@ from .mixed_dataset_materialize import (
 )
 
 DEFAULT_MODES = ("add", "replace")
+VALID_SPLIT_POLICIES = {"resplit_combined", "fixed_common_test"}
 _SMALL_PREFIX = "small__"
 _LARGE_PREFIX = "large__"
 
@@ -33,6 +34,15 @@ LaunchFn = Callable[[dict[str, Any]], dict[str, Any]]
 
 def _ratio_slug(ratio: float) -> str:
     return f"r{ratio:.3f}".replace(".", "p")
+
+
+def _validate_split_policy(split_policy: str) -> str:
+    split_policy = str(split_policy or "resplit_combined")
+    if split_policy not in VALID_SPLIT_POLICIES:
+        raise ValueError(
+            f"Unknown split_policy {split_policy!r}; use 'resplit_combined' or 'fixed_common_test'."
+        )
+    return split_policy
 
 
 def plan_mixing_sweep(
@@ -97,6 +107,8 @@ def plan_mixing_sweep(
                         "ratio": float(part["ratio"]),
                         "ratio_semantics": part.get("ratio_semantics"),
                         "large_capped": part.get("large_capped"),
+                        "n_reserved_small": part.get("n_reserved_small", 0),
+                        "replace_cap_reasons": part.get("replace_cap_reasons", []),
                         "n_small_available": small_counts[size],
                         "n_large_available": large_counts[size],
                         "n_small_selected": total - n_large,
@@ -170,6 +182,7 @@ def plan_mixing_sweep_from_roots(
     reserve the common-test small snapshots (same as ``run_mixing_sweep``), so
     the preview matches what materialization will actually build.
     """
+    split_policy = _validate_split_policy(split_policy)
     small_counts = {int(k): len(read_dataset_samples(v)) for k, v in small_by_size.items()}
     large_counts = {int(k): len(read_dataset_samples(v)) for k, v in large_by_size.items()}
     reserved = None
@@ -261,9 +274,16 @@ def run_mixing_sweep(
     output_root = Path(output_root)
     small_by_size = {int(k): Path(v) for k, v in small_by_size.items()}
     large_by_size = {int(k): Path(v) for k, v in large_by_size.items()}
+    split_policy = _validate_split_policy(split_policy)
 
     plan = plan_mixing_sweep_from_roots(
-        small_by_size, large_by_size, sizes=sizes, modes=modes, ratios=ratios, seed=seed
+        small_by_size,
+        large_by_size,
+        sizes=sizes,
+        modes=modes,
+        ratios=ratios,
+        seed=seed,
+        split_policy=split_policy,
     )
 
     records: list[dict[str, Any]] = []
@@ -310,6 +330,8 @@ def run_mixing_sweep(
                     "ratio": ratio,
                     "ratio_semantics": part.get("ratio_semantics"),
                     "large_capped": part.get("large_capped"),
+                    "n_reserved_small": part.get("n_reserved_small", 0),
+                    "replace_cap_reasons": part.get("replace_cap_reasons", []),
                     "total_size": int(part["n_selected"]),
                     "n_small_selected": len(selected_small),
                     "n_large_selected": len(selected_large),

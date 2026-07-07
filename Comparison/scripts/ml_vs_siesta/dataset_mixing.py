@@ -20,7 +20,9 @@ _ID_KEYS = ("id", "sample_id", "name", "path")
 # ``ratio`` means different things per mode; expose it explicitly so plots and
 # provenance are never ambiguous.
 RATIO_SEMANTICS_ADD = "fraction_of_large_pool_added"
-RATIO_SEMANTICS_REPLACE = "fraction_of_small_pool_replaced_capped_by_available_large"
+RATIO_SEMANTICS_REPLACE = (
+    "fraction_of_small_pool_replaced_capped_by_available_large_and_reserved_small_test"
+)
 
 
 def ratio_semantics_for_mode(mode: str | None) -> str | None:
@@ -28,7 +30,8 @@ def ratio_semantics_for_mode(mode: str | None) -> str | None:
 
     ``add`` interprets ``ratio`` as a fraction of the large pool that is
     appended; ``replace`` as a fraction of the small pool that is swapped for
-    large (capped by the available large pool). Unknown/None modes return None.
+    large (capped by available large samples and any reserved fixed-test small
+    samples). Unknown/None modes return None.
     """
     if mode == "add":
         return RATIO_SEMANTICS_ADD
@@ -89,6 +92,8 @@ def _select_manifest_for_ratio(
 ) -> dict[str, Any]:
     large_capped = False
     reserved_small_ids = set(reserved_small_ids or ())
+    n_reserved_small = 0
+    replace_cap_reasons: list[str] = []
     if mode == "add":
         # Keep all small samples, add a fraction of the large ones.
         n_large = round(ratio * len(large_ids))
@@ -98,10 +103,15 @@ def _select_manifest_for_ratio(
         # Keep total size constant: replace a fraction of small samples with large.
         # Reserved small ids (fixed common test) are never replaced.
         total = len(small_ids)
+        n_reserved_small = len(reserved_small_ids & set(small_ids))
         replaceable_small = [sid for sid in small_ids if sid not in reserved_small_ids]
         requested_replace = round(ratio * total)
         n_replace = min(requested_replace, len(replaceable_small), len(large_ids))
         large_capped = requested_replace > min(len(replaceable_small), len(large_ids))
+        if requested_replace > len(large_ids):
+            replace_cap_reasons.append("available_large")
+        if requested_replace > len(replaceable_small):
+            replace_cap_reasons.append("reserved_small_test")
         chosen_large = sorted(rng.sample(large_ids, n_replace)) if n_replace else []
         # Sample (not prefix-slice) the retained small ids: manifest order encodes
         # MD time/temperature/seed, so a prefix would bias the retained pool.
@@ -116,6 +126,8 @@ def _select_manifest_for_ratio(
         "mode": mode,
         "ratio_semantics": ratio_semantics_for_mode(mode),
         "large_capped": large_capped,
+        "n_reserved_small": n_reserved_small,
+        "replace_cap_reasons": replace_cap_reasons,
         "n_selected": len(selected),
         "n_large_selected": len(chosen_large),
         "selected_ids": selected,
@@ -142,11 +154,11 @@ def make_mixed_dataset_manifest(
     Ratio semantics are exposed per partition as ``ratio_semantics`` and differ
     by mode: ``add`` -> ``"fraction_of_large_pool_added"`` (number of large
     samples is ``round(ratio * len(large))``); ``replace`` ->
-    ``"fraction_of_small_pool_replaced_capped_by_available_large"`` (number of
-    replaced small samples is ``round(ratio * len(small))``, capped by the
-    available large pool). When that cap kicks in (``ratio=1.0`` with fewer
-    large than small samples does NOT give 100% large), the partition flags it
-    with ``large_capped == True``.
+    ``"fraction_of_small_pool_replaced_capped_by_available_large_and_reserved_small_test"``
+    (number of replaced small samples is ``round(ratio * len(small))``, capped
+    by the available large pool and any reserved fixed-test small samples). When
+    a cap kicks in, the partition flags it with ``large_capped == True`` and
+    lists ``replace_cap_reasons``.
 
     ``reserved_small_ids`` is optional and only affects ``replace``: those small
     samples are kept in every partition (used by ``fixed_common_test``).

@@ -365,7 +365,9 @@ def test_ratio_semantics_and_large_capped_exposed():
     large = [{"id": f"l{i}"} for i in range(4)]  # fewer large than small
     expected_semantics = {
         "add": "fraction_of_large_pool_added",
-        "replace": "fraction_of_small_pool_replaced_capped_by_available_large",
+        "replace": (
+            "fraction_of_small_pool_replaced_capped_by_available_large_and_reserved_small_test"
+        ),
     }
     for mode in ("add", "replace"):
         manifest = mvs.make_mixed_dataset_manifest(
@@ -385,6 +387,16 @@ def test_ratio_semantics_and_large_capped_exposed():
     perm = plan["permutations"][0]
     assert perm["ratio_semantics"] == expected_semantics["replace"]
     assert perm["large_capped"] is True
+    reserved = mvs.make_mixed_dataset_manifest(
+        small,
+        large,
+        ratios=(1.0,),
+        mode="replace",
+        seed=0,
+        reserved_small_ids={"s0", "s1"},
+    )["partitions"][0]
+    assert reserved["n_reserved_small"] == 2
+    assert set(reserved["replace_cap_reasons"]) == {"available_large", "reserved_small_test"}
 
 
 def _compo(permutations):
@@ -419,6 +431,20 @@ def test_preview_matches_materialization_for_fixed_common_test_replace(small_lar
     # so it is NOT 100% large (this is exactly what would mismatch without the
     # split_policy-aware preview).
     assert preview[("replace", 1.0)][1] < 8
+
+
+def test_mixing_plan_rejects_invalid_split_policy(small_large):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    with pytest.raises(ValueError, match="Unknown split_policy"):
+        mvs.plan_mixing_sweep_from_roots(
+            {8: str(small)}, {8: str(large)}, split_policy="bogus"
+        )
+    with pytest.raises(ValueError, match="Unknown split_policy"):
+        ui.mixing_plan_payload(
+            {"small": {"8": str(small)}, "large": {"8": str(large)}, "split_policy": "bogus"}
+        )
 
 
 def test_cli_mixing_sweep_accepts_split_policy(small_large, tmp_path):
