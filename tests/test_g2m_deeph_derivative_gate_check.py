@@ -126,6 +126,11 @@ class DerivativeGateCheckTests(unittest.TestCase):
                 "invalid_geometry",
                 "geometry_validation_failed",
                 "comparison_status",
+                "deeph_prediction_method",
+                "deeph_raw_global_equivalence_proven",
+                "deeph_diagnostic_only",
+                "deeph_equivalence_status",
+                "deeph_equivalence_scope",
                 "dh_mae_union_eV_per_Ang",
                 "dh_rmse_union_eV_per_Ang",
                 "dh_relative_frobenius_ref",
@@ -387,6 +392,63 @@ class DerivativeGateCheckTests(unittest.TestCase):
 
         self.assertEqual(report["scientific_status"], "internal_diagnostic")
         self.assertIn("diagnostic-only", " ".join(report["allowed_claims"]).lower())
+
+    def test_deeph_autograd_unproven_equivalence_stays_internal_diagnostic(self) -> None:
+        self.derivative_root = self.root / "deeph_eval" / "derivative_metrics"
+        self.write_fixture(
+            manifest_overrides={
+                "deeph_prediction_method": "autograd_vectorized",
+                "deeph_diagnostic_only": True,
+                "deeph_all_raw_global_equivalence_proven": False,
+                "deeph_raw_global_equivalence_proven_count": 0,
+                "deeph_raw_global_equivalence_total": 1,
+            },
+            metric_rows=[
+                {
+                    "sample": "sample_0",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.01,
+                    "finite_difference_method": "central",
+                    "source_model": "deeph",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "deeph_prediction_method": "autograd_vectorized",
+                    "deeph_raw_global_equivalence_proven": False,
+                    "deeph_diagnostic_only": True,
+                    "deeph_equivalence_status": "unproven",
+                    "deeph_equivalence_scope": "deeph_processed_blockwise_global_hdf5",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                }
+            ],
+            hermiticity_rows=[
+                {
+                    "sample": "sample_0",
+                    "finite_difference_method": "central",
+                    "source_model": "deeph",
+                    "reference_source": "siesta",
+                    "dH_ref_hermiticity_defect": 0.0,
+                    "dH_pred_hermiticity_defect": 0.0,
+                    "dH_hermiticity_error_delta": 0.0,
+                    "finite_values": True,
+                }
+            ],
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "internal_diagnostic")
+        self.assertIn("deeph_autograd_equivalence_not_proven", {row["id"] for row in report["warnings"]})
 
     def test_paper_level_blocked_without_delta_sweep(self) -> None:
         self.write_fixture(

@@ -1551,6 +1551,67 @@ pre {
   margin-top: 2px;
 }
 
+.mix-payload-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted-strong);
+}
+
+.mix-payload-group summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.mix-payload-group summary input {
+  margin-top: 3px;
+}
+
+.mix-payload-group summary strong,
+.mix-run-option strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mix-payload-group summary span,
+.mix-run-option span {
+  display: block;
+  min-width: 0;
+}
+
+.mix-run-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  padding: 0 10px 10px 28px;
+}
+
+.mix-run-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.mix-run-option input {
+  margin-top: 3px;
+}
+
 .muted-text {
   color: var(--muted);
   font-size: 13px;

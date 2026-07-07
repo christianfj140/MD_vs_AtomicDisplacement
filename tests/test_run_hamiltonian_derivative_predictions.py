@@ -532,6 +532,46 @@ class DerivativePredictionStageTests(unittest.TestCase):
         self.assertEqual(matrix.shape, (2, 2))
         self.assertAlmostEqual(matrix[0, 0], 10.0)
 
+    def test_reconstruction_selects_deeph_gradient_block_component(self) -> None:
+        import h5py
+        import numpy as np
+        from scipy import sparse
+
+        processed = self.root / "processed_grad"
+        processed.mkdir(parents=True, exist_ok=True)
+        (processed / "orbital_types.dat").write_text("0\n0\n", encoding="utf-8")
+        (processed / "R_list.dat").write_text("0 0 0\n", encoding="utf-8")
+        prediction_h5 = processed / "hamiltonians_grad_pred.h5"
+        block = np.zeros((1, 1, 2, 3), dtype=float)
+        block[0, 0, 1, 2] = 42.0
+        with h5py.File(prediction_h5, "w") as handle:
+            handle.create_dataset("[0, 0, 0, 1, 2]", data=block)
+
+        siesta_ref = self.root / "siesta_reference_grad"
+        siesta_ref.mkdir(parents=True, exist_ok=True)
+        (siesta_ref / "ref.ORB_INDX").write_text("stub\n", encoding="utf-8")
+        output_path = self.root / "dH_pred_atom1_axis2.npz"
+
+        with mock.patch(
+            "run_hamiltonian_derivative_predictions.siesta_reference_supercell_order",
+            return_value=([(0, 0, 0)], siesta_ref / "ref.HSX"),
+        ), mock.patch(
+            "run_hamiltonian_derivative_predictions.derive_deeph_to_siesta_basis_transform",
+            return_value={"permutation": [0, 1], "signs": [1.0, 1.0]},
+        ):
+            info = reconstruct_deeph_sparse_layout_prediction(
+                prediction_h5=prediction_h5,
+                processed_sample_dir=processed,
+                siesta_reference_dir=siesta_ref,
+                output_path=output_path,
+                block_transform=lambda raw: np.asarray(raw)[..., 1, 2],
+            )
+
+        self.assertEqual(info["blocks_placed"], 1)
+        matrix = sparse.load_npz(output_path).tocsr().toarray()
+        self.assertEqual(matrix.shape, (2, 2))
+        self.assertAlmostEqual(matrix[0, 1], 42.0)
+
     def test_reconstruction_swaps_cleanly_reversed_deeph_derivative_pair(self) -> None:
         import h5py
         import numpy as np

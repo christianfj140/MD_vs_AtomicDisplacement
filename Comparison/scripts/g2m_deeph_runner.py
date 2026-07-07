@@ -121,8 +121,13 @@ DEFAULT_DERIVATIVE_PREDICTION_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "r
 DEFAULT_AUTOGRAD_DERIVATIVE_PREDICTION_SCRIPT = (
     REPO_ROOT / "Comparison" / "scripts" / "run_graph2mat_autograd_derivative_predictions.py"
 )
+DEFAULT_DEEPH_AUTOGRAD_DERIVATIVE_PREDICTION_SCRIPT = (
+    REPO_ROOT / "Comparison" / "scripts" / "run_deeph_autograd_derivative_predictions.py"
+)
 AUTOGRAD_DERIVATIVE_PREDICTION_MANIFEST = "derivative_graph2mat_autograd_prediction_manifest.json"
+DEEPH_AUTOGRAD_DERIVATIVE_PREDICTION_MANIFEST = "derivative_deeph_autograd_prediction_manifest.json"
 VALID_GRAPH2MAT_DERIVATIVE_PREDICTION_METHODS = {"finite_difference", "autograd_vectorized"}
+VALID_DEEPH_DERIVATIVE_PREDICTION_METHODS = {"finite_difference", "autograd_vectorized"}
 DEFAULT_DEEPH_KPOINT_METRICS_SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_deeph_kpoint_metrics.py"
 DEEPH_PACK_ROOT_ENV = "DEEPH_PACK_ROOT"
 DEEPH_CLI_NAMES = ("deeph-preprocess", "deeph-train", "deeph-inference")
@@ -1443,6 +1448,9 @@ def _derivative_metrics_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "graph2mat_prediction_method": str(
             raw.get("graph2mat_prediction_method") or "finite_difference"
         ).strip().lower(),
+        "deeph_prediction_method": str(
+            raw.get("deeph_prediction_method") or "finite_difference"
+        ).strip().lower(),
     }
 
 
@@ -1526,6 +1534,9 @@ def _normalize_derivative_workflow_config(payload: dict[str, Any]) -> dict[str, 
     config["axes"] = _normalize_optional_string_list(raw.get("axes"), field="derivative.axes")
     config["graph2mat_prediction_method"] = str(
         raw.get("graph2mat_prediction_method") or "finite_difference"
+    ).strip().lower()
+    config["deeph_prediction_method"] = str(
+        raw.get("deeph_prediction_method") or "finite_difference"
     ).strip().lower()
     return config
 
@@ -1657,6 +1668,15 @@ def _validate_derivative_workflow_config(stages: dict[str, bool], config: dict[s
             + ", ".join(sorted(VALID_GRAPH2MAT_DERIVATIVE_PREDICTION_METHODS))
             + "."
         )
+    deeph_prediction_method = str(
+        config.get("deeph_prediction_method") or "finite_difference"
+    ).strip().lower()
+    if deeph_prediction_method not in VALID_DEEPH_DERIVATIVE_PREDICTION_METHODS:
+        raise RuntimeError(
+            "derivative.deeph_prediction_method must be one of: "
+            + ", ".join(sorted(VALID_DEEPH_DERIVATIVE_PREDICTION_METHODS))
+            + "."
+        )
 
     if stages.get("build_derivative_stencils"):
         _require_derivative_field(config, "source_dataset_root", stage="build_derivative_stencils")
@@ -1760,6 +1780,11 @@ def _derivative_metric_command_args(
     ).strip().lower()
     if source_model == "graph2mat" and graph2mat_prediction_method != "finite_difference":
         command.extend(["--graph2mat-prediction-method", graph2mat_prediction_method])
+    deeph_prediction_method = str(
+        settings.get("deeph_prediction_method") or "finite_difference"
+    ).strip().lower()
+    if source_model == "deeph" and deeph_prediction_method != "finite_difference":
+        command.extend(["--deeph-prediction-method", deeph_prediction_method])
     return command
 
 
@@ -8060,6 +8085,112 @@ class Graph2MatDeepHBenchmarkRunner:
             },
         )
 
+    def _run_deeph_autograd_derivative_prediction_stage(
+        self,
+        payload: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        model_root: Path,
+        overwrite: bool,
+        skip_if_exists: bool,
+        diagnostic_only: bool,
+        python_executable: str,
+        graph2mat_context: "Graph2MatBenchmarkContext | None",
+        deeph_context: "DeepHBenchmarkContext | None",
+        mark: Any,
+    ) -> None:
+        """Run direct DeepH dH_pred/dR from hamiltonians_grad_pred.h5."""
+
+        output_root = self._derivative_path(config, "deeph_prediction_root") or (
+            model_root / "predicted_derivative_hamiltonians"
+        )
+        manifest_path = output_root / DEEPH_AUTOGRAD_DERIVATIVE_PREDICTION_MANIFEST
+        if skip_if_exists and not overwrite and manifest_path.exists():
+            self._check_derivative_manifest(
+                manifest_path,
+                stage="predict_derivative_deeph",
+                fail_on_samples_failed=not diagnostic_only,
+            )
+            mark(
+                "predict_derivative_deeph",
+                {
+                    "status": "skipped_existing",
+                    "manifest": str(manifest_path),
+                    "deeph_prediction_method": "autograd_vectorized",
+                },
+            )
+            return
+
+        model_dir = self._derivative_path(config, "deeph_model_dir")
+        source = "configured_deeph_model_dir"
+        if model_dir is None:
+            model_dir = self._require_inferred_derivative_model_artifact(
+                "deeph",
+                graph2mat_context=graph2mat_context,
+                deeph_context=deeph_context,
+            )
+            source = "inferred_h_workflow_model_dir"
+
+        deeph_command = config.get("deeph_command")
+        if deeph_command in (None, ""):
+            deeph_command = self._deeph_command(payload, "deeph-inference")
+        if deeph_command not in (None, "") and any(token in str(deeph_command) for token in ("{stencil_root}", "{output_root}", "{model_dir}")):
+            raise RuntimeError(
+                "derivative.deeph_prediction_method='autograd_vectorized' requires "
+                "derivative.deeph_command to be a DeepH CLI path, not an external template."
+            )
+
+        command = [
+            python_executable,
+            str(DEFAULT_DEEPH_AUTOGRAD_DERIVATIVE_PREDICTION_SCRIPT),
+            "--stencil-root",
+            str(model_root),
+            "--output-root",
+            str(output_root),
+            "--model-dir",
+            str(model_dir),
+            "--python-executable",
+            python_executable,
+        ]
+        if deeph_command not in (None, ""):
+            command.extend(["--deeph-command", str(deeph_command)])
+        if overwrite:
+            command.append("--overwrite")
+        command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
+        max_samples = (
+            config.get("max_samples")
+            if config.get("max_samples") not in (None, "")
+            else config.get("max_jobs")
+        )
+        if max_samples not in (None, ""):
+            command.extend(["--max-base-structures", str(max_samples)])
+
+        record = self._run_derivative_stage_command(
+            command,
+            payload=payload,
+            label="Derivative deeph autograd dH/dR predictions",
+            allowed_returncodes=(0, 2) if diagnostic_only else (0,),
+        )
+        manifest = self._check_derivative_manifest(
+            manifest_path,
+            stage="predict_derivative_deeph",
+            fail_on_samples_failed=not diagnostic_only,
+        )
+        mark(
+            "predict_derivative_deeph",
+            {
+                **record,
+                "status": "completed",
+                "manifest": manifest,
+                "deeph_prediction_method": "autograd_vectorized",
+                "model_artifact": {
+                    "model": "deeph",
+                    "source": source,
+                    "model_dir": str(model_dir),
+                },
+            },
+        )
+
     def _run_modular_derivative_workflow(
         self,
         payload: dict[str, Any],
@@ -8266,6 +8397,9 @@ class Graph2MatDeepHBenchmarkRunner:
         graph2mat_prediction_method = str(
             config.get("graph2mat_prediction_method") or "finite_difference"
         ).strip().lower()
+        deeph_prediction_method = str(
+            config.get("deeph_prediction_method") or "finite_difference"
+        ).strip().lower()
         for model in ("graph2mat", "deeph"):
             if not stages.get(f"predict_derivative_{model}"):
                 continue
@@ -8273,6 +8407,20 @@ class Graph2MatDeepHBenchmarkRunner:
             self._materialize_derivative_model_root(common_root, model_root)
             if model == "graph2mat" and graph2mat_prediction_method == "autograd_vectorized":
                 self._run_autograd_derivative_prediction_stage(
+                    payload,
+                    config=config,
+                    model_root=model_root,
+                    overwrite=overwrite,
+                    skip_if_exists=skip_if_exists,
+                    diagnostic_only=diagnostic_only,
+                    python_executable=python_executable,
+                    graph2mat_context=graph2mat_context,
+                    deeph_context=deeph_context,
+                    mark=mark,
+                )
+                continue
+            if model == "deeph" and deeph_prediction_method == "autograd_vectorized":
+                self._run_deeph_autograd_derivative_prediction_stage(
                     payload,
                     config=config,
                     model_root=model_root,
@@ -8411,6 +8559,8 @@ class Graph2MatDeepHBenchmarkRunner:
             }
             if model == "graph2mat":
                 settings["graph2mat_prediction_method"] = graph2mat_prediction_method
+            if model == "deeph":
+                settings["deeph_prediction_method"] = deeph_prediction_method
             if skip_if_exists and not overwrite and manifest_path.exists():
                 metric_roots[model] = output_dir
                 mark(f"derivative_metrics_{model}", {"status": "skipped_existing", "manifest": str(manifest_path)})

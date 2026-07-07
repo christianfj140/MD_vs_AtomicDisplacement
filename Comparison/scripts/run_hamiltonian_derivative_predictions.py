@@ -509,6 +509,7 @@ def reconstruct_deeph_sparse_layout_prediction(
     processed_sample_dir: Path,
     siesta_reference_dir: Path,
     output_path: Path,
+    block_transform: Any | None = None,
 ) -> dict[str, Any]:
     import h5py
     import numpy as np
@@ -553,6 +554,8 @@ def reconstruct_deeph_sparse_layout_prediction(
             row_slice = slice(int(offsets[atom_i]), int(offsets[atom_i + 1]))
             col_slice = slice(int(offsets[atom_j]), int(offsets[atom_j + 1]))
             block = np.asarray(handle[key][()])
+            if block_transform is not None:
+                block = np.asarray(block_transform(block))
             row_perm = permutation[row_slice] - int(offsets[atom_i])
             col_perm = permutation[col_slice] - int(offsets[atom_j])
             row_sign = signs[row_slice]

@@ -24,11 +24,15 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DERIVATIVE_SUPPORT_THRESHOLD,
+    DEEPH_PREDICTION_METHOD_AUTOGRAD,
+    DEEPH_PREDICTION_METHOD_FINITE_DIFFERENCE,
     EXPECTED_DERIVATIVE_UNITS,
     GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD,
     GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
+    PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH,
     PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
     REFERENCE_DERIVATIVE_METHOD_SIESTA,
+    VALID_DEEPH_PREDICTION_METHODS,
     VALID_GRAPH2MAT_PREDICTION_METHODS,
     DerivativeMatrixInput,
     DerivativeMetadata,
@@ -113,6 +117,17 @@ DERIVATIVE_SIGNAL_TO_NOISE_FIELDS = [
     "dh_signal_to_noise_ratio",
     "dh_signal_below_noise_floor",
     "dh_signal_to_noise_unavailable_reason",
+]
+DEEPH_EQUIVALENCE_FIELDS = [
+    "claim_status",
+    "deeph_adapter_equivalence_status",
+    "deeph_equivalence_status",
+    "deeph_equivalence_scope",
+    "deeph_equivalence_reason",
+    "deeph_equivalence_evidence_paths",
+    "deeph_raw_global_equivalence_proven",
+    "deeph_diagnostic_only",
+    "deeph_diagnostic_reason",
 ]
 GEOMETRY_VALIDATION_FIELDS = [
     "sample",
@@ -211,6 +226,14 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> 
         writer.writerows([{key: json_safe(value) for key, value in row.items()} for row in rows])
 
 
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def ensure_output_dir(output_dir: Path, *, overwrite: bool) -> None:
     if output_dir.exists() and any(output_dir.iterdir()):
         if not overwrite:
@@ -251,24 +274,50 @@ def evaluate_derivative_metrics(
     output_dir: Path | None = None,
     source_model: str = "graph2mat",
     graph2mat_prediction_method: str = GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
+    deeph_prediction_method: str = DEEPH_PREDICTION_METHOD_FINITE_DIFFERENCE,
 ) -> dict[str, Any]:
     result_dir = Path(result_dir)
     output_dir = Path(output_dir) if output_dir is not None else result_dir / "derivative_metrics"
+    source_model = str(source_model or "").strip().lower()
 
     graph2mat_prediction_method = str(
         graph2mat_prediction_method or GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE
+    ).strip().lower()
+    deeph_prediction_method = str(
+        deeph_prediction_method or DEEPH_PREDICTION_METHOD_FINITE_DIFFERENCE
     ).strip().lower()
     if graph2mat_prediction_method not in VALID_GRAPH2MAT_PREDICTION_METHODS:
         raise DerivativeMetricEvaluationError(
             f"Unsupported graph2mat_prediction_method {graph2mat_prediction_method!r}. "
             f"Use one of: {', '.join(sorted(VALID_GRAPH2MAT_PREDICTION_METHODS))}."
         )
-    direct_prediction_mode = graph2mat_prediction_method == GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD
-    if direct_prediction_mode and source_model != "graph2mat":
+    if deeph_prediction_method not in VALID_DEEPH_PREDICTION_METHODS:
+        raise DerivativeMetricEvaluationError(
+            f"Unsupported deeph_prediction_method {deeph_prediction_method!r}. "
+            f"Use one of: {', '.join(sorted(VALID_DEEPH_PREDICTION_METHODS))}."
+        )
+    graph2mat_direct_mode = (
+        source_model == "graph2mat" and graph2mat_prediction_method == GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD
+    )
+    deeph_direct_mode = source_model == "deeph" and deeph_prediction_method == DEEPH_PREDICTION_METHOD_AUTOGRAD
+    direct_prediction_mode = graph2mat_direct_mode or deeph_direct_mode
+    if graph2mat_prediction_method == GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD and source_model != "graph2mat":
         raise DerivativeMetricEvaluationError(
             "graph2mat_prediction_method='autograd_vectorized' only applies to "
             f"source_model='graph2mat', got source_model={source_model!r}."
         )
+    if deeph_prediction_method == DEEPH_PREDICTION_METHOD_AUTOGRAD and source_model != "deeph":
+        raise DerivativeMetricEvaluationError(
+            "deeph_prediction_method='autograd_vectorized' only applies to "
+            f"source_model='deeph', got source_model={source_model!r}."
+        )
+    predicted_derivative_method = (
+        PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT
+        if graph2mat_direct_mode
+        else PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH
+        if deeph_direct_mode
+        else f"finite_difference_{source_model}"
+    )
     ensure_output_dir(output_dir, overwrite=overwrite)
 
     discoveries = discover_derivative_stencils(
@@ -300,6 +349,9 @@ def evaluate_derivative_metrics(
             diagnostic_only=diagnostic_only,
             result_dir=result_dir,
             direct_prediction_mode=direct_prediction_mode,
+            predicted_derivative_method=predicted_derivative_method,
+            graph2mat_prediction_method=graph2mat_prediction_method,
+            deeph_prediction_method=deeph_prediction_method,
         )
         stencil_rows.append(row)
         metric_rows.extend(metrics)
@@ -313,6 +365,11 @@ def evaluate_derivative_metrics(
     stencils_total = len(discoveries)
     stencils_ok = len(metric_rows)
     stencils_failed = stencils_total - stencils_ok
+    deeph_equivalence = _deeph_equivalence_summary(
+        source_model=source_model,
+        deeph_prediction_method=deeph_prediction_method,
+        metric_rows=metric_rows,
+    )
     scientific_status = _scientific_status(
         method=method,
         diagnostic_only=diagnostic_only,
@@ -321,6 +378,7 @@ def evaluate_derivative_metrics(
         stencils_failed=stencils_failed,
         metric_rows=metric_rows,
         fatal_errors=fatal_errors,
+        deeph_equivalence=deeph_equivalence,
     )
     delta_stability = _delta_stability_summary(metric_rows)
     delta_stability_convergence = _delta_stability_convergence_summary(delta_stability)
@@ -354,11 +412,6 @@ def evaluate_derivative_metrics(
         "derivative_group_metrics": str(output_dir / "derivative_group_metrics.json"),
         "derivative_onsite_offsite_metrics": str(output_dir / "derivative_onsite_offsite_metrics.json"),
     }
-    predicted_derivative_method = (
-        PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT
-        if direct_prediction_mode
-        else f"finite_difference_{source_model}"
-    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "scientific_status": scientific_status,
@@ -371,6 +424,7 @@ def evaluate_derivative_metrics(
         "graph2mat_prediction_method": graph2mat_prediction_method
         if source_model == "graph2mat"
         else None,
+        "deeph_prediction_method": deeph_prediction_method if source_model == "deeph" else None,
         "predicted_delta_ang": None if direct_prediction_mode else "per_stencil_delta_ang",
         "derivative_units": EXPECTED_DERIVATIVE_UNITS,
         "result_dir": str(result_dir),
@@ -393,6 +447,7 @@ def evaluate_derivative_metrics(
         "warnings": warnings,
         "fatal_errors": fatal_errors,
         "outputs": outputs,
+        **deeph_equivalence,
     }
 
     write_csv(output_dir / "stencil_status.csv", STATUS_FIELDS, stencil_rows)
@@ -421,6 +476,9 @@ def _evaluate_discovery(
     diagnostic_only: bool,
     result_dir: Path | None = None,
     direct_prediction_mode: bool = False,
+    predicted_derivative_method: str = PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
+    graph2mat_prediction_method: str = GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
+    deeph_prediction_method: str = DEEPH_PREDICTION_METHOD_FINITE_DIFFERENCE,
 ) -> tuple[
     list[Any] | dict[str, Any],
     list[dict[str, Any]],
@@ -493,6 +551,7 @@ def _evaluate_discovery(
             return status_row, metric_rows, quantile_rows, sweep_rows, hermiticity_rows, geometry_row, warnings, fatal_errors
         metadata = _metadata_for_status(stencil.metadata, diagnostic_only=diagnostic_only)
         direct_prediction_path: Path | None = None
+        direct_metadata: dict[str, Any] = {}
         if direct_prediction_mode:
             candidate_base_ids = [
                 str(metadata.base_sample_id or ""),
@@ -512,7 +571,7 @@ def _evaluate_discovery(
                         discovery,
                         "missing_direct_derivative_prediction",
                         "No direct dH_pred/dR matrix was found for this stencil; "
-                        "run run_graph2mat_autograd_derivative_predictions.py first.",
+                        f"run the {source_model} autograd derivative prediction stage first.",
                         candidate_base_sample_ids=[c for c in candidate_base_ids if c],
                     )
                 )
@@ -526,6 +585,7 @@ def _evaluate_discovery(
                 reference_base=loaded.get("siesta_base"),
                 predicted_matrix=predicted_matrix,
                 predicted_source=source_model,
+                predicted_derivative_method=predicted_derivative_method,
                 reference_hashes=_matrix_hashes(stencil, prefix="siesta"),
                 predicted_matrix_metadata=direct_metadata,
                 metadata=metadata,
@@ -563,24 +623,22 @@ def _evaluate_discovery(
                 "reference_plus_minus_support_changed": bool(pair.diagnostics.get("reference_plus_minus_support_changed")),
                 "predicted_plus_minus_support_changed": bool(pair.diagnostics.get("predicted_plus_minus_support_changed")),
                 "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
-                "predicted_derivative_method": (
-                    PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT
-                    if direct_prediction_mode
-                    else f"finite_difference_{source_model}"
-                ),
+                "predicted_derivative_method": predicted_derivative_method,
                 "reference_delta_ang": float(metadata.delta_ang),
                 "predicted_delta_ang": None if direct_prediction_mode else float(metadata.delta_ang),
                 "graph2mat_prediction_method": (
-                    (
-                        GRAPH2MAT_PREDICTION_METHOD_AUTOGRAD
-                        if direct_prediction_mode
-                        else GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE
-                    )
-                    if source_model == "graph2mat"
-                    else None
+                    graph2mat_prediction_method if source_model == "graph2mat" else None
                 ),
+                "deeph_prediction_method": deeph_prediction_method if source_model == "deeph" else None,
                 "direct_prediction_path": str(direct_prediction_path) if direct_prediction_path else "",
             }
+        )
+        row.update(
+            _deeph_direct_equivalence_fields(
+                source_model=source_model,
+                direct_prediction_mode=direct_prediction_mode,
+                direct_metadata=direct_metadata,
+            )
         )
         row.update(
             {
@@ -686,6 +744,75 @@ def _metadata_for_status(metadata: DerivativeMetadata, *, diagnostic_only: bool)
     return metadata
 
 
+def _deeph_direct_equivalence_fields(
+    *,
+    source_model: str,
+    direct_prediction_mode: bool,
+    direct_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    if source_model != "deeph" or not direct_prediction_mode:
+        return {}
+    proven = truthy(direct_metadata.get("deeph_raw_global_equivalence_proven"))
+    diagnostic_only = truthy(direct_metadata.get("deeph_diagnostic_only")) if "deeph_diagnostic_only" in direct_metadata else not proven
+    evidence_paths = direct_metadata.get("deeph_equivalence_evidence_paths") or []
+    if isinstance(evidence_paths, str):
+        evidence_text = evidence_paths
+    else:
+        evidence_text = ";".join(str(path) for path in evidence_paths if str(path))
+    return {
+        "claim_status": direct_metadata.get("claim_status") or ("raw_global_equivalence_proven" if proven else "diagnostic_only"),
+        "deeph_adapter_equivalence_status": direct_metadata.get("deeph_adapter_equivalence_status") or "",
+        "deeph_equivalence_status": direct_metadata.get("deeph_equivalence_status") or ("proven" if proven else "unproven"),
+        "deeph_equivalence_scope": direct_metadata.get("deeph_equivalence_scope") or "",
+        "deeph_equivalence_reason": direct_metadata.get("deeph_equivalence_reason") or "",
+        "deeph_equivalence_evidence_paths": evidence_text,
+        "deeph_raw_global_equivalence_proven": proven,
+        "deeph_diagnostic_only": diagnostic_only,
+        "deeph_diagnostic_reason": direct_metadata.get("deeph_diagnostic_reason") or ("" if proven else "deeph_raw_global_equivalence_not_proven"),
+    }
+
+
+def _deeph_equivalence_summary(
+    *,
+    source_model: str,
+    deeph_prediction_method: str,
+    metric_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if source_model != "deeph" or deeph_prediction_method != DEEPH_PREDICTION_METHOD_AUTOGRAD:
+        return {}
+    total = len(metric_rows)
+    proven_count = sum(1 for row in metric_rows if truthy(row.get("deeph_raw_global_equivalence_proven")))
+    all_proven = total > 0 and proven_count == total
+    diagnostic_only = (not all_proven) or any(truthy(row.get("deeph_diagnostic_only")) for row in metric_rows)
+    evidence_paths: list[str] = []
+    for row in metric_rows:
+        value = row.get("deeph_equivalence_evidence_paths")
+        items = value if isinstance(value, list) else str(value or "").split(";")
+        for item in items:
+            text = str(item).strip()
+            if text and text not in evidence_paths:
+                evidence_paths.append(text)
+    return {
+        "deeph_raw_global_equivalence_proven_count": proven_count,
+        "deeph_raw_global_equivalence_total": total,
+        "deeph_all_raw_global_equivalence_proven": all_proven,
+        "deeph_diagnostic_only": diagnostic_only,
+        "deeph_equivalence_statuses": _unique_row_values(metric_rows, "deeph_equivalence_status"),
+        "deeph_adapter_equivalence_statuses": _unique_row_values(metric_rows, "deeph_adapter_equivalence_status"),
+        "deeph_equivalence_scopes": _unique_row_values(metric_rows, "deeph_equivalence_scope"),
+        "deeph_equivalence_evidence_paths": evidence_paths,
+    }
+
+
+def _unique_row_values(rows: list[dict[str, Any]], field: str) -> list[str]:
+    values: list[str] = []
+    for row in rows:
+        text = str(row.get(field) or "").strip()
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
 def _matrix_hashes(stencil: DerivativeStencil, *, prefix: str) -> dict[str, str | None]:
     hashes: dict[str, str | None] = {}
     for role, matrix_input in stencil.matrix_inputs().items():
@@ -773,8 +900,11 @@ def _scientific_status(
     stencils_failed: int,
     metric_rows: list[dict[str, Any]],
     fatal_errors: list[dict[str, Any]],
+    deeph_equivalence: dict[str, Any] | None = None,
 ) -> str:
     if diagnostic_only or method != "central" or not metric_rows:
+        return "diagnostic_only"
+    if deeph_equivalence and truthy(deeph_equivalence.get("deeph_diagnostic_only")):
         return "diagnostic_only"
     if stencils_total == stencils_ok and stencils_failed == 0 and not fatal_errors:
         if all(
@@ -1119,6 +1249,7 @@ def _metric_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "dh_support_changed",
         "reference_plus_minus_support_changed",
         "predicted_plus_minus_support_changed",
+        *DEEPH_EQUIVALENCE_FIELDS,
         "dh_hermiticity_ref",
         "dh_hermiticity_pred",
         "dh_hermiticity_error_delta",
@@ -1149,6 +1280,16 @@ def parse_args() -> argparse.Namespace:
             "(direct dH_pred/dR matrices from run_graph2mat_autograd_derivative_predictions.py)."
         ),
     )
+    parser.add_argument(
+        "--deeph-prediction-method",
+        choices=sorted(VALID_DEEPH_PREDICTION_METHODS),
+        default=DEEPH_PREDICTION_METHOD_FINITE_DIFFERENCE,
+        help=(
+            "How the predicted DeepH derivative is obtained: 'finite_difference' "
+            "(legacy, from displaced ML_prediction.HSX pairs) or 'autograd_vectorized' "
+            "(direct dH_pred/dR matrices from hamiltonians_grad_pred.h5)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1166,6 +1307,7 @@ def main() -> int:
         output_dir=args.output_dir,
         source_model=args.source_model,
         graph2mat_prediction_method=args.graph2mat_prediction_method,
+        deeph_prediction_method=args.deeph_prediction_method,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=True, allow_nan=False))
     return 0 if not manifest["fatal_errors"] else 2

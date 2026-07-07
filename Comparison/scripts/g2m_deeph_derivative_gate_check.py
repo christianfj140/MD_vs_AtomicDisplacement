@@ -342,6 +342,24 @@ def winner_claim_requires_paired_gate(dataset: dict[str, Any]) -> bool:
     return truthy(manifest.get("paired_comparison_gate_proven")) or truthy(manifest.get("explicit_paired_comparison_gate"))
 
 
+def deeph_autograd_equivalence_proven(dataset: dict[str, Any]) -> bool:
+    if str(dataset["model"]).strip().lower() != "deeph":
+        return True
+    manifest = dataset["manifest"]
+    rows = dataset["matrix_rows"]
+    deeph_autograd = str(manifest.get("deeph_prediction_method") or "").strip().lower() == "autograd_vectorized" or any(
+        str(row.get("deeph_prediction_method") or "").strip().lower() == "autograd_vectorized"
+        for row in rows
+    )
+    if not deeph_autograd:
+        return True
+    if truthy(manifest.get("deeph_diagnostic_only")):
+        return False
+    if "deeph_all_raw_global_equivalence_proven" in manifest:
+        return truthy(manifest.get("deeph_all_raw_global_equivalence_proven"))
+    return bool(rows) and all(truthy(row.get("deeph_raw_global_equivalence_proven")) for row in rows)
+
+
 def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     manifest = dataset["manifest"]
     matrix_rows = dataset["matrix_rows"]
@@ -388,6 +406,7 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
         "split_consistency_proven": split_consistency_proven(dataset),
         "cross_model_equivalence_proven": truthy(manifest.get("cross_model_equivalence_proven"))
         or str(manifest.get("cross_model_equivalence_status") or "").strip().lower() == "proven",
+        "deeph_autograd_equivalence_proven": deeph_autograd_equivalence_proven(dataset),
         "paper_level_candidate_requested": truthy(manifest.get("paper_level_candidate_requested"))
         or truthy(manifest.get("paper_level_evidence_complete")),
         "winner_claim_paired_gate_ok": winner_claim_requires_paired_gate(dataset),
@@ -602,6 +621,16 @@ def evaluate_dataset(
                 evidence_paths=evidence_paths,
             )
         )
+    if str(model).strip().lower() == "deeph" and not deeph_autograd_equivalence_proven(dataset):
+        warnings.append(
+            warning_row(
+                "deeph_autograd_equivalence_not_proven",
+                model=model,
+                severity="severe",
+                message="DeepH autograd derivative claims remain diagnostic-only until raw/global equivalence is proven.",
+                evidence_paths=evidence_paths,
+            )
+        )
     for fatal in manifest.get("fatal_errors") or []:
         if isinstance(fatal, dict):
             warnings.append(
@@ -631,6 +660,8 @@ def overall_status(
     ):
         return "internal_diagnostic"
     if any(not evidence["has_non_diagnostic_comparison_rows"] for evidence in paper_evidence.values()):
+        return "internal_diagnostic"
+    if any(not evidence.get("deeph_autograd_equivalence_proven", True) for evidence in paper_evidence.values()):
         return "internal_diagnostic"
     paper_blocked = [
         not info["central_only"]

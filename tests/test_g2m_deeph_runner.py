@@ -269,6 +269,20 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--source-model") + 1], "graph2mat")
         self.assertEqual(command[command.index("--max-stencils") + 1], "3")
 
+        deeph_command = _derivative_metric_command_args(
+            python_executable="/venv/bin/python",
+            result_dir=Path("/tmp/result"),
+            output_dir=Path("/tmp/result/derivative_metrics/deeph"),
+            source_model="deeph",
+            settings={**settings, "deeph_prediction_method": "autograd_vectorized"},
+        )
+        self.assertIn("--deeph-prediction-method", deeph_command)
+        self.assertEqual(
+            deeph_command[deeph_command.index("--deeph-prediction-method") + 1],
+            "autograd_vectorized",
+        )
+        self.assertNotIn("--graph2mat-prediction-method", deeph_command)
+
     def test_modular_workflow_defaults_preserve_existing_hamiltonian_path(self):
         workflow = _normalized_modular_workflow_payload({})
         stages = workflow["stages"]
@@ -1009,6 +1023,82 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertIn("--deeph-shell", deeph_command)
             self.assertEqual(summary["stages"]["predict_derivative_graph2mat"]["status"], "completed")
             self.assertEqual(summary["stages"]["predict_derivative_deeph"]["status"], "completed")
+
+    def test_modular_derivative_predictions_only_uses_deeph_autograd_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "derivatives"
+            source = Path(tmp) / "source"
+            root.mkdir()
+            source.mkdir()
+            (Path(tmp) / "g2m_existing").mkdir()
+            deeph_model = Path(tmp) / "deeph_model"
+            deeph_model.mkdir()
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                if "geometry validation" in label:
+                    root.mkdir(parents=True, exist_ok=True)
+                    (root / "derivative_geometry_validation.json").write_text(
+                        json.dumps({"errors": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "graph2mat" in label:
+                    output_root = Path(command[command.index("--output-root") + 1])
+                    output_root.mkdir(parents=True, exist_ok=True)
+                    (output_root / "derivative_graph2mat_prediction_manifest.json").write_text(
+                        json.dumps({"samples_failed": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "deeph autograd" in label:
+                    output_root = Path(command[command.index("--output-root") + 1])
+                    output_root.mkdir(parents=True, exist_ok=True)
+                    (output_root / "derivative_deeph_autograd_prediction_manifest.json").write_text(
+                        json.dumps({"samples_failed": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "derivative_predictions_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(root),
+                    "source_dataset_root": str(source),
+                    "method": "central",
+                    "delta_ang": 0.01,
+                    "atoms": ["0"],
+                    "axes": ["x"],
+                    "graph2mat_existing_prediction_root": str(Path(tmp) / "g2m_existing"),
+                    "deeph_model_dir": str(deeph_model),
+                    "deeph_prediction_method": "autograd_vectorized",
+                    "deeph_command": str(Path(tmp) / "DeepH-pack" / ".venv" / "bin" / "deeph-inference"),
+                    "max_samples": 2,
+                },
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            summary = runner._run_modular_derivative_workflow(payload)
+
+            labels = [label for label, _command in commands]
+            self.assertEqual(
+                labels,
+                [
+                    "Derivative stencil geometry validation",
+                    "Derivative graph2mat Hamiltonian predictions",
+                    "Derivative deeph autograd dH/dR predictions",
+                ],
+            )
+            deeph_command = commands[2][1]
+            self.assertIn("run_deeph_autograd_derivative_predictions.py", deeph_command[1])
+            self.assertEqual(deeph_command[deeph_command.index("--max-base-structures") + 1], "2")
+            self.assertEqual(deeph_command[deeph_command.index("--model-dir") + 1], str(deeph_model))
+            self.assertEqual(
+                summary["stages"]["predict_derivative_deeph"]["deeph_prediction_method"],
+                "autograd_vectorized",
+            )
 
     def test_modular_derivative_workflow_smoke_runs_ordered_fake_chain(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -451,6 +451,9 @@ def render_inference_config(
     huge_structure: bool = True,
     restore_blocks_py: bool = True,
     radius: float = -1.0,
+    with_grad: bool = False,
+    grad_atom_indices: list[int] | None = None,
+    grad_axis_indices: list[int] | None = None,
 ) -> Path:
     task = task or [3, 4]
     config = configparser.ConfigParser()
@@ -468,8 +471,12 @@ def render_inference_config(
         "restore_blocks_py": str(bool(restore_blocks_py)),
         "gen_rc_idx": "False",
         "gen_rc_by_idx": "",
-        "with_grad": "False",
+        "with_grad": str(bool(with_grad)),
     }
+    if grad_atom_indices is not None:
+        config["basic"]["grad_atom_indices"] = json.dumps([int(item) for item in grad_atom_indices])
+    if grad_axis_indices is not None:
+        config["basic"]["grad_axis_indices"] = json.dumps([int(item) for item in grad_axis_indices])
     config["interpreter"] = {
         "julia_interpreter": "",
         "python_interpreter": python_interpreter,

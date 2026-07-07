@@ -27,6 +27,7 @@ SPEC.loader.exec_module(metrics_module)
 
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DerivativeMetadata,
+    PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH,
     HamiltonianDerivativeError,
     PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
     REFERENCE_DERIVATIVE_METHOD_SIESTA,
@@ -52,12 +53,19 @@ class RunnerWiringTests(unittest.TestCase):
     def test_config_defaults_to_finite_difference(self) -> None:
         config = self.runner._normalize_derivative_workflow_config({})
         self.assertEqual(config["graph2mat_prediction_method"], "finite_difference")
+        self.assertEqual(config["deeph_prediction_method"], "finite_difference")
 
     def test_config_accepts_autograd_vectorized(self) -> None:
         config = self.runner._normalize_derivative_workflow_config(
-            {"derivative": {"graph2mat_prediction_method": "autograd_vectorized"}}
+            {
+                "derivative": {
+                    "graph2mat_prediction_method": "autograd_vectorized",
+                    "deeph_prediction_method": "autograd_vectorized",
+                }
+            }
         )
         self.assertEqual(config["graph2mat_prediction_method"], "autograd_vectorized")
+        self.assertEqual(config["deeph_prediction_method"], "autograd_vectorized")
 
     def test_validation_rejects_unknown_method(self) -> None:
         config = self.runner._normalize_derivative_workflow_config(
@@ -71,6 +79,21 @@ class RunnerWiringTests(unittest.TestCase):
             }
         )
         stages = {"derivative_metrics_graph2mat": True}
+        with self.assertRaises(RuntimeError):
+            self.runner._validate_derivative_workflow_config(stages, config)
+
+    def test_validation_rejects_unknown_deeph_method(self) -> None:
+        config = self.runner._normalize_derivative_workflow_config(
+            {
+                "derivative": {
+                    "enabled": True,
+                    "method": "central",
+                    "result_dir": "/tmp/derivatives",
+                    "deeph_prediction_method": "bogus",
+                }
+            }
+        )
+        stages = {"derivative_metrics_deeph": True}
         with self.assertRaises(RuntimeError):
             self.runner._validate_derivative_workflow_config(stages, config)
 
@@ -115,6 +138,19 @@ class RunnerWiringTests(unittest.TestCase):
             settings={**base_settings, "graph2mat_prediction_method": "autograd_vectorized"},
         )
         self.assertNotIn("--graph2mat-prediction-method", deeph)
+
+        deeph_direct = self.runner._derivative_metric_command_args(
+            python_executable="python",
+            result_dir=Path("/tmp/result"),
+            output_dir=Path("/tmp/out"),
+            source_model="deeph",
+            settings={**base_settings, "deeph_prediction_method": "autograd_vectorized"},
+        )
+        self.assertIn("--deeph-prediction-method", deeph_direct)
+        self.assertEqual(
+            deeph_direct[deeph_direct.index("--deeph-prediction-method") + 1],
+            "autograd_vectorized",
+        )
 
 
 class DirectDerivativePairTests(unittest.TestCase):
@@ -317,7 +353,13 @@ class DirectPredictionEvaluatorCliTests(unittest.TestCase):
             )
 
     def write_direct_prediction(
-        self, matrix: sparse.spmatrix, *, base_sample_id: str = "base"
+        self,
+        matrix: sparse.spmatrix,
+        *,
+        base_sample_id: str = "base",
+        predicted_derivative_method: str = PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
+        prediction_method_key: str = "graph2mat_prediction_method",
+        metadata_overrides: dict | None = None,
     ) -> Path:
         npz_path, json_path = direct_derivative_prediction_paths(
             self.result_dir,
@@ -326,28 +368,35 @@ class DirectPredictionEvaluatorCliTests(unittest.TestCase):
             axis_index=0,
         )
         self.write_sparse_payload(npz_path, matrix)
+        payload = {
+            "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
+            "predicted_derivative_method": predicted_derivative_method,
+            "reference_delta_ang": DELTA_ANG,
+            "predicted_delta_ang": None,
+            "atom_index_zero_based": 0,
+            "axis_index": 0,
+            "axis_name": "x",
+            "units": "eV/Angstrom",
+            prediction_method_key: "autograd_vectorized",
+            "jacobian_method": "vmap_vjp_chunked",
+            "jacobian_chunk_size": 64,
+            "topology_fixed": True,
+        }
+        payload.update(metadata_overrides or {})
         json_path.write_text(
-            json.dumps(
-                {
-                    "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
-                    "predicted_derivative_method": PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
-                    "reference_delta_ang": DELTA_ANG,
-                    "predicted_delta_ang": None,
-                    "atom_index_zero_based": 0,
-                    "axis_index": 0,
-                    "axis_name": "x",
-                    "units": "eV/Angstrom",
-                    "graph2mat_prediction_method": "autograd_vectorized",
-                    "jacobian_method": "vmap_vjp_chunked",
-                    "jacobian_chunk_size": 64,
-                    "topology_fixed": True,
-                }
-            ),
+            json.dumps(payload),
             encoding="utf-8",
         )
         return npz_path
 
-    def write_direct_fixture(self, *, include_direct_prediction: bool = True) -> None:
+    def write_direct_fixture(
+        self,
+        *,
+        include_direct_prediction: bool = True,
+        predicted_derivative_method: str = PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
+        prediction_method_key: str = "graph2mat_prediction_method",
+        direct_metadata_overrides: dict | None = None,
+    ) -> None:
         zero = sparse.csr_matrix((2, 2))
         ref_plus = sparse.csr_matrix([[2.0, 0.0], [0.0, 2.0]])
         # No predicted_hamiltonians are written anywhere: the direct route
@@ -356,7 +405,12 @@ class DirectPredictionEvaluatorCliTests(unittest.TestCase):
         self.write_sample("plus", sign=1, reference=ref_plus)
         self.write_sample("minus", sign=-1, reference=zero)
         if include_direct_prediction:
-            self.write_direct_prediction(sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]]))
+            self.write_direct_prediction(
+                sparse.csr_matrix([[3.0, 0.0], [0.0, 3.0]]),
+                predicted_derivative_method=predicted_derivative_method,
+                prediction_method_key=prediction_method_key,
+                metadata_overrides=direct_metadata_overrides,
+            )
 
     def run_cli(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         completed = subprocess.run(
@@ -415,6 +469,104 @@ class DirectPredictionEvaluatorCliTests(unittest.TestCase):
         self.assertEqual(row["predicted_delta_ang"], "")
         self.assertTrue(row["direct_prediction_path"].endswith("dH_pred_atom0_axis0.npz"))
         self.assertEqual(row["derivative_units"], "eV/Ang")
+
+    def test_deeph_direct_prediction_metrics_match_expected_values(self) -> None:
+        self.write_direct_fixture(
+            predicted_derivative_method=PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH,
+            prediction_method_key="deeph_prediction_method",
+        )
+
+        self.run_cli(
+            "--method",
+            "central",
+            "--overwrite",
+            "--source-model",
+            "deeph",
+            "--deeph-prediction-method",
+            "autograd_vectorized",
+        )
+
+        metrics_root = self.result_dir / "derivative_metrics"
+        manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
+        with (metrics_root / "derivative_matrix_metrics.csv").open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(manifest["stencils_ok"], 1)
+        self.assertEqual(manifest["predicted_derivative_method"], PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH)
+        self.assertIsNone(manifest["graph2mat_prediction_method"])
+        self.assertEqual(manifest["deeph_prediction_method"], "autograd_vectorized")
+        self.assertIsNone(manifest["predicted_delta_ang"])
+        self.assertEqual(rows[0]["predicted_derivative_method"], PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH)
+        self.assertEqual(rows[0]["deeph_prediction_method"], "autograd_vectorized")
+        self.assertEqual(rows[0]["source_model"], "deeph")
+
+    def test_deeph_direct_prediction_equivalence_diagnostic_only_stays_diagnostic(self) -> None:
+        self.write_direct_fixture(
+            predicted_derivative_method=PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH,
+            prediction_method_key="deeph_prediction_method",
+            direct_metadata_overrides={
+                "claim_status": "diagnostic_only",
+                "deeph_diagnostic_only": True,
+                "deeph_diagnostic_reason": "basis_equivalence_to_graph2mat_raw_hsx_not_proven",
+                "deeph_raw_global_equivalence_proven": False,
+                "deeph_equivalence_status": "unproven",
+                "deeph_equivalence_scope": "deeph_processed_blockwise_global_hdf5",
+            },
+        )
+
+        self.run_cli(
+            "--method",
+            "central",
+            "--overwrite",
+            "--source-model",
+            "deeph",
+            "--deeph-prediction-method",
+            "autograd_vectorized",
+        )
+
+        metrics_root = self.result_dir / "derivative_metrics"
+        manifest = json.loads((metrics_root / "manifest.json").read_text(encoding="utf-8"))
+        with (metrics_root / "derivative_matrix_metrics.csv").open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        self.assertEqual(manifest["scientific_status"], "diagnostic_only")
+        self.assertTrue(manifest["deeph_diagnostic_only"])
+        self.assertFalse(manifest["deeph_all_raw_global_equivalence_proven"])
+        self.assertEqual(manifest["deeph_raw_global_equivalence_proven_count"], 0)
+        self.assertEqual(rows[0]["deeph_diagnostic_only"], "True")
+        self.assertEqual(rows[0]["deeph_raw_global_equivalence_proven"], "False")
+
+    def test_deeph_direct_prediction_equivalence_proven_is_not_forced_diagnostic(self) -> None:
+        self.write_direct_fixture(
+            predicted_derivative_method=PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH,
+            prediction_method_key="deeph_prediction_method",
+            direct_metadata_overrides={
+                "claim_status": "raw_global_equivalence_proven",
+                "deeph_diagnostic_only": False,
+                "deeph_raw_global_equivalence_proven": True,
+                "deeph_equivalence_status": "proven",
+                "deeph_equivalence_scope": "raw_global",
+                "deeph_equivalence_evidence_paths": ["raw_global_equivalence_evidence.json"],
+            },
+        )
+
+        self.run_cli(
+            "--method",
+            "central",
+            "--overwrite",
+            "--source-model",
+            "deeph",
+            "--deeph-prediction-method",
+            "autograd_vectorized",
+        )
+
+        manifest = json.loads(
+            (self.result_dir / "derivative_metrics" / "manifest.json").read_text(encoding="utf-8")
+        )
+
+        self.assertFalse(manifest["deeph_diagnostic_only"])
+        self.assertTrue(manifest["deeph_all_raw_global_equivalence_proven"])
+        self.assertEqual(manifest["deeph_raw_global_equivalence_proven_count"], 1)
 
     def test_direct_mode_fails_closed_without_direct_matrix(self) -> None:
         self.write_direct_fixture(include_direct_prediction=False)

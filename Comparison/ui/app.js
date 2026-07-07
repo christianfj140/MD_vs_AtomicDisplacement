@@ -12648,6 +12648,7 @@ let mixMetricsPayload = null;
 let mixSelectedPayloadIds = new Set();
 let mixPayloadSelectionInitialized = false;
 let mixKnownPayloadIds = new Set();
+let mixOpenPayloadGroups = new Set();
 
 function mixParseMap(text) {
   const map = {};
@@ -12806,6 +12807,55 @@ function mixSetMetricsPayload(payload, extraPayloads = []) {
   return mixRenderChart(mixMetricsPayload);
 }
 
+function mixPayloadGroups(payload, payloads) {
+  const byGroup = new Map();
+  for (const item of payloads) {
+    const key = item.size !== undefined ? `size:${item.size}` : "mixing";
+    const group = byGroup.get(key) || {
+      key,
+      label: item.size !== undefined ? `size=${item.size}` : "Mixing sweep",
+      items: [],
+    };
+    group.items.push(item);
+    byGroup.set(key, group);
+  }
+  return Array.from(byGroup.values()).map((group) => {
+    const ids = group.items.map((item) => String(item.id));
+    const models = Array.from(
+      new Set(ids.flatMap((id) => mixPayloadModels(payload, id).map(methodDisplayLabel)))
+    ).join("+") || "sin metricas";
+    const statuses = Array.from(new Set(group.items.map((item) => item.status).filter(Boolean))).join(", ");
+    const totals = group.items.map((item) => Number(item.total_size)).filter((value) => Number.isFinite(value));
+    const totalText = totals.length ? `total=${Math.min(...totals)}-${Math.max(...totals)}` : "";
+    return { ...group, ids, models, statuses, totalText };
+  });
+}
+
+function mixUpdatePayloadSelectionUi(payload, groups) {
+  const status = document.getElementById("mix-payload-status");
+  if (status) {
+    const total = (groups || []).reduce((sum, group) => sum + group.items.length, 0);
+    status.textContent = `${mixSelectedPayloadIds.size}/${total} run(s) seleccionados.`;
+  }
+  for (const group of groups || []) {
+    const selected = group.ids.filter((id) => mixSelectedPayloadIds.has(id)).length;
+    const checkbox = document.querySelector(`.mix-payload-group-checkbox[data-group="${CSS.escape(group.key)}"]`);
+    if (checkbox) {
+      checkbox.checked = selected === group.ids.length;
+      checkbox.indeterminate = selected > 0 && selected < group.ids.length;
+    }
+    const meta = document.querySelector(`.mix-payload-group-meta[data-group="${CSS.escape(group.key)}"]`);
+    if (meta) {
+      meta.textContent = [
+        `${selected}/${group.items.length} runs`,
+        group.models,
+        group.statuses ? `status=${group.statuses}` : "",
+        group.totalText,
+      ].filter(Boolean).join(" | ");
+    }
+  }
+}
+
 function mixRenderPayloadSelector(payload) {
   const list = document.getElementById("mix-payload-list");
   const status = document.getElementById("mix-payload-status");
@@ -12830,29 +12880,42 @@ function mixRenderPayloadSelector(payload) {
     mixSelectedPayloadIds = new Set(ids.filter((id) => previous.has(id)));
   }
   mixKnownPayloadIds = new Set(ids);
-  status.textContent = `${mixSelectedPayloadIds.size}/${payloads.length} payload(s) seleccionados.`;
-  list.innerHTML = payloads
-    .map((item) => {
-      const id = String(item.id);
-      const label = item.label || id;
-      const models = mixPayloadModels(payload, id).map(methodDisplayLabel).join("+") || "sin metricas";
-      const detail = [
-        models,
-        item.status ? `status=${item.status}` : "",
-        item.mode ? `mode=${item.mode}` : "",
-        item.ratio !== undefined ? `ratio=${item.ratio}` : "",
-        item.size !== undefined ? `size=${item.size}` : "",
-        item.total_size !== undefined ? `total=${item.total_size}` : "",
-        item.output_root || "",
-      ].filter(Boolean).join(" | ");
-      return `
-        <label class="plot-run-option">
-          <input class="mix-payload-checkbox" type="checkbox" value="${escapeHtml(id)}" ${mixSelectedPayloadIds.has(id) ? "checked" : ""} />
-          <span><strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span></span>
-        </label>
-      `;
-    })
+  const groups = mixPayloadGroups(payload, payloads);
+  list.innerHTML = groups
+    .map((group) => `
+      <details class="mix-payload-group" data-group="${escapeHtml(group.key)}" ${mixOpenPayloadGroups.has(group.key) ? "open" : ""}>
+        <summary>
+          <input class="mix-payload-group-checkbox" data-group="${escapeHtml(group.key)}" type="checkbox" />
+          <span>
+            <strong>${escapeHtml(group.label)}</strong>
+            <span class="mix-payload-group-meta" data-group="${escapeHtml(group.key)}"></span>
+          </span>
+        </summary>
+        <div class="mix-run-list">
+          ${group.items.map((item) => {
+            const id = String(item.id);
+            const label = item.label || id;
+            const models = mixPayloadModels(payload, id).map(methodDisplayLabel).join("+") || "sin metricas";
+            const detail = [
+              models,
+              item.status ? `status=${item.status}` : "",
+              item.mode ? `mode=${item.mode}` : "",
+              item.ratio !== undefined ? `ratio=${item.ratio}` : "",
+              item.total_size !== undefined ? `total=${item.total_size}` : "",
+              item.output_root || "",
+            ].filter(Boolean).join(" | ");
+            return `
+              <label class="mix-run-option">
+                <input class="mix-payload-checkbox" type="checkbox" value="${escapeHtml(id)}" ${mixSelectedPayloadIds.has(id) ? "checked" : ""} />
+                <span><strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span></span>
+              </label>
+            `;
+          }).join("")}
+        </div>
+      </details>
+    `)
     .join("");
+  mixUpdatePayloadSelectionUi(payload, groups);
 }
 
 async function mixDiscover() {
@@ -13064,14 +13127,35 @@ function setupMixingDatasets() {
   mvsBind("mix-payloads-clear", "click", () => mixSetAllPayloads(false));
   document.getElementById("mix-payload-list")?.addEventListener("change", (event) => {
     const target = event.target;
-    if (!target?.classList?.contains("mix-payload-checkbox")) return;
-    if (target.checked) {
-      mixSelectedPayloadIds.add(target.value);
+    const payloads = mixPayloadsForMetrics(mixMetricsPayload);
+    const groups = mixPayloadGroups(mixMetricsPayload, payloads);
+    mixPayloadSelectionInitialized = true;
+    if (target?.classList?.contains("mix-payload-group-checkbox")) {
+      const details = target.closest(".mix-payload-group");
+      details?.querySelectorAll(".mix-payload-checkbox").forEach((node) => {
+        node.checked = target.checked;
+        if (target.checked) mixSelectedPayloadIds.add(node.value);
+        else mixSelectedPayloadIds.delete(node.value);
+      });
+    } else if (target?.classList?.contains("mix-payload-checkbox")) {
+      if (target.checked) mixSelectedPayloadIds.add(target.value);
+      else mixSelectedPayloadIds.delete(target.value);
     } else {
-      mixSelectedPayloadIds.delete(target.value);
+      return;
     }
-    mixRenderPayloadSelector(mixMetricsPayload);
+    mixUpdatePayloadSelectionUi(mixMetricsPayload, groups);
     mixRenderChart(mixMetricsPayload || {}).catch((error) => showToast(error.message));
+  });
+  document.getElementById("mix-payload-list")?.addEventListener("toggle", (event) => {
+    const target = event.target;
+    if (!target?.classList?.contains("mix-payload-group")) return;
+    const key = target.dataset.group;
+    if (!key) return;
+    if (target.open) mixOpenPayloadGroups.add(key);
+    else mixOpenPayloadGroups.delete(key);
+  }, true);
+  document.getElementById("mix-payload-list")?.addEventListener("click", (event) => {
+    if (event.target?.classList?.contains("mix-payload-group-checkbox")) event.stopPropagation();
   });
 }
 
