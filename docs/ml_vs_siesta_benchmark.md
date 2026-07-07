@@ -231,7 +231,10 @@ the heatmap works before real matrices are wired.
 
 ## What this does NOT do (yet)
 
-- It does **not** train Graph2Mat or DeepH.
+- The CLI / base helpers do **not** train by themselves (they plan, materialize
+  and serve payloads). Real Graph2Mat/DeepH training **is** reachable from the
+  **Mixing datasets** UI via the runner (`action == "train"` on
+  `/api/mixing/launch`), which drives the existing Graph2Mat/DeepH runner.
 - It does **not** launch SIESTA (you run SIESTA yourself on the generated FDFs).
 - It does **not** ship heavy HSX/TSHS parsing here — those live in the existing
   derivative scripts; the loader here uses the lightweight `.npy` fixture format

@@ -16354,8 +16354,10 @@ def mixing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
     ratios = tuple(float(r) for r in (body.get("ratios") or (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)))
     sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
     seed = int(body.get("seed") or 0)
+    split_policy = str(body.get("split_policy") or "resplit_combined")
     return mvs.plan_mixing_sweep_from_roots(
-        small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed
+        small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed,
+        split_policy=split_policy,
     )
 
 
@@ -16914,7 +16916,8 @@ class MixingSweepRunner:
                 self._status["action"] = action
                 try:
                     plan = mvs.plan_mixing_sweep_from_roots(
-                        small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed
+                        small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed,
+                        split_policy=split_policy,
                     )
                     self._status["payloads"] = _mixing_payloads_from_permutations(plan.get("permutations"))
                 except Exception:

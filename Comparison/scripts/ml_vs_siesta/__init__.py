@@ -75,9 +75,11 @@ from .viewer import (  # noqa: E402
 from .fdf_io import generate_siesta_displacement_inputs  # noqa: E402
 from .pipeline import benchmark_dry_run  # noqa: E402
 from .mixed_dataset_materialize import (  # noqa: E402
+    DEFAULT_SPLIT_FRACTIONS,
     DatasetCompatibilityError,
     DatasetMaterializeError,
     dataset_atom_count,
+    fixed_common_test_ids,
     materialize_mixed_dataset,
     read_dataset_samples,
     validate_datasets_compatible,
@@ -86,6 +88,7 @@ from .mixing_sweep import (  # noqa: E402
     discover_dataset_sizes,
     plan_mixing_sweep,
     plan_mixing_sweep_from_roots,
+    reserved_small_ids_by_size_for_fixed_common_test,
     run_mixing_sweep,
 )
 from .plot_mixing_mae_vs_size import (  # noqa: E402
@@ -133,11 +136,14 @@ __all__ = [
     "prepare_matrix_plot_payload",
     "generate_siesta_displacement_inputs",
     "benchmark_dry_run",
+    "DEFAULT_SPLIT_FRACTIONS",
     "DatasetCompatibilityError",
     "DatasetMaterializeError",
     "dataset_atom_count",
+    "fixed_common_test_ids",
     "materialize_mixed_dataset",
     "read_dataset_samples",
+    "reserved_small_ids_by_size_for_fixed_common_test",
     "validate_datasets_compatible",
     "discover_dataset_sizes",
     "plan_mixing_sweep",

@@ -26,6 +26,8 @@ from typing import Any
 from benchmark_manifest import write_benchmark_manifests  # noqa: E402
 from joint_artifact_contract import validate_snapshot  # noqa: E402
 
+from .dataset_mixing import ratio_semantics_for_mode
+
 DEFAULT_SPLIT_FRACTIONS = (0.7, 0.15, 0.15)
 _SPLITS = ("train", "validation", "test")
 
@@ -401,6 +403,13 @@ def materialize_mixed_dataset(
         split_assignment = _fixed_common_test_split(
             selected, sorted(small_by_id), split_fractions, seed
         )
+        if "test" not in split_assignment:
+            raise DatasetMaterializeError(
+                "split_policy='fixed_common_test' produced an empty test split: "
+                "none of the selected small snapshots fall in the reserved common "
+                "test set. Include the reserved small ids in selected_small_ids "
+                "(run_mixing_sweep does this automatically via reserved_small_ids)."
+            )
     else:
         raise DatasetMaterializeError(
             f"Unknown split_policy {split_policy!r}; "
@@ -474,7 +483,7 @@ def materialize_mixed_dataset(
         "schema": "ml_vs_siesta_mixed_dataset_provenance_v1",
         "mode": mode,
         "ratio": ratio,
-        "ratio_semantics": "fraction_of_large_pool",
+        "ratio_semantics": ratio_semantics_for_mode(mode),
         "seed": seed,
         "small_root": str(small_root),
         "large_root": str(large_root),

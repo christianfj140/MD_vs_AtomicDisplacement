@@ -162,7 +162,7 @@ def test_materialize_writes_self_contained_provenance(small_large, tmp_path):
     assert prov["schema"] == "ml_vs_siesta_mixed_dataset_provenance_v1"
     assert prov["mode"] == "add"
     assert prov["ratio"] == 0.5
-    assert prov["ratio_semantics"] == "fraction_of_large_pool"
+    assert prov["ratio_semantics"] == "fraction_of_large_pool_added"
     assert prov["seed"] == 1
     assert prov["small_root"] == str(small)
     assert prov["large_root"] == str(large)
@@ -363,12 +363,16 @@ def test_replace_kept_small_is_sampled_not_prefix():
 def test_ratio_semantics_and_large_capped_exposed():
     small = [{"id": f"s{i}"} for i in range(10)]
     large = [{"id": f"l{i}"} for i in range(4)]  # fewer large than small
+    expected_semantics = {
+        "add": "fraction_of_large_pool_added",
+        "replace": "fraction_of_small_pool_replaced_capped_by_available_large",
+    }
     for mode in ("add", "replace"):
         manifest = mvs.make_mixed_dataset_manifest(
             small, large, ratios=(0.0, 1.0), mode=mode, seed=0
         )
         for part in manifest["partitions"]:
-            assert part["ratio_semantics"] == "fraction_of_large_pool"
+            assert part["ratio_semantics"] == expected_semantics[mode]
             assert "large_capped" in part
     # replace ratio=1.0 wants 10 large but only 4 exist -> capped, and flagged.
     replace = mvs.make_mixed_dataset_manifest(
@@ -376,11 +380,89 @@ def test_ratio_semantics_and_large_capped_exposed():
     )["partitions"][0]
     assert replace["large_capped"] is True
     assert replace["n_large_selected"] == 4
-    # plan propagates both fields.
+    # plan propagates both fields with the per-mode semantics.
     plan = mvs.plan_mixing_sweep({8: 10}, {8: 4}, modes=("replace",), ratios=(1.0,), seed=0)
     perm = plan["permutations"][0]
-    assert perm["ratio_semantics"] == "fraction_of_large_pool"
+    assert perm["ratio_semantics"] == expected_semantics["replace"]
     assert perm["large_capped"] is True
+
+
+def _compo(permutations):
+    return {
+        (p["mode"], p["ratio"]): (
+            p["n_small_selected"], p["n_large_selected"], p["total_size"]
+        )
+        for p in permutations
+    }
+
+
+def test_preview_matches_materialization_for_fixed_common_test_replace(small_large, tmp_path):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    body = {
+        "small": {"8": str(small)},
+        "large": {"8": str(large)},
+        "modes": ["replace"],
+        "ratios": [0.5, 1.0],
+        "seed": 3,
+        "split_policy": "fixed_common_test",
+    }
+    preview = _compo(ui.mixing_plan_payload(body)["permutations"])
+    summary = mvs.run_mixing_sweep(
+        {8: str(small)}, {8: str(large)}, tmp_path / "out",
+        modes=("replace",), ratios=(0.5, 1.0), seed=3,
+        split_policy="fixed_common_test", dry_run=False,
+    )
+    assert preview == _compo(summary["permutations"])
+    # Non-trivial: the reserved common-test small id caps replace at ratio=1.0,
+    # so it is NOT 100% large (this is exactly what would mismatch without the
+    # split_policy-aware preview).
+    assert preview[("replace", 1.0)][1] < 8
+
+
+def test_cli_mixing_sweep_accepts_split_policy(small_large, tmp_path):
+    from ml_vs_siesta.cli import build_parser
+
+    small, large = small_large
+    out = tmp_path / "cli_out"
+    args = build_parser().parse_args(
+        [
+            "mixing-sweep",
+            "--small", f"8={small}",
+            "--large", f"8={large}",
+            "--modes", "replace",
+            "--ratios", "1.0",
+            "--seed", "3",
+            "--split-policy", "fixed_common_test",
+            "--output-root", str(out),
+        ]
+    )
+    assert args.split_policy == "fixed_common_test"
+    assert args.func(args) == 0
+    prov = json.loads(
+        (out / "size8_replace_r1p000" / "mixed_dataset_provenance.json").read_text()
+    )
+    assert prov["split_policy"] == "fixed_common_test"
+
+
+def test_fixed_common_test_raises_when_selection_excludes_reserved(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    reserved = mvs.fixed_common_test_ids(
+        sorted(small_ids), mvs.DEFAULT_SPLIT_FRACTIONS, seed=5
+    )
+    non_reserved = [sid for sid in small_ids if sid not in reserved]
+    assert non_reserved and reserved  # sanity: the split is non-degenerate
+    with pytest.raises(mvs.DatasetMaterializeError, match="empty test split"):
+        mvs.materialize_mixed_dataset(
+            small, large,
+            selected_small_ids=non_reserved,  # deliberately drops the reserved test ids
+            selected_large_ids=large_ids[:2],
+            output_root=tmp_path / "empty_test", seed=5,
+            split_policy="fixed_common_test",
+        )
 
 
 # --------------------------------------------------------------------------- #

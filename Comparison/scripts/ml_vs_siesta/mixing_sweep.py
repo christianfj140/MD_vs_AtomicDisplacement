@@ -68,6 +68,16 @@ def plan_mixing_sweep(
             continue
         small_ids = [{"id": f"s{i}"} for i in range(small_counts[size])]
         large_ids = [{"id": f"l{i}"} for i in range(large_counts[size])]
+        # The planner works with synthetic ids, so it cannot match the real
+        # reserved ids; only their COUNT matters for the composition counts.
+        # Reserve the same number of synthetic small ids so the preview mirrors
+        # what run_mixing_sweep materializes under fixed_common_test.
+        n_reserved = len(reserved_small_ids_by_size.get(size) or ())
+        reserved_synthetic = (
+            {f"s{i}" for i in range(min(n_reserved, small_counts[size]))}
+            if n_reserved
+            else None
+        )
         for mode in modes:
             manifest = make_mixed_dataset_manifest(
                 small_ids,
@@ -75,7 +85,7 @@ def plan_mixing_sweep(
                 ratios=ratios,
                 mode=mode,
                 seed=seed,
-                reserved_small_ids=reserved_small_ids_by_size.get(size),
+                reserved_small_ids=reserved_synthetic,
             )
             for part in manifest["partitions"]:
                 n_large = int(part["n_large_selected"])
@@ -125,6 +135,25 @@ def discover_dataset_sizes(dataset_roots: list[str | Path]) -> dict[int, dict[st
     return out
 
 
+def reserved_small_ids_by_size_for_fixed_common_test(
+    small_by_size: dict[int, str | Path],
+    seed: int,
+) -> dict[int, set[str]]:
+    """Prefixed (``small__``) reserved test ids per size for ``fixed_common_test``.
+
+    These are the small snapshots the ``replace`` mode must never swap out, so
+    that preview and materialization agree on the retained composition.
+    """
+    reserved: dict[int, set[str]] = {}
+    for size, root in small_by_size.items():
+        ids = sorted(s.sample_id for s in read_dataset_samples(root))
+        reserved[int(size)] = {
+            f"{_SMALL_PREFIX}{sid}"
+            for sid in fixed_common_test_ids(ids, DEFAULT_SPLIT_FRACTIONS, seed)
+        }
+    return reserved
+
+
 def plan_mixing_sweep_from_roots(
     small_by_size: dict[int, str | Path],
     large_by_size: dict[int, str | Path],
@@ -133,12 +162,27 @@ def plan_mixing_sweep_from_roots(
     modes: tuple[str, ...] = DEFAULT_MODES,
     ratios: tuple[float, ...] = DEFAULT_RATIOS,
     seed: int = 0,
+    split_policy: str = "resplit_combined",
 ) -> dict[str, Any]:
-    """Read counts from dataset roots, then plan."""
+    """Read counts from dataset roots, then plan.
+
+    With ``split_policy="fixed_common_test"`` the planned ``replace`` selections
+    reserve the common-test small snapshots (same as ``run_mixing_sweep``), so
+    the preview matches what materialization will actually build.
+    """
     small_counts = {int(k): len(read_dataset_samples(v)) for k, v in small_by_size.items()}
     large_counts = {int(k): len(read_dataset_samples(v)) for k, v in large_by_size.items()}
+    reserved = None
+    if split_policy == "fixed_common_test":
+        reserved = reserved_small_ids_by_size_for_fixed_common_test(small_by_size, seed)
     return plan_mixing_sweep(
-        small_counts, large_counts, sizes=sizes, modes=modes, ratios=ratios, seed=seed
+        small_counts,
+        large_counts,
+        sizes=sizes,
+        modes=modes,
+        ratios=ratios,
+        seed=seed,
+        reserved_small_ids_by_size=reserved,
     )
 
 
@@ -345,7 +389,9 @@ def run_mixing_sweep(
     summary = {
         "schema": "ml_vs_siesta_mixing_sweep_summary_v1",
         "dry_run": dry_run,
-        "ratio_semantics": "fraction_of_large_pool",
+        # A sweep can span both add/replace; ratio meaning is per-permutation
+        # (see each permutation's ``ratio_semantics``).
+        "ratio_semantics": "per_partition",
         "split_policy": split_policy,
         "modes": list(modes),
         "ratios": list(ratios),

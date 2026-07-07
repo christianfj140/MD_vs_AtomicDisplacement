@@ -112,9 +112,11 @@ def _cmd_mixing_sweep(args: argparse.Namespace) -> int:
     sizes = [int(s) for s in args.sizes.split(",")] if args.sizes else None
     modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
     ratios = tuple(float(r) for r in args.ratios.split(",")) if args.ratios else (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    split_policy = getattr(args, "split_policy", "resplit_combined")
     if args.dry_run or not args.output_root:
         plan = plan_mixing_sweep_from_roots(
-            small_by_size, large_by_size, sizes=sizes, modes=modes, ratios=ratios, seed=args.seed
+            small_by_size, large_by_size, sizes=sizes, modes=modes, ratios=ratios,
+            seed=args.seed, split_policy=split_policy,
         )
         _print_json(plan)
         return 0
@@ -127,6 +129,7 @@ def _cmd_mixing_sweep(args: argparse.Namespace) -> int:
         ratios=ratios,
         seed=args.seed,
         models=tuple(m.strip() for m in args.models.split(",") if m.strip()),
+        split_policy=split_policy,
         dry_run=False,
         launch_fn=None,  # CLI materializes only; training is launched via the UI/runner.
     )
@@ -183,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--seed", type=int, default=0)
     sweep.add_argument("--models", default="graph2mat,deeph", help="Comma-separated models.")
     sweep.add_argument("--output-root", default=None, help="Materialize merged datasets here.")
+    sweep.add_argument(
+        "--split-policy",
+        choices=["resplit_combined", "fixed_common_test"],
+        default="resplit_combined",
+        help="Split policy for materialized datasets (fixed_common_test keeps a "
+        "common small test set across ratios).",
+    )
     sweep.add_argument("--dry-run", action="store_true", help="Only print the permutation plan.")
     sweep.set_defaults(func=_cmd_mixing_sweep)
 

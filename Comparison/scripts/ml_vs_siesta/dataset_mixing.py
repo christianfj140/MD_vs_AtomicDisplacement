@@ -17,6 +17,25 @@ DEFAULT_RATIOS = (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)
 _ATOM_COUNT_KEYS = ("n_atoms", "num_atoms", "atom_count", "natoms")
 _ID_KEYS = ("id", "sample_id", "name", "path")
 
+# ``ratio`` means different things per mode; expose it explicitly so plots and
+# provenance are never ambiguous.
+RATIO_SEMANTICS_ADD = "fraction_of_large_pool_added"
+RATIO_SEMANTICS_REPLACE = "fraction_of_small_pool_replaced_capped_by_available_large"
+
+
+def ratio_semantics_for_mode(mode: str | None) -> str | None:
+    """Return the ``ratio_semantics`` label for a mixing ``mode``.
+
+    ``add`` interprets ``ratio`` as a fraction of the large pool that is
+    appended; ``replace`` as a fraction of the small pool that is swapped for
+    large (capped by the available large pool). Unknown/None modes return None.
+    """
+    if mode == "add":
+        return RATIO_SEMANTICS_ADD
+    if mode == "replace":
+        return RATIO_SEMANTICS_REPLACE
+    return None
+
 
 def _sample_atom_count(sample: dict[str, Any]) -> int | None:
     for key in _ATOM_COUNT_KEYS:
@@ -95,7 +114,7 @@ def _select_manifest_for_ratio(
     return {
         "ratio": ratio,
         "mode": mode,
-        "ratio_semantics": "fraction_of_large_pool",
+        "ratio_semantics": ratio_semantics_for_mode(mode),
         "large_capped": large_capped,
         "n_selected": len(selected),
         "n_large_selected": len(chosen_large),
@@ -120,13 +139,14 @@ def make_mixed_dataset_manifest(
     keeping the total size constant. Output is written as JSON/YAML/CSV inferred
     from ``output_path``'s suffix (CSV = one row per ratio×sample).
 
-    Ratio semantics (exposed per partition as ``ratio_semantics ==
-    "fraction_of_large_pool"``): in ``add`` the number of large samples is
-    ``round(ratio * len(large))``; in ``replace`` the number of replaced small
-    samples is ``round(ratio * len(small))``, capped by the available large
-    pool. When that cap kicks in (``ratio=1.0`` with fewer large than small
-    samples does NOT give 100% large), the partition flags it with
-    ``large_capped == True``.
+    Ratio semantics are exposed per partition as ``ratio_semantics`` and differ
+    by mode: ``add`` -> ``"fraction_of_large_pool_added"`` (number of large
+    samples is ``round(ratio * len(large))``); ``replace`` ->
+    ``"fraction_of_small_pool_replaced_capped_by_available_large"`` (number of
+    replaced small samples is ``round(ratio * len(small))``, capped by the
+    available large pool). When that cap kicks in (``ratio=1.0`` with fewer
+    large than small samples does NOT give 100% large), the partition flags it
+    with ``large_capped == True``.
 
     ``reserved_small_ids`` is optional and only affects ``replace``: those small
     samples are kept in every partition (used by ``fixed_common_test``).
