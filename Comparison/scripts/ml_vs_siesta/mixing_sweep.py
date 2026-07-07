@@ -15,7 +15,9 @@ from typing import Any, Callable
 
 from .dataset_mixing import DEFAULT_RATIOS, make_mixed_dataset_manifest
 from .mixed_dataset_materialize import (
+    DEFAULT_SPLIT_FRACTIONS,
     dataset_atom_count,
+    fixed_common_test_ids,
     materialize_mixed_dataset,
     read_dataset_samples,
 )
@@ -41,6 +43,7 @@ def plan_mixing_sweep(
     modes: tuple[str, ...] = DEFAULT_MODES,
     ratios: tuple[float, ...] = DEFAULT_RATIOS,
     seed: int = 0,
+    reserved_small_ids_by_size: dict[int, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Enumerate (size, mode, ratio) permutations with total/composition sizes.
 
@@ -50,6 +53,7 @@ def plan_mixing_sweep(
     """
     small_counts = {int(k): int(v) for k, v in small_counts.items()}
     large_counts = {int(k): int(v) for k, v in large_counts.items()}
+    reserved_small_ids_by_size = reserved_small_ids_by_size or {}
     if sizes is None:
         sizes = sorted(set(small_counts) & set(large_counts))
     else:
@@ -66,7 +70,12 @@ def plan_mixing_sweep(
         large_ids = [{"id": f"l{i}"} for i in range(large_counts[size])]
         for mode in modes:
             manifest = make_mixed_dataset_manifest(
-                small_ids, large_ids, ratios=ratios, mode=mode, seed=seed
+                small_ids,
+                large_ids,
+                ratios=ratios,
+                mode=mode,
+                seed=seed,
+                reserved_small_ids=reserved_small_ids_by_size.get(size),
             )
             for part in manifest["partitions"]:
                 n_large = int(part["n_large_selected"])
@@ -76,6 +85,8 @@ def plan_mixing_sweep(
                         "size": size,
                         "mode": mode,
                         "ratio": float(part["ratio"]),
+                        "ratio_semantics": part.get("ratio_semantics"),
+                        "large_capped": part.get("large_capped"),
                         "n_small_available": small_counts[size],
                         "n_large_available": large_counts[size],
                         "n_small_selected": total - n_large,
@@ -191,6 +202,7 @@ def run_mixing_sweep(
     epochs: int | None = None,
     system_label: str | None = None,
     performance: dict[str, Any] | None = None,
+    split_policy: str = "resplit_combined",
     dry_run: bool = True,
     launch_fn: LaunchFn | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
@@ -218,15 +230,31 @@ def run_mixing_sweep(
             continue
         small_root = small_by_size[size]
         large_root = large_by_size[size]
+        raw_small_samples = read_dataset_samples(small_root)
+        reserved_small_ids = None
+        if split_policy == "fixed_common_test":
+            reserved_small_ids = {
+                f"{_SMALL_PREFIX}{sid}"
+                for sid in fixed_common_test_ids(
+                    sorted(s.sample_id for s in raw_small_samples),
+                    DEFAULT_SPLIT_FRACTIONS,
+                    seed,
+                )
+            }
         small_samples = [
-            {"id": f"{_SMALL_PREFIX}{s.sample_id}"} for s in read_dataset_samples(small_root)
+            {"id": f"{_SMALL_PREFIX}{s.sample_id}"} for s in raw_small_samples
         ]
         large_samples = [
             {"id": f"{_LARGE_PREFIX}{s.sample_id}"} for s in read_dataset_samples(large_root)
         ]
         for mode in modes:
             manifest = make_mixed_dataset_manifest(
-                small_samples, large_samples, ratios=ratios, mode=mode, seed=seed
+                small_samples,
+                large_samples,
+                ratios=ratios,
+                mode=mode,
+                seed=seed,
+                reserved_small_ids=reserved_small_ids,
             )
             for part in manifest["partitions"]:
                 ratio = float(part["ratio"])
@@ -236,6 +264,8 @@ def run_mixing_sweep(
                     "size": size,
                     "mode": mode,
                     "ratio": ratio,
+                    "ratio_semantics": part.get("ratio_semantics"),
+                    "large_capped": part.get("large_capped"),
                     "total_size": int(part["n_selected"]),
                     "n_small_selected": len(selected_small),
                     "n_large_selected": len(selected_large),
@@ -253,6 +283,10 @@ def run_mixing_sweep(
                     selected_large_ids=selected_large,
                     output_root=merged_dir,
                     seed=seed,
+                    mode=mode,
+                    ratio=ratio,
+                    split_policy=split_policy,
+                    overwrite=True,
                 )
                 entry["materialize"] = materialize_summary
                 if launch_fn is not None:
@@ -311,6 +345,8 @@ def run_mixing_sweep(
     summary = {
         "schema": "ml_vs_siesta_mixing_sweep_summary_v1",
         "dry_run": dry_run,
+        "ratio_semantics": "fraction_of_large_pool",
+        "split_policy": split_policy,
         "modes": list(modes),
         "ratios": list(ratios),
         "seed": seed,

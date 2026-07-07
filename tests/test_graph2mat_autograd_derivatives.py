@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 
@@ -12,6 +15,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+TORCH_COMPAT_DIR = REPO_ROOT / "scripts" / "torch_serialization_compat"
+if str(TORCH_COMPAT_DIR) not in sys.path:
+    sys.path.insert(0, str(TORCH_COMPAT_DIR))
 
 from graph2mat_autograd_derivatives import (  # noqa: E402
     Graph2MatAutogradDerivativeError,
@@ -352,6 +358,134 @@ class SparseConversionTests(unittest.TestCase):
         self.assertEqual(recorded["copy_kwargs"], {"sub_point_matrix": False})
         self.assertIsNone(recorded["threshold"])
         self.assertFalse(recorded["predictions"]["node_labels"].requires_grad)
+
+
+# --------------------------------------------------------------------------- #
+# Real-checkpoint smoke: autograd jacobian vs finite-difference of the model
+# itself (never SIESTA). Skips cleanly when no checkpoint is available.
+# --------------------------------------------------------------------------- #
+_SMOKE_SWEEP_ROOT = (
+    REPO_ROOT / "Comparison" / "results" / "e2e_smoke_12snap_20ep" / "e2e_smoke_12snap_20ep" / "sweep"
+)
+_DEFAULT_SMOKE_CKPT = (
+    _SMOKE_SWEEP_ROOT / "graph2mat" / "graphene_w90_scale_iid12" / "G2M-E2E12-20EP"
+    / "graph2mat" / "training" / "lightning_logs" / "my_first_model" / "version_0"
+    / "checkpoints" / "best-160.ckpt"
+)
+_DEFAULT_SMOKE_STRUCTURE = (
+    _SMOKE_SWEEP_ROOT / "derivative_workflows" / "graphene_w90_scale_iid12"
+    / "structures" / "md_11_base"
+)
+
+
+def _flat_labels(predictions: dict[str, torch.Tensor]) -> torch.Tensor:
+    return torch.cat(
+        [predictions[key].detach().reshape(-1) for key in ("node_labels", "edge_labels")]
+    ).to(torch.float64)
+
+
+@pytest.mark.slow
+def test_autograd_jacobian_matches_model_finite_difference_real_checkpoint(tmp_path):
+    """dH_pred/dR (autograd, 1 atom, 1 axis) vs central FD of the model itself."""
+    checkpoint = Path(os.environ.get("G2M_AUTOGRAD_SMOKE_CKPT") or _DEFAULT_SMOKE_CKPT)
+    structure_dir = Path(
+        os.environ.get("G2M_AUTOGRAD_SMOKE_STRUCTURE") or _DEFAULT_SMOKE_STRUCTURE
+    )
+    if not checkpoint.is_file():
+        pytest.skip(f"No Graph2Mat checkpoint available: {checkpoint}")
+    if not (structure_dir / "RUN.fdf").is_file():
+        pytest.skip(f"No base structure RUN.fdf available: {structure_dir}")
+    basis_glob = os.environ.get("G2M_AUTOGRAD_SMOKE_BASIS") or str(structure_dir / "*.ion.xml")
+    import glob as _glob
+
+    if not _glob.glob(basis_glob):
+        pytest.skip(f"No basis .ion.xml files match: {basis_glob}")
+    try:
+        from torch_safe_globals import allow_graph2mat_checkpoint_globals
+
+        # Importing graph2mat/mace already torch.load()s data files, so the
+        # safe globals must be registered before the imports.
+        allow_graph2mat_checkpoint_globals()
+
+        from graph2mat.tools.lightning import MatrixDataModule
+        from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
+
+        from predict_model_on_dataset import (
+            checkpoint_training_dir,
+            normalize_pattern_for_workdir,
+        )
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        pytest.skip(f"graph2mat stack not importable: {exc}")
+    run_cwd = checkpoint_training_dir(checkpoint)
+    source_cwd = Path.cwd()
+    runs_json = tmp_path / "smoke_runs.json"
+    runs_json.write_text(
+        json.dumps({"predict": [str(structure_dir / "RUN.fdf")]}), encoding="utf-8"
+    )
+    basis_files = normalize_pattern_for_workdir(
+        basis_glob, source_cwd=source_cwd, target_cwd=run_cwd
+    )
+    try:
+        os.chdir(run_cwd)
+        model = LitMACEMatrixModel.load_from_checkpoint(
+            str(checkpoint), map_location="cpu", weights_only=False
+        )
+        model.eval()
+        datamodule = MatrixDataModule(
+            out_matrix="hamiltonian",
+            symmetric_matrix=True,
+            sub_point_matrix=False,
+            basis_files=basis_files,
+            runs_json=str(runs_json),
+            store_in_memory=True,
+            batch_size=1,
+            n_matrix_components=1,
+            matrix_component_policy="h_only",
+        )
+        datamodule.setup("predict")
+        batch = next(iter(datamodule.predict_dataloader()))
+        cob = torch.as_tensor(
+            datamodule.data_processor.basis_table.change_of_basis, dtype=torch.float64
+        )
+    finally:
+        os.chdir(source_cwd)
+
+    atom_index, axis_index = 0, 0
+    result = compute_graph2mat_position_jacobian(model.model, batch)
+    derivative = select_derivative_prediction_from_jacobian(
+        result.jacobian, result.spec, atom_index, axis_index, change_of_basis=cob
+    )
+    autograd_flat = _flat_labels(derivative)
+    assert autograd_flat.abs().max().item() > 0.0
+
+    positions = batch["positions"]
+    # Batch positions live in the e3nn frame (p_batch = C @ p_cart), so a
+    # cartesian displacement along axis a maps to the direction C[:, a].
+    direction = cob.to(positions.dtype)[:, axis_index]
+    for delta in (0.003, 0.01):
+        displaced = {}
+        for sign in (1.0, -1.0):
+            shifted = batch.clone()
+            shifted_positions = positions.detach().clone()
+            shifted_positions[atom_index] += sign * delta * direction
+            shifted["positions"] = shifted_positions
+            with torch.no_grad():
+                displaced[sign] = _flat_labels(model.model(shifted))
+        fd_flat = (displaced[1.0] - displaced[-1.0]) / (2.0 * delta)
+
+        cos = torch.dot(autograd_flat, fd_flat) / (
+            autograd_flat.norm() * fd_flat.norm()
+        )
+        rel_frobenius = (autograd_flat - fd_flat).norm() / fd_flat.norm()
+        mae = (autograd_flat - fd_flat).abs().mean()
+        print(
+            f"[autograd-smoke] delta={delta} cos={cos.item():.6f} "
+            f"rel_frobenius={rel_frobenius.item():.3e} mae_eV_per_ang={mae.item():.3e}"
+        )
+        assert cos.item() >= 0.999, (
+            f"autograd vs model finite-difference cosine {cos.item():.6f} < 0.999 "
+            f"(delta={delta}, rel_frobenius={rel_frobenius.item():.3e})"
+        )
 
 
 if __name__ == "__main__":

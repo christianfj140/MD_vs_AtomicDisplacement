@@ -154,8 +154,9 @@ python Comparison/scripts/ml_vs_siesta_benchmark.py mixing-sweep \
     --modes add,replace --ratios 0.0,0.2,0.4,0.6,0.8,1.0 --dry-run
 ```
 
-Drop `--dry-run` and pass `--output-root runs/mix` to materialize the merged
-datasets (still no training — training is launched via the runner / UI).
+Drop `--dry-run` and pass `--output-root Comparison/results/runs/mix` to
+materialize the merged datasets (still no training — training is launched via
+the runner / UI).
 
 ### Placing datasets
 
@@ -179,10 +180,46 @@ Open the **Mixing datasets** sidebar tab:
    synthetic curve, *Cargar métricas reales* reads `/api/mixing/metrics` once
    training has produced records.
 
-> Training is **not** auto-launched by the UI. Materialization is cheap
-> (snapshots are symlinked). Wire real per-permutation training by passing a
-> `launch_fn` to `run_mixing_sweep` that drives the existing Graph2Mat/DeepH
-> runner and returns `{"metrics": {model: {"h_mae_eV": ...}}}`.
+> The real flow is **preview → materialize → train (real) → load metrics**.
+> *Previsualizar* is a dry-run plan; *Materializar* builds the merged
+> `dataset_root`s (cheap, snapshots are symlinked); the **Entrenar sweep
+> (real)** button (`action == "train"` on `/api/mixing/launch`) materializes
+> everything and then drives ONE Graph2Mat/DeepH runner invocation with full
+> training parallelism — this launches real training subprocesses and needs
+> the models installed (GPU recommended). *Cargar métricas reales* then reads
+> `/api/mixing/metrics`, which reflects per-permutation `h_mae_eV` records and
+> `trained`/`partial`/`failed` statuses. Programmatic use without the UI: pass
+> a `launch_fn` to `run_mixing_sweep` returning
+> `{"metrics": {model: {"h_mae_eV": ...}}}`.
+
+#### Split policy
+
+`materialize_mixed_dataset` / `run_mixing_sweep` accept
+`split_policy` (UI payload key `split_policy`):
+
+- `"resplit_combined"` (default, legacy behaviour): the merged pool is
+  re-split by seed, so the test set changes with the selection — an MAE
+  improvement between ratios can come from the test set changing, not from
+  the composition.
+- `"fixed_common_test"` (**recommended for scientific analysis**): the test
+  set is a fixed fraction of the small pool derived only from
+  `small_root` + `seed`, so all permutations of the same size/seed share
+  exactly the same test snapshots.
+
+Each merged dataset also writes a self-contained
+`mixed_dataset_provenance.json` (mode, ratio + semantics, seed, selected ids,
+split policy, compatibility check) so any mixture can be reproduced.
+
+#### Graph2Mat autograd derivatives (dH_pred/dR)
+
+The autograd route (`run_graph2mat_autograd_derivative_predictions.py`) is
+**CPU-only** (MACE's TorchScript modules reject the vectorized batched
+backward on CUDA) and differentiates the model with the **fixed neighbor
+topology of the base structure** — the jacobian is exact up to cutoff-induced
+connectivity changes. A real-checkpoint smoke test
+(`tests/test_graph2mat_autograd_derivatives.py`, marked `slow`; set
+`G2M_AUTOGRAD_SMOKE_CKPT` to point at a checkpoint) validates autograd against
+a finite difference of the model itself.
 
 ## UI section
 

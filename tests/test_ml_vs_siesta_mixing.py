@@ -149,6 +149,128 @@ def test_materialize_split_proportions_roughly_match(small_large, tmp_path):
     assert counts["train"] >= counts["test"]
 
 
+def test_materialize_writes_self_contained_provenance(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "merged"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=out, seed=1, mode="add", ratio=0.5,
+    )
+    prov = json.loads((out / "mixed_dataset_provenance.json").read_text())
+    assert prov["schema"] == "ml_vs_siesta_mixed_dataset_provenance_v1"
+    assert prov["mode"] == "add"
+    assert prov["ratio"] == 0.5
+    assert prov["ratio_semantics"] == "fraction_of_large_pool"
+    assert prov["seed"] == 1
+    assert prov["small_root"] == str(small)
+    assert prov["large_root"] == str(large)
+    assert prov["split_policy"] == "resplit_combined"
+    assert prov["split_fractions"] == [0.7, 0.15, 0.15]
+    assert prov["compatibility"]["compatible"] is True
+    # The recorded selection reconstructs exactly what was requested.
+    assert prov["selected_small_ids"] == small_ids
+    assert prov["selected_large_ids"] == large_ids[:4]
+    # mode/ratio are optional: omitted -> null, no breakage.
+    out2 = tmp_path / "merged2"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=[],
+        output_root=out2, seed=1,
+    )
+    prov2 = json.loads((out2 / "mixed_dataset_provenance.json").read_text())
+    assert prov2["mode"] is None and prov2["ratio"] is None
+
+
+def _test_split_ids(dataset_root: Path) -> set[str]:
+    frozen = json.loads((dataset_root / "frozen_split_manifest.json").read_text())
+    return {row["sample_id"] for row in frozen["rows"] if row["split"] == "test"}
+
+
+def test_fixed_common_test_split_is_ratio_independent(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    test_sets = []
+    for name, n_large in (("r_low", 2), ("r_high", 6)):
+        out = tmp_path / name
+        mvs.materialize_mixed_dataset(
+            small, large, selected_small_ids=small_ids,
+            selected_large_ids=large_ids[:n_large],
+            output_root=out, seed=3, split_policy="fixed_common_test",
+        )
+        test_sets.append(_test_split_ids(out))
+    assert test_sets[0] == test_sets[1]
+    assert test_sets[0]  # non-empty
+    assert all(sid.startswith("small__") for sid in test_sets[0])
+
+
+def test_fixed_common_test_replace_preserves_same_test_set(small_large, tmp_path):
+    small, large = small_large
+    summary = mvs.run_mixing_sweep(
+        {8: small}, {8: large}, tmp_path / "out",
+        modes=("replace",), ratios=(0.25, 0.75), seed=3,
+        split_policy="fixed_common_test", dry_run=False,
+    )
+    assert summary["n_permutations"] == 2
+    test_sets = [
+        _test_split_ids(tmp_path / "out" / "size8_replace_r0p250"),
+        _test_split_ids(tmp_path / "out" / "size8_replace_r0p750"),
+    ]
+    assert test_sets[0] == test_sets[1]
+    assert test_sets[0]
+    assert all(sid.startswith("small__") for sid in test_sets[0])
+
+
+def test_fixed_common_test_differs_from_resplit_and_default_unchanged(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    # Default policy regression: same counts + all splits populated as before.
+    summary = mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=tmp_path / "default", seed=1,
+    )
+    assert sum(summary["split_counts"].values()) == 12
+    assert all(summary["split_counts"][s] > 0 for s in ("train", "validation", "test"))
+    # Unknown policy fails loudly.
+    with pytest.raises(mvs.DatasetMaterializeError):
+        mvs.materialize_mixed_dataset(
+            small, large, selected_small_ids=small_ids, selected_large_ids=[],
+            output_root=tmp_path / "bad", seed=1, split_policy="nonsense",
+        )
+
+
+def test_materialize_refuses_existing_output_without_overwrite(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    out = tmp_path / "merged"
+    kwargs = dict(
+        selected_small_ids=small_ids, selected_large_ids=[], output_root=out, seed=0,
+    )
+    mvs.materialize_mixed_dataset(small, large, **kwargs)
+    with pytest.raises(mvs.DatasetMaterializeError, match="already exists"):
+        mvs.materialize_mixed_dataset(small, large, **kwargs)
+    # overwrite=True keeps the run_mixing_sweep contract working.
+    mvs.materialize_mixed_dataset(small, large, overwrite=True, **kwargs)
+
+
+def test_materialize_rejects_output_outside_safe_roots(small_large):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    for dangerous in (
+        Path.home() / "some_merged_dataset",
+        Path("/"),
+        Path(__file__).resolve().parents[1],  # repo root
+        Path(__file__).resolve().parents[1] / "Comparison" / "results",
+    ):
+        with pytest.raises(mvs.DatasetMaterializeError, match="safe working roots"):
+            mvs.materialize_mixed_dataset(
+                small, large, selected_small_ids=small_ids, selected_large_ids=[],
+                output_root=dangerous, seed=0, overwrite=True,
+            )
+
+
 def test_incompatible_basis_raises(tmp_path):
     small = _make_dataset(tmp_path / "small", n_snapshots=4, n_atoms=2, basis_content="basis A")
     large = _make_dataset(tmp_path / "large", n_snapshots=4, n_atoms=50, basis_content="basis B")
@@ -210,6 +332,55 @@ def test_dataset_atom_count_falls_back_to_fdf(tmp_path):
         payload.pop("n_atoms", None)
         meta.write_text(json.dumps(payload), encoding="utf-8")
     assert mvs.dataset_atom_count(dataset) == 50
+
+
+# --------------------------------------------------------------------------- #
+# manifest selection (replace mode)
+# --------------------------------------------------------------------------- #
+def _replace_manifest(seed: int):
+    small = [{"id": f"s{i:02d}"} for i in range(20)]
+    large = [{"id": f"l{i:02d}"} for i in range(10)]
+    return mvs.make_mixed_dataset_manifest(
+        small, large, ratios=(0.5,), mode="replace", seed=seed
+    )
+
+
+def test_replace_kept_small_is_deterministic():
+    a = _replace_manifest(seed=3)["partitions"][0]["selected_ids"]
+    b = _replace_manifest(seed=3)["partitions"][0]["selected_ids"]
+    assert a == b
+
+
+def test_replace_kept_small_is_sampled_not_prefix():
+    part = _replace_manifest(seed=3)["partitions"][0]
+    kept_small = [sid for sid in part["selected_ids"] if sid.startswith("s")]
+    n_keep = 20 - part["n_large_selected"]
+    assert len(kept_small) == n_keep
+    prefix = [f"s{i:02d}" for i in range(n_keep)]
+    assert sorted(kept_small) != prefix
+
+
+def test_ratio_semantics_and_large_capped_exposed():
+    small = [{"id": f"s{i}"} for i in range(10)]
+    large = [{"id": f"l{i}"} for i in range(4)]  # fewer large than small
+    for mode in ("add", "replace"):
+        manifest = mvs.make_mixed_dataset_manifest(
+            small, large, ratios=(0.0, 1.0), mode=mode, seed=0
+        )
+        for part in manifest["partitions"]:
+            assert part["ratio_semantics"] == "fraction_of_large_pool"
+            assert "large_capped" in part
+    # replace ratio=1.0 wants 10 large but only 4 exist -> capped, and flagged.
+    replace = mvs.make_mixed_dataset_manifest(
+        small, large, ratios=(1.0,), mode="replace", seed=0
+    )["partitions"][0]
+    assert replace["large_capped"] is True
+    assert replace["n_large_selected"] == 4
+    # plan propagates both fields.
+    plan = mvs.plan_mixing_sweep({8: 10}, {8: 4}, modes=("replace",), ratios=(1.0,), seed=0)
+    perm = plan["permutations"][0]
+    assert perm["ratio_semantics"] == "fraction_of_large_pool"
+    assert perm["large_capped"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -407,6 +578,7 @@ def test_backend_mixing_launch_dry_run_and_status(small_large, tmp_path, monkeyp
     # own past runs) so the persisted-summary fallback in metrics() only
     # ever sees this test's own payloads.
     monkeypatch.setattr(ui, "MIXING_SWEEP_OUTPUT_ROOT", tmp_path / "mixing_sweep_output")
+    monkeypatch.setattr(ui, "RESULTS_ROOT", tmp_path / "results")
     runner = ui.MixingSweepRunner()  # fresh instance, does not touch the singleton
     runner.start(
         {
@@ -438,6 +610,7 @@ def test_mixing_metrics_surfaces_historical_payload_without_records(tmp_path, mo
 
     output_root = tmp_path / "mixing_sweep_output"
     monkeypatch.setattr(ui, "MIXING_SWEEP_OUTPUT_ROOT", output_root)
+    monkeypatch.setattr(ui, "RESULTS_ROOT", tmp_path / "results")
     output_root.mkdir(parents=True)
     (output_root / "mixing_sweep_summary.json").write_text(
         json.dumps(
@@ -475,6 +648,7 @@ def test_mixing_metrics_payload_status_trained_when_metrics_exist(tmp_path, monk
 
     output_root = tmp_path / "mixing_sweep_output"
     monkeypatch.setattr(ui, "MIXING_SWEEP_OUTPUT_ROOT", output_root)
+    monkeypatch.setattr(ui, "RESULTS_ROOT", tmp_path / "results")
     output_root.mkdir(parents=True)
     (output_root / "mixing_sweep_summary.json").write_text(
         json.dumps(
@@ -518,6 +692,67 @@ def test_mixing_metrics_payload_status_trained_when_metrics_exist(tmp_path, monk
     assert by_size[50]["status"] == "trained"
     assert by_size[80]["status"] == "planned"
     assert any(curve["points"] for curve in metrics["curves"])
+
+
+class _FakeParallelBenchmarkRunner:
+    """Stands in for Graph2MatDeepHBenchmarkRunner: finishes instantly, no training."""
+
+    def start(self, payload):
+        self.payload = payload
+
+    def status(self):
+        return {"running": False}
+
+    def results(self):
+        return {"status": {}}
+
+
+def _write_common_metrics_csv(run_root: Path, model: str, h_mae: float) -> None:
+    summary_dir = run_root / "common_metrics" / "summary"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    (summary_dir / "common_method_metrics.csv").write_text(
+        f"method,h_mae_eV_mean\n{model},{h_mae}\n", encoding="utf-8"
+    )
+
+
+def test_parallel_sweep_marks_partial_when_one_model_missing(small_large, tmp_path, monkeypatch):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    monkeypatch.setattr(ui, "Graph2MatDeepHBenchmarkRunner", _FakeParallelBenchmarkRunner)
+    out = tmp_path / "out"
+    # Only graph2mat produces MAE for perm_0; deeph is missing -> partial.
+    _write_common_metrics_csv(
+        out / "parallel_run" / "sweep" / "graph2mat" / "perm_0", "graph2mat", 0.05
+    )
+    summary = ui._run_mixing_sweep_parallel(
+        {8: str(small)}, {8: str(large)}, out,
+        sizes=None, modes=("add",), ratios=(1.0,), seed=0,
+        models=("graph2mat", "deeph"), epochs=None, performance=None, progress_fn=None,
+    )
+    assert summary["n_partial"] == 1
+    assert summary["n_trained"] == 0
+    assert summary["n_failed"] == 0
+    perm = summary["permutations"][0]
+    assert perm["status"] == "partial"
+    assert "deeph" in perm["error"]
+
+
+def test_parallel_sweep_marks_failed_without_any_mae(small_large, tmp_path, monkeypatch):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    monkeypatch.setattr(ui, "Graph2MatDeepHBenchmarkRunner", _FakeParallelBenchmarkRunner)
+    summary = ui._run_mixing_sweep_parallel(
+        {8: str(small)}, {8: str(large)}, tmp_path / "out",
+        sizes=None, modes=("add",), ratios=(1.0,), seed=0,
+        models=("graph2mat", "deeph"), epochs=None, performance=None, progress_fn=None,
+    )
+    assert summary["n_failed"] == 1
+    assert summary["n_trained"] == 0
+    perm = summary["permutations"][0]
+    assert perm["status"] == "failed"
+    assert perm["error"] == "no h_mae_eV produced"
 
 
 def test_backend_mixing_launch_rejects_concurrent(small_large):

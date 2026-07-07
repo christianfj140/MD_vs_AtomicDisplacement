@@ -66,7 +66,10 @@ def _select_manifest_for_ratio(
     ratio: float,
     mode: str,
     rng: random.Random,
+    reserved_small_ids: set[str] | None = None,
 ) -> dict[str, Any]:
+    large_capped = False
+    reserved_small_ids = set(reserved_small_ids or ())
     if mode == "add":
         # Keep all small samples, add a fraction of the large ones.
         n_large = round(ratio * len(large_ids))
@@ -74,16 +77,26 @@ def _select_manifest_for_ratio(
         selected = list(small_ids) + chosen_large
     elif mode == "replace":
         # Keep total size constant: replace a fraction of small samples with large.
+        # Reserved small ids (fixed common test) are never replaced.
         total = len(small_ids)
-        n_replace = min(round(ratio * total), total, len(large_ids))
+        replaceable_small = [sid for sid in small_ids if sid not in reserved_small_ids]
+        requested_replace = round(ratio * total)
+        n_replace = min(requested_replace, len(replaceable_small), len(large_ids))
+        large_capped = requested_replace > min(len(replaceable_small), len(large_ids))
         chosen_large = sorted(rng.sample(large_ids, n_replace)) if n_replace else []
-        kept_small = list(small_ids[: total - n_replace])
+        # Sample (not prefix-slice) the retained small ids: manifest order encodes
+        # MD time/temperature/seed, so a prefix would bias the retained pool.
+        n_keep = len(replaceable_small) - n_replace
+        kept_small = sorted(reserved_small_ids & set(small_ids))
+        kept_small += sorted(rng.sample(replaceable_small, n_keep)) if n_keep else []
         selected = kept_small + chosen_large
     else:
         raise ValueError(f"Unknown mode {mode!r}; use 'add' or 'replace'.")
     return {
         "ratio": ratio,
         "mode": mode,
+        "ratio_semantics": "fraction_of_large_pool",
+        "large_capped": large_capped,
         "n_selected": len(selected),
         "n_large_selected": len(chosen_large),
         "selected_ids": selected,
@@ -98,6 +111,7 @@ def make_mixed_dataset_manifest(
     output_path: str | Path | None = None,
     *,
     seed: int = 0,
+    reserved_small_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build a reproducible small/large mixing manifest.
 
@@ -105,6 +119,17 @@ def make_mixed_dataset_manifest(
     ``mode="replace"`` swaps a fraction of small samples for large ones while
     keeping the total size constant. Output is written as JSON/YAML/CSV inferred
     from ``output_path``'s suffix (CSV = one row per ratio×sample).
+
+    Ratio semantics (exposed per partition as ``ratio_semantics ==
+    "fraction_of_large_pool"``): in ``add`` the number of large samples is
+    ``round(ratio * len(large))``; in ``replace`` the number of replaced small
+    samples is ``round(ratio * len(small))``, capped by the available large
+    pool. When that cap kicks in (``ratio=1.0`` with fewer large than small
+    samples does NOT give 100% large), the partition flags it with
+    ``large_capped == True``.
+
+    ``reserved_small_ids`` is optional and only affects ``replace``: those small
+    samples are kept in every partition (used by ``fixed_common_test``).
     """
     small_ids = [
         _sample_id(sample, i) for i, sample in enumerate(small_dataset)
@@ -121,7 +146,9 @@ def make_mixed_dataset_manifest(
     for index, ratio in enumerate(ratios_list):
         # Deterministic but ratio-dependent seed for reproducibility.
         rng = random.Random(seed * 1000 + index)
-        entry = _select_manifest_for_ratio(small_ids, large_ids, ratio, mode, rng)
+        entry = _select_manifest_for_ratio(
+            small_ids, large_ids, ratio, mode, rng, reserved_small_ids=reserved_small_ids
+        )
         entry["label"] = f"D{index}"
         partitions.append(entry)
 

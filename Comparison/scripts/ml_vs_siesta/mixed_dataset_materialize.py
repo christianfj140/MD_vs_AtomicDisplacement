@@ -17,6 +17,7 @@ import json
 import os
 import random
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -232,6 +233,70 @@ def _split_pool(
     return assignment
 
 
+def _validate_safe_output_root(output_root: Path) -> Path:
+    """Refuse to materialize (and later rmtree) outside a safe working root.
+
+    Safe roots are ``Comparison/results`` and the system temp dir; the output
+    must be a strict subdirectory of one of them, which by construction rules
+    out ``/``, ``$HOME``, the repo root and ``Comparison/results`` itself.
+    """
+    resolved = Path(output_root).resolve()
+    repo_root = Path(__file__).resolve().parents[3]
+    safe_roots = (
+        repo_root / "Comparison" / "results",
+        Path(tempfile.gettempdir()).resolve(),
+    )
+    if not any(root in resolved.parents for root in safe_roots):
+        raise DatasetMaterializeError(
+            f"Refusing to materialize into {resolved}: output_root must live "
+            f"inside one of the safe working roots {[str(r) for r in safe_roots]} "
+            "(it will be recursively deleted on overwrite)."
+        )
+    return resolved
+
+
+def _fixed_common_test_split(
+    selected: list[tuple[str, "DatasetSample"]],
+    small_pool_ids: list[str],
+    fractions: tuple[float, float, float],
+    seed: int,
+) -> list[str]:
+    """Split with a test set derived only from the small pool + seed.
+
+    A fixed fraction (``fractions[2]``) of the *whole* small pool is reserved
+    for test; any selected small snapshot in that reservation goes to "test".
+    The remaining selected snapshots are shuffled into train/validation with
+    the train:validation proportion of ``fractions``.
+    """
+    rng = random.Random(seed)
+    test_ids = fixed_common_test_ids(small_pool_ids, fractions, seed)
+
+    assignment = [""] * len(selected)
+    rest: list[int] = []
+    for i, (merged_id, _sample) in enumerate(selected):
+        if merged_id.startswith("small__") and merged_id[len("small__"):] in test_ids:
+            assignment[i] = "test"
+        else:
+            rest.append(i)
+    rng.shuffle(rest)
+    n_rest = len(rest)
+    train_share = fractions[0] / (fractions[0] + fractions[1])
+    n_train = min(max(1, round(train_share * n_rest)), max(n_rest - 1, 1)) if n_rest else 0
+    for rank, idx in enumerate(rest):
+        assignment[idx] = "train" if rank < n_train else "validation"
+    return assignment
+
+
+def fixed_common_test_ids(
+    small_pool_ids: list[str],
+    fractions: tuple[float, float, float],
+    seed: int,
+) -> set[str]:
+    rng = random.Random(seed)
+    n_test = max(1, round(fractions[2] * len(small_pool_ids)))
+    return set(rng.sample(small_pool_ids, min(n_test, len(small_pool_ids))))
+
+
 def _link_or_copy(src: Path, dst: Path, *, link: bool) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
@@ -272,17 +337,44 @@ def materialize_mixed_dataset(
     seed: int = 0,
     split_fractions: tuple[float, float, float] = DEFAULT_SPLIT_FRACTIONS,
     link: bool = True,
+    mode: str | None = None,
+    ratio: float | None = None,
+    split_policy: str = "resplit_combined",
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Materialize a merged, runner-ready ``dataset_root`` from selected samples.
 
-    The merged pool (selected small + large snapshots) is re-split into
-    train/validation/test deterministically by ``seed`` (the "combined test").
+    Split policies:
+
+    - ``"resplit_combined"`` (default): the merged pool (selected small + large
+      snapshots) is re-split into train/validation/test deterministically by
+      ``seed`` (the "combined test"). The test set therefore changes with the
+      selection, i.e. between ratios of the same sweep.
+    - ``"fixed_common_test"``: the test set is a fixed fraction
+      (``split_fractions[2]``) of the *small pool*, derived only from
+      ``small_root`` + ``seed`` and independent of the ratio, so permutations
+      of the same size/seed share exactly the same test snapshots (recommended
+      for scientific MAE-vs-composition analysis). ``run_mixing_sweep`` keeps
+      those reserved small samples selected even in ``mode="replace"``. The
+      remaining selected snapshots are split into train/validation.
+
+    ``mode``/``ratio`` are optional metadata recorded in the provenance file
+    (``mixed_dataset_provenance.json``); they do not affect the selection.
     Snapshot artifacts are symlinked (or copied) into ``splits/<split>/<idx>/``
     and the benchmark manifests are regenerated via ``write_benchmark_manifests``.
+
+    ``output_root`` must live inside a safe working root (``Comparison/results``
+    or the system temp dir) and, if it already exists, is only recursively
+    replaced when ``overwrite=True``.
     """
     small_root = Path(small_root)
     large_root = Path(large_root)
     output_root = Path(output_root)
+    _validate_safe_output_root(output_root)
+    if output_root.exists() and not overwrite:
+        raise DatasetMaterializeError(
+            f"output_root already exists: {output_root}. Pass overwrite=True to replace it."
+        )
 
     compat = validate_datasets_compatible(small_root, large_root)
 
@@ -302,8 +394,18 @@ def materialize_mixed_dataset(
     if not selected:
         raise DatasetMaterializeError("No samples selected for the merged dataset.")
 
-    rng = random.Random(seed)
-    split_assignment = _split_pool(len(selected), split_fractions, rng)
+    if split_policy == "resplit_combined":
+        rng = random.Random(seed)
+        split_assignment = _split_pool(len(selected), split_fractions, rng)
+    elif split_policy == "fixed_common_test":
+        split_assignment = _fixed_common_test_split(
+            selected, sorted(small_by_id), split_fractions, seed
+        )
+    else:
+        raise DatasetMaterializeError(
+            f"Unknown split_policy {split_policy!r}; "
+            "use 'resplit_combined' or 'fixed_common_test'."
+        )
 
     if output_root.exists():
         shutil.rmtree(output_root)
@@ -365,6 +467,25 @@ def materialize_mixed_dataset(
         split_root=output_root / "splits",
         generation_mode="mixed_dataset",
         strict_paper_ready_provenance=False,
+    )
+
+    # Self-contained provenance of the mixture (reproducibility contract).
+    provenance = {
+        "schema": "ml_vs_siesta_mixed_dataset_provenance_v1",
+        "mode": mode,
+        "ratio": ratio,
+        "ratio_semantics": "fraction_of_large_pool",
+        "seed": seed,
+        "small_root": str(small_root),
+        "large_root": str(large_root),
+        "selected_small_ids": list(selected_small_ids),
+        "selected_large_ids": list(selected_large_ids),
+        "split_policy": split_policy,
+        "split_fractions": list(split_fractions),
+        "compatibility": compat,
+    }
+    (output_root / "mixed_dataset_provenance.json").write_text(
+        json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
     )
 
     split_counts = {split: len(rows) for split, rows in split_rows.items()}

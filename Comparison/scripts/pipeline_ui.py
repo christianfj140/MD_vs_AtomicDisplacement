@@ -16624,6 +16624,7 @@ def _run_mixing_sweep_parallel(
     models: tuple[str, ...],
     epochs: int | None,
     performance: dict[str, Any] | None,
+    split_policy: str = "resplit_combined",
     progress_fn: Callable[[dict[str, Any]], None] | None,
 ) -> dict[str, Any]:
     """Materialize ALL permutation datasets, then train with ONE runner invocation.
@@ -16646,6 +16647,7 @@ def _run_mixing_sweep_parallel(
         models=models,
         epochs=epochs,
         performance=performance,
+        split_policy=split_policy,
         dry_run=False,
         launch_fn=None,          # materialise only, no training yet
         progress_fn=progress_fn,
@@ -16746,8 +16748,10 @@ def _run_mixing_sweep_parallel(
 
     # ── Phase 3: collect per-permutation MAE from the common_metrics CSV ───────
     records: list[dict[str, Any]] = []
+    requested_models = list(models)
     for i, perm in enumerate(materialized):
         dataset_id = f"perm_{i}"
+        recorded_models: list[str] = []
         # The runner writes per-run metrics under run_root/sweep/<model>/<dataset_id>/…
         for model in models:
             sweep_run_root = Path(run_root) / "sweep" / model / dataset_id
@@ -16758,6 +16762,7 @@ def _run_mixing_sweep_parallel(
             if not m:
                 m = _mixing_metrics_from_run_metrics(sweep_run_root, model)
             if model in m:
+                recorded_models.append(model)
                 records.append(
                     {
                         "size": perm.get("size"),
@@ -16769,11 +16774,30 @@ def _run_mixing_sweep_parallel(
                         "output_root": perm["output_root"],
                     }
                 )
+        # Rewrite the per-permutation status (same semantics as run_mixing_sweep)
+        # so failures never linger as "materialized".
+        if not recorded_models:
+            perm["status"] = "failed"
+            perm["error"] = "no h_mae_eV produced"
+        elif len(recorded_models) < len(requested_models):
+            perm["status"] = "partial"
+            perm["error"] = "missing h_mae_eV for: " + ", ".join(
+                model for model in requested_models if model not in recorded_models
+            )
+        else:
+            perm["status"] = "trained"
+
+    def _count(status: str) -> int:
+        return sum(
+            1
+            for entry in (summary_permutations.get("permutations") or [])
+            if entry.get("status") == status
+        )
 
     summary_permutations["records"] = records
-    summary_permutations["n_trained"] = len(
-        {(r["size"], r["mode"], r["ratio"]) for r in records}
-    )
+    summary_permutations["n_trained"] = _count("trained")
+    summary_permutations["n_partial"] = _count("partial")
+    summary_permutations["n_failed"] = _count("failed")
     summary_permutations["parallel_run_root"] = run_root
     _persist_mixing_summary(output_root, summary_permutations)
     return summary_permutations
@@ -16792,8 +16816,11 @@ class MixingSweepRunner:
             return dict(self._status)
 
     def _latest_persisted_summary(self) -> dict[str, Any]:
+        # The canonical write location is MIXING_SWEEP_OUTPUT_ROOT, which in
+        # production lives under RESULTS_ROOT but may be pointed elsewhere.
         candidates = sorted(
-            RESULTS_ROOT.glob("ml_vs_siesta_mixing_sweep*/mixing_sweep_summary.json"),
+            set(RESULTS_ROOT.glob("ml_vs_siesta_mixing_sweep*/mixing_sweep_summary.json"))
+            | {MIXING_SWEEP_OUTPUT_ROOT / "mixing_sweep_summary.json"},
             key=lambda path: path.stat().st_mtime if path.exists() else 0,
             reverse=True,
         )
@@ -16849,6 +16876,7 @@ class MixingSweepRunner:
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
             epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
             performance = body.get("performance") or None
+            split_policy = str(body.get("split_policy") or "resplit_combined")
             # Actions:
             #   "preview"     -> plan only (no writes).
             #   "materialize" -> build merged datasets, no training.
@@ -16905,6 +16933,7 @@ class MixingSweepRunner:
                     models=models,
                     epochs=epochs,
                     performance=performance,
+                    split_policy=split_policy,
                     progress_fn=progress,
                 )
             else:
@@ -16919,6 +16948,7 @@ class MixingSweepRunner:
                     models=models,
                     epochs=epochs,
                     performance=performance,
+                    split_policy=split_policy,
                     dry_run=dry_run,
                     launch_fn=launch_fn,
                     progress_fn=progress,
