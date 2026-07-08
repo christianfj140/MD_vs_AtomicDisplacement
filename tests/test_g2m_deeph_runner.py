@@ -1076,6 +1076,7 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
                     "deeph_prediction_method": "autograd_vectorized",
                     "deeph_command": str(Path(tmp) / "DeepH-pack" / ".venv" / "bin" / "deeph-inference"),
                     "max_samples": 2,
+                    "max_base_snapshots": 1,
                 },
             }
             payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
@@ -1093,12 +1094,66 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             )
             deeph_command = commands[2][1]
             self.assertIn("run_deeph_autograd_derivative_predictions.py", deeph_command[1])
-            self.assertEqual(deeph_command[deeph_command.index("--max-base-structures") + 1], "2")
+            self.assertEqual(deeph_command[deeph_command.index("--max-base-structures") + 1], "1")
             self.assertEqual(deeph_command[deeph_command.index("--model-dir") + 1], str(deeph_model))
             self.assertEqual(
                 summary["stages"]["predict_derivative_deeph"]["deeph_prediction_method"],
                 "autograd_vectorized",
             )
+
+    def test_autograd_prediction_limit_uses_base_snapshots_not_legacy_max_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "derivatives"
+            source = Path(tmp) / "source"
+            root.mkdir()
+            source.mkdir()
+            checkpoint = Path(tmp) / "graph2mat.ckpt"
+            checkpoint.write_text("checkpoint\n", encoding="utf-8")
+            runner = Graph2MatDeepHBenchmarkRunner()
+            commands = []
+
+            def fake_run_command(command, *, cwd, env, label, allowed_returncodes=(0,), **_kwargs):
+                commands.append((label, list(command)))
+                if "geometry validation" in label:
+                    (root / "derivative_geometry_validation.json").write_text(
+                        json.dumps({"errors": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                elif "graph2mat autograd" in label:
+                    output_root = Path(command[command.index("--output-root") + 1])
+                    output_root.mkdir(parents=True, exist_ok=True)
+                    (output_root / "derivative_graph2mat_autograd_prediction_manifest.json").write_text(
+                        json.dumps({"samples_failed": 0}) + "\n",
+                        encoding="utf-8",
+                    )
+                return {"label": label, "returncode": 0}
+
+            runner._run_command = fake_run_command  # type: ignore[method-assign]
+            payload = {
+                "workflow_mode": "derivative_predictions_only",
+                "derivative": {
+                    "enabled": True,
+                    "result_dir": str(root),
+                    "source_dataset_root": str(source),
+                    "method": "central",
+                    "delta_ang": 0.01,
+                    "atoms": ["0"],
+                    "axes": ["x"],
+                    "graph2mat_prediction_method": "autograd_vectorized",
+                    "graph2mat_checkpoint": str(checkpoint),
+                    "basis_files": str(Path(tmp) / "*.ion.xml"),
+                    "max_samples": 99,
+                    "max_base_snapshots": 3,
+                },
+                "stages": {"predict_derivative_deeph": False},
+            }
+            payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
+
+            runner._run_modular_derivative_workflow(payload)
+
+            graph2mat_command = commands[1][1]
+            self.assertNotIn("--max-samples", graph2mat_command)
+            self.assertEqual(graph2mat_command[graph2mat_command.index("--max-base-structures") + 1], "3")
 
     def test_modular_derivative_workflow_smoke_runs_ordered_fake_chain(self):
         with tempfile.TemporaryDirectory() as tmp:

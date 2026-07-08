@@ -28,6 +28,9 @@ from graph2mat_autograd_derivatives import (  # noqa: E402
     select_derivative_prediction_from_jacobian,
     unflatten_graph2mat_prediction_vector,
 )
+from run_graph2mat_autograd_derivative_predictions import (  # noqa: E402
+    _append_missing_structure_rows,
+)
 
 
 N_ATOMS = 4
@@ -486,6 +489,28 @@ def test_autograd_jacobian_matches_model_finite_difference_real_checkpoint(tmp_p
             f"autograd vs model finite-difference cosine {cos.item():.6f} < 0.999 "
             f"(delta={delta}, rel_frobenius={rel_frobenius.item():.3e})"
         )
+        assert rel_frobenius.item() <= 0.25, (
+            f"autograd vs model finite-difference relative Frobenius "
+            f"{rel_frobenius.item():.3e} > 2.5e-1 (delta={delta})"
+        )
+
+
+class AutogradPredictionScriptTests(unittest.TestCase):
+    def test_missing_dataloader_structure_becomes_failed_row(self) -> None:
+        rows = []
+        requests = {
+            "base_0_base": {
+                "base_sample_id": "base_0",
+                "pairs": {(0, "x"): {0.01}},
+            }
+        }
+
+        _append_missing_structure_rows(rows, requests, seen_structure_ids=set())
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "error")
+        self.assertEqual(rows[0]["base_structure_sample_id"], "base_0_base")
+        self.assertEqual(rows[0]["error"], "missing_base_structure_from_graph2mat_dataloader")
 
 
 if __name__ == "__main__":

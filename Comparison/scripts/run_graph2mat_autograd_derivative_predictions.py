@@ -303,6 +303,35 @@ def _prediction_file_metadata(
     }
 
 
+def _append_missing_structure_rows(
+    rows: list[dict[str, Any]],
+    requests_by_structure_id: dict[str, dict[str, Any]],
+    seen_structure_ids: set[str],
+) -> None:
+    for structure_id, request in sorted(requests_by_structure_id.items()):
+        if structure_id in seen_structure_ids:
+            continue
+        for (atom_index, axis), deltas in sorted(request["pairs"].items()):
+            axis_index = VALID_AXES[axis]
+            rows.append(
+                {
+                    "base_structure_sample_id": structure_id,
+                    "base_sample_id": request["base_sample_id"],
+                    "atom_index_zero_based": atom_index,
+                    "axis": axis,
+                    "axis_index": axis_index,
+                    "status": "error",
+                    "prediction_path": "",
+                    "metadata_path": "",
+                    "nnz": None,
+                    "shape_rows": None,
+                    "shape_cols": None,
+                    "reference_delta_ang_values": ";".join(f"{d:g}" for d in sorted(deltas)),
+                    "error": "missing_base_structure_from_graph2mat_dataloader",
+                }
+            )
+
+
 def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, Any]:
     import torch
 
@@ -417,6 +446,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
     }
 
     rows: list[dict[str, Any]] = []
+    seen_structure_ids: set[str] = set()
     started_at = time.time()
     cwd = Path.cwd()
     try:
@@ -449,6 +479,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
                     f"Prediction batch structure {structure_id!r} does not match any "
                     "requested base stencil sample."
                 )
+            seen_structure_ids.add(structure_id)
             batch = batch.to(device) if hasattr(batch, "to") else batch
 
             jacobian_result = compute_graph2mat_position_jacobian(
@@ -543,6 +574,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
     finally:
         os.chdir(cwd)
 
+    _append_missing_structure_rows(rows, requests_by_structure_id, seen_structure_ids)
     failed = [row for row in rows if row["status"] == "error"]
     manifest = {
         "schema_version": "derivative_graph2mat_autograd_prediction_v1",

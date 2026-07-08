@@ -1454,6 +1454,14 @@ def _derivative_metrics_settings(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _autograd_max_base_structures(config: dict[str, Any]) -> Any:
+    return (
+        config.get("max_base_structures")
+        if config.get("max_base_structures") not in (None, "")
+        else config.get("max_base_snapshots")
+    )
+
+
 def _normalized_derivative_metrics_payload(payload: dict[str, Any]) -> dict[str, Any]:
     raw = payload.get("derivative_metrics") if isinstance(payload.get("derivative_metrics"), dict) else {}
     normalized = dict(raw)
@@ -8044,13 +8052,9 @@ class Graph2MatDeepHBenchmarkRunner:
         if overwrite:
             command.append("--overwrite")
         command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
-        max_samples = (
-            config.get("max_samples")
-            if config.get("max_samples") not in (None, "")
-            else config.get("max_jobs")
-        )
-        if max_samples not in (None, ""):
-            command.extend(["--max-base-structures", str(max_samples)])
+        max_base_structures = _autograd_max_base_structures(config)
+        if max_base_structures not in (None, ""):
+            command.extend(["--max-base-structures", str(max_base_structures)])
         for key, flag in (
             ("accelerator", "--accelerator"),
             ("jacobian_method", "--jacobian-method"),
@@ -8157,13 +8161,9 @@ class Graph2MatDeepHBenchmarkRunner:
         if overwrite:
             command.append("--overwrite")
         command.append("--skip-if-exists" if skip_if_exists else "--no-skip-if-exists")
-        max_samples = (
-            config.get("max_samples")
-            if config.get("max_samples") not in (None, "")
-            else config.get("max_jobs")
-        )
-        if max_samples not in (None, ""):
-            command.extend(["--max-base-structures", str(max_samples)])
+        max_base_structures = _autograd_max_base_structures(config)
+        if max_base_structures not in (None, ""):
+            command.extend(["--max-base-structures", str(max_base_structures)])
 
         record = self._run_derivative_stage_command(
             command,
