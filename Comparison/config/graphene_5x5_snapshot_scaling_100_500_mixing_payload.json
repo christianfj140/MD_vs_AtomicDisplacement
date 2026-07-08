@@ -1,0 +1,323 @@
+{
+  "description": "Graphene 5x5 dataset-generation payload for iid100/iid150/iid200/iid300/iid400/iid500 mixing E2E. Generates SIESTA MD datasets only; no model training.",
+  "source_reference_payloads": [
+    "Comparison/config/graphene_5x5_snapshot_scaling_20_50_80_payload.json"
+  ],
+  "pipeline_config": "Comparison/config/graphene_5x5_snapshot_scaling_20_50_pipeline_config.yaml",
+  "material_preset": "graphene_5x5",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene_5x5"
+  },
+  "dataset_mode": "generate_new",
+  "run_mode": "generate_datasets_only",
+  "dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing",
+  "output_root": "${REPO_ROOT}/Comparison/results/graphene_5x5_snapshot_scaling_100_500_mixing",
+  "system_label": "graphene_5x5",
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": "disabled",
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "split_mode": "blocked_with_gap",
+  "temporal_gap": 1,
+  "block_order": "train,validation,test",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "dataset_sweep": {
+    "enabled": true,
+    "max_datasets": 6,
+    "recipes": [
+      {
+        "recipe_id": "graphene_5x5_scale_iid100",
+        "label": "Graphene 5x5 IID scale: 100 snapshots",
+        "size": 100,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x5_scale_iid100_T150_20_1",
+            "label": "20 snapshots @ 150 K",
+            "n_snapshots": 20,
+            "temperature_K": 150,
+            "seed": 150100
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid100_T300_60_2",
+            "label": "60 snapshots @ 300 K",
+            "n_snapshots": 60,
+            "temperature_K": 300,
+            "seed": 300100
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid100_T450_20_3",
+            "label": "20 snapshots @ 450 K",
+            "n_snapshots": 20,
+            "temperature_K": 450,
+            "seed": 450100
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x5_scale_iid150",
+        "label": "Graphene 5x5 IID scale: 150 snapshots",
+        "size": 150,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x5_scale_iid150_T150_30_1",
+            "label": "30 snapshots @ 150 K",
+            "n_snapshots": 30,
+            "temperature_K": 150,
+            "seed": 150150
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid150_T300_90_2",
+            "label": "90 snapshots @ 300 K",
+            "n_snapshots": 90,
+            "temperature_K": 300,
+            "seed": 300150
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid150_T450_30_3",
+            "label": "30 snapshots @ 450 K",
+            "n_snapshots": 30,
+            "temperature_K": 450,
+            "seed": 450150
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x5_scale_iid200",
+        "label": "Graphene 5x5 IID scale: 200 snapshots",
+        "size": 200,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x5_scale_iid200_T150_40_1",
+            "label": "40 snapshots @ 150 K",
+            "n_snapshots": 40,
+            "temperature_K": 150,
+            "seed": 150200
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid200_T300_120_2",
+            "label": "120 snapshots @ 300 K",
+            "n_snapshots": 120,
+            "temperature_K": 300,
+            "seed": 300200
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid200_T450_40_3",
+            "label": "40 snapshots @ 450 K",
+            "n_snapshots": 40,
+            "temperature_K": 450,
+            "seed": 450200
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x5_scale_iid300",
+        "label": "Graphene 5x5 IID scale: 300 snapshots",
+        "size": 300,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x5_scale_iid300_T150_60_1",
+            "label": "60 snapshots @ 150 K",
+            "n_snapshots": 60,
+            "temperature_K": 150,
+            "seed": 150300
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid300_T300_180_2",
+            "label": "180 snapshots @ 300 K",
+            "n_snapshots": 180,
+            "temperature_K": 300,
+            "seed": 300300
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid300_T450_60_3",
+            "label": "60 snapshots @ 450 K",
+            "n_snapshots": 60,
+            "temperature_K": 450,
+            "seed": 450300
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x5_scale_iid400",
+        "label": "Graphene 5x5 IID scale: 400 snapshots",
+        "size": 400,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x5_scale_iid400_T150_80_1",
+            "label": "80 snapshots @ 150 K",
+            "n_snapshots": 80,
+            "temperature_K": 150,
+            "seed": 150400
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid400_T300_240_2",
+            "label": "240 snapshots @ 300 K",
+            "n_snapshots": 240,
+            "temperature_K": 300,
+            "seed": 300400
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid400_T450_80_3",
+            "label": "80 snapshots @ 450 K",
+            "n_snapshots": 80,
+            "temperature_K": 450,
+            "seed": 450400
+          }
+        ]
+      },
+      {
+        "recipe_id": "graphene_5x5_scale_iid500",
+        "label": "Graphene 5x5 IID scale: 500 snapshots",
+        "size": 500,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "graphene_5x5_scale_iid500_T150_100_1",
+            "label": "100 snapshots @ 150 K",
+            "n_snapshots": 100,
+            "temperature_K": 150,
+            "seed": 150500
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid500_T300_300_2",
+            "label": "300 snapshots @ 300 K",
+            "n_snapshots": 300,
+            "temperature_K": 300,
+            "seed": 300500
+          },
+          {
+            "block_id": "graphene_5x5_scale_iid500_T450_100_3",
+            "label": "100 snapshots @ 450 K",
+            "n_snapshots": 100,
+            "temperature_K": 450,
+            "seed": 450500
+          }
+        ]
+      }
+    ]
+  },
+  "graph2mat_overrides": {
+    "max_epochs": 750,
+    "optim_lr": 0.0018,
+    "batch_size": 40,
+    "loader_threads": 4,
+    "num_interactions": 3,
+    "correlation": 3,
+    "max_ell": 3,
+    "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+    "loss": "graph2mat.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.006
+    },
+    "readout": "edge_node_mix",
+    "seed_everything": 0
+  },
+  "deeph": {
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "num_threads": 2,
+    "multiprocessing": 0,
+    "epochs": 750,
+    "batch_size": 4,
+    "learning_rate": 0.0003,
+    "criterion": "MaskMSELoss",
+    "retain_edge_fea": true,
+    "weight_decay": 0.0,
+    "optimizer": "adamW",
+    "edge_fea_len": 192,
+    "normalization": "LayerNorm",
+    "atom_update_net": "CGConv",
+    "if_lcmp": true,
+    "gauss_stop": 6,
+    "atom_fea_len": 192,
+    "num_l": 4,
+    "if_edge_update": true
+  },
+  "training_sweep": {
+    "enabled": false,
+    "manual_runs": [],
+    "max_runs": 0,
+    "apply_to_datasets": []
+  },
+  "cost_accounting": {
+    "dataset_sweep_summary_json": "summary/dataset_sweep_summary.json",
+    "dataset_sweep_summary_csv": "summary/dataset_sweep_summary.csv",
+    "fields": [
+      "dataset_size",
+      "blocks",
+      "split_counts",
+      "generation_seconds",
+      "elapsed_seconds",
+      "artifact_validation_status",
+      "benchmark_manifest_path",
+      "frozen_split_manifest_path"
+    ],
+    "siesta_wall_time_source": "RUN.out timer: Elapsed wall time (sec), plus runner generation_seconds/elapsed_seconds per dataset row."
+  },
+  "notes": {
+    "intended_use": "Fresh graphene_5x5 SIESTA MD dataset generation for mixing E2E.",
+    "expected_dataset_count": 6,
+    "expected_dataset_sizes": [
+      100,
+      150,
+      200,
+      300,
+      400,
+      500
+    ],
+    "temperature_distribution": "20% at 150 K, 60% at 300 K, 20% at 450 K for every dataset size.",
+    "scientific_policy": "Only MD size varies. SIESTA physics/template, material, basis and pseudopotentials are held fixed. Test/validation split policy remains blocked_with_gap.",
+    "material_scope": "This payload is graphene-only.",
+    "supercell": "5x5 graphene, 50 carbon atoms",
+    "fdf_template": "materials/graphene_5x5/RUN.fdf",
+    "training": "disabled"
+  },
+  "overwrite_datasets": false
+}

@@ -35,6 +35,7 @@
           <button class="tab" data-view="g2m-deeph" data-icon="GD">G2M vs DeepH</button>
           <button class="tab" data-view="ml-vs-siesta" data-icon="MS">ML vs SIESTA</button>
           <button class="tab" data-view="mixing-datasets" data-icon="MX">Mixing datasets</button>
+          <button class="tab" data-view="terminal" data-icon="TM">Terminal</button>
           <button class="tab" data-view="results" data-icon="RS">Results</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -1648,6 +1649,39 @@
           </section>
         </section>
 
+        <section id="view-terminal" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Live process output</p>
+              <h2>Terminal</h2>
+            </div>
+            <div class="button-row">
+              <span id="terminal-status" class="muted-text">Sin logs cargados.</span>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="terminal-frame">
+              <div class="terminal-navbar">
+                <span>Procesos activos</span>
+                <div class="terminal-actions">
+                  <select id="terminal-source" class="terminal-source" aria-label="Terminal source">
+                    <option value="all" selected>All</option>
+                    <option value="mixing-e2e">Mixing E2E</option>
+                    <option value="mixing">Mixing sweep</option>
+                    <option value="g2m-deeph">G2M vs DeepH</option>
+                    <option value="experiment">Experiment</option>
+                  </select>
+                  <button id="terminal-refresh" class="button ghost small" type="button">Refresh</button>
+                  <button id="terminal-bottom" class="button ghost small" type="button">Bottom</button>
+                  <button id="terminal-clear" class="button ghost small" type="button">Clear view</button>
+                </div>
+              </div>
+              <pre id="terminal-log" class="log-output terminal-log" role="log" aria-live="polite">Esperando procesos activos.</pre>
+            </div>
+          </section>
+        </section>
+
         <section id="view-performance" class="view">
           <header class="content-header">
             <div>
@@ -2034,12 +2068,16 @@
             <code>GET /api/g2m-deeph/plots</code>
             <code>GET /api/g2m-deeph/derivative-metrics?run_id=...</code>
             <code>GET /api/g2m-deeph/dataset-size-minimum</code>
+            <code>POST /api/mixing-e2e/start</code>
+            <code>POST /api/mixing-e2e/stop</code>
+            <code>GET /api/mixing-e2e/status</code>
+            <code>GET /api/mixing-e2e/logs?since=0&amp;limit=2000</code>
           </div>
         </section>
       </main>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260707-mixing-groups"></script>
+    <script src="/app.js?v=20260708-terminal-tab"></script>
   </body>
 </html>

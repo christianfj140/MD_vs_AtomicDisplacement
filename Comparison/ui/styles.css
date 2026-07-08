@@ -1253,6 +1253,24 @@ pre {
   box-shadow: none;
 }
 
+.terminal-log {
+  height: clamp(620px, 74vh, 1120px);
+  min-height: 420px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.terminal-source {
+  min-height: 30px;
+  border: 1px solid rgba(231, 242, 239, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e7f2ef;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .checkbox-row {
   display: flex;
   flex-wrap: wrap;

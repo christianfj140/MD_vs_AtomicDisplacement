@@ -1,0 +1,15 @@
+{
+  "description": "One-shot wrapper payload: generate graphene_5x5 iid100/iid150/iid200/iid300/iid400/iid500, then launch the mixing datasets sweep and metrics.",
+  "generation_payload": "Comparison/config/graphene_5x5_snapshot_scaling_100_500_mixing_payload.json",
+  "mixing_payload": "Comparison/config/ml_vs_siesta_mixing_sweep_100_500_train_payload.json",
+  "expected_paths": [
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid100",
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid150",
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid200",
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid300",
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid400",
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid500"
+  ],
+  "skip_generation_if_present": true,
+  "mixing_output_root": "Comparison/results/ml_vs_siesta_mixing_sweep_100_500"
+}

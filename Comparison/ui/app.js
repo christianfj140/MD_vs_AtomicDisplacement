@@ -177,6 +177,7 @@ const LOG_POLL_LIMIT = 2000;
 const POLL_INTERVAL_MS = 1200;
 const POLL_ERROR_TOAST_INTERVAL_MS = 30000;
 const G2M_DEEPH_LIVE_PLOT_REFRESH_MS = 30000;
+const TERMINAL_MAX_BLOCKS = 1200;
 
 const METRIC_HELP = {
   low_energy_rmse_eV: {
@@ -655,6 +656,9 @@ const state = {
   offsets: Object.fromEntries(pipelines.map((pipeline) => [pipeline.key, 0])),
   experimentOffset: 0,
   g2mDeephOffset: 0,
+  mixingE2eOffset: 0,
+  terminalBlocks: [],
+  terminalMixingSignature: "",
   g2mDeephRunId: null,
   g2mDeephWasRunning: false,
   g2mDeephValidation: null,
@@ -1029,7 +1033,53 @@ async function pollLogs() {
   await pollStatus();
   await pollExperimentLogs();
   await pollG2MDeepHLogs();
+  await pollMixingE2ELogs();
+  await pollMixingTerminalStatus();
   updateVenvCommandPreview();
+}
+
+async function pollMixingE2ELogs() {
+  const requestedSince = state.mixingE2eOffset;
+  const payload = await request(`/api/mixing-e2e/logs?since=${requestedSince}&limit=${LOG_POLL_LIMIT}`);
+  if (Number.isFinite(payload.offset) && payload.offset < requestedSince) {
+    terminalClearSource("mixing-e2e");
+    state.mixingE2eOffset = 0;
+    return pollMixingE2ELogs();
+  }
+  state.mixingE2eOffset = payload.offset;
+  if (payload.lines?.length) {
+    terminalAppendBlock("mixing-e2e", payload.lines.join(""));
+  }
+}
+
+async function pollMixingTerminalStatus() {
+  const status = await request("/api/mixing/status");
+  const stateName = status.state || "idle";
+  const signature = JSON.stringify({
+    state: stateName,
+    action: status.action || "",
+    done: status.permutations_done || 0,
+    total: status.n_permutations || 0,
+    failed: status.n_failed || 0,
+    partial: status.n_partial || 0,
+    records: (status.live_records || []).length,
+    error: status.error || "",
+  });
+  if (signature === state.terminalMixingSignature) return;
+  state.terminalMixingSignature = signature;
+  if (stateName === "idle" && !(status.permutations_done || status.n_permutations || status.error)) return;
+  terminalAppendBlock(
+    "mixing",
+    [
+      `state=${stateName}`,
+      status.action ? `action=${status.action}` : "",
+      `done=${status.permutations_done || 0}/${status.n_permutations || 0}`,
+      `records=${(status.live_records || []).length}`,
+      status.n_failed ? `failed=${status.n_failed}` : "",
+      status.n_partial ? `partial=${status.n_partial}` : "",
+      status.error ? `error=${status.error}` : "",
+    ].filter(Boolean).join(" | "),
+  );
 }
 
 function inputValue(id) {
@@ -1043,6 +1093,72 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function terminalSourceLabel(source) {
+  return {
+    experiment: "Experiment",
+    "g2m-deeph": "G2M vs DeepH",
+    mixing: "Mixing sweep",
+    "mixing-e2e": "Mixing E2E",
+  }[source] || source;
+}
+
+function terminalAppendBlock(source, text) {
+  const content = String(text || "");
+  if (!content.trim()) return;
+  state.terminalBlocks.push({
+    source,
+    label: terminalSourceLabel(source),
+    stamp: new Date().toLocaleTimeString(),
+    text: content.endsWith("\n") ? content : `${content}\n`,
+  });
+  if (state.terminalBlocks.length > TERMINAL_MAX_BLOCKS) {
+    state.terminalBlocks.splice(0, state.terminalBlocks.length - TERMINAL_MAX_BLOCKS);
+  }
+  renderTerminalView();
+}
+
+function terminalClearSource(source) {
+  state.terminalBlocks = state.terminalBlocks.filter((block) => block.source !== source);
+  renderTerminalView();
+}
+
+function terminalSelectedSource() {
+  return document.getElementById("terminal-source")?.value || "all";
+}
+
+function terminalFilteredBlocks() {
+  const selected = terminalSelectedSource();
+  if (selected === "all") return state.terminalBlocks;
+  return state.terminalBlocks.filter((block) => block.source === selected);
+}
+
+function scrollTerminalToBottom() {
+  const output = document.getElementById("terminal-log");
+  if (output) output.scrollTop = output.scrollHeight;
+}
+
+function renderTerminalView() {
+  const output = document.getElementById("terminal-log");
+  const status = document.getElementById("terminal-status");
+  if (!output) return;
+  const blocks = terminalFilteredBlocks();
+  const text = blocks
+    .map((block) => `[${block.stamp}] ${block.label}\n${block.text}`)
+    .join("\n");
+  output.textContent = text || "Esperando procesos activos.";
+  if (status) {
+    const sources = Array.from(new Set(state.terminalBlocks.map((block) => block.source))).length;
+    status.textContent = `${blocks.length}/${state.terminalBlocks.length} bloques · ${sources} origen(es)`;
+  }
+  scrollTerminalToBottom();
+}
+
+function clearTerminalView() {
+  state.terminalBlocks = [];
+  state.terminalMixingSignature = "";
+  renderTerminalView();
 }
 
 function numericInputValue(id, fallback = null) {
@@ -6263,6 +6379,7 @@ async function pollG2MDeepHLogs() {
     const output = document.getElementById("g2m-deeph-log");
     output.textContent += payload.lines.join("");
     scrollG2MDeepHLogToBottom();
+    terminalAppendBlock("g2m-deeph", payload.lines.join(""));
   }
   const wasRunning = state.g2mDeephWasRunning;
   state.g2mDeephWasRunning = Boolean(payload.status?.running);
@@ -9135,6 +9252,7 @@ async function pollExperimentLogs() {
     const output = document.getElementById("experiment-log");
     output.textContent += payload.lines.join("");
     output.scrollTop = output.scrollHeight;
+    terminalAppendBlock("experiment", payload.lines.join(""));
   }
   updateVenvCommandPreview();
 }
@@ -13186,6 +13304,10 @@ function setupTabs() {
         } else {
           mixRefreshAvailablePayloads({ silent: true }).catch((error) => showToast(error.message));
         }
+      } else if (tab.dataset.view === "terminal") {
+        renderTerminalView();
+        Promise.all([pollMixingE2ELogs(), pollMixingTerminalStatus()])
+          .catch((error) => showToast(error.message));
       }
     });
   });
@@ -13453,6 +13575,17 @@ function setupEvents() {
   document.getElementById("g2m-deeph-log-clear")?.addEventListener("click", () => {
     clearG2MDeepHLogView();
     showToast("Graph2Mat vs DeepH log view cleared");
+  });
+  document.getElementById("terminal-source")?.addEventListener("change", renderTerminalView);
+  document.getElementById("terminal-refresh")?.addEventListener("click", () => {
+    Promise.all([pollMixingE2ELogs(), pollMixingTerminalStatus()])
+      .then(() => renderTerminalView())
+      .catch((error) => showToast(error.message));
+  });
+  document.getElementById("terminal-bottom")?.addEventListener("click", scrollTerminalToBottom);
+  document.getElementById("terminal-clear")?.addEventListener("click", () => {
+    clearTerminalView();
+    showToast("Terminal view cleared");
   });
   document.getElementById("g2m-deeph-refresh-datasets")?.addEventListener("click", () => {
     loadG2MDeepHDatasets()
