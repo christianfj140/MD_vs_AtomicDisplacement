@@ -320,6 +320,49 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
         self.assertIn("platform", environment)
         self.assertNotIn("SECRET_TOKEN", environment)
 
+    def test_combined_blocks_use_globally_unique_primary_sample_ids(self) -> None:
+        """Audit I1: block-local sample_ids (md_0..md_N) repeat across blocks;
+        the combined metadata must key snapshots by the global id so
+        frozen-manifest <-> metadata joins are 1:1."""
+        config = self.temperature_block_config()
+        dataset = Path(config["paths"]["dataset_dir"])
+        blocks = config["md"]["temperature_blocks"]
+        blocks_root = dataset / "md_temperature_blocks"
+        for block in blocks:
+            block_dir = blocks_root / block["block_id"]
+            (block_dir / "RUN.fdf").parent.mkdir(parents=True, exist_ok=True)
+            (block_dir / "RUN.fdf").write_text("SystemLabel graphene\n", encoding="utf-8")
+            (block_dir / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+            for index in range(block["n_snapshots"]):
+                snapshot = block_dir / "MD_steps" / str(index)
+                write_joint_snapshot(snapshot)
+                # Colliding block-local id, as the per-block generation writes.
+                (snapshot / "metadata.json").write_text(
+                    json.dumps({"system_label": "graphene", "sample_id": f"md_{index}"}),
+                    encoding="utf-8",
+                )
+
+        self.generate.combine_temperature_blocks(config, blocks)
+
+        steps_dir = dataset / "MD_steps"
+        seen_ids: list[str] = []
+        for index in range(sum(int(b["n_snapshots"]) for b in blocks)):
+            metadata = json.loads(
+                (steps_dir / str(index) / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["sample_id"], f"md_{index}")
+            self.assertEqual(metadata["global_sample_id"], str(index))
+            self.assertIn(metadata["block_local_sample_id"], {"md_0", "md_1"})
+            seen_ids.append(metadata["sample_id"])
+        self.assertEqual(len(seen_ids), len(set(seen_ids)))
+
+        manifest = json.loads(
+            (dataset / "md_temperature_blocks_manifest.json").read_text(encoding="utf-8")
+        )
+        manifest_ids = [sample["sample_id"] for sample in manifest["samples"]]
+        self.assertEqual(len(manifest_ids), len(set(manifest_ids)))
+        self.assertEqual(sorted(manifest_ids), sorted(seen_ids))
+
     def test_temperature_block_workers_one_preserves_sequential_behavior(self) -> None:
         config = self.temperature_block_config(workers=1)
         calls: list[str] = []

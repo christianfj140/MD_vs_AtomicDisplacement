@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
+import Comparison.scripts.run_mixing_e2e_payload_once as e2e
 from Comparison.scripts.run_mixing_e2e_payload_once import expected_paths_present, resolve_repo_path
 
 
@@ -17,3 +19,100 @@ def test_expected_paths_present_requires_all_paths(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     assert expected_paths_present([existing]) is True
     assert expected_paths_present([existing, missing]) is False
+
+
+def _base_payload(**extra: object) -> dict:
+    payload = {
+        "small": {"20": "/tmp/small20"},
+        "large": {"20": "/tmp/large20"},
+        "sizes": [20],
+        "modes": ["add"],
+        "ratios": [0.0, 0.5],
+        "seed": 0,
+        "models": ["graph2mat"],
+    }
+    payload.update(extra)
+    return payload
+
+
+def _run_and_capture_split_policy(payload: dict, tmp_path: Path) -> dict[str, str]:
+    """Run _run_mixing_payload with both runner paths mocked; return captured kwargs."""
+    captured: dict[str, str] = {}
+
+    def fake_parallel(*args, **kwargs):
+        captured["parallel"] = kwargs["split_policy"]
+        return {"n_permutations": 0, "permutations": []}
+
+    def fake_sweep(*args, **kwargs):
+        captured["sweep"] = kwargs["split_policy"]
+        return {"n_permutations": 0, "permutations": []}
+
+    fake_mvs = mock.Mock()
+    fake_mvs.run_mixing_sweep = fake_sweep
+    with mock.patch.object(e2e.ui, "_run_mixing_sweep_parallel", fake_parallel), \
+            mock.patch.object(e2e.ui, "_ml_vs_siesta_module", return_value=fake_mvs):
+        e2e._run_mixing_payload(payload, tmp_path)
+    return captured
+
+
+def test_mixing_payload_defaults_to_fixed_common_test(tmp_path: Path) -> None:
+    # Train path (parallel runner).
+    captured = _run_and_capture_split_policy(_base_payload(action="train"), tmp_path)
+    assert captured == {"parallel": "fixed_common_test"}
+    # Preview path (library sweep).
+    captured = _run_and_capture_split_policy(_base_payload(action="preview"), tmp_path)
+    assert captured == {"sweep": "fixed_common_test"}
+
+
+def test_mixing_payload_explicit_resplit_combined_is_respected(tmp_path: Path) -> None:
+    payload = _base_payload(action="train", split_policy="resplit_combined")
+    captured = _run_and_capture_split_policy(payload, tmp_path)
+    assert captured == {"parallel": "resplit_combined"}
+
+
+def test_production_train_payload_declares_fixed_common_test() -> None:
+    import json
+
+    path = resolve_repo_path(
+        "Comparison/config/ml_vs_siesta_mixing_sweep_100_500_train_payload.json"
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["split_policy"] == "fixed_common_test"
+    # Audit I2/I5: the heterogeneous ghost pool is declared explicitly and the
+    # sweep runs >= 3 seeds so the curves carry error bars.
+    assert payload["confirm_ghost_species_exemption"] is True
+    assert len(payload["seeds"]) >= 3
+
+
+def test_multi_seed_payload_runs_each_seed_and_aggregates(tmp_path: Path) -> None:
+    payload = _base_payload(action="train", seeds=[0, 1, 2])
+    calls: list[tuple[int, str]] = []
+
+    def fake_single(single_payload: dict, output_root: Path) -> dict:
+        seed = int(single_payload["seed"])
+        calls.append((seed, str(output_root)))
+        assert "seeds" not in single_payload
+        return {
+            "records": [
+                {"size": 20, "mode": "add", "ratio": 0.0, "seed": seed,
+                 "total_size": 20, "model": "graph2mat", "h_mae_eV": 0.05 + 0.01 * seed},
+            ]
+        }
+
+    with mock.patch.object(e2e, "_run_mixing_payload", side_effect=fake_single):
+        summary = e2e._run_mixing_payload_seeds(payload, tmp_path)
+
+    assert [seed for seed, _root in calls] == [0, 1, 2]
+    assert all(root.endswith(f"seed{seed}") for seed, root in calls)
+    assert summary["n_seeds"] == 3
+    assert summary["exploratory"] is False
+    assert len(summary["records"]) == 3
+    assert (tmp_path / "mae_vs_size.json").is_file()
+
+
+def test_payload_without_seeds_runs_single_pass(tmp_path: Path) -> None:
+    payload = _base_payload(action="preview")
+    with mock.patch.object(e2e, "_run_mixing_payload", return_value={"records": []}) as single:
+        summary = e2e._run_mixing_payload_seeds(payload, tmp_path)
+    single.assert_called_once_with(payload, tmp_path)
+    assert summary == {"records": []}

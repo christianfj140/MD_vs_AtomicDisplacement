@@ -332,6 +332,30 @@ pre {
   background: #47d4bd;
 }
 
+.archived-tabs {
+  margin-top: auto;
+}
+
+.archived-tabs summary {
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(171, 204, 216, 0.08);
+  border-radius: var(--radius);
+  color: #d8e6ed;
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.archived-tabs summary:hover {
+  border-color: var(--sidebar-line);
+  background: rgba(255, 255, 255, 0.055);
+  color: #ffffff;
+}
+
+.archived-tabs .tabs {
+  margin-top: 7px;
+}
+
 .hidden {
   display: none !important;
 }
@@ -344,7 +368,6 @@ pre {
 }
 
 .status-panel {
-  margin-top: auto;
   min-height: 42px;
   padding: 10px 12px;
   border: 1px solid var(--sidebar-line);

@@ -81,6 +81,11 @@ def _run_mixing_payload(payload: dict[str, Any], output_root: Path | None) -> di
     epochs = int(payload["epochs"]) if payload.get("epochs") not in (None, "") else None
     performance = payload.get("performance") or None
     action = str(payload.get("action") or "preview")
+    # Default fixed_common_test: resplit_combined re-splits the test set per
+    # ratio, so MAE differences between ratios can come from the test set
+    # changing instead of the composition (see docs/ml_vs_siesta_benchmark.md).
+    split_policy = str(payload.get("split_policy") or "fixed_common_test")
+    confirm_ghost = bool(payload.get("confirm_ghost_species_exemption"))
     root = output_root or ui.MIXING_SWEEP_OUTPUT_ROOT
     if action == "train":
         return ui._run_mixing_sweep_parallel(
@@ -94,11 +99,12 @@ def _run_mixing_payload(payload: dict[str, Any], output_root: Path | None) -> di
             models=models,
             epochs=epochs,
             performance=performance,
+            split_policy=split_policy,
+            confirm_ghost_species_exemption=confirm_ghost,
             progress_fn=None,
         )
     mvs = ui._ml_vs_siesta_module()
     dry_run = action == "preview"
-    launch_fn = ui._mixing_runner_launch_fn if action == "train" else None
     return mvs.run_mixing_sweep(
         small,
         large,
@@ -110,8 +116,10 @@ def _run_mixing_payload(payload: dict[str, Any], output_root: Path | None) -> di
         models=models,
         epochs=epochs,
         performance=performance,
+        split_policy=split_policy,
+        confirm_ghost_species_exemption=confirm_ghost,
         dry_run=dry_run,
-        launch_fn=launch_fn,
+        launch_fn=None,
         progress_fn=None,
     )
 
@@ -156,7 +164,7 @@ def main() -> int:
     if expected and not expected_paths_present(expected):
         raise RuntimeError("Expected generated dataset paths are still missing after generation phase.")
 
-    mixing_summary = _run_mixing_payload(mixing_payload, output_root)
+    mixing_summary = _run_mixing_payload_seeds(mixing_payload, output_root)
     manifest["mixing"] = {
         "status": "completed",
         "summary": mixing_summary,
@@ -164,6 +172,42 @@ def main() -> int:
     }
     write_json(args.manifest_json, manifest)
     return 0
+
+
+def _run_mixing_payload_seeds(payload: dict[str, Any], output_root: Path | None) -> dict[str, Any]:
+    """Run the mixing payload once per seed (``seeds`` list) or once (``seed``).
+
+    Multi-seed runs write each sweep under ``<output_root>/seed<N>`` and then
+    aggregate one combined MAE-vs-size payload (mean ± std, n_seeds per point)
+    at ``output_root``. Fewer than 3 seeds is flagged exploratory by the
+    aggregator (audit I5).
+    """
+    seeds = payload.get("seeds")
+    if not seeds:
+        return _run_mixing_payload(payload, output_root)
+    seeds = [int(s) for s in seeds]
+    root = output_root or ui.MIXING_SWEEP_OUTPUT_ROOT
+    mvs = ui._ml_vs_siesta_module()
+    per_seed: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for seed in seeds:
+        seed_payload = dict(payload)
+        seed_payload["seed"] = seed
+        seed_payload.pop("seeds", None)
+        summary = _run_mixing_payload(seed_payload, Path(root) / f"seed{seed}")
+        per_seed.append({"seed": seed, "summary": summary})
+        records.extend(summary.get("records") or [])
+    aggregated = mvs.write_mae_vs_size_outputs(records, root)
+    return {
+        "schema": "ml_vs_siesta_mixing_multi_seed_summary_v1",
+        "seeds": seeds,
+        "n_seeds": len(seeds),
+        "exploratory": aggregated.get("exploratory"),
+        "warnings": aggregated.get("warnings") or [],
+        "records": records,
+        "mae_vs_size": {k: aggregated[k] for k in ("json_path", "png_path") if k in aggregated},
+        "per_seed": per_seed,
+    }
 
 
 if __name__ == "__main__":

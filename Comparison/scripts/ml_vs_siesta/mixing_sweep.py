@@ -37,7 +37,7 @@ def _ratio_slug(ratio: float) -> str:
 
 
 def _validate_split_policy(split_policy: str) -> str:
-    split_policy = str(split_policy or "resplit_combined")
+    split_policy = str(split_policy or "fixed_common_test")
     if split_policy not in VALID_SPLIT_POLICIES:
         raise ValueError(
             f"Unknown split_policy {split_policy!r}; use 'resplit_combined' or 'fixed_common_test'."
@@ -158,10 +158,10 @@ def reserved_small_ids_by_size_for_fixed_common_test(
     """
     reserved: dict[int, set[str]] = {}
     for size, root in small_by_size.items():
-        ids = sorted(s.sample_id for s in read_dataset_samples(root))
+        samples = read_dataset_samples(root)
         reserved[int(size)] = {
             f"{_SMALL_PREFIX}{sid}"
-            for sid in fixed_common_test_ids(ids, DEFAULT_SPLIT_FRACTIONS, seed)
+            for sid in fixed_common_test_ids(samples, DEFAULT_SPLIT_FRACTIONS, seed)
         }
     return reserved
 
@@ -174,7 +174,7 @@ def plan_mixing_sweep_from_roots(
     modes: tuple[str, ...] = DEFAULT_MODES,
     ratios: tuple[float, ...] = DEFAULT_RATIOS,
     seed: int = 0,
-    split_policy: str = "resplit_combined",
+    split_policy: str = "fixed_common_test",
 ) -> dict[str, Any]:
     """Read counts from dataset roots, then plan.
 
@@ -259,7 +259,8 @@ def run_mixing_sweep(
     epochs: int | None = None,
     system_label: str | None = None,
     performance: dict[str, Any] | None = None,
-    split_policy: str = "resplit_combined",
+    split_policy: str = "fixed_common_test",
+    confirm_ghost_species_exemption: bool = False,
     dry_run: bool = True,
     launch_fn: LaunchFn | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
@@ -300,7 +301,7 @@ def run_mixing_sweep(
             reserved_small_ids = {
                 f"{_SMALL_PREFIX}{sid}"
                 for sid in fixed_common_test_ids(
-                    sorted(s.sample_id for s in raw_small_samples),
+                    raw_small_samples,
                     DEFAULT_SPLIT_FRACTIONS,
                     seed,
                 )
@@ -353,6 +354,7 @@ def run_mixing_sweep(
                     ratio=ratio,
                     split_policy=split_policy,
                     overwrite=True,
+                    confirm_ghost_species_exemption=confirm_ghost_species_exemption,
                 )
                 entry["materialize"] = materialize_summary
                 if launch_fn is not None:
@@ -378,6 +380,7 @@ def run_mixing_sweep(
                                 "size": size,
                                 "mode": mode,
                                 "ratio": ratio,
+                                "seed": seed,
                                 "total_size": int(part["n_selected"]),
                                 "model": model,
                                 "h_mae_eV": float(h_mae),

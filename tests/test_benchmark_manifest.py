@@ -78,7 +78,7 @@ class BenchmarkManifestTests(unittest.TestCase):
                     "fdf_sha256": "fdfhash",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
-                    "siesta_version": "SIESTA test-version",
+                    "siesta_version": "SIESTA 5.4.2-test",
                     "siesta_executable": "siesta",
                     "siesta_command_line": "bash -lc 'siesta < RUN.fdf'",
                     "run_out_path": str(self.dataset / "RUN.out"),
@@ -148,7 +148,7 @@ class BenchmarkManifestTests(unittest.TestCase):
         self.assertEqual(dataset_manifest["generation_mode"], "clean_one_pass")
         self.assertEqual(dataset_manifest["validation_status"], "valid")
         self.assertTrue(dataset_manifest["siesta_input_sha256"])
-        self.assertEqual(dataset_manifest["siesta_version"], "SIESTA test-version")
+        self.assertEqual(dataset_manifest["siesta_version"], "SIESTA 5.4.2-test")
         self.assertEqual(dataset_manifest["siesta_command_line"], "bash -lc 'siesta < RUN.fdf'")
         self.assertEqual(dataset_manifest["siesta_returncode"], 0)
         self.assertEqual(dataset_manifest["environment"]["python_version"], "3.11.0")
@@ -294,7 +294,7 @@ class BenchmarkManifestTests(unittest.TestCase):
                 "basis_file_sha256": {"C.ion.xml": "basis"},
                 "pseudopotential_sha256": {"C": "pseudo"},
                 "fdf_sha256": "fdfhash",
-                "siesta_version": "SIESTA test-version",
+                "siesta_version": "SIESTA 5.4.2-test",
                 "run_out_path": str(self.dataset / "RUN.out"),
                 "environment": {"python_version": "3.11.0", "platform": "test-platform"},
             },

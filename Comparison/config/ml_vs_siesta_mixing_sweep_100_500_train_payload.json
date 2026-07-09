@@ -19,6 +19,13 @@
     1.0
   ],
   "seed": 0,
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "split_policy": "fixed_common_test",
+  "confirm_ghost_species_exemption": true,
   "models": [
     "graph2mat",
     "deeph"
@@ -71,7 +78,7 @@
     "run_order": [
       "1. Generate graphene_5x5 iid100/iid150/iid200/iid300/iid400/iid500 with Comparison/config/graphene_5x5_snapshot_scaling_100_500_mixing_payload.json",
       "2. Launch this payload through /api/mixing/launch or the E2E wrapper",
-      "3. Expect 6 sizes x 2 modes x 3 ratios = 36 permutations, and 72 model runs for Graph2Mat+DeepH"
+      "3. Expect 6 sizes x 2 modes x 3 ratios = 36 permutations por seed; con seeds=[0,1,2] son 108 permutaciones y 216 model runs para Graph2Mat+DeepH"
     ],
     "nominal_size_note": "The mixing backend keys permutations by declared nominal size; frozen manifests can contain slightly fewer effective snapshots after blocked-with-gap splitting.",
     "estimated_disk_gb": {
@@ -79,6 +86,10 @@
       "mixing_results_plus_30pct": 176.68,
       "generated_5x5_datasets_plus_30pct": 10.3,
       "total_plus_30pct": 186.98
-    }
+    },
+    "split_policy_note": "fixed_common_test: test set fijo derivado solo del pool small + seed, compartido por todas las permutaciones del mismo tamano; resplit_combined cambia el test set por ratio y confunde las curvas MAE-vs-composicion.",
+    "iid_naming_note": "Los datasets *_iid* NO son muestras iid: son frames MD consecutivos (1 fs) agrupados en bloques de temperatura 150/300/450 K. Ver docs/known_limitations.md (Temporal Leakage In Archived Snapshot-Scaling Datasets).",
+    "ghost_exemption_note": "confirm_ghost_species_exemption=true: los datasets small (W90, con Ghost-H) y large (5x5, solo C) tienen especies ghost distintas. La exencion NO esta verificada en codigo (los ghosts llevan orbitales en SIESTA); se declara explicitamente aqui y queda registrada en la provenance del merge.",
+    "seeds_note": "seeds=[0,1,2]: cada permutacion se entrena con 3 seeds y las curvas MAE-vs-size se agregan como media±std con n_seeds por punto (minimo 3 para claims, igual que g2m_deeph_final_stats --min-final-seeds). Con <3 seeds el payload agregado se marca exploratory. 'seed' se mantiene como fallback de una sola tanda."
   }
 }

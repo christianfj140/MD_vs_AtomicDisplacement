@@ -2681,7 +2681,11 @@ def copy_selected_reference_files(source_root: Path, destination_root: Path) -> 
 
 DEFAULT_SPLIT_RATIOS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 DEFAULT_MD_SPLIT_MODE = "blocked_with_gap"
-DEFAULT_MD_TEMPORAL_GAP = 1
+# 30 frames @ 1 fs/frame ≈ one carbon vibrational period (~20-40 fs). A gap of
+# 1 frame (1 fs) is physically meaningless for decorrelating MD trajectory
+# frames between train/validation/test; datasets generated with the old gap=1
+# are documented as a known limitation in docs/known_limitations.md.
+DEFAULT_MD_TEMPORAL_GAP = 30
 DEFAULT_MD_BLOCK_ORDER = "train,validation,test"
 MD_SPREAD_SPLIT_WARNING = (
     "MD split_mode=spread is exploratory/debug only because temporally adjacent "
@@ -2804,18 +2808,40 @@ def validate_split_sizes(
     return counts
 
 
+def _archived_temporal_gap_from_items(items: list[dict[str, Any]]) -> int | None:
+    """Temporal gap recorded in reused split-manifest rows, if unambiguous."""
+    gaps: set[int] = set()
+    for item in items:
+        row = item.get("row") or {}
+        value = str(row.get("temporal_gap") or "").strip()
+        if not value:
+            continue
+        try:
+            gaps.add(int(float(value)))
+        except ValueError:
+            return None
+    if len(gaps) == 1:
+        return gaps.pop()
+    return None
+
+
 def md_split_counts_for_mode(
     dataset_size: int,
     splits: dict[str, float],
     *,
     split_mode: str,
     label: str,
+    temporal_gap: int | None = None,
 ) -> tuple[dict[str, int], int]:
-    """Return train/validation/test counts plus frames reserved as temporal gaps."""
+    """Return train/validation/test counts plus frames reserved as temporal gaps.
+
+    ``temporal_gap=None`` uses the scientific default; reused archived datasets
+    pass their recorded gap so a rebuild preserves the archived structure.
+    """
     if split_mode != DEFAULT_MD_SPLIT_MODE:
         return validate_split_sizes(dataset_size, splits, label=label), 0
 
-    gap = DEFAULT_MD_TEMPORAL_GAP
+    gap = DEFAULT_MD_TEMPORAL_GAP if temporal_gap is None else int(temporal_gap)
     reserved_gap_frames = 2 * gap
     usable_size = dataset_size - reserved_gap_frames
     if usable_size < 3:
@@ -12465,12 +12491,23 @@ class ExperimentRunner:
     ) -> dict[str, Any]:
         method_id = self._method_id_for_pipeline_key(key)
         fieldnames, items = self._collect_reusable_split_items(key, dataset_dir)
+        # Reused archived datasets keep the temporal_gap they were generated
+        # with (audit C2 decision: old datasets are documented, not rebuilt to
+        # the new default); only when the rows record no gap does the current
+        # scientific default apply.
+        archived_gap = _archived_temporal_gap_from_items(items) if key == "md" else None
+        effective_gap = (
+            archived_gap
+            if archived_gap is not None
+            else (DEFAULT_MD_TEMPORAL_GAP if split_mode == DEFAULT_MD_SPLIT_MODE else 0)
+        )
         if key == "md":
             counts, reserved_gap_frames = md_split_counts_for_mode(
                 size,
                 split_ratios,
                 split_mode=split_mode,
                 label=f"{method_id} reusable dataset",
+                temporal_gap=effective_gap,
             )
         else:
             counts = validate_split_sizes(size, split_ratios, label=f"{method_id} reusable dataset")
@@ -12491,7 +12528,7 @@ class ExperimentRunner:
             split_items, excluded_gap_items = split_blocked_with_gap_items(
                 items,
                 counts,
-                temporal_gap=DEFAULT_MD_TEMPORAL_GAP,
+                temporal_gap=effective_gap,
             )
         else:
             split_items = self._split_reusable_items(key, items, counts, split_mode)
@@ -12512,7 +12549,7 @@ class ExperimentRunner:
                         split_name=split_name,
                         destination=destination,
                         split_mode=split_mode,
-                        temporal_gap=DEFAULT_MD_TEMPORAL_GAP if split_mode == DEFAULT_MD_SPLIT_MODE else 0,
+                        temporal_gap=effective_gap if split_mode == DEFAULT_MD_SPLIT_MODE else 0,
                     )
                 )
             manifest_path = split_root / f"{split_name}_manifest.csv"
@@ -12533,7 +12570,7 @@ class ExperimentRunner:
                     split_name="excluded_gap",
                     destination=source,
                     split_mode=split_mode,
-                    temporal_gap=DEFAULT_MD_TEMPORAL_GAP,
+                    temporal_gap=effective_gap,
                 )
                 row["valid"] = "false"
                 row["status"] = "excluded"
@@ -12553,7 +12590,7 @@ class ExperimentRunner:
             "reused_split_policy": REBUILD_REUSABLE_SPLITS,
             "reused_split_counts": counts,
             "reused_split_strategy": split_mode,
-            "reused_temporal_gap": DEFAULT_MD_TEMPORAL_GAP if reserved_gap_frames else 0,
+            "reused_temporal_gap": effective_gap if reserved_gap_frames else 0,
             "reused_excluded_gap_count": len(excluded_gap_items),
             "effective_size": sum(counts.values()),
         }
@@ -16354,7 +16391,7 @@ def mixing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
     ratios = tuple(float(r) for r in (body.get("ratios") or (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)))
     sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
     seed = int(body.get("seed") or 0)
-    split_policy = str(body.get("split_policy") or "resplit_combined")
+    split_policy = str(body.get("split_policy") or "fixed_common_test")
     return mvs.plan_mixing_sweep_from_roots(
         small, large, sizes=sizes, modes=modes, ratios=ratios, seed=seed,
         split_policy=split_policy,
@@ -16466,35 +16503,63 @@ def _mixing_metrics_payload(records: list[dict[str, Any]], summary: dict[str, An
 _MIXING_TRAINING_POLL_SECONDS = 5.0
 
 
+_NON_TEST_SPLITS = {"train", "training", "validation", "val"}
+_TEST_SPLITS = {"test", "final_test", "final"}
+
+
 def _extract_model_h_mae_eV(results_payload: Any, models: tuple[str, ...]) -> dict[str, Any]:
-    """Best-effort per-model ``h_mae_eV`` extraction from a runner results dict.
+    """Per-model ``h_mae_eV`` extraction from a runner results dict.
 
     Recursively walks the results/plot payload looking for nodes that carry both
-    a method/model identifier and an ``h_mae_eV`` value. Returns
-    ``{model: {"h_mae_eV": float}}`` for the requested models; missing metrics are
+    a method/model identifier and an ``h_mae_eV`` value. Candidates whose
+    nearest ``split`` context is train/validation are discarded (the mixing
+    curves are test-split metrics). If a model has multiple *distinct* surviving
+    values the extraction fails loudly instead of silently picking one.
+    Returns ``{model: {"h_mae_eV": float}}``; models without a usable metric are
     simply omitted (run_mixing_sweep skips records without an MAE).
     """
     models_lower = {m.lower(): m for m in models}
-    found: dict[str, Any] = {}
+    # model -> list of (value, json_path)
+    candidates: dict[str, list[tuple[float, str]]] = {}
 
-    def visit(node: Any, method_hint: str | None) -> None:
+    def visit(node: Any, method_hint: str | None, split_hint: str | None, path: str) -> None:
         if isinstance(node, dict):
             method = node.get("method") or node.get("model") or method_hint
+            split = str(node.get("split") or split_hint or "").lower() or None
             value = node.get("h_mae_eV")
             key = str(method or "").lower()
-            if value is not None and key in models_lower:
+            if value is not None and key in models_lower and split not in _NON_TEST_SPLITS:
                 try:
-                    found.setdefault(models_lower[key], {})["h_mae_eV"] = float(value)
+                    candidates.setdefault(models_lower[key], []).append(
+                        (float(value), f"{path}.h_mae_eV")
+                    )
                 except (TypeError, ValueError):
                     pass
             for child_key, child in node.items():
                 child_hint = child_key if str(child_key).lower() in models_lower else method
-                visit(child, child_hint)
+                child_split = split
+                if str(child_key).lower() in (_NON_TEST_SPLITS | _TEST_SPLITS):
+                    child_split = str(child_key).lower()
+                visit(child, child_hint, child_split, f"{path}.{child_key}")
         elif isinstance(node, list):
-            for item in node:
-                visit(item, method_hint)
+            for index, item in enumerate(node):
+                visit(item, method_hint, split_hint, f"{path}[{index}]")
 
-    visit(results_payload, None)
+    visit(results_payload, None, None, "$")
+
+    found: dict[str, Any] = {}
+    for model, entries in candidates.items():
+        distinct: list[tuple[float, str]] = []
+        for value, path in entries:
+            if not any(math.isclose(value, seen, rel_tol=1e-9, abs_tol=1e-15) for seen, _ in distinct):
+                distinct.append((value, path))
+        if len(distinct) > 1:
+            detail = "; ".join(f"{path}={value!r}" for value, path in distinct)
+            raise RuntimeError(
+                f"Ambiguous h_mae_eV for model {model!r}: multiple distinct values in "
+                f"runner results ({detail}). Refusing to pick one silently."
+            )
+        found[model] = {"h_mae_eV": distinct[0][0]}
     return found
 
 
@@ -16541,16 +16606,56 @@ def _mixing_metrics_from_common_csv(run_root: Any, models: tuple[str, ...]) -> d
     return found
 
 
+def _mixing_csv_split_evidence(path: Path, root: Path) -> str | None:
+    """Best-effort split provenance for a metrics CSV: manifest first, then path.
+
+    Returns "test", a non-test split name, or None when no evidence exists.
+    """
+    manifest_path = path.parent / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            split = str(manifest.get("split") or "").lower()
+            if split:
+                return split
+        except (OSError, json.JSONDecodeError):
+            pass
+    try:
+        parts = [part.lower() for part in path.relative_to(root).parts]
+    except ValueError:
+        parts = [part.lower() for part in path.parts]
+    for part in parts:
+        tokens = set(re.split(r"[^a-z]+", part))
+        if tokens & _NON_TEST_SPLITS:
+            return "train_or_validation"
+        if tokens & _TEST_SPLITS:
+            return "test"
+    return None
+
+
 def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any]:
+    """Last-resort ``h_mae_eV`` from kpoint CSVs, restricted to test-split evidence.
+
+    A CSV is used only when a sibling ``manifest.json`` or its path marks it as
+    test/final split; train/validation CSVs are skipped so mixed-split averages
+    can never masquerade as a test MAE. Only ``weighted_sample`` rows count when
+    the ``row_type`` column exists (per-k rows would double count). No evidence
+    at all -> the CSV is skipped and the caller reports the metric as missing.
+    """
     if not run_root:
         return {}
     root = Path(str(run_root))
-    candidates = sorted(root.rglob("kpoint_matrix_metrics.csv"))
     values: list[float] = []
-    for path in candidates:
+    for path in sorted(root.rglob("kpoint_matrix_metrics.csv")):
+        evidence = _mixing_csv_split_evidence(path, root)
+        if evidence not in _TEST_SPLITS:
+            continue
         try:
             with path.open(newline="", encoding="utf-8") as handle:
                 for row in csv.DictReader(handle):
+                    row_type = row.get("row_type")
+                    if row_type is not None and row_type != "weighted_sample":
+                        continue
                     value = row.get("h_mae_eV")
                     if value in (None, ""):
                         continue
@@ -16626,7 +16731,8 @@ def _run_mixing_sweep_parallel(
     models: tuple[str, ...],
     epochs: int | None,
     performance: dict[str, Any] | None,
-    split_policy: str = "resplit_combined",
+    split_policy: str = "fixed_common_test",
+    confirm_ghost_species_exemption: bool = False,
     progress_fn: Callable[[dict[str, Any]], None] | None,
 ) -> dict[str, Any]:
     """Materialize ALL permutation datasets, then train with ONE runner invocation.
@@ -16650,6 +16756,7 @@ def _run_mixing_sweep_parallel(
         epochs=epochs,
         performance=performance,
         split_policy=split_policy,
+        confirm_ghost_species_exemption=confirm_ghost_species_exemption,
         dry_run=False,
         launch_fn=None,          # materialise only, no training yet
         progress_fn=progress_fn,
@@ -16770,6 +16877,7 @@ def _run_mixing_sweep_parallel(
                         "size": perm.get("size"),
                         "mode": perm.get("mode"),
                         "ratio": perm.get("ratio"),
+                        "seed": seed,
                         "total_size": perm.get("total_size"),
                         "model": model,
                         "h_mae_eV": m[model]["h_mae_eV"],
@@ -16878,7 +16986,10 @@ class MixingSweepRunner:
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
             epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
             performance = body.get("performance") or None
-            split_policy = str(body.get("split_policy") or "resplit_combined")
+            # Default fixed_common_test: with resplit_combined the test set
+            # changes with each ratio, confounding MAE-vs-composition curves.
+            split_policy = str(body.get("split_policy") or "fixed_common_test")
+            confirm_ghost = bool(body.get("confirm_ghost_species_exemption"))
             # Actions:
             #   "preview"     -> plan only (no writes).
             #   "materialize" -> build merged datasets, no training.
@@ -16937,6 +17048,7 @@ class MixingSweepRunner:
                     epochs=epochs,
                     performance=performance,
                     split_policy=split_policy,
+                    confirm_ghost_species_exemption=confirm_ghost,
                     progress_fn=progress,
                 )
             else:
@@ -16952,6 +17064,7 @@ class MixingSweepRunner:
                     epochs=epochs,
                     performance=performance,
                     split_policy=split_policy,
+                    confirm_ghost_species_exemption=confirm_ghost,
                     dry_run=dry_run,
                     launch_fn=launch_fn,
                     progress_fn=progress,

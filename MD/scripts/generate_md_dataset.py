@@ -35,7 +35,7 @@ from joint_artifact_contract import (
     snapshot_requirements,
     validate_dataset,
 )
-from benchmark_manifest import write_benchmark_manifests
+from benchmark_manifest import extract_siesta_version_from_text, write_benchmark_manifests
 
 BOHR_TO_ANG = 0.529177210903
 JOINT_GRAPH2MAT_DEEPH_STORE_FILES = "*fdf *TSHS *TSDE *XV *HSX *STRUCT_OUT *ORB_INDX *out"
@@ -127,9 +127,17 @@ def execution_environment_provenance() -> dict[str, object]:
 
 
 def probe_siesta_version(siesta_command: str) -> dict[str, object]:
-    """Best-effort SIESTA version probe; unknown versions remain unknown."""
+    """Best-effort SIESTA version probe; unknown versions remain unknown.
+
+    The output must contain a line that validates as a real version (the
+    build-info ``Version : X.Y...`` line, or a line with an ``X.Y`` token).
+    Environment noise on stdout/stderr (e.g. X11 "Authorization required")
+    is never recorded as a version: without a validated version the probe
+    reports ``status: "unverified"`` and leaves ``siesta_version`` empty.
+    """
 
     attempts: list[dict[str, object]] = []
+    saw_output = False
     for flag in ("--version", "-V", "-v"):
         cmd = [siesta_command, flag]
         try:
@@ -147,17 +155,23 @@ def probe_siesta_version(siesta_command: str) -> dict[str, object]:
         output = (result.stdout or "").strip()
         attempts.append({"command": cmd, "returncode": result.returncode, "output": output[:2000]})
         if result.returncode == 0 and output:
-            first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
-            if first_line:
+            saw_output = True
+            version = extract_siesta_version_from_text(output)
+            if version is not None:
                 return {
-                    "siesta_version": first_line,
+                    "siesta_version": version,
                     "siesta_build_info": output,
                     "siesta_version_probe": {"status": "detected", "attempts": attempts},
                 }
     return {
         "siesta_version": "",
         "siesta_build_info": "",
-        "siesta_version_probe": {"status": "unavailable", "attempts": attempts},
+        "siesta_version_probe": {
+            # "unverified": the command ran and produced output, but nothing
+            # validated as a version; "unavailable": no usable output at all.
+            "status": "unverified" if saw_output else "unavailable",
+            "attempts": attempts,
+        },
     }
 
 
@@ -1005,6 +1019,11 @@ def run_temperature_block(config: dict, block: dict, block_dir: Path) -> None:
 
 
 def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
+    # Semantics note (audit C2): datasets built from temperature blocks are
+    # often *named* "iid" in payloads, but each block is one MD trajectory of
+    # consecutive frames (1 fs apart) — the samples are temporally correlated,
+    # NOT independent draws. Splits must respect blocked_with_gap with a
+    # physically meaningful temporal_gap; see docs/known_limitations.md.
     pipeline_paths = paths(config)
     dataset_dir = pipeline_paths["dataset_dir"]
     blocks_root = dataset_dir / "md_temperature_blocks"
@@ -1044,6 +1063,13 @@ def combine_temperature_blocks(config: dict, blocks: list[dict]) -> None:
                 {
                     "generation_method": "md_temperature_block",
                     "method": "md",
+                    # Audit I1: per-block sample_ids (md_0..md_N) repeat across
+                    # temperature blocks, while the frozen split manifest keys
+                    # samples globally. The primary sample_id must be the
+                    # global one so frozen-manifest <-> metadata joins are 1:1;
+                    # the block-local id survives as block_local_sample_id.
+                    "sample_id": f"md_{global_index}",
+                    "block_local_sample_id": metadata.get("sample_id"),
                     "temperature_K": block.get("temperature_K"),
                     "n_snapshots_in_block": expected,
                     "source_block_id": block_id,
@@ -1345,7 +1371,10 @@ def prepare_dataset_splits(config: dict) -> None:
         shutil.rmtree(split_root)
 
     strategy = str(split_config.get("strategy", "blocked_with_gap")).strip().lower()
-    temporal_gap_default = 1 if strategy == "blocked_with_gap" else 0
+    # 30 frames @ 1 fs ≈ one carbon vibrational period (~20-40 fs); a 1-frame
+    # gap does not decorrelate adjacent MD frames (audit finding C2). Explicit
+    # splits.temporal_gap in the config still overrides this default.
+    temporal_gap_default = 30 if strategy == "blocked_with_gap" else 0
     temporal_gap = int(split_config.get("temporal_gap", temporal_gap_default) or 0)
     if temporal_gap < 0:
         raise RuntimeError("splits.temporal_gap debe ser >= 0.")

@@ -166,7 +166,8 @@ def test_materialize_writes_self_contained_provenance(small_large, tmp_path):
     assert prov["seed"] == 1
     assert prov["small_root"] == str(small)
     assert prov["large_root"] == str(large)
-    assert prov["split_policy"] == "resplit_combined"
+    # Default split policy is the scientifically safe one (C1 audit fix).
+    assert prov["split_policy"] == "fixed_common_test"
     assert prov["split_fractions"] == [0.7, 0.15, 0.15]
     assert prov["compatibility"]["compatible"] is True
     # The recorded selection reconstructs exactly what was requested.
@@ -298,7 +299,8 @@ def test_incompatible_real_species_raises(tmp_path):
         mvs.validate_datasets_compatible(small, large)
 
 
-def test_ghost_species_do_not_block_compatibility(tmp_path):
+def test_ghost_species_mismatch_requires_explicit_exemption(tmp_path):
+    """Audit I2: the ghost exemption is unverified in code -> explicit opt-in."""
     # 2-atom cell has [C, Ghost-H]; 5x5x1 supercell often has only [C].
     small = _make_dataset(tmp_path / "small", n_snapshots=4, n_atoms=2)
     large = _make_dataset(tmp_path / "large", n_snapshots=4, n_atoms=50)
@@ -306,10 +308,65 @@ def test_ghost_species_do_not_block_compatibility(tmp_path):
     prov["species"] = [{"index": 1, "atomic_number": 6, "label": "C"}]
     prov["basis_file_sha256"] = {"C.ion.xml": small_basis_hash(small)}
     (large / "material_provenance.json").write_text(json.dumps(prov), encoding="utf-8")
-    result = mvs.validate_datasets_compatible(small, large)
+
+    # Without confirmation, differing ghost species refuse to mix.
+    with pytest.raises(mvs.DatasetCompatibilityError, match="Ghost species differ"):
+        mvs.validate_datasets_compatible(small, large)
+
+    # With explicit confirmation the mix is allowed and the exemption recorded.
+    result = mvs.validate_datasets_compatible(
+        small, large, confirm_ghost_species_exemption=True
+    )
     assert result["compatible"] is True
     assert result["species"] == ["C"]
     assert result["ghost_species_ignored"] == ["Ghost-H"]
+    exemption = result["ghost_species_exemption"]
+    assert exemption["required"] is True
+    assert exemption["confirmed"] is True
+    assert exemption["verified_in_code"] is False
+    assert "UNVERIFIED" in exemption["note"]
+
+
+def test_merged_provenance_is_honest_for_heterogeneous_pool(tmp_path):
+    """Audit I3: the merged dataset must not masquerade as the small material."""
+    small = _make_dataset(tmp_path / "small", n_snapshots=4, n_atoms=2)
+    large = _make_dataset(tmp_path / "large", n_snapshots=4, n_atoms=50)
+    prov = json.loads((large / "material_provenance.json").read_text())
+    prov["species"] = [{"index": 1, "atomic_number": 6, "label": "C"}]
+    prov["basis_file_sha256"] = {"C.ion.xml": small_basis_hash(small)}
+    prov["label"] = "graphene_5x5"
+    (large / "material_provenance.json").write_text(json.dumps(prov), encoding="utf-8")
+
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "merged"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:2],
+        output_root=out, seed=0, confirm_ghost_species_exemption=True,
+    )
+    merged = json.loads((out / "material_provenance.json").read_text())
+    assert merged["material_source"] == "mixed_dataset"
+    assert merged["heterogeneous_material_pool"] is True
+    assert merged["provenance_source_of_truth"] == "mixed_dataset_provenance.json"
+    assert merged["label"] == "mixed(graphene+graphene_5x5)"
+    # Only the validated real species are asserted; ghosts are per-source.
+    assert [s["label"] for s in merged["species"]] == ["C"]
+    assert merged["ghost_species_by_source"] == {"small": ["Ghost-H"], "large": []}
+    assert merged["fdf_sha256_semantics"] == "sha256_of_source_fdf_sha256_pair"
+    assert any("UNVERIFIED" in w for w in merged["warnings"])
+
+
+def test_merged_provenance_copies_verbatim_for_homogeneous_pool(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    out = tmp_path / "merged"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=[],
+        output_root=out, seed=0,
+    )
+    merged = json.loads((out / "material_provenance.json").read_text())
+    source = json.loads((small / "material_provenance.json").read_text())
+    assert merged == source
 
 
 def small_basis_hash(dataset_root: Path) -> str:
@@ -472,6 +529,71 @@ def test_cli_mixing_sweep_accepts_split_policy(small_large, tmp_path):
     assert prov["split_policy"] == "fixed_common_test"
 
 
+def test_fixed_common_test_reuses_source_test_split_when_available(small_large, tmp_path):
+    """Audit C2: the source's temporally blocked test split is reused verbatim."""
+    small, large = small_large
+    frozen_path = small / "frozen_split_manifest.json"
+    frozen = json.loads(frozen_path.read_text())
+    # Mark the source's own (tail) test split, as real datasets have.
+    source_test = {"md_6", "md_7"}
+    for row in frozen["rows"]:
+        row["split"] = "test" if row["sample_id"] in source_test else "train"
+    frozen_path.write_text(json.dumps(frozen), encoding="utf-8")
+
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "merged"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=out, seed=2, split_policy="fixed_common_test",
+    )
+    assert _test_split_ids(out) == {f"small__{sid}" for sid in source_test}
+
+
+def test_fixed_common_test_without_source_split_uses_temporal_tail(small_large, tmp_path):
+    """No source test split -> test is the temporal TAIL, never interleaved."""
+    small, large = small_large
+    small_samples = mvs.read_dataset_samples(small)
+    test_ids = mvs.fixed_common_test_ids(
+        small_samples, mvs.DEFAULT_SPLIT_FRACTIONS, seed=3
+    )
+    # 8 snapshots, 15% test -> 1 snapshot: the temporally last frame.
+    assert test_ids == {"md_7"}
+
+    # After materialization no train/validation frame is temporally later than
+    # any test frame (test is a contiguous tail: single temporal boundary).
+    out = tmp_path / "merged"
+    mvs.materialize_mixed_dataset(
+        small, large,
+        selected_small_ids=[s.sample_id for s in small_samples],
+        selected_large_ids=[],
+        output_root=out, seed=3, split_policy="fixed_common_test",
+    )
+    frozen = json.loads((out / "frozen_split_manifest.json").read_text())
+    frame = lambda sid: int(sid.rsplit("_", 1)[1])  # noqa: E731
+    test_frames = [frame(r["sample_id"]) for r in frozen["rows"] if r["split"] == "test"]
+    fit_frames = [frame(r["sample_id"]) for r in frozen["rows"] if r["split"] != "test"]
+    assert test_frames and fit_frames
+    assert min(test_frames) > max(fit_frames)
+
+
+def test_fixed_common_test_empty_validation_fails_loudly(small_large, tmp_path):
+    small, large = small_large
+    small_samples = mvs.read_dataset_samples(small)
+    reserved = mvs.fixed_common_test_ids(small_samples, mvs.DEFAULT_SPLIT_FRACTIONS)
+    # Reserved test + one extra snapshot: nothing left for validation.
+    selection = sorted(reserved) + [
+        next(s.sample_id for s in small_samples if s.sample_id not in reserved)
+    ]
+    with pytest.raises(mvs.DatasetMaterializeError, match="train and validation"):
+        mvs.materialize_mixed_dataset(
+            small, large,
+            selected_small_ids=selection, selected_large_ids=[],
+            output_root=tmp_path / "novalid", seed=0,
+            split_policy="fixed_common_test",
+        )
+
+
 def test_fixed_common_test_raises_when_selection_excludes_reserved(small_large, tmp_path):
     small, large = small_large
     small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
@@ -615,6 +737,40 @@ def test_aggregate_mae_vs_size():
     assert all(point.get("payload_id") for curve in agg["curves"] for point in curve["points"])
     g2m = next(c for c in agg["curves"] if c["model"] == "graph2mat")
     assert [p["total_size"] for p in g2m["points"]] == [20, 40]
+
+
+def test_aggregate_mae_vs_size_multi_seed_mean_std_n():
+    """Audit I5: points aggregate per-seed replicates as mean±std with N."""
+    base = {"size": 20, "mode": "add", "ratio": 0.0, "total_size": 20, "model": "graph2mat"}
+    records = [
+        {**base, "seed": 0, "h_mae_eV": 0.04},
+        {**base, "seed": 1, "h_mae_eV": 0.06},
+        {**base, "seed": 2, "h_mae_eV": 0.05},
+    ]
+    agg = mvs.aggregate_mae_vs_size(records)
+    point = agg["curves"][0]["points"][0]
+    assert point["mae"] == pytest.approx(0.05)
+    assert point["mae_std"] == pytest.approx(0.01)
+    assert point["n_seeds"] == 3
+    assert point["exploratory"] is False
+    assert agg["curves"][0]["exploratory"] is False
+    assert agg["exploratory"] is False
+    assert agg["warnings"] == []
+    assert agg["min_seeds_for_claims"] == 3
+
+
+def test_aggregate_mae_vs_size_single_seed_is_exploratory():
+    records = [
+        {"size": 20, "mode": "add", "ratio": 0.0, "seed": 0, "total_size": 20,
+         "model": "graph2mat", "h_mae_eV": 0.05},
+    ]
+    agg = mvs.aggregate_mae_vs_size(records)
+    point = agg["curves"][0]["points"][0]
+    assert point["n_seeds"] == 1
+    assert point["mae_std"] is None
+    assert point["exploratory"] is True
+    assert agg["exploratory"] is True
+    assert any("EXPLORATORY" in w for w in agg["warnings"])
 
 
 def test_write_mae_vs_size_outputs(tmp_path):
@@ -890,6 +1046,50 @@ def test_extract_model_h_mae_eV_shapes():
     assert ui._extract_model_h_mae_eV({"results": None}, ("graph2mat",)) == {}
 
 
+def test_extract_model_h_mae_eV_ignores_non_test_splits():
+    import pipeline_ui as ui
+
+    payload = {
+        "results": {
+            "graph2mat": {
+                "train": {"h_mae_eV": 0.001},
+                "validation": {"h_mae_eV": 0.002},
+                "test": {"h_mae_eV": 0.5},
+            }
+        }
+    }
+    assert ui._extract_model_h_mae_eV(payload, ("graph2mat",)) == {
+        "graph2mat": {"h_mae_eV": 0.5}
+    }
+    # Explicit split field on the node also filters.
+    payload = {
+        "rows": [
+            {"method": "deeph", "split": "train", "h_mae_eV": 0.001},
+            {"method": "deeph", "split": "test", "h_mae_eV": 0.7},
+        ]
+    }
+    assert ui._extract_model_h_mae_eV(payload, ("deeph",)) == {"deeph": {"h_mae_eV": 0.7}}
+
+
+def test_extract_model_h_mae_eV_ambiguous_distinct_values_fail_loudly():
+    import pipeline_ui as ui
+
+    payload = {
+        "summary": {"graph2mat": {"h_mae_eV": 0.10}},
+        "plots": {"graph2mat": {"h_mae_eV": 0.99}},
+    }
+    with pytest.raises(RuntimeError, match="Ambiguous h_mae_eV"):
+        ui._extract_model_h_mae_eV(payload, ("graph2mat",))
+    # Duplicated but IDENTICAL values are fine (same metric surfaced twice).
+    payload = {
+        "summary": {"graph2mat": {"h_mae_eV": 0.10}},
+        "plots": {"graph2mat": {"h_mae_eV": 0.10}},
+    }
+    assert ui._extract_model_h_mae_eV(payload, ("graph2mat",)) == {
+        "graph2mat": {"h_mae_eV": 0.10}
+    }
+
+
 def test_mixing_metrics_from_common_csv(tmp_path):
     import pipeline_ui as ui
 
@@ -910,18 +1110,51 @@ def test_mixing_metrics_from_common_csv(tmp_path):
 def test_mixing_metrics_from_run_metrics_csv(tmp_path):
     import pipeline_ui as ui
 
-    metrics = tmp_path / "run" / "metrics" / "graph2mat" / "eval" / "metrics"
-    metrics.mkdir(parents=True)
-    (metrics / "kpoint_matrix_metrics.csv").write_text(
-        "sample,row_type,h_mae_eV\n"
-        "s0,per_k,0.10\n"
-        "s0,per_k,0.20\n",
-        encoding="utf-8",
-    )
+    def _write_csv(metrics_dir, rows, manifest_split=None):
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        (metrics_dir / "kpoint_matrix_metrics.csv").write_text(
+            "sample,row_type,h_mae_eV\n" + "".join(f"{r}\n" for r in rows),
+            encoding="utf-8",
+        )
+        if manifest_split is not None:
+            (metrics_dir / "manifest.json").write_text(
+                json.dumps({"split": manifest_split}), encoding="utf-8"
+            )
 
-    assert ui._mixing_metrics_from_run_metrics(tmp_path / "run", "graph2mat") == {
+    # Manifest declares the test split -> used; per_k rows are ignored
+    # (weighted_sample rows only, no double counting).
+    run = tmp_path / "run"
+    _write_csv(
+        run / "metrics" / "graph2mat" / "eval" / "metrics",
+        ["s0,per_k,0.90", "s0,weighted_sample,0.10", "s1,weighted_sample,0.20"],
+        manifest_split="test",
+    )
+    assert ui._mixing_metrics_from_run_metrics(run, "graph2mat") == {
         "graph2mat": {"h_mae_eV": pytest.approx(0.15)}
     }
+
+    # Train/validation CSVs are never averaged into the metric.
+    run2 = tmp_path / "run2"
+    _write_csv(
+        run2 / "cross_evaluations" / "on__test_md" / "metrics",
+        ["s0,weighted_sample,0.30"],
+    )
+    _write_csv(
+        run2 / "cross_evaluations" / "on__train_md" / "metrics",
+        ["s0,weighted_sample,0.001"],
+    )
+    _write_csv(
+        run2 / "cross_evaluations" / "on__validation_md" / "metrics",
+        ["s0,weighted_sample,0.002"],
+    )
+    assert ui._mixing_metrics_from_run_metrics(run2, "graph2mat") == {
+        "graph2mat": {"h_mae_eV": pytest.approx(0.30)}
+    }
+
+    # No split evidence at all -> skipped, metric reported missing (not wrong).
+    run3 = tmp_path / "run3"
+    _write_csv(run3 / "metrics" / "eval" / "metrics", ["s0,weighted_sample,0.40"])
+    assert ui._mixing_metrics_from_run_metrics(run3, "graph2mat") == {}
 
 
 def test_http_dispatch_mixing_routes(small_large):

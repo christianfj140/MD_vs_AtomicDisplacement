@@ -7020,19 +7020,28 @@ class ComparisonWorkflowTests(unittest.TestCase):
         module = self.load_pipeline_ui_module()
 
         self.assertIn("strategy: blocked_with_gap", config_text)
-        self.assertIn("temporal_gap: 1", config_text)
+        # ~1 carbon vibrational period at 1 fs/frame (audit C2).
+        self.assertIn("temporal_gap: 30", config_text)
         self.assertNotIn("strategy: spread", config_text)
         self.assertIn('value="blocked_with_gap" selected', index_html)
         self.assertIn("Spread split (exploratory)", index_html)
         self.assertEqual(module.parse_split_mode(None), "blocked_with_gap")
         counts, reserved_gap_frames = module.md_split_counts_for_mode(
-            10,
+            100,
             {"train": 0.8, "validation": 0.1, "test": 0.1},
             split_mode="blocked_with_gap",
-            label="MD dataset_10",
+            label="MD dataset_100",
         )
-        self.assertEqual(counts, {"train": 6, "validation": 1, "test": 1})
-        self.assertEqual(reserved_gap_frames, 2)
+        self.assertEqual(counts, {"train": 32, "validation": 4, "test": 4})
+        self.assertEqual(reserved_gap_frames, 60)
+        # Too few frames for the default gap fails loudly instead of leaking.
+        with self.assertRaises(RuntimeError):
+            module.md_split_counts_for_mode(
+                10,
+                {"train": 0.8, "validation": 0.1, "test": 0.1},
+                split_mode="blocked_with_gap",
+                label="MD dataset_10",
+            )
 
     def test_md_prepare_dataset_splits_writes_gap_metadata_and_spread_warning(self) -> None:
         module = self.load_md_dataset_module("generate_md_dataset_gap_manifest_test")

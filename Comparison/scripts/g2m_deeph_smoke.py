@@ -314,7 +314,7 @@ def _create_paper_workflow_dataset(dataset_root: Path) -> None:
             "fdf_sha256": "synthetic-fdf-hash",
             "basis_file_sha256": {"C.ion.xml": "synthetic-basis-hash"},
             "pseudopotential_sha256": {"C": "synthetic-pseudo-hash"},
-            "siesta_version": "SIESTA synthetic-smoke",
+            "siesta_version": "SIESTA 5.4.2-synthetic-smoke",
             "siesta_command_line": "siesta < RUN.fdf",
             "run_out_path": str(dataset_root / "RUN.out"),
             "siesta_returncode": 0,

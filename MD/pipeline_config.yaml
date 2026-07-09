@@ -16,7 +16,8 @@ md:
   system_label: siesta
   run_fdf_template: ${REPO_ROOT}/materials/graphene/RUN.fdf
   type_of_run: verlet
-  steps: 10
+  # 70 = 6+1+1 split frames + 2*30 temporal-gap frames (see splits below).
+  steps: 70
   temperature_K: 300.0
   timestep_fs: 1.0
   ensemble: nve
@@ -185,10 +186,14 @@ performance:
   torch_float32_matmul_precision: null
 splits:
   enabled: true
-  # Leakage-safer scientific default for MD trajectories. The two omitted
-  # frames act as temporal buffers between train/validation/test for 10 steps.
+  # Leakage-safer scientific default for MD trajectories: consecutive frames
+  # are 1 fs apart, and carbon vibrational periods are ~20-40 fs, so a gap of
+  # 30 frames (~30 fs, about one vibrational period) is the minimum for the
+  # buffered blocks to be meaningfully decorrelated. A gap of 1 frame (1 fs)
+  # is physically meaningless. md.steps must cover
+  # train+validation+test + 2*temporal_gap frames.
   strategy: blocked_with_gap
-  temporal_gap: 1
+  temporal_gap: 30
   block_order: train,validation,test
   train: 6
   validation: 1

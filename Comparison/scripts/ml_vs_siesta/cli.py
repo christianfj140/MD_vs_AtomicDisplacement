@@ -112,7 +112,7 @@ def _cmd_mixing_sweep(args: argparse.Namespace) -> int:
     sizes = [int(s) for s in args.sizes.split(",")] if args.sizes else None
     modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
     ratios = tuple(float(r) for r in args.ratios.split(",")) if args.ratios else (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-    split_policy = getattr(args, "split_policy", "resplit_combined")
+    split_policy = getattr(args, "split_policy", "fixed_common_test")
     if args.dry_run or not args.output_root:
         plan = plan_mixing_sweep_from_roots(
             small_by_size, large_by_size, sizes=sizes, modes=modes, ratios=ratios,
@@ -189,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument(
         "--split-policy",
         choices=["resplit_combined", "fixed_common_test"],
-        default="resplit_combined",
+        default="fixed_common_test",
         help="Split policy for materialized datasets (fixed_common_test keeps a "
         "common small test set across ratios).",
     )

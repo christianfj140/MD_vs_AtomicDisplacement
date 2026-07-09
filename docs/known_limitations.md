@@ -16,6 +16,36 @@
 - Several user-facing flows are file-driven and manifest-driven, so moving or
   partially editing archived run directories can invalidate reuse.
 
+## Temporal Leakage In Archived Snapshot-Scaling Datasets (Audit C2)
+
+The archived `*_iid*` snapshot-scaling datasets (e.g.
+`graphene_w90_scale_iid*`, `graphene_5x5_scale_iid*`) were generated from MD
+temperature blocks (150 K / 300 K / 450 K trajectories of consecutive frames,
+1 fs apart) and split with `blocked_with_gap` using `temporal_gap: 1`. This
+has three consequences that apply to every number already produced from these
+datasets. The user decision is to document them, not to regenerate the
+datasets (regeneration would require re-running SIESTA):
+
+1. **The reported test MAE is 450 K extrapolation, not in-distribution
+   error.** In these datasets the train split contains the 150 K and 300 K
+   trajectories only, while validation and test are both carved from the
+   450 K trajectory. Models are therefore evaluated on a temperature regime
+   they never saw in training.
+2. **Validation is a temporal twin of test.** Validation and test are the
+   early and late halves of the *same* 450 K trajectory, separated by a
+   single 1 fs frame. Carbon vibrational periods are ~20-40 fs, so a 1-frame
+   gap does not decorrelate the blocks: checkpoint selection / early stopping
+   is informed by configurations nearly identical to the test set. The
+   locked-test policy holds formally but is materially eroded.
+3. **`*_iid*` is a misnomer.** The samples are consecutive MD frames, not
+   independent draws. Treat any "MAE vs dataset size" trend from these
+   datasets as interpolation along nearly continuous trajectories.
+
+Any already-published or archived result computed on these splits needs this
+note attached. New datasets are generated with `temporal_gap: 30` by default
+(~one carbon vibrational period at 1 fs/frame); the old datasets keep their
+frozen splits for reproducibility of past runs.
+
 ## Scientific And Computational Caveats
 
 - The repository exposes DeepH-comparable diagnostics, but it does not claim to

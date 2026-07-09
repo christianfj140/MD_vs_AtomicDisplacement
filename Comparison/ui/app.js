@@ -12803,6 +12803,7 @@ function mixCollectBody() {
     modes: modes.length ? modes : ["add", "replace"],
     ratios: ratios.length ? ratios : [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
     seed: Number(mvsValue("mix-seed", "0")) || 0,
+    split_policy: mvsValue("mix-split-policy", "fixed_common_test") || "fixed_common_test",
     models: models.length ? models : ["graph2mat", "deeph"],
     performance: {
       compute_accelerator: "gpu",

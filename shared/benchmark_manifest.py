@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +252,40 @@ def _non_empty_text(payload: dict[str, Any], *keys: str) -> bool:
     return False
 
 
+# A usable SIESTA version string must contain a dotted numeric version
+# (e.g. "5.4.2-11-g4e9a46060"). Environment noise captured from stderr
+# ("Authorization required, but no authorization protocol specified") has no
+# such token, so it can never pass the provenance gate again.
+_SIESTA_VERSION_TOKEN = re.compile(r"\d+\.\d+")
+# Line emitted by `siesta --version` build info: "Version         : 5.4.2-...".
+_SIESTA_BUILD_INFO_VERSION_LINE = re.compile(r"^\s*Version\s*:\s*(\S+)", re.MULTILINE)
+
+
+def looks_like_siesta_version(text: Any) -> bool:
+    """True when ``text`` plausibly names a SIESTA version (contains X.Y)."""
+    return isinstance(text, str) and bool(_SIESTA_VERSION_TOKEN.search(text))
+
+
+def extract_siesta_version_from_text(text: Any) -> str | None:
+    """Extract a validated SIESTA version from probe output / build info.
+
+    Prefers the build-info ``Version : <token>`` line; otherwise the first
+    line that looks like a version. Returns None when nothing validates —
+    callers must NOT fall back to arbitrary first lines (that is how X11
+    noise got recorded as a version).
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    match = _SIESTA_BUILD_INFO_VERSION_LINE.search(text)
+    if match and looks_like_siesta_version(match.group(1)):
+        return match.group(1)
+    for line in text.splitlines():
+        line = line.strip()
+        if line and looks_like_siesta_version(line):
+            return line
+    return None
+
+
 def _non_empty_text_or_sequence(payload: dict[str, Any], *keys: str) -> bool:
     for key in keys:
         value = payload.get(key)
@@ -347,9 +382,10 @@ def provenance_status(
             "fdf_sha256",
             "siesta_input_sha256",
         ),
-        "siesta_version_provenance": _non_empty_text(
-            material,
-            "siesta_version",
+        # A non-empty string is NOT enough: archived datasets carried X11
+        # noise as siesta_version. The text must look like a real version.
+        "siesta_version_provenance": looks_like_siesta_version(
+            material.get("siesta_version")
         ) or _existing_material_path(dataset_root, material, "siesta_version_source_file"),
         "siesta_command_line_provenance": _non_empty_text_or_sequence(material, "siesta_command_line"),
         "siesta_environment_provenance": _environment_provenance_present(material),

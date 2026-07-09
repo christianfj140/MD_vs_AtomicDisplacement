@@ -230,10 +230,54 @@ def _run_deeph_inference(*, deeph_cli: Path, config_path: Path) -> None:
 slow_mark = pytest.mark.slow if pytest is not None else (lambda func: func)
 
 
+def fd_window_converged(rel_errors: list[float], *, noise_floor: float = 0.05) -> bool:
+    """Correct finite-difference behaviour over a descending-delta sweep.
+
+    ``rel_errors`` are relative errors ordered from the LARGEST delta to the
+    smallest. A healthy FD check shows a window where shrinking delta reduces
+    the error (truncation-dominated regime) before numerical cancellation
+    saturates it; alternatively every delta may already sit at the noise
+    floor. A sweep where shrinking delta only ever makes things worse (and
+    errors are large) means the analytic derivative does not match.
+    """
+    if len(rel_errors) < 2:
+        return min(rel_errors) < noise_floor
+    improves = any(rel_errors[i + 1] < rel_errors[i] for i in range(len(rel_errors) - 1))
+    saturated_at_noise = max(rel_errors) < noise_floor
+    return improves or saturated_at_noise
+
+
+class FdWindowCriterionTests(unittest.TestCase):
+    """Synthetic checks of the delta-window convergence criterion."""
+
+    def test_truncation_then_cancellation_window_passes(self) -> None:
+        # Classic FD signature: error drops with delta, then cancellation bites.
+        self.assertTrue(fd_window_converged([0.20, 0.03, 0.08]))
+
+    def test_flat_noise_floor_passes(self) -> None:
+        self.assertTrue(fd_window_converged([0.02, 0.02, 0.021]))
+
+    def test_monotonically_worse_with_smaller_delta_fails(self) -> None:
+        # Shrinking delta only increases the error and errors are large:
+        # the analytic derivative disagrees with the model.
+        self.assertFalse(fd_window_converged([0.30, 0.45, 0.90]))
+
+    def test_single_delta_requires_noise_floor(self) -> None:
+        self.assertTrue(fd_window_converged([0.01]))
+        self.assertFalse(fd_window_converged([0.30]))
+
+
 class DeepHAutogradFiniteDifferenceSmokeTests(unittest.TestCase):
     @slow_mark
     def test_deeph_autograd_matches_predict_finite_difference_when_fixture_is_available(self) -> None:
-        """DeepH dH/dR from with_grad vs central finite difference of DeepH predict()."""
+        """DeepH dH/dR from with_grad vs central finite difference of DeepH predict().
+
+        Dtype note (audit I6): this smoke exercises the PRODUCTION dtype
+        (float32 DeepH inference). The earlier float64 verification of the
+        autograd route is a separate offline check and is NOT re-executed
+        here; expect the float32 noise floor (best-delta relative error of a
+        few percent), not float64 tightness.
+        """
 
         from deeph_config import render_inference_config
 
@@ -245,12 +289,13 @@ class DeepHAutogradFiniteDifferenceSmokeTests(unittest.TestCase):
             raise unittest.SkipTest("Set DEEPH_AUTOGRAD_SMOKE_SAMPLE_DIR to a processed DeepH sample/work directory.")
         model_dir = Path(model_env)
         sample_dir = Path(sample_env)
-        deeph_cli = Path(
-            os.environ.get(
-                "DEEPH_AUTOGRAD_SMOKE_DEEPH_COMMAND",
-                str(Path("/home/christian/repositorios/DeepH-pack/.venv/bin/deeph-inference")),
+        deeph_cli_env = os.environ.get("DEEPH_AUTOGRAD_SMOKE_DEEPH_COMMAND")
+        if not deeph_cli_env:
+            raise unittest.SkipTest(
+                "Set DEEPH_AUTOGRAD_SMOKE_DEEPH_COMMAND to the deeph-inference "
+                "executable (no machine-specific default)."
             )
-        )
+        deeph_cli = Path(deeph_cli_env)
         if not model_dir.is_dir():
             raise unittest.SkipTest(f"DeepH model directory is unavailable: {model_dir}")
         if not sample_dir.is_dir():
@@ -318,5 +363,17 @@ class DeepHAutogradFiniteDifferenceSmokeTests(unittest.TestCase):
             self.assertGreater(compared, 0)
             self.assertGreater(grad_norm, 0.0)
             self.assertTrue(np.all(np.isfinite(rel_errors)), rel_errors)
-            self.assertLess(min(rel_errors), 0.25, rel_errors)
-            self.assertLessEqual(rel_errors[-1], rel_errors[0] * 1.2, rel_errors)
+            # Report the full delta -> error map and the optimal delta, not
+            # just the best-case number (audit I6).
+            by_delta = dict(zip(deltas, rel_errors))
+            best_delta = min(by_delta, key=by_delta.get)
+            report = (
+                f"relative errors by delta (Ang): {by_delta}; "
+                f"optimal delta {best_delta:g} -> {by_delta[best_delta]:.4f} "
+                "(float32 production dtype)"
+            )
+            self.assertLess(min(rel_errors), 0.10, report)
+            # FD must show a truncation-dominated window (or sit at the noise
+            # floor); "smaller delta only ever worse" means the analytic
+            # derivative disagrees with the model.
+            self.assertTrue(fd_window_converged(rel_errors), report)

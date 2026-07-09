@@ -14,12 +14,20 @@ from typing import Any, Iterable
 from .mixing_sweep import _ratio_slug
 
 
+# Repo-wide statistical bar for claims (mirrors g2m_deeph_final_stats
+# --min-final-seeds): curves built from fewer seeds are exploratory only.
+MIN_SEEDS_FOR_CLAIMS = 3
+
+
 def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Group ``h_mae_eV`` records into MAE-vs-total-size curves.
 
     Each record needs ``mode``, ``ratio``, ``model``, ``total_size``,
-    ``h_mae_eV``. Points within a curve are sorted by total size; duplicate
-    sizes are averaged.
+    ``h_mae_eV`` and ideally ``seed``. Points within a curve are sorted by
+    total size; replicate values per point (one per seed) are aggregated as
+    mean ± sample std with the replicate count ``n_seeds``. Points/curves
+    backed by fewer than ``MIN_SEEDS_FOR_CLAIMS`` seeds are flagged
+    ``exploratory`` — treat them as exploratory, not publishable evidence.
     """
     curves: dict[tuple[str, float, str], dict[str, dict[str, Any]]] = {}
     payloads: dict[str, dict[str, Any]] = {}
@@ -60,33 +68,66 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 "payload_id": payload_id,
                 "total_size": total_size,
                 "values": [],
+                "seeds": set(),
             },
         )
         bucket["values"].append(mae)
+        if record.get("seed") is not None:
+            try:
+                bucket["seeds"].add(int(record["seed"]))
+            except (TypeError, ValueError):
+                pass
+
+    def _point(item: dict[str, Any]) -> dict[str, Any]:
+        values = item["values"]
+        mean = sum(values) / len(values)
+        if len(values) > 1:
+            std = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5
+        else:
+            std = None
+        # Replicates = distinct seeds when recorded, else raw value count.
+        n_seeds = len(item["seeds"]) if item["seeds"] else len(values)
+        return {
+            "payload_id": item["payload_id"],
+            "total_size": item["total_size"],
+            "mae": mean,
+            "mae_std": std,
+            "n_seeds": n_seeds,
+            "exploratory": n_seeds < MIN_SEEDS_FOR_CLAIMS,
+        }
 
     curve_list: list[dict[str, Any]] = []
     for (mode, ratio, model), by_payload in sorted(curves.items()):
         points = [
-            {
-                "payload_id": item["payload_id"],
-                "total_size": item["total_size"],
-                "mae": sum(item["values"]) / len(item["values"]),
-            }
+            _point(item)
             for item in sorted(by_payload.values(), key=lambda value: (value["total_size"], value["payload_id"]))
         ]
+        curve_exploratory = any(point["exploratory"] for point in points)
         curve_list.append(
             {
                 "mode": mode,
                 "ratio": ratio,
                 "model": model,
                 "label": f"{model} · {mode} · ratio={ratio:g}",
+                "exploratory": curve_exploratory,
                 "points": points,
             }
         )
+    exploratory = any(curve["exploratory"] for curve in curve_list)
+    warnings: list[str] = []
+    if exploratory and curve_list:
+        warnings.append(
+            f"curves with fewer than {MIN_SEEDS_FOR_CLAIMS} seeds per point are "
+            "EXPLORATORY: seed-to-seed training variance is not resolved, do "
+            "not use them for publishable composition claims"
+        )
     return {
-        "schema": "ml_vs_siesta_mae_vs_size_v1",
+        "schema": "ml_vs_siesta_mae_vs_size_v2",
         "metric": "h_mae_eV",
         "x": "total_dataset_size",
+        "min_seeds_for_claims": MIN_SEEDS_FOR_CLAIMS,
+        "exploratory": exploratory,
+        "warnings": warnings,
         "n_curves": len(curve_list),
         "payloads": sorted(payloads.values(), key=lambda item: (item["size"], item["mode"], item["ratio"], item["id"])),
         "curves": curve_list,
@@ -117,11 +158,18 @@ def plot_mae_vs_size(aggregated: dict[str, Any], output_png: str | Path) -> str:
             continue
         xs = [p["total_size"] for p in points]
         ys = [p["mae"] for p in points]
+        yerr = [p.get("mae_std") or 0.0 for p in points]
         linestyle = "--" if curve.get("mode") == "replace" else "-"
-        ax.plot(xs, ys, marker="o", linestyle=linestyle, label=curve.get("label"))
+        ax.errorbar(
+            xs, ys, yerr=yerr if any(yerr) else None,
+            marker="o", linestyle=linestyle, capsize=3, label=curve.get("label"),
+        )
     ax.set_xlabel("Total dataset size (snapshots)")
     ax.set_ylabel("Hamiltonian MAE (eV)")
-    ax.set_title("MAE vs dataset size — small/large mixing")
+    title = "MAE vs dataset size — small/large mixing"
+    if aggregated.get("exploratory"):
+        title += f"  [EXPLORATORY: <{aggregated.get('min_seeds_for_claims', 3)} seeds/point]"
+    ax.set_title(title)
     if aggregated.get("curves"):
         ax.legend(fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)

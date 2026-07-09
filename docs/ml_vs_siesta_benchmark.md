@@ -143,7 +143,11 @@ curve per `(mode, ratio, model)`.
 - `Comparison/scripts/ml_vs_siesta/mixing_sweep.py` — `plan_mixing_sweep` (pure)
   and `run_mixing_sweep` (materialize + train via an injectable `launch_fn`).
 - `Comparison/scripts/ml_vs_siesta/plot_mixing_mae_vs_size.py` —
-  `aggregate_mae_vs_size` / `write_mae_vs_size_outputs` (JSON + PNG).
+  `aggregate_mae_vs_size` / `write_mae_vs_size_outputs` (JSON + PNG). Points
+  aggregate per-seed replicates as mean ± std with `n_seeds`; curves with
+  fewer than 3 seeds per point are flagged `exploratory` (same statistical
+  bar as `g2m_deeph_final_stats --min-final-seeds 3`). The E2E wrapper
+  accepts `"seeds": [0, 1, 2]` to run the sweep once per seed and aggregate.
 
 ### CLI (dry-run preview)
 
@@ -195,16 +199,24 @@ Open the **Mixing datasets** sidebar tab:
 #### Split policy
 
 `materialize_mixed_dataset` / `run_mixing_sweep` accept
-`split_policy` (UI payload key `split_policy`):
+`split_policy` (UI payload key `split_policy`). It is selectable end to end:
+the Mixing UI tab exposes a *Split policy* selector, `/api/mixing/launch` and
+`/api/mixing/plan` read `split_policy` from the request body, and the E2E
+wrapper (`run_mixing_e2e_payload_once.py`) forwards `split_policy` from the
+payload JSON.
 
-- `"resplit_combined"` (default, legacy behaviour): the merged pool is
+- `"fixed_common_test"` (**default**, recommended for scientific analysis):
+  the test set is fixed and temporally blocked — the small source dataset's
+  own frozen test split when available, otherwise the temporal tail of the
+  small pool. All permutations of the same size/seed share exactly the same
+  test snapshots, and test frames are never randomly interleaved inside the
+  source MD trajectories (the pool is consecutive 1 fs MD frames; a random
+  test subset would leak near-identical geometries into training).
+- `"resplit_combined"` (legacy, opt-in only): the merged pool is
   re-split by seed, so the test set changes with the selection — an MAE
   improvement between ratios can come from the test set changing, not from
-  the composition.
-- `"fixed_common_test"` (**recommended for scientific analysis**): the test
-  set is a fixed fraction of the small pool derived only from
-  `small_root` + `seed`, so all permutations of the same size/seed share
-  exactly the same test snapshots.
+  the composition. Use it only to reproduce old runs; never for new
+  MAE-vs-composition claims.
 
 Each merged dataset also writes a self-contained
 `mixed_dataset_provenance.json` (mode, ratio + semantics, seed, selected ids,

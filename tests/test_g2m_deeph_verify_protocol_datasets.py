@@ -160,7 +160,7 @@ class Graph2MatDeepHVerifyProtocolDatasetsTests(unittest.TestCase):
                 "fdf_sha256": "fdfhash",
                 "basis_file_sha256": {"C.ion.xml": "basis"},
                 "pseudopotential_sha256": {"C": "pseudo"},
-                "siesta_version": "SIESTA unit-test",
+                "siesta_version": "SIESTA 5.4.2-unit-test",
                 "siesta_command_line": "siesta < RUN.fdf",
                 "run_out_path": str(self.dataset / "RUN.out"),
                 "environment": {"python_version": "3.11", "platform": "test"},

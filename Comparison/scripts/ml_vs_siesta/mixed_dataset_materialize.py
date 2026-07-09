@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ class DatasetSample:
     system_label: str | None
     source_root: Path
     n_atoms: int | None = None
+    split: str | None = None
 
     def to_manifest_entry(self) -> dict[str, Any]:
         return {"id": self.sample_id, "n_atoms": self.n_atoms}
@@ -117,6 +119,7 @@ def read_dataset_samples(dataset_root: str | Path) -> list[DatasetSample]:
                 system_label=row.get("system_label"),
                 source_root=root,
                 n_atoms=_snapshot_atom_count(sample_dir),
+                split=(str(row.get("split")) or None) if row.get("split") else None,
             )
         )
     if not samples:
@@ -166,17 +169,34 @@ def _basis_for_real_species(
     return kept
 
 
+GHOST_EXEMPTION_NOTE = (
+    "UNVERIFIED exemption: the claim that ghost species (atomic_number < 0, "
+    "e.g. Wannier projection centers like Ghost-H) are not part of the "
+    "Graph2Mat/DeepH representation is not verified anywhere in this "
+    "repository's training code. Ghost atoms carry basis orbitals in SIESTA, "
+    "so Hamiltonians of snapshots WITH ghosts contain orbital blocks absent "
+    "from snapshots WITHOUT them. Mixing such pools requires an explicit "
+    "confirm_ghost_species_exemption=True and is recorded in provenance."
+)
+
+
 def validate_datasets_compatible(
     small_root: str | Path,
     large_root: str | Path,
+    *,
+    confirm_ghost_species_exemption: bool = False,
 ) -> dict[str, Any]:
     """Validate that two datasets share species + basis so they can be mixed.
 
-    Compares only the *real* species and their basis files. Ghost atoms
-    (``atomic_number < 0``, e.g. Wannier projection centers like ``Ghost-H``)
-    are not part of the Graph2Mat/DeepH representation, so they are ignored:
-    a 2-atom ``["C", "Ghost-H"]`` cell is compatible with a ``["C"]`` supercell.
-    Raises :class:`DatasetCompatibilityError` on a real mismatch.
+    Compares the *real* species and their basis files; a mismatch raises
+    :class:`DatasetCompatibilityError`.
+
+    Ghost atoms (``atomic_number < 0``) are exempted from the species check
+    only when the caller explicitly confirms the exemption: the assertion that
+    ghosts play no role in the Graph2Mat/DeepH representation is NOT verified
+    in code (see ``GHOST_EXEMPTION_NOTE``), so datasets whose ghost species
+    sets differ refuse to mix unless ``confirm_ghost_species_exemption=True``.
+    The returned report records whether the exemption was required/confirmed.
     """
     small = _load_json(Path(small_root) / "material_provenance.json")
     large = _load_json(Path(large_root) / "material_provenance.json")
@@ -189,6 +209,16 @@ def validate_datasets_compatible(
             "Mixing requires the same real (non-ghost) species set."
         )
 
+    small_ghosts = _ghost_species_labels(small)
+    large_ghosts = _ghost_species_labels(large)
+    ghost_exemption_required = small_ghosts != large_ghosts
+    if ghost_exemption_required and not confirm_ghost_species_exemption:
+        raise DatasetCompatibilityError(
+            f"Ghost species differ between datasets (small={small_ghosts}, "
+            f"large={large_ghosts}). {GHOST_EXEMPTION_NOTE} Pass "
+            "confirm_ghost_species_exemption=True to mix them anyway."
+        )
+
     real_set = set(small_species)
     small_basis = _basis_for_real_species(small.get("basis_file_sha256") or {}, real_set)
     large_basis = _basis_for_real_species(large.get("basis_file_sha256") or {}, real_set)
@@ -198,11 +228,19 @@ def validate_datasets_compatible(
             "(basis_file_sha256 mismatch); Graph2Mat/DeepH cannot train on a "
             f"heterogeneous basis pool. small={small_basis} large={large_basis}."
         )
-    ghost_ignored = sorted(set(_ghost_species_labels(small)) | set(_ghost_species_labels(large)))
+    ghost_ignored = sorted(set(small_ghosts) | set(large_ghosts))
     return {
         "species": small_species,
         "basis_file_sha256": small_basis or large_basis,
         "ghost_species_ignored": ghost_ignored,
+        "ghost_species_exemption": {
+            "required": ghost_exemption_required,
+            "confirmed": bool(confirm_ghost_species_exemption),
+            "verified_in_code": False,
+            "small_ghost_species": small_ghosts,
+            "large_ghost_species": large_ghosts,
+            "note": GHOST_EXEMPTION_NOTE if ghost_exemption_required else "",
+        },
         "compatible": True,
     }
 
@@ -259,19 +297,21 @@ def _validate_safe_output_root(output_root: Path) -> Path:
 
 def _fixed_common_test_split(
     selected: list[tuple[str, "DatasetSample"]],
-    small_pool_ids: list[str],
+    small_pool: list["DatasetSample | str"],
     fractions: tuple[float, float, float],
     seed: int,
 ) -> list[str]:
-    """Split with a test set derived only from the small pool + seed.
+    """Split with a fixed, temporally blocked test set from the small pool.
 
-    A fixed fraction (``fractions[2]``) of the *whole* small pool is reserved
-    for test; any selected small snapshot in that reservation goes to "test".
-    The remaining selected snapshots are shuffled into train/validation with
-    the train:validation proportion of ``fractions``.
+    The test ids come from :func:`fixed_common_test_ids` (the source dataset's
+    own test split when available, otherwise the temporal tail of the pool) so
+    the test set is identical across permutations and never randomly
+    interleaved inside the source MD trajectories. The remaining selected
+    snapshots are shuffled into train/validation with the train:validation
+    proportion of ``fractions``.
     """
     rng = random.Random(seed)
-    test_ids = fixed_common_test_ids(small_pool_ids, fractions, seed)
+    test_ids = fixed_common_test_ids(small_pool, fractions, seed)
 
     assignment = [""] * len(selected)
     rest: list[int] = []
@@ -282,21 +322,63 @@ def _fixed_common_test_split(
             rest.append(i)
     rng.shuffle(rest)
     n_rest = len(rest)
+    if n_rest < 2:
+        raise DatasetMaterializeError(
+            "split_policy='fixed_common_test' cannot populate both train and "
+            f"validation: only {n_rest} selected snapshot(s) remain outside the "
+            "reserved test set. Select more snapshots."
+        )
     train_share = fractions[0] / (fractions[0] + fractions[1])
-    n_train = min(max(1, round(train_share * n_rest)), max(n_rest - 1, 1)) if n_rest else 0
+    n_train = min(max(1, round(train_share * n_rest)), n_rest - 1)
     for rank, idx in enumerate(rest):
         assignment[idx] = "train" if rank < n_train else "validation"
     return assignment
 
 
+def _temporal_sort_key(sample_id: str) -> tuple[str, int]:
+    """Sort key approximating MD temporal order (numeric suffix, e.g. md_17)."""
+    match = re.search(r"(\d+)$", sample_id)
+    if match:
+        return (sample_id[: match.start()], int(match.group(1)))
+    return (sample_id, -1)
+
+
 def fixed_common_test_ids(
-    small_pool_ids: list[str],
+    small_pool: list["DatasetSample | str"],
     fractions: tuple[float, float, float],
-    seed: int,
+    seed: int = 0,
 ) -> set[str]:
-    rng = random.Random(seed)
-    n_test = max(1, round(fractions[2] * len(small_pool_ids)))
-    return set(rng.sample(small_pool_ids, min(n_test, len(small_pool_ids))))
+    """Fixed test ids for the small pool, preserving temporal structure.
+
+    Priority (audit C2: the small pool is MD trajectory frames 1 fs apart, so
+    a RANDOM test subset interleaves test frames between train frames of the
+    same trajectory — temporal leakage):
+
+    1. The source dataset's own frozen test split (``DatasetSample.split ==
+       "test"``), when available: this reuses exactly the temporally blocked
+       test set the source benchmark used.
+    2. Otherwise the temporal *tail* of the pool (last ``fractions[2]`` ids in
+       numeric-suffix order): a single temporal boundary instead of random
+       interleaving.
+
+    ``seed`` is accepted for API compatibility but the selection is fully
+    deterministic (selection-independent, so all permutations of one sweep
+    share the same test snapshots).
+    """
+    ids: list[str] = []
+    source_test: set[str] = set()
+    for item in small_pool:
+        if isinstance(item, DatasetSample):
+            ids.append(item.sample_id)
+            if item.split == "test":
+                source_test.add(item.sample_id)
+        else:
+            ids.append(str(item))
+    if source_test:
+        return source_test
+    ordered = sorted(ids, key=_temporal_sort_key)
+    n_test = min(max(1, round(fractions[2] * len(ordered))), len(ordered))
+    return set(ordered[len(ordered) - n_test :])
 
 
 def _link_or_copy(src: Path, dst: Path, *, link: bool) -> None:
@@ -312,21 +394,102 @@ def _link_or_copy(src: Path, dst: Path, *, link: bool) -> None:
     shutil.copy2(src, dst)
 
 
-def _copy_dataset_level_files(small_root: Path, output_root: Path) -> None:
-    """Copy dataset-level provenance / basis / pseudos.
+def _copy_dataset_level_files(
+    small_root: Path,
+    large_root: Path,
+    output_root: Path,
+    compat: dict[str, Any],
+) -> None:
+    """Write dataset-level provenance / basis / pseudos for the merged pool.
 
     RUN.fdf/RUN.out stay inside snapshot dirs; a root RUN.fdf makes the shared
-    validator treat the dataset root itself as a snapshot.
+    validator treat the dataset root itself as a snapshot. The merged
+    ``material_provenance.json`` must not masquerade as the small dataset's
+    provenance (audit I3): when the two sources differ it is written as an
+    explicitly mixed provenance pointing at ``mixed_dataset_provenance.json``.
     """
-    for name in ("material_provenance.json",):
-        src = small_root / name
-        if src.is_file():
-            shutil.copy2(src, output_root / name)
+    _write_merged_material_provenance(small_root, large_root, output_root, compat)
     for psf in small_root.glob("*.psf"):
         shutil.copy2(psf, output_root / psf.name)
     basis_src = small_root / "material_basis"
     if basis_src.is_dir():
         shutil.copytree(basis_src, output_root / "material_basis", dirs_exist_ok=True)
+
+
+def _write_merged_material_provenance(
+    small_root: Path,
+    large_root: Path,
+    output_root: Path,
+    compat: dict[str, Any],
+) -> None:
+    small_path = small_root / "material_provenance.json"
+    large_path = large_root / "material_provenance.json"
+    small = _load_json(small_path) if small_path.is_file() else {}
+    large = _load_json(large_path) if large_path.is_file() else {}
+    if not small and not large:
+        return
+    if small == large:
+        # Truly homogeneous sources: the shared provenance is the pool's.
+        shutil.copy2(small_path, output_root / "material_provenance.json")
+        return
+
+    real_set = set(compat.get("species") or [])
+    small_pseudo = small.get("pseudopotential_sha256") or {}
+    large_pseudo = large.get("pseudopotential_sha256") or {}
+    small_label = str(small.get("label") or small_root.name)
+    large_label = str(large.get("label") or large_root.name)
+    merged: dict[str, Any] = {
+        "schema": "ml_vs_siesta_mixed_material_provenance_v1",
+        "material_source": "mixed_dataset",
+        "heterogeneous_material_pool": True,
+        "provenance_source_of_truth": "mixed_dataset_provenance.json",
+        "label": small_label if small_label == large_label else f"mixed({small_label}+{large_label})",
+        # Real species are validated identical between the sources.
+        "species": [
+            entry
+            for entry in (small.get("species") or [])
+            if str(entry.get("label")) in real_set
+        ],
+        "ghost_species_by_source": {
+            "small": _ghost_species_labels(small),
+            "large": _ghost_species_labels(large),
+        },
+        "basis_file_sha256": compat.get("basis_file_sha256") or {},
+        "mixed_from": {
+            "small_root": str(small_root),
+            "small_label": small_label,
+            "small_fdf_sha256": small.get("fdf_sha256"),
+            "large_root": str(large_root),
+            "large_label": large_label,
+            "large_fdf_sha256": large.get("fdf_sha256"),
+        },
+        "warnings": [],
+    }
+    if small_pseudo == large_pseudo:
+        merged["pseudopotential_sha256"] = small_pseudo
+    else:
+        merged["pseudopotential_sha256_by_source"] = {
+            "small": small_pseudo,
+            "large": large_pseudo,
+        }
+        merged["warnings"].append("pseudopotential hashes differ between sources")
+    # Dataset-level FDF lineage: two source templates. Hash the pair so the
+    # provenance gate has a real, traceable token instead of the small's hash.
+    fdf_pair = {"small": small.get("fdf_sha256"), "large": large.get("fdf_sha256")}
+    if any(fdf_pair.values()):
+        import hashlib
+
+        merged["fdf_sha256"] = hashlib.sha256(
+            json.dumps(fdf_pair, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        merged["fdf_sha256_semantics"] = "sha256_of_source_fdf_sha256_pair"
+        merged["fdf_sha256_by_source"] = fdf_pair
+    exemption = (compat.get("ghost_species_exemption") or {})
+    if exemption.get("required"):
+        merged["warnings"].append(GHOST_EXEMPTION_NOTE)
+    (output_root / "material_provenance.json").write_text(
+        json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def materialize_mixed_dataset(
@@ -341,24 +504,29 @@ def materialize_mixed_dataset(
     link: bool = True,
     mode: str | None = None,
     ratio: float | None = None,
-    split_policy: str = "resplit_combined",
+    split_policy: str = "fixed_common_test",
     overwrite: bool = False,
+    confirm_ghost_species_exemption: bool = False,
 ) -> dict[str, Any]:
     """Materialize a merged, runner-ready ``dataset_root`` from selected samples.
 
     Split policies:
 
-    - ``"resplit_combined"`` (default): the merged pool (selected small + large
-      snapshots) is re-split into train/validation/test deterministically by
-      ``seed`` (the "combined test"). The test set therefore changes with the
-      selection, i.e. between ratios of the same sweep.
-    - ``"fixed_common_test"``: the test set is a fixed fraction
-      (``split_fractions[2]``) of the *small pool*, derived only from
-      ``small_root`` + ``seed`` and independent of the ratio, so permutations
-      of the same size/seed share exactly the same test snapshots (recommended
-      for scientific MAE-vs-composition analysis). ``run_mixing_sweep`` keeps
-      those reserved small samples selected even in ``mode="replace"``. The
-      remaining selected snapshots are split into train/validation.
+    - ``"resplit_combined"`` (legacy, opt-in): the merged pool (selected small +
+      large snapshots) is re-split into train/validation/test deterministically
+      by ``seed`` (the "combined test"). The test set therefore changes with the
+      selection, i.e. between ratios of the same sweep — MAE differences can
+      come from the test set changing, not from the composition.
+    - ``"fixed_common_test"`` (default): the test set is fixed and temporally
+      blocked — the small source dataset's own frozen test split when it has
+      one, otherwise the temporal tail (``split_fractions[2]``) of the small
+      pool. It is independent of the ratio/selection, so permutations of the
+      same size/seed share exactly the same test snapshots (recommended for
+      scientific MAE-vs-composition analysis), and test frames are never
+      randomly interleaved inside the source MD trajectories (audit C2).
+      ``run_mixing_sweep`` keeps those reserved small samples selected even in
+      ``mode="replace"``. The remaining selected snapshots are split into
+      train/validation.
 
     ``mode``/``ratio`` are optional metadata recorded in the provenance file
     (``mixed_dataset_provenance.json``); they do not affect the selection.
@@ -378,7 +546,11 @@ def materialize_mixed_dataset(
             f"output_root already exists: {output_root}. Pass overwrite=True to replace it."
         )
 
-    compat = validate_datasets_compatible(small_root, large_root)
+    compat = validate_datasets_compatible(
+        small_root,
+        large_root,
+        confirm_ghost_species_exemption=confirm_ghost_species_exemption,
+    )
 
     small_by_id = {s.sample_id: s for s in read_dataset_samples(small_root)}
     large_by_id = {s.sample_id: s for s in read_dataset_samples(large_root)}
@@ -401,7 +573,7 @@ def materialize_mixed_dataset(
         split_assignment = _split_pool(len(selected), split_fractions, rng)
     elif split_policy == "fixed_common_test":
         split_assignment = _fixed_common_test_split(
-            selected, sorted(small_by_id), split_fractions, seed
+            selected, list(small_by_id.values()), split_fractions, seed
         )
         if "test" not in split_assignment:
             raise DatasetMaterializeError(
@@ -458,7 +630,7 @@ def materialize_mixed_dataset(
         )
 
     _write_split_csvs(output_root / "splits", split_rows)
-    _copy_dataset_level_files(small_root, output_root)
+    _copy_dataset_level_files(small_root, large_root, output_root, compat)
 
     all_valid = all(s["valid"] for s in validation_snapshots)
     artifact_validation = {
