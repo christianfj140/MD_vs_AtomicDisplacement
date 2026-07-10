@@ -362,14 +362,51 @@ def select_derivative_prediction_from_jacobian(
     return unflatten_graph2mat_prediction_vector(column, spec)
 
 
+def translation_sum_rule_metrics(jacobian: torch.Tensor) -> dict[str, float]:
+    """Global-translation invariance: sum_I dH/dR_{I,alpha} should vanish.
+
+    Frame-independent (summing over atoms commutes with the e3nn change of
+    basis), so it can be evaluated directly on the batch-frame jacobian.
+    """
+    if jacobian.ndim != 3 or jacobian.shape[2] != 3:
+        raise Graph2MatAutogradDerivativeError(
+            f"Jacobian must have shape [n_outputs, n_atoms, 3], got {tuple(jacobian.shape)}."
+        )
+    translation = jacobian.sum(dim=1)  # [n_outputs, 3]
+    per_atom_norm = torch.linalg.norm(jacobian.reshape(jacobian.shape[0], -1))
+    residual_norm = float(torch.linalg.norm(translation))
+    return {
+        "translation_residual_max_abs": float(translation.abs().max()),
+        "translation_residual_frobenius": residual_norm,
+        "translation_residual_relative": (
+            residual_norm / float(per_atom_norm) if float(per_atom_norm) > 0 else float("nan")
+        ),
+    }
+
+
+def supercell_order_from_sisl_matrix(sisl_matrix: Any) -> list[tuple[int, int, int]] | None:
+    """R-vector ordering of a sisl matrix's supercell columns (or None)."""
+    geometry = getattr(sisl_matrix, "geometry", None)
+    lattice = getattr(geometry, "lattice", None) or getattr(geometry, "sc", None)
+    sc_off = getattr(lattice, "sc_off", None)
+    if sc_off is None:
+        return None
+    return [tuple(int(x) for x in vector) for vector in sc_off]
+
+
 def derivative_prediction_to_sparse_matrices(
     data_processor: Any,
     batch: Any,
     derivative_prediction: dict[str, torch.Tensor],
     *,
     threshold: float | None = None,
+    supercell_orders: list[list[tuple[int, int, int]] | None] | None = None,
 ) -> list[Any]:
     """Convert derivative labels to sparse matrices via the existing mapping.
+
+    ``supercell_orders``, when passed as an empty list, is filled with one
+    R-vector ordering (sisl ``sc_off``) per returned matrix, for real-space
+    blockwise hermiticity checks on the rectangular supercell layout.
 
     Reuses ``data_processor.yield_from_batch`` so the orbital/block mapping and
     the symmetric-edge accounting are exactly the ones used for normal
@@ -405,4 +442,6 @@ def derivative_prediction_to_sparse_matrices(
         )
         csr = sisl_matrix.tocsr(0) if hasattr(sisl_matrix, "tocsr") else sisl_matrix
         matrices.append(csr.tocsr())
+        if supercell_orders is not None:
+            supercell_orders.append(supercell_order_from_sisl_matrix(sisl_matrix))
     return matrices

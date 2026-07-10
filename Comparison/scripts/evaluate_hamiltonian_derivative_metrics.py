@@ -21,6 +21,11 @@ import sisl
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+_SHARED_DIR = SCRIPT_DIR.parents[1] / "shared"
+if str(_SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_DIR))
+
+from run_inventory import collect_run_inventory  # noqa: E402
 
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DERIVATIVE_SUPPORT_THRESHOLD,
@@ -446,6 +451,7 @@ def evaluate_derivative_metrics(
         "reference_noise_status": reference_noise["status"],
         "warnings": warnings,
         "fatal_errors": fatal_errors,
+        "run_inventory": collect_run_inventory(),
         "outputs": outputs,
         **deeph_equivalence,
     }

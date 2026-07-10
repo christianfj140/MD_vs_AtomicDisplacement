@@ -240,6 +240,31 @@ class BenchmarkManifestTests(unittest.TestCase):
         self.assertFalse(dataset_manifest["benchmark_ready"])
         self.assertIn("pseudopotential_provenance", dataset_manifest["provenance_status"]["missing"])
 
+    def test_pseudopotential_sha256_by_source_satisfies_provenance(self) -> None:
+        # mixed_dataset_materialize.py writes this key (not the flat
+        # pseudopotential_sha256) when small/large pseudopotentials differ,
+        # e.g. the small (W90) pool carries Ghost-H and the large (5x5) pool
+        # doesn't. The gate must accept it as real provenance.
+        artifact_validation = self.prepare_dataset()
+        frozen_split = build_frozen_split_manifest(self.dataset, self.split_root)
+
+        dataset_manifest = build_benchmark_dataset_manifest(
+            self.dataset,
+            artifact_validation=artifact_validation,
+            frozen_split_manifest=frozen_split,
+            material_provenance={
+                "label": "graphene",
+                "basis_file_sha256": {"C.ion.xml": "basis"},
+                "pseudopotential_sha256_by_source": {
+                    "small": {"C": "pseudo", "Ghost-H": "pseudo-ghost"},
+                    "large": {"C": "pseudo"},
+                },
+                "fdf_sha256": "fdfhash",
+            },
+        )
+
+        self.assertNotIn("pseudopotential_provenance", dataset_manifest["provenance_status"]["missing"])
+
     def test_missing_material_identity_prevents_benchmark_ready_manifest(self) -> None:
         artifact_validation = self.prepare_dataset()
         frozen_split = build_frozen_split_manifest(self.dataset, self.split_root)

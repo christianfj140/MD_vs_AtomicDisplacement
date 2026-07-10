@@ -375,6 +375,10 @@ def provenance_status(
             "pseudopotential_sha256",
             "pseudopotential_hashes",
             "pseudopotential_sha256_by_species",
+            # Mixed datasets (mixed_dataset_materialize.py) record per-source
+            # hashes here when small/large pseudopotentials differ (e.g. the
+            # small pool carries Ghost-H, the large pool doesn't).
+            "pseudopotential_sha256_by_source",
         ),
         "material_identity": _non_empty_text(material, "label", "material_label", "material_id"),
         "siesta_input_provenance": run_fdf_path.exists() or _non_empty_text(

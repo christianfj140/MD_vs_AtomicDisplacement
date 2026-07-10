@@ -21,6 +21,17 @@ def test_expected_paths_present_requires_all_paths(tmp_path: Path) -> None:
     assert expected_paths_present([existing, missing]) is False
 
 
+def test_stream_runner_logs_prints_internal_runner_lines(capsys) -> None:
+    class FakeRunner:
+        def logs(self, *, since: int, limit: int | None):
+            assert since == 0
+            assert limit is None
+            return {"offset": 2, "lines": ["Epoch 1/750\n", "[DeepH] loss=0.1\n"]}
+
+    assert e2e._stream_runner_logs(FakeRunner(), 0) == 2
+    assert "Epoch 1/750" in capsys.readouterr().out
+
+
 def _base_payload(**extra: object) -> dict:
     payload = {
         "small": {"20": "/tmp/small20"},
@@ -70,6 +81,32 @@ def test_mixing_payload_explicit_resplit_combined_is_respected(tmp_path: Path) -
     assert captured == {"parallel": "resplit_combined"}
 
 
+def test_mixing_payload_hyperparams_reach_parallel_runner(tmp_path: Path) -> None:
+    hyperparams = {"graph2mat": {"hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o", "optim_lr": 0.0018}}
+    payload = _base_payload(action="train", hyperparams=hyperparams)
+    captured: dict[str, object] = {}
+
+    def fake_parallel(*args, **kwargs):
+        captured["hyperparams"] = kwargs["hyperparams"]
+        return {"n_permutations": 0, "permutations": []}
+
+    with mock.patch.object(e2e.ui, "_run_mixing_sweep_parallel", fake_parallel):
+        e2e._run_mixing_payload(payload, tmp_path)
+    assert captured["hyperparams"] == hyperparams
+
+
+def test_mixing_payload_without_hyperparams_passes_none(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_parallel(*args, **kwargs):
+        captured["hyperparams"] = kwargs["hyperparams"]
+        return {"n_permutations": 0, "permutations": []}
+
+    with mock.patch.object(e2e.ui, "_run_mixing_sweep_parallel", fake_parallel):
+        e2e._run_mixing_payload(_base_payload(action="train"), tmp_path)
+    assert captured["hyperparams"] is None
+
+
 def test_production_train_payload_declares_fixed_common_test() -> None:
     import json
 
@@ -82,6 +119,32 @@ def test_production_train_payload_declares_fixed_common_test() -> None:
     # sweep runs >= 3 seeds so the curves carry error bars.
     assert payload["confirm_ghost_species_exemption"] is True
     assert len(payload["seeds"]) >= 3
+
+
+def test_paper_ready_20_500_payload_declares_single_pass_with_anchor_hyperparams() -> None:
+    import json
+
+    path = resolve_repo_path(
+        "Comparison/config/ml_vs_siesta_mixing_sweep_20_500_paper_ready_train_payload.json"
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["split_policy"] == "fixed_common_test"
+    assert payload["sizes"] == [20, 50, 100, 150, 200, 300, 400, 500]
+    # Single training pass, no seed replication (not publication-grade, see notes).
+    assert "seeds" not in payload
+    assert payload["seed"] == 0
+    assert payload["epochs"] == 750
+    # Hyperparams must match the paper-ready T600 anchors verbatim, not the
+    # small MD/pipeline_config.yaml defaults (10x0e+10x1o+10x2e, batch_size=10).
+    anchor_path = resolve_repo_path(
+        "Comparison/config/mixing_sanity_size500_add_r0p000_paper_ready_anchors_payload.json"
+    )
+    anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    anchor_runs = {r["model"]: r["overrides"] for r in anchor["training_sweep"]["manual_runs"]}
+    assert payload["hyperparams"]["graph2mat"]["hidden_irreps"] == anchor_runs["graph2mat"]["hidden_irreps"]
+    assert payload["hyperparams"]["graph2mat"]["optim_lr"] == anchor_runs["graph2mat"]["optim_lr"]
+    assert payload["hyperparams"]["deeph"]["learning_rate"] == anchor_runs["deeph"]["learning_rate"]
+    assert payload["hyperparams"]["deeph"]["atom_fea_len"] == anchor_runs["deeph"]["atom_fea_len"]
 
 
 def test_multi_seed_payload_runs_each_seed_and_aggregates(tmp_path: Path) -> None:

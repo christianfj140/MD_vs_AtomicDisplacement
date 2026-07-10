@@ -2180,6 +2180,45 @@ def sparse_hermiticity_defect(matrix: sparse.spmatrix) -> float:
     return sparse_frobenius_norm(matrix - matrix.getH()) / denominator
 
 
+def sparse_blockwise_hermiticity_defect(
+    matrix: sparse.spmatrix,
+    supercell_order: list[tuple[int, int, int]],
+) -> float:
+    """Real-space blockwise hermiticity defect: D_ij(R) vs D_ji(-R)^dagger.
+
+    ``matrix`` is the rectangular (n_orb, n_orb * n_supercells) supercell
+    layout with column blocks ordered as ``supercell_order``. A naive
+    ``H == H^dagger`` check is meaningless for this shape (audit Fase 4/8.3);
+    hermiticity in real space pairs each R block with its -R partner. R vectors
+    whose -R partner is absent from the layout are skipped.
+    """
+    matrix = matrix.tocsr()
+    n_rows, n_cols = matrix.shape
+    n_supercells = len(supercell_order)
+    if n_supercells == 0 or n_cols != n_rows * n_supercells:
+        return math.nan
+    index_by_r = {tuple(int(x) for x in vector): i for i, vector in enumerate(supercell_order)}
+    defect_sq = 0.0
+    norm_sq = 0.0
+    seen: set[tuple[int, int]] = set()
+    for r_vector, block_index in index_by_r.items():
+        minus_index = index_by_r.get((-r_vector[0], -r_vector[1], -r_vector[2]))
+        if minus_index is None:
+            continue
+        pair = (min(block_index, minus_index), max(block_index, minus_index))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        block_r = matrix[:, block_index * n_rows : (block_index + 1) * n_rows]
+        block_minus = matrix[:, minus_index * n_rows : (minus_index + 1) * n_rows]
+        diff = block_r - block_minus.getH()
+        defect_sq += sparse_frobenius_norm(diff) ** 2
+        norm_sq += sparse_frobenius_norm(block_r) ** 2 + sparse_frobenius_norm(block_minus) ** 2
+    if norm_sq == 0.0:
+        return math.nan
+    return math.sqrt(defect_sq / norm_sq)
+
+
 def sparse_density(matrix: sparse.spmatrix) -> float:
     rows, cols = matrix.shape
     total = int(rows) * int(cols)

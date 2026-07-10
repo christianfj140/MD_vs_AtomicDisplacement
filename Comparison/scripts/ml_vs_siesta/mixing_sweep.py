@@ -23,7 +23,17 @@ from .mixed_dataset_materialize import (
 )
 
 DEFAULT_MODES = ("add", "replace")
-VALID_SPLIT_POLICIES = {"resplit_combined", "fixed_common_test"}
+VALID_SPLIT_POLICIES = {
+    "resplit_combined",
+    "fixed_common_test",
+    "fixed_common_test_small_only",
+    "fixed_stratified_test",
+}
+_FIXED_TEST_POLICIES = {
+    "fixed_common_test",
+    "fixed_common_test_small_only",
+    "fixed_stratified_test",
+}
 _SMALL_PREFIX = "small__"
 _LARGE_PREFIX = "large__"
 
@@ -40,7 +50,7 @@ def _validate_split_policy(split_policy: str) -> str:
     split_policy = str(split_policy or "fixed_common_test")
     if split_policy not in VALID_SPLIT_POLICIES:
         raise ValueError(
-            f"Unknown split_policy {split_policy!r}; use 'resplit_combined' or 'fixed_common_test'."
+            f"Unknown split_policy {split_policy!r}; use one of {sorted(VALID_SPLIT_POLICIES)}."
         )
     return split_policy
 
@@ -296,8 +306,10 @@ def run_mixing_sweep(
         small_root = small_by_size[size]
         large_root = large_by_size[size]
         raw_small_samples = read_dataset_samples(small_root)
+        raw_large_samples = read_dataset_samples(large_root)
         reserved_small_ids = None
-        if split_policy == "fixed_common_test":
+        reserved_large_ids = None
+        if split_policy in _FIXED_TEST_POLICIES:
             reserved_small_ids = {
                 f"{_SMALL_PREFIX}{sid}"
                 for sid in fixed_common_test_ids(
@@ -306,11 +318,20 @@ def run_mixing_sweep(
                     seed,
                 )
             }
+        if split_policy == "fixed_stratified_test":
+            reserved_large_ids = {
+                f"{_LARGE_PREFIX}{sid}"
+                for sid in fixed_common_test_ids(
+                    raw_large_samples,
+                    DEFAULT_SPLIT_FRACTIONS,
+                    seed,
+                )
+            }
         small_samples = [
             {"id": f"{_SMALL_PREFIX}{s.sample_id}"} for s in raw_small_samples
         ]
         large_samples = [
-            {"id": f"{_LARGE_PREFIX}{s.sample_id}"} for s in read_dataset_samples(large_root)
+            {"id": f"{_LARGE_PREFIX}{s.sample_id}"} for s in raw_large_samples
         ]
         for mode in modes:
             manifest = make_mixed_dataset_manifest(
@@ -320,6 +341,7 @@ def run_mixing_sweep(
                 mode=mode,
                 seed=seed,
                 reserved_small_ids=reserved_small_ids,
+                reserved_large_ids=reserved_large_ids,
             )
             for part in manifest["partitions"]:
                 ratio = float(part["ratio"])
@@ -375,6 +397,7 @@ def run_mixing_sweep(
                         if h_mae is None:
                             continue
                         recorded_models.append(model)
+                        composition = materialize_summary.get("composition") or {}
                         records.append(
                             {
                                 "size": size,
@@ -382,6 +405,16 @@ def run_mixing_sweep(
                                 "ratio": ratio,
                                 "seed": seed,
                                 "total_size": int(part["n_selected"]),
+                                "actual_train_size": composition.get("actual_train_size"),
+                                "n_large_train": composition.get("n_large_train"),
+                                "actual_large_fraction_by_snapshots": composition.get(
+                                    "actual_large_fraction_by_snapshots"
+                                ),
+                                "actual_large_fraction_by_atoms": composition.get(
+                                    "actual_large_fraction_by_atoms"
+                                ),
+                                "split_policy": split_policy,
+                                "evaluation_scope": composition.get("evaluation_scope"),
                                 "model": model,
                                 "h_mae_eV": float(h_mae),
                                 "output_root": str(merged_dir),
@@ -430,6 +463,11 @@ def run_mixing_sweep(
         "permutations": permutation_results,
         "records": records,
     }
+    if not dry_run:
+        # Imported lazily via the package __init__ sys.path shim (shared/).
+        from run_inventory import collect_run_inventory
+
+        summary["run_inventory"] = collect_run_inventory()
     if not dry_run:
         output_root.mkdir(parents=True, exist_ok=True)
         (output_root / "mixing_sweep_summary.json").write_text(

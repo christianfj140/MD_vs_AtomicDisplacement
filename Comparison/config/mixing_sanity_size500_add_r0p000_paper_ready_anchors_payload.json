@@ -1,0 +1,109 @@
+{
+  "description": "Sanity check for the all-W90 endpoint of the mixing sweep: reuse size500_add_r0p000 and train only the paper-ready T600 Graph2Mat/DeepH anchors.",
+  "dataset_mode": "reuse_validated",
+  "dataset_root": "Comparison/results/ml_vs_siesta_mixing_sweep_100_500/size500_add_r0p000",
+  "output_root": "Comparison/results/mixing_sanity_500_paper_ready_anchors",
+  "run_id": "mixing_sanity_size500_add_r0p000_paper_ready_anchors",
+  "system_label": "graphene",
+  "material": {
+    "mode": "preset",
+    "preset": "graphene"
+  },
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": "disabled",
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "metric_evaluation_split": "test",
+  "strict_dataset_validation": false,
+  "performance": {
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 1,
+    "max_parallel_deeph_training_jobs": 1,
+    "model_batch_schedule": "contiguous",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "deeph": {
+    "repo_path": "/home/christian/repositorios/DeepH-pack",
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "num_threads": 2,
+    "multiprocessing": 0
+  },
+  "training_sweep": {
+    "enabled": true,
+    "max_runs": 2,
+    "error_policy": "continue_on_error",
+    "search_policy": {
+      "strategy": "manual",
+      "random_seed": 0
+    },
+    "manual_runs": [
+      {
+        "id": "G2M-T600-26-anchor-size500_add_r0p000",
+        "config_id": "G2M-T600-26-anchor-size500_add_r0p000",
+        "model": "graph2mat",
+        "dataset_id": "size500_add_r0p000",
+        "overrides": {
+          "max_epochs": 750,
+          "optim_lr": 0.0018,
+          "batch_size": 40,
+          "loader_threads": 4,
+          "num_interactions": 3,
+          "correlation": 3,
+          "max_ell": 3,
+          "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+          "loss": "graph2mat.metrics.block_type_huber",
+          "loss_kwargs": {
+            "beta": 0.006
+          },
+          "readout": "edge_node_mix",
+          "seed_everything": 1
+        }
+      },
+      {
+        "id": "DH-T600-13-anchor-size500_add_r0p000",
+        "config_id": "DH-T600-13-anchor-size500_add_r0p000",
+        "model": "deeph",
+        "dataset_id": "size500_add_r0p000",
+        "overrides": {
+          "epochs": 750,
+          "batch_size": 4,
+          "learning_rate": 0.0003,
+          "criterion": "MaskMSELoss",
+          "retain_edge_fea": true,
+          "weight_decay": 0.0,
+          "optimizer": "adamW",
+          "edge_fea_len": 192,
+          "normalization": "LayerNorm",
+          "atom_update_net": "CGConv",
+          "if_lcmp": true,
+          "gauss_stop": 6,
+          "atom_fea_len": 192,
+          "num_l": 4,
+          "if_edge_update": true,
+          "seed": 1
+        }
+      }
+    ]
+  }
+}

@@ -220,6 +220,18 @@ def _metadata_from_counts(
     }
 
 
+def _mixing_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    mode = payload.get("mode") or payload.get("mixing_mode") or payload.get("combination_mode")
+    ratio = payload.get("ratio") or payload.get("mixing_ratio") or payload.get("large_ratio")
+    if mode not in (None, ""):
+        fields["mode"] = str(mode)
+    ratio_number = number(ratio)
+    if ratio_number is not None:
+        fields["ratio"] = ratio_number
+    return fields
+
+
 def _metadata_from_dataset_root(
     dataset_root: Path | None,
     *,
@@ -271,6 +283,7 @@ def _metadata_from_explicit_payload(payload: dict[str, Any], *, base_dir: Path |
     if dataset_root is not None:
         resolved = _metadata_from_dataset_root(dataset_root, dataset_id=dataset_id)
         if resolved is not None:
+            resolved.update(_mixing_fields(payload))
             return resolved
     n_train = _int_value(payload.get("n_train") or payload.get("N_train") or payload.get("train_count"))
     n_validation = _int_value(payload.get("n_validation") or payload.get("N_validation") or payload.get("validation_count"))
@@ -292,6 +305,7 @@ def _metadata_from_explicit_payload(payload: dict[str, Any], *, base_dir: Path |
         "x_dataset_size_kind": "N_train" if n_train is not None else "N_total",
         "dataset_size_source": "explicit_payload",
         "warnings": [],
+        **_mixing_fields(payload),
     }
 
 
@@ -302,6 +316,7 @@ def _metadata_from_stage_manifest(manifest_path: Path) -> dict[str, Any] | None:
     sweep_record = extra.get("sweep_record") if isinstance(extra.get("sweep_record"), dict) else {}
     merged = {
         **context,
+        **sweep_record,
         "dataset_id": sweep_record.get("dataset_id") or context.get("dataset_id") or "",
         "dataset_root": sweep_record.get("dataset_root") or context.get("dataset_root") or "",
     }
@@ -382,6 +397,9 @@ def _training_sweep_metadata(derivative_root: Path) -> dict[str, Any] | None:
                 dataset_id = str(matched_runs[0].get("dataset_id") or "").strip()
             resolved = _metadata_from_dataset_root(dataset_root, dataset_id=dataset_id)
             if resolved is not None:
+                resolved.update(_mixing_fields(matched_workflow))
+                if matched_runs:
+                    resolved.update(_mixing_fields(matched_runs[0]))
                 return resolved
         for row in runs:
             run_root = _resolve_path(row.get("run_root"), base_dir=manifest_path.parent.parent)
@@ -586,6 +604,8 @@ def _combined_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "x_dataset_size": dataset_size_metadata.get("x_dataset_size"),
                     "x_dataset_size_kind": dataset_size_metadata.get("x_dataset_size_kind") or "",
                     "dataset_size_source": dataset_size_metadata.get("dataset_size_source") or "missing",
+                    "mode": dataset_size_metadata.get("mode"),
+                    "ratio": dataset_size_metadata.get("ratio"),
                     "model": model,
                     "model_label": model_label,
                     "sample": str(row.get("sample") or ""),
@@ -593,6 +613,11 @@ def _combined_rows(datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "axis": str(row.get("axis") or ""),
                     "delta_ang": number(row.get("delta_ang")),
                     "finite_difference_method": str(row.get("finite_difference_method") or ""),
+                    "reference_derivative_method": str(row.get("reference_derivative_method") or ""),
+                    "predicted_derivative_method": str(row.get("predicted_derivative_method") or ""),
+                    "graph2mat_prediction_method": str(row.get("graph2mat_prediction_method") or ""),
+                    "deeph_prediction_method": str(row.get("deeph_prediction_method") or ""),
+                    "direct_prediction_path": str(row.get("direct_prediction_path") or ""),
                     "invalid_geometry": _bool(row.get("invalid_geometry"))
                     or _bool(row.get("geometry_validation_failed")),
                     "geometry_validation_failed": _bool(row.get("geometry_validation_failed"))
@@ -664,6 +689,8 @@ def _combined_hermiticity_rows(datasets: list[dict[str, Any]]) -> list[dict[str,
                     "x_dataset_size": dataset_size_metadata.get("x_dataset_size"),
                     "x_dataset_size_kind": dataset_size_metadata.get("x_dataset_size_kind") or "",
                     "dataset_size_source": dataset_size_metadata.get("dataset_size_source") or "missing",
+                    "mode": dataset_size_metadata.get("mode"),
+                    "ratio": dataset_size_metadata.get("ratio"),
                     "model": model,
                     "model_label": model_label,
                     "sample": str(row.get("sample") or ""),
@@ -694,6 +721,8 @@ def _combined_quantile_rows(datasets: list[dict[str, Any]]) -> list[dict[str, An
                     "x_dataset_size": dataset_size_metadata.get("x_dataset_size"),
                     "x_dataset_size_kind": dataset_size_metadata.get("x_dataset_size_kind") or "",
                     "dataset_size_source": dataset_size_metadata.get("dataset_size_source") or "missing",
+                    "mode": dataset_size_metadata.get("mode"),
+                    "ratio": dataset_size_metadata.get("ratio"),
                     "model": model,
                     "model_label": model_label,
                     "sample": str(row.get("sample") or ""),
@@ -1106,15 +1135,17 @@ def _support_diagnostic_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _aggregate_metric_vs_dataset_size(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    buckets: dict[tuple[str, str, str, int], list[dict[str, Any]]] = {}
     for row in rows:
         x_dataset_size = _int_value(row.get("x_dataset_size"))
         model = str(row.get("model") or "")
         if x_dataset_size is None or not model:
             continue
-        buckets.setdefault((model, x_dataset_size), []).append(row)
+        mode = str(row.get("mode") or "")
+        ratio = "" if row.get("ratio") is None else f"{float(row.get('ratio')):g}"
+        buckets.setdefault((mode, ratio, model, x_dataset_size), []).append(row)
     results: list[dict[str, Any]] = []
-    for (model, x_dataset_size), group in sorted(buckets.items(), key=lambda item: (item[0][0], item[0][1])):
+    for (mode, ratio, model, x_dataset_size), group in sorted(buckets.items(), key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3])):
         stencils = {
             (
                 str(item.get("sample") or ""),
@@ -1128,6 +1159,8 @@ def _aggregate_metric_vs_dataset_size(rows: list[dict[str, Any]]) -> list[dict[s
         aggregated: dict[str, Any] = {
             "model": model,
             "model_label": str(group[0].get("model_label") or model),
+            "mode": mode or None,
+            "ratio": number(ratio),
             "x_dataset_size": x_dataset_size,
             "x_dataset_size_kind": str(group[0].get("x_dataset_size_kind") or ""),
             "n_train": group[0].get("n_train"),
@@ -1139,7 +1172,14 @@ def _aggregate_metric_vs_dataset_size(rows: list[dict[str, Any]]) -> list[dict[s
             "atom_indices": _sorted_unique(sorted({item.get("atom_index_zero_based") for item in group if item.get("atom_index_zero_based") not in (None, "")})),
             "axes": _sorted_unique(sorted({str(item.get("axis")) for item in group if str(item.get("axis") or "")})),
             "dataset_ids": _sorted_unique([str(item.get("dataset_id") or "") for item in group if str(item.get("dataset_id") or "")]),
+            "reference_derivative_methods": _sorted_unique([str(item.get("reference_derivative_method") or "") for item in group if str(item.get("reference_derivative_method") or "")]),
+            "predicted_derivative_methods": _sorted_unique([str(item.get("predicted_derivative_method") or "") for item in group if str(item.get("predicted_derivative_method") or "")]),
+            "graph2mat_prediction_methods": _sorted_unique([str(item.get("graph2mat_prediction_method") or "") for item in group if str(item.get("graph2mat_prediction_method") or "")]),
+            "deeph_prediction_methods": _sorted_unique([str(item.get("deeph_prediction_method") or "") for item in group if str(item.get("deeph_prediction_method") or "")]),
+            "direct_prediction_count": len([item for item in group if str(item.get("direct_prediction_path") or "")]),
         }
+        if mode or ratio:
+            aggregated["series_label"] = f"mode={mode or '-'} · ratio={ratio or '-'} · {aggregated['model_label']}"
         for key in DATASET_SIZE_METRICS:
             aggregated[key] = _mean([number(item.get(key)) for item in group])
         results.append(aggregated)
@@ -1336,6 +1376,7 @@ def _dataset_size_plot_result(
         )
     x_kinds = [str(row.get("x_dataset_size_kind") or "") for row in aggregated_rows if str(row.get("x_dataset_size_kind") or "")]
     x_kind = x_kinds[0] if len(set(x_kinds)) == 1 else "dataset size"
+    model_size_series_key = "series_label" if any(row.get("series_label") for row in aggregated_rows) else "model_label"
     plots = [
         _dataset_size_scatter_plot(
             "dh_mae_vs_dataset_size",
@@ -1344,6 +1385,7 @@ def _dataset_size_plot_result(
             "dh_mae_union_eV_per_Ang",
             aggregated_rows,
             x_dataset_size_kind=x_kind,
+            series_key=model_size_series_key,
             warnings=warnings,
         ),
         _dataset_size_scatter_plot(

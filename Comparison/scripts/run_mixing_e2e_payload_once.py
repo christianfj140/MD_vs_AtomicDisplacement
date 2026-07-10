@@ -53,15 +53,36 @@ def expected_paths_present(paths: list[str | Path]) -> bool:
     return all(resolve_repo_path(path).exists() for path in paths)
 
 
+def _emit_log(line: str) -> None:
+    print(line, end="" if line.endswith("\n") else "\n", flush=True)
+
+
+def _stream_runner_logs(runner: Any, offset: int) -> int:
+    if not hasattr(runner, "logs"):
+        return offset
+    try:
+        payload = runner.logs(since=offset, limit=None)
+    except Exception as exc:
+        _emit_log(f"[MixingE2E][WARN] no se pudieron leer logs internos: {exc}\n")
+        return offset
+    for line in payload.get("lines") or []:
+        _emit_log(str(line))
+    return int(payload.get("offset") or offset)
+
+
 def _run_generation_payload(payload_path: Path, poll_seconds: float) -> dict[str, Any]:
     payload = read_json(payload_path)
     runner = Graph2MatDeepHBenchmarkRunner()
+    _emit_log(f"[MixingE2E] Generacion datasets: {payload_path}\n")
     runner.start(payload)
+    log_offset = 0
     while True:
+        log_offset = _stream_runner_logs(runner, log_offset)
         status = runner.status()
         if not status.get("running"):
             break
         time.sleep(max(1.0, float(poll_seconds)))
+    _stream_runner_logs(runner, log_offset)
     results = runner.results()
     status = results.get("status") or {}
     returncode = status.get("returncode")
@@ -70,7 +91,11 @@ def _run_generation_payload(payload_path: Path, poll_seconds: float) -> dict[str
     return results
 
 
-def _run_mixing_payload(payload: dict[str, Any], output_root: Path | None) -> dict[str, Any]:
+def _run_mixing_payload(
+    payload: dict[str, Any],
+    output_root: Path | None,
+    log_fn: Any | None = None,
+) -> dict[str, Any]:
     small = ui._mixing_roots_from_body(payload, "small")
     large = ui._mixing_roots_from_body(payload, "large")
     modes = tuple(payload.get("modes") or ("add", "replace"))
@@ -80,6 +105,11 @@ def _run_mixing_payload(payload: dict[str, Any], output_root: Path | None) -> di
     models = tuple(payload.get("models") or ("graph2mat", "deeph"))
     epochs = int(payload["epochs"]) if payload.get("epochs") not in (None, "") else None
     performance = payload.get("performance") or None
+    hyperparams = payload.get("hyperparams") or None
+    training_weighting_policy = str(
+        payload.get("training_weighting_policy") or "legacy_elementwise"
+    )
+    domain_weighting = payload.get("domain_weighting") or None
     action = str(payload.get("action") or "preview")
     # Default fixed_common_test: resplit_combined re-splits the test set per
     # ratio, so MAE differences between ratios can come from the test set
@@ -101,7 +131,11 @@ def _run_mixing_payload(payload: dict[str, Any], output_root: Path | None) -> di
             performance=performance,
             split_policy=split_policy,
             confirm_ghost_species_exemption=confirm_ghost,
+            hyperparams=hyperparams,
+            training_weighting_policy=training_weighting_policy,
+            domain_weighting=domain_weighting,
             progress_fn=None,
+            log_fn=log_fn,
         )
     mvs = ui._ml_vs_siesta_module()
     dry_run = action == "preview"
@@ -164,7 +198,7 @@ def main() -> int:
     if expected and not expected_paths_present(expected):
         raise RuntimeError("Expected generated dataset paths are still missing after generation phase.")
 
-    mixing_summary = _run_mixing_payload_seeds(mixing_payload, output_root)
+    mixing_summary = _run_mixing_payload_seeds(mixing_payload, output_root, log_fn=_emit_log)
     manifest["mixing"] = {
         "status": "completed",
         "summary": mixing_summary,
@@ -174,7 +208,11 @@ def main() -> int:
     return 0
 
 
-def _run_mixing_payload_seeds(payload: dict[str, Any], output_root: Path | None) -> dict[str, Any]:
+def _run_mixing_payload_seeds(
+    payload: dict[str, Any],
+    output_root: Path | None,
+    log_fn: Any | None = None,
+) -> dict[str, Any]:
     """Run the mixing payload once per seed (``seeds`` list) or once (``seed``).
 
     Multi-seed runs write each sweep under ``<output_root>/seed<N>`` and then
@@ -184,7 +222,9 @@ def _run_mixing_payload_seeds(payload: dict[str, Any], output_root: Path | None)
     """
     seeds = payload.get("seeds")
     if not seeds:
-        return _run_mixing_payload(payload, output_root)
+        if log_fn is None:
+            return _run_mixing_payload(payload, output_root)
+        return _run_mixing_payload(payload, output_root, log_fn=log_fn)
     seeds = [int(s) for s in seeds]
     root = output_root or ui.MIXING_SWEEP_OUTPUT_ROOT
     mvs = ui._ml_vs_siesta_module()
@@ -194,7 +234,11 @@ def _run_mixing_payload_seeds(payload: dict[str, Any], output_root: Path | None)
         seed_payload = dict(payload)
         seed_payload["seed"] = seed
         seed_payload.pop("seeds", None)
-        summary = _run_mixing_payload(seed_payload, Path(root) / f"seed{seed}")
+        if log_fn is None:
+            summary = _run_mixing_payload(seed_payload, Path(root) / f"seed{seed}")
+        else:
+            log_fn(f"[MixingE2E] Mixing seed={seed} -> {Path(root) / f'seed{seed}'}\n")
+            summary = _run_mixing_payload(seed_payload, Path(root) / f"seed{seed}", log_fn=log_fn)
         per_seed.append({"seed": seed, "summary": summary})
         records.extend(summary.get("records") or [])
     aggregated = mvs.write_mae_vs_size_outputs(records, root)

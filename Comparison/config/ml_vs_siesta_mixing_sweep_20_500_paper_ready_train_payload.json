@@ -1,0 +1,131 @@
+{
+  "description": "Paper-ready mixing sweep over nominal sizes 20..500 (single training pass, no seed replication) using the T600/750-epoch Graph2Mat/DeepH anchors hyperparameters instead of the small pipeline_config.yaml defaults.",
+  "action": "train",
+  "sizes": [
+    20,
+    50,
+    100,
+    150,
+    200,
+    300,
+    400,
+    500
+  ],
+  "modes": [
+    "add",
+    "replace"
+  ],
+  "ratios": [
+    0.0,
+    0.5,
+    1.0
+  ],
+  "seed": 0,
+  "split_policy": "fixed_common_test",
+  "confirm_ghost_species_exemption": true,
+  "models": [
+    "graph2mat",
+    "deeph"
+  ],
+  "epochs": 750,
+  "hyperparams": {
+    "graph2mat": {
+      "optim_lr": 0.0018,
+      "batch_size": 40,
+      "loader_threads": 4,
+      "num_interactions": 3,
+      "correlation": 3,
+      "max_ell": 3,
+      "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+      "loss": "graph2mat.metrics.block_type_huber",
+      "loss_kwargs": {
+        "beta": 0.006
+      },
+      "readout": "edge_node_mix",
+      "seed_everything": 1
+    },
+    "deeph": {
+      "batch_size": 4,
+      "learning_rate": 0.0003,
+      "criterion": "MaskMSELoss",
+      "retain_edge_fea": true,
+      "weight_decay": 0.0,
+      "optimizer": "adamW",
+      "edge_fea_len": 192,
+      "normalization": "LayerNorm",
+      "atom_update_net": "CGConv",
+      "if_lcmp": true,
+      "gauss_stop": 6,
+      "atom_fea_len": 192,
+      "num_l": 4,
+      "if_edge_update": true,
+      "seed": 1
+    }
+  },
+  "small": {
+    "20": "Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid20",
+    "50": "Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid50",
+    "100": "Comparison/datasets/graphene_w90_snapshot_scaling_paper_ready_like/graphene_w90_scale_iid100",
+    "150": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid150",
+    "200": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid200",
+    "300": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid300",
+    "400": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid400",
+    "500": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid500"
+  },
+  "large": {
+    "20": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20",
+    "50": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid50",
+    "100": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid100",
+    "150": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid150",
+    "200": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid200",
+    "300": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid300",
+    "400": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid400",
+    "500": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid500"
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "notes": {
+    "run_order": [
+      "1. Confirm datasets exist: graphene_5x5_snapshot_scaling_20_50_80 (iid20, iid50) and graphene_5x5_snapshot_scaling_100_500_mixing (iid100..iid500) -- both already generated on disk.",
+      "2. Launch this payload through /api/mixing/launch or the E2E wrapper (run_mixing_e2e_payload_once.py).",
+      "3. Expect 8 sizes x 2 modes x 3 ratios = 48 permutations, 96 model runs for Graph2Mat+DeepH (single seed, no replication)."
+    ],
+    "single_seed_note": "No seeds replication (seed=0 only), per user request. This is a single training pass per permutation, NOT publication-grade (audit I5 requires >=3 seeds for MAE-vs-size claims with error bars). Treat curves from this sweep as exploratory point estimates.",
+    "hyperparams_note": "Added because the automatic mixing sweep only exposes 'epochs' as an override; without 'hyperparams' it silently trains with the small MD/pipeline_config.yaml defaults (hidden_irreps=10x0e+10x1o+10x2e, batch_size=10, lr=0.005) instead of the paper-ready T600/750-epoch anchors (hidden_irreps=64x0e+64x1o+64x2e+64x3o, batch_size=40, lr=0.0018). Values copied verbatim from Comparison/config/mixing_sanity_size500_*_paper_ready_anchors_payload.json.",
+    "estimated_disk_gb": {
+      "basis": "measured 1.5 GB for a single size=500 permutation with these exact hyperparameters (Comparison/results/mixing_sanity_500_paper_ready_anchors), scaled linearly by nominal size with a 20% fixed-checkpoint floor",
+      "expected": 35,
+      "expected_plus_30pct": 45,
+      "pessimistic_upper_bound_all_sizes_at_size500_cost": 72
+    },
+    "split_policy_note": "fixed_common_test: test set fijo derivado solo del pool small + seed, compartido por todas las permutaciones del mismo tamano.",
+    "iid_naming_note": "Los datasets *_iid* NO son muestras iid: son frames MD consecutivos (1 fs) agrupados en bloques de temperatura. Ver docs/known_limitations.md.",
+    "ghost_exemption_note": "confirm_ghost_species_exemption=true: los datasets small (W90, con Ghost-H) y large (5x5, solo C) tienen especies ghost distintas; la exencion se declara explicitamente aqui."
+  }
+}

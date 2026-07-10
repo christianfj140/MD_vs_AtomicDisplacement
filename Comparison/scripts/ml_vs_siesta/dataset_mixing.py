@@ -89,45 +89,62 @@ def _select_manifest_for_ratio(
     mode: str,
     rng: random.Random,
     reserved_small_ids: set[str] | None = None,
+    reserved_large_ids: set[str] | None = None,
 ) -> dict[str, Any]:
+    """Select ids for one (mode, ratio) permutation.
+
+    Reserved ids are FIXED TEST snapshots: they are always selected, never
+    replaced, and excluded from the ratio arithmetic — ``ratio`` applies to the
+    training pool, not to the materialized total (audit Fase 7/8).
+    """
     large_capped = False
-    reserved_small_ids = set(reserved_small_ids or ())
-    n_reserved_small = 0
+    reserved_small_ids = set(reserved_small_ids or ()) & set(small_ids)
+    reserved_large_ids = set(reserved_large_ids or ()) & set(large_ids)
+    n_reserved_small = len(reserved_small_ids)
     replace_cap_reasons: list[str] = []
+    large_pool = [lid for lid in large_ids if lid not in reserved_large_ids]
+    reserved_large_sorted = sorted(reserved_large_ids)
     if mode == "add":
-        # Keep all small samples, add a fraction of the large ones.
-        n_large = round(ratio * len(large_ids))
-        chosen_large = sorted(rng.sample(large_ids, n_large)) if n_large else []
-        selected = list(small_ids) + chosen_large
+        # Keep all small samples, add a fraction of the large TRAINING pool.
+        requested_float = ratio * len(large_pool)
+        n_large = round(requested_float)
+        chosen_large = sorted(rng.sample(large_pool, n_large)) if n_large else []
+        selected = list(small_ids) + reserved_large_sorted + chosen_large
     elif mode == "replace":
-        # Keep total size constant: replace a fraction of small samples with large.
-        # Reserved small ids (fixed common test) are never replaced.
-        total = len(small_ids)
-        n_reserved_small = len(reserved_small_ids & set(small_ids))
+        # Keep the trainable total constant: swap small train snapshots for
+        # large ones. Reserved (fixed test) ids on either side never move.
         replaceable_small = [sid for sid in small_ids if sid not in reserved_small_ids]
-        requested_replace = round(ratio * total)
-        n_replace = min(requested_replace, len(replaceable_small), len(large_ids))
-        large_capped = requested_replace > min(len(replaceable_small), len(large_ids))
-        if requested_replace > len(large_ids):
+        total = len(small_ids)
+        requested_float = ratio * total
+        requested_replace = round(requested_float)
+        n_replace = min(requested_replace, len(replaceable_small), len(large_pool))
+        large_capped = requested_replace > min(len(replaceable_small), len(large_pool))
+        if requested_replace > len(large_pool):
             replace_cap_reasons.append("available_large")
         if requested_replace > len(replaceable_small):
             replace_cap_reasons.append("reserved_small_test")
-        chosen_large = sorted(rng.sample(large_ids, n_replace)) if n_replace else []
+        chosen_large = sorted(rng.sample(large_pool, n_replace)) if n_replace else []
         # Sample (not prefix-slice) the retained small ids: manifest order encodes
         # MD time/temperature/seed, so a prefix would bias the retained pool.
         n_keep = len(replaceable_small) - n_replace
-        kept_small = sorted(reserved_small_ids & set(small_ids))
+        kept_small = sorted(reserved_small_ids)
         kept_small += sorted(rng.sample(replaceable_small, n_keep)) if n_keep else []
-        selected = kept_small + chosen_large
+        selected = kept_small + reserved_large_sorted + chosen_large
+        chosen_large = reserved_large_sorted + chosen_large if reserved_large_sorted else chosen_large
     else:
         raise ValueError(f"Unknown mode {mode!r}; use 'add' or 'replace'.")
+    if mode == "add" and reserved_large_sorted:
+        chosen_large = reserved_large_sorted + chosen_large
     return {
         "ratio": ratio,
         "mode": mode,
         "ratio_semantics": ratio_semantics_for_mode(mode),
         "large_capped": large_capped,
         "n_reserved_small": n_reserved_small,
+        "n_reserved_large": len(reserved_large_ids),
         "replace_cap_reasons": replace_cap_reasons,
+        "requested_count_float": float(requested_float),
+        "rounding_policy": "python_round_half_even",
         "n_selected": len(selected),
         "n_large_selected": len(chosen_large),
         "selected_ids": selected,
@@ -143,6 +160,7 @@ def make_mixed_dataset_manifest(
     *,
     seed: int = 0,
     reserved_small_ids: set[str] | None = None,
+    reserved_large_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build a reproducible small/large mixing manifest.
 
@@ -179,7 +197,13 @@ def make_mixed_dataset_manifest(
         # Deterministic but ratio-dependent seed for reproducibility.
         rng = random.Random(seed * 1000 + index)
         entry = _select_manifest_for_ratio(
-            small_ids, large_ids, ratio, mode, rng, reserved_small_ids=reserved_small_ids
+            small_ids,
+            large_ids,
+            ratio,
+            mode,
+            rng,
+            reserved_small_ids=reserved_small_ids,
+            reserved_large_ids=reserved_large_ids,
         )
         entry["label"] = f"D{index}"
         partitions.append(entry)

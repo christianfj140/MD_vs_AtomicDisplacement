@@ -14,6 +14,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 pipeline_ui = importlib.import_module("pipeline_ui")
+from plot_hamiltonian_derivative_metrics import write_derivative_plot_outputs  # noqa: E402
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -35,38 +36,49 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
-    def write_derivative_tree(self, run_root: Path, name: str, *, source_model: str, fatal_error: bool = False) -> None:
+    def write_derivative_tree(
+        self,
+        run_root: Path,
+        name: str,
+        *,
+        source_model: str,
+        fatal_error: bool = False,
+        manifest_overrides: dict | None = None,
+        row_overrides: dict | None = None,
+    ) -> None:
         root = run_root / "common_metrics" / f"{name}_eval" / "derivative_metrics"
+        manifest = {
+            "scientific_status": "diagnostic_only",
+            "finite_difference_method": "central",
+            "derivative_units": "eV/Ang",
+            "stencils_ok": 1,
+            "stencils_failed": 1 if fatal_error else 0,
+            "warnings": [],
+            "fatal_errors": [{"kind": "missing_required_metadata", "message": "orbital ordering missing"}] if fatal_error else [],
+        }
+        manifest.update(manifest_overrides or {})
         write_json(
             root / "manifest.json",
-            {
-                "scientific_status": "diagnostic_only",
-                "finite_difference_method": "central",
-                "derivative_units": "eV/Ang",
-                "stencils_ok": 1,
-                "stencils_failed": 1 if fatal_error else 0,
-                "warnings": [],
-                "fatal_errors": [{"kind": "missing_required_metadata", "message": "orbital ordering missing"}] if fatal_error else [],
-            },
+            manifest,
         )
+        metric_row = {
+            "sample": "shared",
+            "source_model": source_model,
+            "atom_index_zero_based": 0,
+            "axis": "x",
+            "delta_ang": 0.01,
+            "finite_difference_method": "central",
+            "derivative_units": "eV/Ang",
+            "dh_mae_union_eV_per_Ang": 0.2 if source_model == "graph2mat" else 0.1,
+            "dh_rmse_union_eV_per_Ang": 0.3 if source_model == "graph2mat" else 0.2,
+            "dh_relative_frobenius_ref": 0.4 if source_model == "graph2mat" else 0.3,
+            "dh_false_zero_rate": 0.1,
+            "dh_false_nonzero_rate": 0.05,
+        }
+        metric_row.update(row_overrides or {})
         write_csv(
             root / "derivative_matrix_metrics.csv",
-            [
-                {
-                    "sample": "shared",
-                    "source_model": source_model,
-                    "atom_index_zero_based": 0,
-                    "axis": "x",
-                    "delta_ang": 0.01,
-                    "finite_difference_method": "central",
-                    "derivative_units": "eV/Ang",
-                    "dh_mae_union_eV_per_Ang": 0.2 if source_model == "graph2mat" else 0.1,
-                    "dh_rmse_union_eV_per_Ang": 0.3 if source_model == "graph2mat" else 0.2,
-                    "dh_relative_frobenius_ref": 0.4 if source_model == "graph2mat" else 0.3,
-                    "dh_false_zero_rate": 0.1,
-                    "dh_false_nonzero_rate": 0.05,
-                }
-            ],
+            [metric_row],
         )
         write_csv(
             root / "derivative_hermiticity.csv",
@@ -462,6 +474,104 @@ class G2MDeepHDerivativeUIBackendTests(unittest.TestCase):
         self.assertEqual(new_payload["plot_payload"]["diagnostic_plot_ids"], ["dh_mae_by_model"])
         self.assertEqual([plot["id"] for plot in new_payload["plot_payload"]["plots"][:2]], ["dh_mae_vs_dataset_size", "dh_rmse_vs_dataset_size"])
         self.assertTrue(new_payload["plot_payload"]["plots"][0]["dataset_size_plot"])
+
+    def test_autograd_derivative_dataset_size_payload_reaches_mixing_ui_plot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_root = Path(tmp) / "run_autograd"
+            dataset_root = Path(tmp) / "dataset_iid20"
+            dataset_root_40 = Path(tmp) / "dataset_iid40"
+            write_json(
+                dataset_root / "frozen_split_manifest.json",
+                {"split_counts": {"train": 20, "validation": 2, "test": 2}},
+            )
+            write_json(
+                dataset_root_40 / "frozen_split_manifest.json",
+                {"split_counts": {"train": 40, "validation": 4, "test": 4}},
+            )
+            direct_path = run_root / "common_metrics" / "graph2mat_eval" / "predicted_derivative_hamiltonians" / "base" / "dH_pred_atom0_axis0.npz"
+            manifest_overrides = {
+                "dataset_root": str(dataset_root),
+                "dataset_id": "iid20",
+                "mode": "add",
+                "ratio": 0.25,
+                "predicted_derivative_method": "autograd_graph2mat_vectorized",
+                "graph2mat_prediction_method": "autograd_vectorized",
+                "predicted_delta_ang": None,
+            }
+            self.write_derivative_tree(
+                run_root,
+                "graph2mat",
+                source_model="graph2mat",
+                manifest_overrides=manifest_overrides,
+                row_overrides={
+                    "reference_derivative_method": "finite_difference_siesta",
+                    "predicted_derivative_method": "autograd_graph2mat_vectorized",
+                    "graph2mat_prediction_method": "autograd_vectorized",
+                    "predicted_delta_ang": "",
+                    "direct_prediction_path": str(direct_path),
+                },
+            )
+            derivative_root_40 = run_root / "derivative_workflows" / "iid40" / "derivative_metrics" / "graph2mat"
+            write_json(
+                derivative_root_40 / "manifest.json",
+                {
+                    **manifest_overrides,
+                    "dataset_root": str(dataset_root_40),
+                    "dataset_id": "iid40",
+                },
+            )
+            write_csv(
+                derivative_root_40 / "derivative_matrix_metrics.csv",
+                [
+                    {
+                        "sample": "shared",
+                        "source_model": "graph2mat",
+                        "atom_index_zero_based": 0,
+                        "axis": "x",
+                        "delta_ang": 0.01,
+                        "finite_difference_method": "central",
+                        "derivative_units": "eV/Ang",
+                        "dh_mae_union_eV_per_Ang": 0.12,
+                        "dh_rmse_union_eV_per_Ang": 0.2,
+                        "dh_relative_frobenius_ref": 0.3,
+                        "reference_derivative_method": "finite_difference_siesta",
+                        "predicted_derivative_method": "autograd_graph2mat_vectorized",
+                        "graph2mat_prediction_method": "autograd_vectorized",
+                        "predicted_delta_ang": "",
+                        "direct_prediction_path": str(direct_path),
+                    }
+                ],
+            )
+            write_csv(derivative_root_40 / "derivative_hermiticity.csv", [])
+            write_csv(derivative_root_40 / "stencil_status.csv", [])
+            plot_result = write_derivative_plot_outputs(
+                derivative_roots=[
+                    run_root / "common_metrics" / "graph2mat_eval" / "derivative_metrics",
+                    derivative_root_40,
+                ],
+                output_dir=run_root / "common_metrics" / "summary" / "derivative_plots",
+            )
+
+            with patch.object(pipeline_ui, "resolve_g2m_deeph_run_root", return_value=run_root):
+                payload = pipeline_ui.g2m_deeph_derivative_metrics_payload("run_autograd")
+
+            self.assertTrue(Path(plot_result["payload_path"]).is_file())
+            plot = next(plot for plot in payload["plot_payload"]["plots"] if plot["id"] == "dh_mae_vs_dataset_size")
+            self.assertTrue(plot["dataset_size_plot"])
+            self.assertEqual(plot["series_key"], "series_label")
+            self.assertEqual({row["x_dataset_size"] for row in plot["rows"]}, {20, 40})
+            for row in plot["rows"]:
+                self.assertEqual(row["series_label"], "mode=add · ratio=0.25 · Graph2Mat")
+                self.assertEqual(row["predicted_derivative_methods"], ["autograd_graph2mat_vectorized"])
+                self.assertEqual(row["graph2mat_prediction_methods"], ["autograd_vectorized"])
+                self.assertEqual(row["reference_derivative_methods"], ["finite_difference_siesta"])
+                self.assertEqual(row["direct_prediction_count"], 1)
+        index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
+        mixing_html = index_html.split('<section id="view-mixing-datasets" class="view">', 1)[1].split(
+            '<section id="view-terminal" class="view">',
+            1,
+        )[0]
+        self.assertIn('id="g2m-deeph-derivative-mae-dataset-chart"', mixing_html)
 
     def test_derivative_backend_combines_multiple_run_plot_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

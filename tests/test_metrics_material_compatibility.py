@@ -506,6 +506,18 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
             self.assertEqual(manifest["metrics_schema_version"], self.module.METRICS_SCHEMA_VERSION)
             self.assertEqual(manifest["metrics_provenance_status"], "post_h_only_sref")
             self.assertFalse(stale_file.exists())
+            # Default split is "test" so mixing-sweep consumers (pipeline_ui.py
+            # _mixing_csv_split_evidence) can trust an unlabeled manifest.
+            self.assertEqual(manifest["split"], "test")
+
+    def test_extract_records_the_requested_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result_dir = Path(tmp) / "result"
+            result_dir.mkdir(parents=True)
+
+            manifest = self.module.extract(result_dir, split="validation")
+
+            self.assertEqual(manifest["split"], "validation")
 
     def test_prediction_overlap_validation_tolerance_controls_standalone_safety(self) -> None:
         from scipy import sparse

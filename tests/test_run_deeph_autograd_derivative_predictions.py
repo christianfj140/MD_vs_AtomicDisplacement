@@ -309,6 +309,13 @@ class AutogradFlowTests(unittest.TestCase):
                 "nnz": int(matrix.nnz), "shape_rows": int(matrix.shape[0]),
                 "shape_cols": int(matrix.shape[1])}
 
+    FAKE_CAPABILITY = {
+        "schema": "deeph_autograd_capability_v1",
+        "available": True,
+        "implementation": "torch_forward_ad_jvp",
+        "output_schema": "hamiltonians_grad_pred_v2",
+    }
+
     def run_flow(self, fake_run, *, expect_error=False):
         args = rd.build_argument_parser().parse_args(
             [
@@ -320,6 +327,8 @@ class AutogradFlowTests(unittest.TestCase):
         )
         with mock.patch.object(rd, "build_deeph_derivative_raw_mirror", side_effect=self.fake_raw_mirror), \
                 mock.patch("run_hamiltonian_derivative_predictions.subprocess.run", side_effect=fake_run), \
+                mock.patch.object(rd, "deeph_autograd_capability_preflight",
+                                  return_value=dict(self.FAKE_CAPABILITY)), \
                 mock.patch.object(rd, "adapt_deeph_prediction_sample", side_effect=self.fake_adapter), \
                 mock.patch.object(rd, "reconstruct_deeph_sparse_layout_prediction",
                                   side_effect=self.fake_reconstruct):
@@ -400,6 +409,85 @@ class AutogradFlowTests(unittest.TestCase):
         rows = self.read_status_rows()
         self.assertEqual(rows[0]["status"], "error")
         self.assertEqual(rows[0]["error"], "missing_hamiltonians_grad_pred_h5")
+
+    def test_nan_in_requested_direction_fails_closed(self) -> None:
+        # hamiltonians_grad_pred_v2: NaN means "never computed"; a requested
+        # direction that comes back NaN must never be marked 'predicted'.
+        self.grad_block[..., self.ATOM, self.AXIS_INDEX] = np.nan
+        self.run_flow(self.make_fake_run(), expect_error=True)
+        rows = self.read_status_rows()
+        self.assertEqual(rows[0]["status"], "error")
+        self.assertIn("deeph_autograd_non_finite", rows[0]["error"])
+
+    def test_capability_preflight_blocks_before_inference(self) -> None:
+        args = rd.build_argument_parser().parse_args(
+            [
+                "--stencil-root", str(self.stencil_root),
+                "--model-dir", str(self.model_dir),
+                "--output-root", str(self.output_root),
+                "--deeph-command", str(self.inference_cli),
+            ]
+        )
+        with mock.patch.object(rd, "build_deeph_derivative_raw_mirror", side_effect=self.fake_raw_mirror), \
+                mock.patch("run_hamiltonian_derivative_predictions.subprocess.run",
+                           side_effect=self.make_fake_run()), \
+                mock.patch.object(
+                    rd, "deeph_autograd_capability_preflight",
+                    side_effect=rd.DeepHAutogradDerivativePredictionError("capability_unavailable: stub"),
+                ):
+            with self.assertRaises(rd.DeepHAutogradDerivativePredictionError) as ctx:
+                rd.run_deeph_autograd_derivative_predictions(args)
+        self.assertIn("capability_unavailable", str(ctx.exception))
+        self.assertEqual(self.inference_configs, [])  # inference never launched
+
+
+class CapabilityPreflightTests(unittest.TestCase):
+    """deeph_autograd_capability_preflight parses/validates the backend manifest."""
+
+    def _record(self, payload, returncode=0, stderr=""):
+        return {
+            "command": ["python", "-c", "stub"],
+            "returncode": returncode,
+            "stdout": json.dumps(payload) if isinstance(payload, dict) else str(payload),
+            "stderr": stderr,
+            "started_at": 0.0,
+            "finished_at": 0.0,
+        }
+
+    def test_accepts_real_jvp_manifest(self) -> None:
+        manifest = {
+            "available": True,
+            "implementation": "torch_forward_ad_jvp",
+            "output_schema": "hamiltonians_grad_pred_v2",
+        }
+        with mock.patch.object(rd, "run_command", return_value=self._record(manifest)):
+            result = rd.deeph_autograd_capability_preflight("python")
+        self.assertTrue(result["available"])
+
+    def test_rejects_placeholder_backend(self) -> None:
+        manifest = {"available": False, "implementation": None, "errors": ["missing__forward_ad_jvp_blocks"]}
+        with mock.patch.object(rd, "run_command", return_value=self._record(manifest)):
+            with self.assertRaises(rd.DeepHAutogradDerivativePredictionError) as ctx:
+                rd.deeph_autograd_capability_preflight("python")
+        self.assertIn("capability_unavailable", str(ctx.exception))
+
+    def test_rejects_backend_without_capability_module(self) -> None:
+        record = self._record("ModuleNotFoundError", returncode=1, stderr="No module named capability")
+        with mock.patch.object(rd, "run_command", return_value=record):
+            with self.assertRaises(rd.DeepHAutogradDerivativePredictionError) as ctx:
+                rd.deeph_autograd_capability_preflight("python")
+        self.assertIn("capability_unavailable", str(ctx.exception))
+
+    def test_rejects_unknown_output_schema(self) -> None:
+        manifest = {
+            "available": True,
+            "implementation": "torch_forward_ad_jvp",
+            "output_schema": "hamiltonians_grad_pred_v1",
+        }
+        with mock.patch.object(rd, "run_command", return_value=self._record(manifest)):
+            with self.assertRaises(rd.DeepHAutogradDerivativePredictionError) as ctx:
+                rd.deeph_autograd_capability_preflight("python")
+        self.assertIn("unsupported grad output schema", str(ctx.exception))
 
 
 if __name__ == "__main__":

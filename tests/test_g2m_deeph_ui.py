@@ -61,6 +61,11 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-derivative-comparison",
             "g2m-deeph-derivative-gate-report",
             "g2m-deeph-derivative-issues",
+            "g2m-deeph-derivative-mae-series-status",
+            "g2m-deeph-derivative-mae-series-list",
+            "g2m-deeph-derivative-mae-series-all",
+            "g2m-deeph-derivative-mae-series-clear",
+            "g2m-deeph-derivative-mae-dataset-chart",
             "g2m-deeph-derivative-plots",
             "g2m-deeph-derivative-artifacts",
         ):
@@ -73,6 +78,10 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("Full strict pipeline: generate + train/test sweep", self.index_html)
 
     def test_mixing_datasets_accessibility_controls_exist(self) -> None:
+        mixing_html = self.index_html.split('<section id="view-mixing-datasets" class="view">', 1)[1].split(
+            '<section id="view-terminal" class="view">',
+            1,
+        )[0]
         for control_id in (
             "mix-payload-log",
             "mix-payload-bottom",
@@ -81,8 +90,15 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "mix-payload-list",
             "mix-payloads-all",
             "mix-payloads-clear",
+            "g2m-deeph-derivative-mae-series-status",
+            "g2m-deeph-derivative-mae-series-list",
+            "g2m-deeph-derivative-mae-series-all",
+            "g2m-deeph-derivative-mae-series-clear",
+            "g2m-deeph-derivative-mae-dataset-chart",
         ):
-            self.assertIn(f'id="{control_id}"', self.index_html)
+            self.assertIn(f'id="{control_id}"', mixing_html)
+        self.assertIn("MAE de derivadas vs tamaño de dataset", mixing_html)
+        self.assertIn("Una curva por (modo, ratio, modelo)", mixing_html)
         for token in (
             "mixAppendPayload",
             "mixPayloadsForMetrics",
@@ -93,6 +109,11 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         ):
             self.assertIn(token, self.app_js)
         self.assertIn(".mix-payload-log", self.styles_css)
+
+    def test_mixing_dataset_plot_displays_mae_in_mev(self) -> None:
+        self.assertIn("MIXING_MAE_EV_TO_MEV = 1000", self.app_js)
+        self.assertIn("Number(p.mae) * MIXING_MAE_EV_TO_MEV", self.app_js)
+        self.assertIn("Hamiltonian MAE (meV)", self.app_js)
 
     def test_dataset_sweep_controls_are_in_g2m_deeph_tab(self) -> None:
         for control_id in (
@@ -348,6 +369,13 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("Mean relative Frobenius vs dataset size", self.app_js)
         self.assertIn("Only base dataset-size derivative plots are present.", self.app_js)
         self.assertIn("Regenerate derivative_plot_payload.json from current derivative metric CSV/JSON artifacts", self.app_js)
+        self.assertIn("g2m-deeph-derivative-mae-series-checkbox", self.app_js)
+        self.assertIn("g2mDeephDerivativeMaeSeriesLabel", self.app_js)
+        self.assertIn("renderG2MDeepHDerivativeMaeDatasetPlot", self.app_js)
+        self.assertIn("G2M_DEEPH_DERIVATIVE_MAE_DATASET_SIZE_PLOT_ID", self.app_js)
+        self.assertIn("G2M_DEEPH_DERIVATIVE_MAE_EV_TO_MEV = 1000", self.app_js)
+        self.assertIn("dh_mae_union_meV_per_Ang", self.app_js)
+        self.assertIn("dH MAE (meV/Ang)", self.app_js)
         for plot_id in (
             "robust_relative_frobenius_vs_dataset_size",
             "robust_relative_l1_vs_dataset_size",

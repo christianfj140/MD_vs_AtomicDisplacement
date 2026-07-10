@@ -62,12 +62,20 @@ from hamiltonian_derivative_stencil import (  # noqa: E402
     REFERENCE_DERIVATIVE_METHOD_SIESTA,
     VALID_AXES,
     direct_derivative_prediction_basename,
+    sparse_blockwise_hermiticity_defect,
     sparse_hermiticity_defect,
 )
 from predict_model_on_dataset import (  # noqa: E402
     checkpoint_training_dir,
     normalize_pattern_for_workdir,
 )
+from run_inventory import collect_run_inventory  # noqa: E402
+from artifact_signature import (  # noqa: E402
+    CACHE_VALID,
+    cached_result_status,
+    input_signature_sha256,
+)
+from artifact_signature import file_sha256 as sig_file_sha256  # noqa: E402
 
 allow_graph2mat_checkpoint_globals()
 
@@ -256,9 +264,16 @@ def _prediction_file_metadata(
     checkpoint: Path,
     n_atoms: int,
     n_outputs: int,
+    translation_sum_rule: dict[str, float] | None = None,
+    supercell_order: list | None = None,
 ) -> dict[str, Any]:
     axis_index = VALID_AXES[axis]
     hermiticity = sparse_hermiticity_defect(matrix)
+    blockwise_hermiticity = (
+        sparse_blockwise_hermiticity_defect(matrix, supercell_order)
+        if supercell_order
+        else math.nan
+    )
     return {
         "schema": "graph2mat_autograd_direct_derivative_v1",
         "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
@@ -296,9 +311,14 @@ def _prediction_file_metadata(
         "matrix_shape": [int(matrix.shape[0]), int(matrix.shape[1])],
         "nnz": int(matrix.nnz),
         "dh_hermiticity_defect": None if not math.isfinite(hermiticity) else hermiticity,
+        "dh_blockwise_hermiticity_defect": (
+            None if not math.isfinite(blockwise_hermiticity) else blockwise_hermiticity
+        ),
+        "translation_sum_rule": translation_sum_rule,
         "hermiticity_note": (
-            "Measured, not enforced. NaN/null for rectangular (supercell) layouts "
-            "where the unit-cell block structure is not square."
+            "Measured, not enforced. dh_hermiticity_defect is NaN/null for rectangular "
+            "(supercell) layouts; dh_blockwise_hermiticity_defect pairs D(R) with "
+            "D(-R)^dagger over the supercell columns instead."
         ),
     }
 
@@ -370,6 +390,36 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
         max_base_structures=args.max_base_structures,
     )
 
+    run_inventory = collect_run_inventory()
+    base_signature_payload = {
+        "model": "graph2mat",
+        "checkpoint_sha256": sig_file_sha256(checkpoint),
+        "repository_commits": {
+            name: state.get("commit") for name, state in run_inventory["repositories"].items()
+        },
+        "repository_dirty_states": {
+            name: state.get("dirty") for name, state in run_inventory["repositories"].items()
+        },
+        "basis_files": str(args.basis_files),
+        "matrix_component_policy": str(args.matrix_component_policy or ""),
+        "derivative_method": PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_GRAPH2MAT,
+        "jacobian_method": str(args.jacobian_method),
+        "dtype": "float64",
+        "topology_fixed": True,
+    }
+
+    def _pair_signature(request: dict[str, Any], atom_index: int, axis_index: int) -> str:
+        return input_signature_sha256(
+            {
+                **base_signature_payload,
+                "structure_fdf_sha256": sig_file_sha256(
+                    Path(request["base_sample_dir"]) / "RUN.fdf"
+                ),
+                "atom_index": int(atom_index),
+                "axis_index": int(axis_index),
+            }
+        )
+
     matrix_component_policy, n_matrix_components = resolve_matrix_component_policy(
         {
             "matrix_component_policy": args.matrix_component_policy,
@@ -388,6 +438,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
         compute_graph2mat_position_jacobian,
         derivative_prediction_to_sparse_matrices,
         select_derivative_prediction_from_jacobian,
+        translation_sum_rule_metrics,
     )
 
     allow_graph2mat_checkpoint_globals()
@@ -488,6 +539,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
                 method=args.jacobian_method,
                 chunk_size=args.jacobian_chunk_size,
             )
+            translation_sum_rule = translation_sum_rule_metrics(jacobian_result.jacobian)
             # Sparse serialization goes through numpy/sisl; keep a CPU batch.
             serialization_batch = batch.to("cpu") if device.type != "cpu" else batch
 
@@ -513,20 +565,26 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
                     "error": "",
                 }
                 try:
+                    pair_signature = _pair_signature(request, atom_index, axis_index)
                     if npz_path.exists() and args.skip_if_exists and not args.overwrite:
-                        matrix = sparse.load_npz(npz_path)
-                        row.update(
-                            {
-                                "status": "skipped_existing",
-                                "prediction_path": str(npz_path),
-                                "metadata_path": str(json_path),
-                                "nnz": int(matrix.nnz),
-                                "shape_rows": int(matrix.shape[0]),
-                                "shape_cols": int(matrix.shape[1]),
-                            }
-                        )
-                        rows.append(row)
-                        continue
+                        cache_status = cached_result_status(npz_path, json_path, pair_signature)
+                        if cache_status == CACHE_VALID:
+                            matrix = sparse.load_npz(npz_path)
+                            row.update(
+                                {
+                                    "status": "skipped_existing",
+                                    "cache_status": cache_status,
+                                    "prediction_path": str(npz_path),
+                                    "metadata_path": str(json_path),
+                                    "nnz": int(matrix.nnz),
+                                    "shape_rows": int(matrix.shape[0]),
+                                    "shape_cols": int(matrix.shape[1]),
+                                }
+                            )
+                            rows.append(row)
+                            continue
+                        # Stale/legacy/mismatched cache entries are recomputed.
+                        row["cache_status"] = cache_status
                     derivative_prediction = select_derivative_prediction_from_jacobian(
                         jacobian_result.jacobian,
                         jacobian_result.spec,
@@ -534,8 +592,12 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
                         axis_index,
                         change_of_basis=data_processor.basis_table.change_of_basis,
                     )
+                    supercell_orders: list = []
                     matrices = derivative_prediction_to_sparse_matrices(
-                        data_processor, serialization_batch, derivative_prediction
+                        data_processor,
+                        serialization_batch,
+                        derivative_prediction,
+                        supercell_orders=supercell_orders,
                     )
                     if len(matrices) != 1:
                         raise AutogradDerivativePredictionError(
@@ -556,7 +618,10 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
                         checkpoint=checkpoint,
                         n_atoms=jacobian_result.n_atoms,
                         n_outputs=jacobian_result.spec.n_outputs,
+                        translation_sum_rule=translation_sum_rule,
+                        supercell_order=supercell_orders[0] if supercell_orders else None,
                     )
+                    metadata_payload["input_signature_sha256"] = pair_signature
                     write_json(json_path, metadata_payload)
                     row.update(
                         {
@@ -601,6 +666,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
         "samples_ok": len([row for row in rows if row["status"] in {"predicted", "skipped_existing"}]),
         "samples_failed": len(failed),
         "elapsed_seconds": time.time() - started_at,
+        "run_inventory": run_inventory,
         "rows": rows,
         "outputs": {
             "status_csv": str(output_root / STATUS_FILENAME),

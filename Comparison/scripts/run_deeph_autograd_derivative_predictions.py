@@ -14,11 +14,23 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from scipy import sparse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+_SHARED_DIR = SCRIPT_DIR.parents[1] / "shared"
+if str(_SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_DIR))
+
+from run_inventory import collect_run_inventory  # noqa: E402
+from artifact_signature import (  # noqa: E402
+    CACHE_VALID,
+    cached_result_status,
+    input_signature_sha256,
+)
+from artifact_signature import file_sha256 as sig_file_sha256  # noqa: E402
 
 from deeph_config import default_deeph_paths, render_inference_config, render_preprocess_config  # noqa: E402
 from deeph_prediction_adapter import adapt_deeph_prediction_sample  # noqa: E402
@@ -31,6 +43,7 @@ from hamiltonian_derivative_stencil import (  # noqa: E402
     REFERENCE_DERIVATIVE_METHOD_SIESTA,
     VALID_AXES,
     direct_derivative_prediction_basename,
+    sparse_blockwise_hermiticity_defect,
     sparse_hermiticity_defect,
 )
 from run_hamiltonian_derivative_predictions import (  # noqa: E402
@@ -243,6 +256,84 @@ def _row_for_pair(
     }
 
 
+ACCEPTED_GRAD_OUTPUT_SCHEMAS = {"hamiltonians_grad_pred_v2"}
+
+
+def deeph_autograd_capability_preflight(python_interpreter: str) -> dict[str, Any]:
+    """Fail closed unless the DeepH backend proves real forward-AD JVP support.
+
+    Function names are not trusted (a historical DeepH shipped a NaN-stub
+    ``predict_with_grad``): the backend's own capability module runs a
+    synthetic JVP smoke and reports signature/schema support.
+    """
+    script = (
+        "import json; from deeph.inference.capability import autograd_capability; "
+        "print(json.dumps(autograd_capability()))"
+    )
+    record = run_command([str(python_interpreter), "-c", script])
+    if int(record["returncode"]) != 0:
+        raise DeepHAutogradDerivativePredictionError(
+            "capability_unavailable: the DeepH backend has no autograd capability module "
+            f"(deeph.inference.capability). stderr: {record['stderr'][-2000:]}"
+        )
+    try:
+        capability = json.loads(record["stdout"].strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise DeepHAutogradDerivativePredictionError(
+            f"capability_unavailable: unparseable capability manifest: {exc}"
+        ) from exc
+    if not capability.get("available") or capability.get("implementation") != "torch_forward_ad_jvp":
+        raise DeepHAutogradDerivativePredictionError(
+            "capability_unavailable: DeepH backend does not provide a working forward-AD JVP "
+            f"(manifest: {json.dumps(capability, sort_keys=True)})"
+        )
+    if capability.get("output_schema") not in ACCEPTED_GRAD_OUTPUT_SCHEMAS:
+        raise DeepHAutogradDerivativePredictionError(
+            f"capability_unavailable: unsupported grad output schema {capability.get('output_schema')!r}; "
+            f"accepted: {sorted(ACCEPTED_GRAD_OUTPUT_SCHEMAS)}"
+        )
+    return capability
+
+
+def _validate_requested_direction(
+    matrix: sparse.csr_matrix,
+    *,
+    work_dir: Path,
+    atom_index: int,
+    axis_index: int,
+) -> None:
+    """A requested (atom, axis) must be computed AND finite before 'predicted'."""
+    values = matrix.data
+    if values.size == 0:
+        raise DeepHAutogradDerivativePredictionError(
+            f"deeph_autograd_empty_direction: no derivative values for (atom={atom_index}, axis={axis_index})."
+        )
+    if not bool(np.all(np.isfinite(values))):
+        raise DeepHAutogradDerivativePredictionError(
+            "deeph_autograd_non_finite: requested direction "
+            f"(atom={atom_index}, axis={axis_index}) contains non-finite values — "
+            "either the backend never computed it (NaN sentinel) or the JVP diverged."
+        )
+    info_path = work_dir / "info.json"
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+        except ValueError:
+            info = {}
+        computed_atoms = info.get("grad_computed_atom_indices")
+        computed_axes = info.get("grad_computed_axis_indices")
+        if computed_atoms is not None and atom_index not in [int(a) for a in computed_atoms]:
+            raise DeepHAutogradDerivativePredictionError(
+                f"deeph_autograd_direction_not_computed: atom {atom_index} absent from "
+                f"grad_computed_atom_indices={computed_atoms}."
+            )
+        if computed_axes is not None and axis_index not in [int(a) for a in computed_axes]:
+            raise DeepHAutogradDerivativePredictionError(
+                f"deeph_autograd_direction_not_computed: axis {axis_index} absent from "
+                f"grad_computed_axis_indices={computed_axes}."
+            )
+
+
 def _select_gradient_block(block: Any, atom_index: int, axis_index: int) -> Any:
     if getattr(block, "ndim", 0) != 4:
         raise DeepHAutogradDerivativePredictionError(
@@ -273,6 +364,12 @@ def _prediction_file_metadata(
 ) -> dict[str, Any]:
     axis_index = VALID_AXES[axis]
     hermiticity = sparse_hermiticity_defect(matrix)
+    supercell_order = [tuple(v) for v in (layout.get("supercell_order") or [])]
+    blockwise_hermiticity = (
+        sparse_blockwise_hermiticity_defect(matrix, supercell_order)
+        if supercell_order
+        else math.nan
+    )
     payload = {
         "schema": "deeph_autograd_direct_derivative_v1",
         "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
@@ -302,6 +399,9 @@ def _prediction_file_metadata(
         "matrix_shape": [int(matrix.shape[0]), int(matrix.shape[1])],
         "nnz": int(matrix.nnz),
         "dh_hermiticity_defect": None if not math.isfinite(hermiticity) else hermiticity,
+        "dh_blockwise_hermiticity_defect": (
+            None if not math.isfinite(blockwise_hermiticity) else blockwise_hermiticity
+        ),
         "layout": layout,
     }
     payload.update(adapter_fields)
@@ -383,6 +483,34 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
 
     rows: list[dict[str, Any]] = []
     started_at = time.time()
+
+    run_inventory = collect_run_inventory(deeph_python=_deeph_python(args))
+    base_signature_payload = {
+        "model": "deeph",
+        "checkpoint_sha256": sig_file_sha256(model_dir / "best_model.pt"),
+        "checkpoint_config_sha256": sig_file_sha256(model_dir / "config.ini"),
+        "repository_commits": {
+            name: state.get("commit") for name, state in run_inventory["repositories"].items()
+        },
+        "repository_dirty_states": {
+            name: state.get("dirty") for name, state in run_inventory["repositories"].items()
+        },
+        "derivative_method": PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH,
+        "topology_fixed": True,
+    }
+
+    def _pair_signature(request: dict[str, Any], atom_index: int, axis_index: int) -> str:
+        return input_signature_sha256(
+            {
+                **base_signature_payload,
+                "structure_fdf_sha256": sig_file_sha256(
+                    Path(request["base_sample_dir"]) / "RUN.fdf"
+                ),
+                "atom_index": int(atom_index),
+                "axis_index": int(axis_index),
+            }
+        )
+
     if args.skip_if_exists and not args.overwrite:
         all_existing = True
         for request in requests:
@@ -391,7 +519,9 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
                 basename = direct_derivative_prediction_basename(atom_index, VALID_AXES[axis])
                 npz_path = output_root / structure_id / f"{basename}.npz"
                 json_path = output_root / structure_id / f"{basename}.json"
-                if npz_path.exists():
+                if npz_path.exists() and cached_result_status(
+                    npz_path, json_path, _pair_signature(request, atom_index, VALID_AXES[axis])
+                ) == CACHE_VALID:
                     rows.append(
                         _mark_skipped_existing(
                             _row_for_pair(
@@ -423,6 +553,9 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
         python_executable=args.python_executable or sys.executable,
         command_template=args.deeph_command,
     )
+    # Parada A (audit): never launch with_grad inference against a backend that
+    # cannot prove real JVP support — placeholder outputs must be impossible.
+    autograd_capability = deeph_autograd_capability_preflight(str(settings["python_interpreter"]))
     raw_mirror = build_deeph_derivative_raw_mirror(references=references, raw_dir=deeph_paths.raw_dir)
     render_preprocess_config(
         deeph_paths.preprocess_config,
@@ -451,6 +584,7 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
                     )
                 )
         manifest = _manifest_payload(args, stencil_root, output_root, model_dir, requests, rows, started_at)
+        manifest["deeph_autograd_capability"] = autograd_capability
         manifest["runtime"] = {
             "mode": "deeph_autograd_backend",
             "preprocess_command": " ".join(preprocess_record["command"]),
@@ -544,9 +678,13 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
                 reference_deltas=reference_deltas,
             )
             try:
+                pair_signature = _pair_signature(request, atom_index, axis_index)
                 if npz_path.exists() and args.skip_if_exists and not args.overwrite:
-                    rows.append(_mark_skipped_existing(row, npz_path, json_path))
-                    continue
+                    cache_status = cached_result_status(npz_path, json_path, pair_signature)
+                    if cache_status == CACHE_VALID:
+                        rows.append(_mark_skipped_existing(row, npz_path, json_path))
+                        continue
+                    row["cache_status"] = cache_status  # stale/legacy: recompute below
                 if int(command_record["returncode"]) != 0:
                     raise DeepHAutogradDerivativePredictionError("prediction_command_failed")
                 if not grad_h5.exists():
@@ -561,22 +699,24 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
                     ),
                 )
                 matrix = sparse.load_npz(npz_path).tocsr().astype("float64")
+                _validate_requested_direction(
+                    matrix, work_dir=work_dir, atom_index=atom_index, axis_index=axis_index
+                )
                 with npz_path.open("wb") as handle:
                     sparse.save_npz(handle, matrix)
-                write_json(
-                    json_path,
-                    _prediction_file_metadata(
-                        request=request,
-                        atom_index=atom_index,
-                        axis=axis,
-                        reference_deltas=reference_deltas,
-                        matrix=matrix,
-                        model_dir=model_dir,
-                        h5_path=sample_output_dir / grad_h5.name,
-                        layout=layout,
-                        adapter_fields=adapter_fields,
-                    ),
+                metadata_payload = _prediction_file_metadata(
+                    request=request,
+                    atom_index=atom_index,
+                    axis=axis,
+                    reference_deltas=reference_deltas,
+                    matrix=matrix,
+                    model_dir=model_dir,
+                    h5_path=sample_output_dir / grad_h5.name,
+                    layout=layout,
+                    adapter_fields=adapter_fields,
                 )
+                metadata_payload["input_signature_sha256"] = pair_signature
+                write_json(json_path, metadata_payload)
                 row.update(
                     {
                         "status": "predicted",
@@ -593,6 +733,7 @@ def run_deeph_autograd_derivative_predictions(args: argparse.Namespace) -> dict[
             rows.append(row)
 
     manifest = _manifest_payload(args, stencil_root, output_root, model_dir, requests, rows, started_at)
+    manifest["deeph_autograd_capability"] = autograd_capability
     manifest["runtime"] = {
         "mode": "deeph_autograd_backend",
         "preprocess_command": " ".join(preprocess_record["command"]),
@@ -646,6 +787,16 @@ def _deeph_base_equivalence_fields(
         }
 
 
+def _deeph_python(args: argparse.Namespace) -> str | None:
+    """Interpreter that actually imports ``deeph`` (sibling of the CLI)."""
+    cli = Path(infer_deeph_cli(getattr(args, "deeph_command", None), cli_name="deeph-inference"))
+    for name in ("python", "python3"):
+        sibling = cli.with_name(name)
+        if sibling.exists():
+            return str(sibling)
+    return None
+
+
 def _manifest_payload(
     args: argparse.Namespace,
     stencil_root: Path,
@@ -677,6 +828,7 @@ def _manifest_payload(
         "elapsed_seconds": time.time() - started_at,
         "overwrite": bool(args.overwrite),
         "skip_if_exists": bool(args.skip_if_exists),
+        "run_inventory": collect_run_inventory(deeph_python=_deeph_python(args)),
         "rows": rows,
         "outputs": {
             "status_csv": str(output_root / STATUS_FILENAME),

@@ -6,6 +6,7 @@ share a fake carbon basis). No SIESTA, no training, no GPU, no large data.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import sys
@@ -159,7 +160,16 @@ def test_materialize_writes_self_contained_provenance(small_large, tmp_path):
         output_root=out, seed=1, mode="add", ratio=0.5,
     )
     prov = json.loads((out / "mixed_dataset_provenance.json").read_text())
-    assert prov["schema"] == "ml_vs_siesta_mixed_dataset_provenance_v1"
+    assert prov["schema"] == "ml_vs_siesta_mixed_dataset_provenance_v2"
+    # v2 additions (audit Fases 0/7/8): run inventory, scope and composition.
+    assert prov["run_inventory"]["reproducibility_status"] in {
+        "pinned_clean", "pinned_dirty", "unpinned", "unavailable"
+    }
+    assert prov["evaluation_scope"] == "small_only"
+    composition = prov["composition"]
+    assert composition["actual_train_size"] == prov["composition"]["n_small_train"] + composition["n_large_train"]
+    assert composition["materialized_total_size"] == 12
+    assert composition["test_large_size"] == 0
     assert prov["mode"] == "add"
     assert prov["ratio"] == 0.5
     assert prov["ratio_semantics"] == "fraction_of_large_pool_added"
@@ -1231,3 +1241,109 @@ def test_mixing_run_ok_helper():
     assert ui._mixing_run_ok({"returncode": 0, "error": "boom"}) is False
     assert ui._mixing_run_ok({"returncode": 0, "stop_requested": True}) is False
     assert ui._mixing_run_ok(None) is False
+
+
+# --------------------------------------------------------------------------- #
+# Fase 7/8 (audit): fixed_stratified_test, no-leakage guard, composition
+# --------------------------------------------------------------------------- #
+def test_fixed_stratified_test_contains_both_domains(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "stratified"
+    summary = mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids,
+        output_root=out, seed=0, split_policy="fixed_stratified_test",
+    )
+    composition = summary["composition"]
+    assert composition["test_small_size"] > 0
+    assert composition["test_large_size"] > 0
+    assert summary["evaluation_scope"] == "small_and_large"
+    # Test rows come from both origins.
+    rows = list(csv.DictReader((out / "splits" / "test_manifest.csv").open()))
+    origins = {row["origin"] for row in rows}
+    assert origins == {"small", "large"}
+
+
+def test_fixed_stratified_test_is_identical_across_ratios_and_seeds(small_large, tmp_path):
+    small, large = small_large
+    test_sets = []
+    for i, (ratio_ids, seed) in enumerate([(4, 0), (8, 0), (8, 7)]):
+        large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)][:ratio_ids]
+        small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+        out = tmp_path / f"strat{i}"
+        mvs.materialize_mixed_dataset(
+            small, large, selected_small_ids=small_ids,
+            # include reserved large test ids (temporal tail) in every selection
+            selected_large_ids=sorted(set(large_ids) | mvs.fixed_common_test_ids(
+                mvs.read_dataset_samples(large), mvs.DEFAULT_SPLIT_FRACTIONS, 0
+            )),
+            output_root=out, seed=seed, split_policy="fixed_stratified_test",
+        )
+        rows = list(csv.DictReader((out / "splits" / "test_manifest.csv").open()))
+        test_sets.append(sorted(row["sample_id"] for row in rows))
+    assert test_sets[0] == test_sets[1] == test_sets[2]
+
+
+def test_source_test_snapshot_never_trains(small_large, tmp_path):
+    small, large = small_large
+    # Mark every small snapshot as source-test: any train/validation assignment
+    # under resplit_combined must fail closed.
+    manifest_path = small / "frozen_split_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for row in manifest["rows"]:
+        row["split"] = "test"
+    manifest_path.write_text(json.dumps(manifest))
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    with pytest.raises(mvs.DatasetMaterializeError, match="leakage"):
+        mvs.materialize_mixed_dataset(
+            small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+            output_root=tmp_path / "leaky", seed=0, split_policy="resplit_combined",
+        )
+    # Explicit non-scientific override still works.
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=tmp_path / "leaky_ok", seed=0, split_policy="resplit_combined",
+        allow_source_test_in_train=True,
+    )
+
+
+def test_ratio_applies_to_training_pool_not_total():
+    from ml_vs_siesta.dataset_mixing import make_mixed_dataset_manifest
+
+    small = [{"id": f"s{i}"} for i in range(10)]
+    large = [{"id": f"l{i}"} for i in range(10)]
+    reserved_large = {"l8", "l9"}
+    manifest = make_mixed_dataset_manifest(
+        small, large, ratios=[0.5], mode="add", seed=0,
+        reserved_large_ids=reserved_large,
+    )
+    part = manifest["partitions"][0]
+    # ratio 0.5 of the 8-id large TRAINING pool -> 4 train + 2 reserved test.
+    assert part["n_large_selected"] == 6
+    assert part["n_reserved_large"] == 2
+    assert set(reserved_large) <= set(part["selected_ids"])
+    assert part["requested_count_float"] == 4.0
+    assert part["rounding_policy"] == "python_round_half_even"
+
+
+def test_composition_metrics_fractions(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    summary = mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=tmp_path / "comp", seed=1,
+    )
+    composition = summary["composition"]
+    total_train = composition["n_small_train"] + composition["n_large_train"]
+    assert composition["actual_train_size"] == total_train
+    assert composition["materialized_total_size"] == 12
+    # atoms: small snapshots have 2 atoms, large 50.
+    assert composition["small_atoms_total"] == 2 * composition["n_small_train"]
+    assert composition["large_atoms_total"] == 50 * composition["n_large_train"]
+    expected = composition["large_atoms_total"] / (
+        composition["large_atoms_total"] + composition["small_atoms_total"]
+    )
+    assert abs(composition["actual_large_fraction_by_atoms"] - expected) < 1e-12

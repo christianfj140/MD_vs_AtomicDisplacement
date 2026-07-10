@@ -26,7 +26,11 @@ from graph2mat_autograd_derivatives import (  # noqa: E402
     graph2mat_forward_labels,
     require_single_structure_batch,
     select_derivative_prediction_from_jacobian,
+    translation_sum_rule_metrics,
     unflatten_graph2mat_prediction_vector,
+)
+from hamiltonian_derivative_stencil import (  # noqa: E402
+    sparse_blockwise_hermiticity_defect,
 )
 from run_graph2mat_autograd_derivative_predictions import (  # noqa: E402
     _append_missing_structure_rows,
@@ -319,6 +323,62 @@ class SelectDerivativeTests(unittest.TestCase):
             )
         with self.assertRaises(Graph2MatAutogradDerivativeError):
             select_derivative_prediction_from_jacobian(result.jacobian, result.spec, 0, 3)
+
+
+class PhysicalInvarianceTests(unittest.TestCase):
+    """Fase 4 (audit): translation sum rule + real-space blockwise hermiticity."""
+
+    def test_translation_sum_rule_zero_for_invariant_model(self) -> None:
+        # Columns built so per-output rows sum to zero over atoms: the exact
+        # signature of a translation-invariant model.
+        jacobian = torch.zeros(4, 3, 3, dtype=torch.float64)
+        jacobian[:, 0, :] = torch.randn(4, 3, dtype=torch.float64)
+        jacobian[:, 1, :] = torch.randn(4, 3, dtype=torch.float64)
+        jacobian[:, 2, :] = -(jacobian[:, 0, :] + jacobian[:, 1, :])
+        metrics = translation_sum_rule_metrics(jacobian)
+        self.assertLess(metrics["translation_residual_max_abs"], 1e-12)
+        self.assertLess(metrics["translation_residual_relative"], 1e-12)
+
+    def test_translation_sum_rule_flags_violation(self) -> None:
+        jacobian = torch.ones(2, 2, 3, dtype=torch.float64)
+        metrics = translation_sum_rule_metrics(jacobian)
+        self.assertGreater(metrics["translation_residual_max_abs"], 1.0)
+        self.assertGreater(metrics["translation_residual_relative"], 0.5)
+
+    def test_translation_sum_rule_rejects_bad_shape(self) -> None:
+        with self.assertRaises(Graph2MatAutogradDerivativeError):
+            translation_sum_rule_metrics(torch.zeros(4, 3))
+
+    def test_blockwise_hermiticity_zero_for_hermitian_layout(self) -> None:
+        from scipy import sparse as sp
+
+        rng = np.random.default_rng(0)
+        n = 3
+        order = [(0, 0, 0), (1, 0, 0), (-1, 0, 0)]
+        d0 = rng.normal(size=(n, n))
+        d0 = d0 + d0.T  # onsite block hermitian
+        d_plus = rng.normal(size=(n, n))
+        matrix = sp.csr_matrix(np.hstack([d0, d_plus, d_plus.T]))  # D(-R) = D(R)^T
+        defect = sparse_blockwise_hermiticity_defect(matrix, order)
+        self.assertAlmostEqual(defect, 0.0, places=12)
+
+    def test_blockwise_hermiticity_flags_broken_block(self) -> None:
+        from scipy import sparse as sp
+
+        rng = np.random.default_rng(1)
+        n = 3
+        order = [(0, 0, 0), (1, 0, 0), (-1, 0, 0)]
+        d0 = rng.normal(size=(n, n))
+        d0 = d0 + d0.T
+        d_plus = rng.normal(size=(n, n))
+        matrix = sp.csr_matrix(np.hstack([d0, d_plus, rng.normal(size=(n, n))]))
+        self.assertGreater(sparse_blockwise_hermiticity_defect(matrix, order), 0.1)
+
+    def test_blockwise_hermiticity_nan_without_layout(self) -> None:
+        from scipy import sparse as sp
+
+        matrix = sp.csr_matrix(np.ones((2, 4)))
+        self.assertTrue(np.isnan(sparse_blockwise_hermiticity_defect(matrix, [])))
 
 
 class SparseConversionTests(unittest.TestCase):

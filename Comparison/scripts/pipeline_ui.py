@@ -57,6 +57,7 @@ from material_provenance import (
     read_json_file,
 )
 from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner
+from plot_hamiltonian_derivative_metrics import build_derivative_plot_payload
 
 try:
     import pty
@@ -8334,7 +8335,11 @@ def _g2m_deeph_derivative_root(run_root: Path, method: str) -> Path | None:
 
 def _g2m_deeph_derivative_workflow_roots(run_root: Path) -> list[Path]:
     roots: list[Path] = []
-    for parent in (run_root / "derivative_workflows", run_root / "sweep" / "derivative_workflows"):
+    for parent in (
+        run_root / "derivative_workflows",
+        run_root / "sweep" / "derivative_workflows",
+        run_root.parent / "derivative_workflows",
+    ):
         if parent.exists():
             roots.extend(path for path in sorted(parent.glob("graphene_*_scale_iid*")) if path.is_dir())
     return roots
@@ -8386,6 +8391,20 @@ def _g2m_deeph_derivative_summary_path(run_root: Path, filename: str) -> Path | 
     for path in candidates:
         if path is not None and path.exists():
             return path
+    return None
+
+
+def _g2m_deeph_combined_derivative_plot_payload(run_root: Path) -> dict[str, Any] | None:
+    roots = [
+        *(_g2m_deeph_partial_derivative_metric_roots(run_root, "graph2mat")),
+        *(_g2m_deeph_partial_derivative_metric_roots(run_root, "deeph")),
+    ]
+    if len(roots) < 2:
+        return None
+    payload = build_derivative_plot_payload(derivative_roots=roots)
+    plots = payload.get("plots") if isinstance(payload.get("plots"), list) else []
+    if any(plot.get("id") == "dh_mae_vs_dataset_size" and plot.get("rows") for plot in plots if isinstance(plot, dict)):
+        return payload
     return None
 
 
@@ -8804,6 +8823,12 @@ def g2m_deeph_derivative_metrics_payload(run_id: str | None = None) -> dict[str,
         plot_payload = load_json_object(plot_payload_path)
     else:
         plot_payload = {"available": False, "plots": [], "status": "not_computed"}
+    if not any(
+        plot.get("id") == "dh_mae_vs_dataset_size" and plot.get("rows")
+        for plot in (plot_payload.get("plots") or [])
+        if isinstance(plot, dict)
+    ):
+        plot_payload = _g2m_deeph_combined_derivative_plot_payload(run_root) or plot_payload
     status_rows: list[dict[str, Any]] = []
     issue_rows: list[dict[str, Any]] = []
     artifact_rows: list[dict[str, Any]] = []
@@ -16719,6 +16744,48 @@ def _mixing_runner_launch_fn(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _apply_training_weighting_policy(
+    overrides: dict[str, Any],
+    model: str,
+    policy: str,
+    domain_weighting: dict[str, Any] | None,
+) -> None:
+    """Map training_weighting_policy (audit Fase 9) to per-model overrides.
+
+    graph2mat: loss=block_type_mse_per_structure/_per_domain (+ loss_kwargs).
+    deeph: hyperparameter.training_weighting_policy (+ domain options).
+    Explicit user overrides in ``hyperparams`` win (setdefault only).
+    """
+    if policy in ("", None, "legacy_elementwise"):
+        return
+    domain = dict(domain_weighting or {})
+    if model == "graph2mat":
+        if policy == "per_structure":
+            overrides.setdefault("loss", "block_type_mse_per_structure")
+        else:
+            overrides.setdefault("loss", "block_type_mse_per_domain")
+            overrides.setdefault(
+                "loss_kwargs",
+                {
+                    "domain_threshold_atoms": int(domain.get("domain_threshold_atoms", 0)),
+                    "small_domain_weight": float(domain.get("small_domain_weight", 0.5)),
+                    "large_domain_weight": float(domain.get("large_domain_weight", 0.5)),
+                },
+            )
+    elif model == "deeph":
+        overrides.setdefault("training_weighting_policy", policy)
+        if policy == "per_domain":
+            overrides.setdefault(
+                "domain_threshold_atoms", int(domain.get("domain_threshold_atoms", 0))
+            )
+            overrides.setdefault(
+                "small_domain_weight", float(domain.get("small_domain_weight", 0.5))
+            )
+            overrides.setdefault(
+                "large_domain_weight", float(domain.get("large_domain_weight", 0.5))
+            )
+
+
 def _run_mixing_sweep_parallel(
     small: dict[int, str],
     large: dict[int, str],
@@ -16733,7 +16800,11 @@ def _run_mixing_sweep_parallel(
     performance: dict[str, Any] | None,
     split_policy: str = "fixed_common_test",
     confirm_ghost_species_exemption: bool = False,
+    hyperparams: dict[str, dict[str, Any]] | None = None,
+    training_weighting_policy: str = "legacy_elementwise",
+    domain_weighting: dict[str, Any] | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None,
+    log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Materialize ALL permutation datasets, then train with ONE runner invocation.
 
@@ -16742,6 +16813,25 @@ def _run_mixing_sweep_parallel(
     a time) instead of one permutation at a time.
     """
     mvs = _ml_vs_siesta_module()
+    training_weighting_policy = str(training_weighting_policy or "legacy_elementwise")
+    if training_weighting_policy not in ("legacy_elementwise", "per_structure", "per_domain"):
+        raise RuntimeError(
+            f"Unknown training_weighting_policy {training_weighting_policy!r}; "
+            "use legacy_elementwise, per_structure or per_domain."
+        )
+    if training_weighting_policy == "per_domain" and not (domain_weighting or {}).get(
+        "domain_threshold_atoms"
+    ):
+        raise RuntimeError(
+            "training_weighting_policy='per_domain' requires "
+            "domain_weighting.domain_threshold_atoms in the payload."
+        )
+    if log_fn is not None:
+        log_fn(
+            "[MIXING] Materializando datasets: "
+            f"sizes={sizes or sorted(small)} modes={list(modes)} ratios={list(ratios)} "
+            f"split_policy={split_policy} training_weighting_policy={training_weighting_policy}\n"
+        )
 
     # ── Phase 1: materialise all datasets ──────────────────────────────────────
     summary_permutations = mvs.run_mixing_sweep(
@@ -16766,6 +16856,12 @@ def _run_mixing_sweep_parallel(
         p for p in (summary_permutations.get("permutations") or [])
         if p.get("status") == "materialized"
     ]
+    if log_fn is not None:
+        log_fn(
+            "[MIXING] Datasets materializados: "
+            f"{len(materialized)}/{len(summary_permutations.get('permutations') or [])}. "
+            "Arrancando entrenamiento Graph2Mat/DeepH.\n"
+        )
     if not materialized:
         summary_permutations["n_trained"] = 0
         return summary_permutations
@@ -16791,7 +16887,7 @@ def _run_mixing_sweep_parallel(
     for i, _perm in enumerate(materialized):
         dataset_id = f"perm_{i}"
         for model in models:
-            overrides: dict[str, Any] = {}
+            overrides: dict[str, Any] = dict((hyperparams or {}).get(model) or {})
             if epochs is not None:
                 if model == "graph2mat":
                     overrides["max_epochs"] = int(epochs)
@@ -16799,6 +16895,9 @@ def _run_mixing_sweep_parallel(
                     overrides["epochs"] = int(epochs)
             if model == "deeph" and thread_count not in (None, "", "null"):
                 overrides["num_threads"] = int(thread_count)
+            _apply_training_weighting_policy(
+                overrides, model, training_weighting_policy, domain_weighting
+            )
             manual_runs.append(
                 {
                     "model": model,
@@ -16816,6 +16915,11 @@ def _run_mixing_sweep_parallel(
         "dataset_root": materialized[0]["output_root"],
         "output_root": str(output_root / "parallel_run"),
         "allow_regenerate_siesta": False,
+        # Mixed datasets never carry strict-only provenance (siesta_version,
+        # command-line, environment, execution log come from two merged
+        # sources, not a single SIESTA run) -- same as the manual anchor
+        # payloads (mixing_sanity_*_paper_ready_anchors_payload.json).
+        "strict_dataset_validation": False,
         "training_sweep": {
             "enabled": True,
             "error_policy": "continue_on_error",
@@ -16845,11 +16949,27 @@ def _run_mixing_sweep_parallel(
     runner._training_sweep_datasets = _patched_training_sweep_datasets  # type: ignore[method-assign]
 
     runner.start(runner_payload)
+    runner_log_offset = 0
     while True:
+        if log_fn is not None:
+            try:
+                log_payload = runner.logs(since=runner_log_offset, limit=None)
+                for line in log_payload.get("lines") or []:
+                    log_fn(str(line))
+                runner_log_offset = int(log_payload.get("offset") or runner_log_offset)
+            except Exception as exc:
+                log_fn(f"[MIXING][WARN] No se pudieron leer logs Graph2Mat/DeepH: {exc}\n")
         status = runner.status()
         if not status.get("running"):
             break
         time.sleep(_MIXING_TRAINING_POLL_SECONDS)
+    if log_fn is not None:
+        try:
+            log_payload = runner.logs(since=runner_log_offset, limit=None)
+            for line in log_payload.get("lines") or []:
+                log_fn(str(line))
+        except Exception as exc:
+            log_fn(f"[MIXING][WARN] No se pudieron leer logs finales Graph2Mat/DeepH: {exc}\n")
 
     results = runner.results()
     runner_status = results.get("status") or {}
@@ -16909,6 +17029,11 @@ def _run_mixing_sweep_parallel(
     summary_permutations["n_partial"] = _count("partial")
     summary_permutations["n_failed"] = _count("failed")
     summary_permutations["parallel_run_root"] = run_root
+    summary_permutations["training_weighting_policy"] = training_weighting_policy
+    if domain_weighting:
+        summary_permutations["domain_weighting"] = dict(domain_weighting)
+    for record in records:
+        record.setdefault("training_weighting_policy", training_weighting_policy)
     _persist_mixing_summary(output_root, summary_permutations)
     return summary_permutations
 
@@ -16986,10 +17111,15 @@ class MixingSweepRunner:
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
             epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
             performance = body.get("performance") or None
+            hyperparams = body.get("hyperparams") or None
             # Default fixed_common_test: with resplit_combined the test set
             # changes with each ratio, confounding MAE-vs-composition curves.
             split_policy = str(body.get("split_policy") or "fixed_common_test")
             confirm_ghost = bool(body.get("confirm_ghost_species_exemption"))
+            training_weighting_policy = str(
+                body.get("training_weighting_policy") or "legacy_elementwise"
+            )
+            domain_weighting = body.get("domain_weighting") or None
             # Actions:
             #   "preview"     -> plan only (no writes).
             #   "materialize" -> build merged datasets, no training.
@@ -17049,6 +17179,9 @@ class MixingSweepRunner:
                     performance=performance,
                     split_policy=split_policy,
                     confirm_ghost_species_exemption=confirm_ghost,
+                    hyperparams=hyperparams,
+                    training_weighting_policy=training_weighting_policy,
+                    domain_weighting=domain_weighting,
                     progress_fn=progress,
                 )
             else:

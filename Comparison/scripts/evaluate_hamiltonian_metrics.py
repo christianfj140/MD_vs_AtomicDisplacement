@@ -3290,6 +3290,7 @@ def extract(
     workers: int = 1,
     enable_kpoint_metrics: bool = False,
     overwrite: bool = False,
+    split: str = "test",
 ) -> dict[str, Any]:
     low_energy_n_states, low_energy_alignment = validate_low_energy_config(
         low_energy_n_states,
@@ -3988,6 +3989,7 @@ def extract(
         "metrics_provenance_generation": METRICS_PROVENANCE_GENERATION,
         "metrics_provenance_status": "post_h_only_sref",
         "post_h_only_reevaluation_required_for_legacy_metrics": False,
+        "split": split,
         "result_dir": str(result_dir),
         "samples_seen": len(sample_names),
         "samples_compared": len(spectral_rows) + len(kpoint_spectral_rows),
@@ -4154,6 +4156,7 @@ def main() -> int:
             "post-H-only/S_ref re-evaluation."
         ),
     )
+    parser.add_argument("--split", choices=["train", "validation", "test"], default="test")
     args = parser.parse_args()
     manifest = extract(
         args.result_dir,
@@ -4163,6 +4166,7 @@ def main() -> int:
         workers=args.workers,
         enable_kpoint_metrics=args.enable_kpoint_metrics,
         overwrite=args.overwrite,
+        split=args.split,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=False, allow_nan=False))
     return 0 if not manifest["fatal_errors"] else 2

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import csv
+import hashlib
 import json
 import os
 import shlex
@@ -571,6 +572,15 @@ def reconstruct_deeph_sparse_layout_prediction(
     with output_path.open("wb") as handle:
         sparse.save_npz(handle, matrix.tocsr())
     reconstructed = matrix.tocsr()
+    # Base H and dH/dR reconstructions share exactly this permutation/sign
+    # map; hashing it (plus its ORB_INDX / orbital_types sources) makes that
+    # provable from the metadata alone (audit Fase 3).
+    transform_sha256 = hashlib.sha256(
+        json.dumps(
+            {"permutation": [int(i) for i in permutation], "signs": [float(s) for s in signs]},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "kind": DEEPH_SPARSE_LAYOUT_KIND,
         "nnz": int(reconstructed.nnz),
@@ -584,6 +594,12 @@ def reconstruct_deeph_sparse_layout_prediction(
         "source_prediction_h5": str(source_prediction_h5),
         "derivative_orientation_correction": derivative_orientation["status"],
         "derivative_orientation_cosine": derivative_orientation.get("paired_h5_derivative_cosine"),
+        "supercell_order": [list(vector) for vector in supercell_order],
+        "basis_transform_status": transform.get("status"),
+        "basis_transform_warnings": list(transform.get("warnings") or []),
+        "basis_transform_sha256": transform_sha256,
+        "orb_indx_sha256": file_sha256(orb_indx) if orb_indx and Path(orb_indx).exists() else None,
+        "orbital_types_sha256": file_sha256(orbital_types) if orbital_types.exists() else None,
     }
 
 

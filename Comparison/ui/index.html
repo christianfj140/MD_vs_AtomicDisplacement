@@ -1658,6 +1658,31 @@
             </div>
             <div id="mix-mae-chart" class="plot-card full"></div>
           </section>
+
+          <section class="panel derivative-mae-dataset-size-section">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">6 · MAE de derivadas vs tamaño de dataset</p>
+                <h3>Una curva por (modo, ratio, modelo)</h3>
+                <p class="field-help">Usa el plot <code>dh_mae_vs_dataset_size</code> del payload de derivadas ya generado.</p>
+              </div>
+            </div>
+            <div class="g2m-deeph-run-selector" aria-label="Derivative MAE series selector">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Curvas a plotear</strong>
+                  <p class="field-help">Marca las series disponibles para el MAE de dH/dR.</p>
+                </div>
+                <div class="run-selector-actions">
+                  <button id="g2m-deeph-derivative-mae-series-all" class="button ghost small" type="button">All</button>
+                  <button id="g2m-deeph-derivative-mae-series-clear" class="button ghost small" type="button">Clear</button>
+                </div>
+              </div>
+              <div id="g2m-deeph-derivative-mae-series-status" class="muted-text">Derivative MAE series not loaded yet.</div>
+              <div id="g2m-deeph-derivative-mae-series-list" class="plot-run-list"></div>
+            </div>
+            <div id="g2m-deeph-derivative-mae-dataset-chart" class="plot-card full"></div>
+          </section>
         </section>
 
         <section id="view-terminal" class="view">
