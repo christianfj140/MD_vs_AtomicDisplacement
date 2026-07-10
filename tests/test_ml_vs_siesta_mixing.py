@@ -1347,3 +1347,48 @@ def test_composition_metrics_fractions(small_large, tmp_path):
         composition["large_atoms_total"] + composition["small_atoms_total"]
     )
     assert abs(composition["actual_large_fraction_by_atoms"] - expected) < 1e-12
+
+
+# --------------------------------------------------------------------------- #
+# Fase 10 (audit): fail-closed transactional materialization
+# --------------------------------------------------------------------------- #
+def test_invalid_snapshot_blocks_materialization(small_large, tmp_path):
+    small, large = small_large
+    # Break one source snapshot: remove a required artifact.
+    victim = next((small / "MD_steps" / "3").glob("*.HSX"))
+    victim.unlink()
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "merged_invalid"
+    with pytest.raises(mvs.DatasetMaterializeError, match="NOT materialized"):
+        mvs.materialize_mixed_dataset(
+            small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+            output_root=out, seed=1,
+        )
+    # No apparently-complete dataset: final root absent, no manifests anywhere.
+    assert not out.exists()
+    partials = list(out.parent.glob(f"{out.name}.partial-*"))
+    assert partials, "diagnostic partial should be kept"
+    assert (partials[0] / "MATERIALIZATION_FAILED.json").exists()
+    assert not (partials[0] / "frozen_split_manifest.json").exists()
+    assert not (partials[0] / "benchmark_dataset_manifest.json").exists()
+
+
+def test_successful_materialization_leaves_no_partial(small_large, tmp_path):
+    small, large = small_large
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    out = tmp_path / "merged_ok"
+    mvs.materialize_mixed_dataset(
+        small, large, selected_small_ids=small_ids, selected_large_ids=large_ids[:4],
+        output_root=out, seed=1,
+    )
+    assert out.exists()
+    assert not list(out.parent.glob(f"{out.name}.partial-*"))
+    validation = json.loads((out / "artifact_validation.json").read_text())
+    assert validation["valid"] is True and validation["status"] == "validated"
+    # Manifest rows point at the FINAL paths, not the partial ones.
+    frozen = json.loads((out / "frozen_split_manifest.json").read_text())
+    for row in frozen["rows"]:
+        assert ".partial-" not in row["sample_dir"]
+        assert Path(row["sample_dir"]).exists()

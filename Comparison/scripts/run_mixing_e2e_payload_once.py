@@ -96,6 +96,10 @@ def _run_mixing_payload(
     output_root: Path | None,
     log_fn: Any | None = None,
 ) -> dict[str, Any]:
+    # Fail-closed prevalidation + v1 -> v2 migration (audit Fase 15).
+    from ml_vs_siesta.mixing_payload_schema import prevalidate_mixing_payload
+
+    payload = prevalidate_mixing_payload(payload)
     small = ui._mixing_roots_from_body(payload, "small")
     large = ui._mixing_roots_from_body(payload, "large")
     modes = tuple(payload.get("modes") or ("add", "replace"))

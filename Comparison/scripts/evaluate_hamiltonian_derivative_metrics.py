@@ -26,6 +26,7 @@ if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
 from run_inventory import collect_run_inventory  # noqa: E402
+from derivative_claim_status import comparison_kind as _comparison_kind  # noqa: E402
 
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DERIVATIVE_SUPPORT_THRESHOLD,
@@ -426,6 +427,11 @@ def evaluate_derivative_metrics(
         "reference_definition": REFERENCE_DEFINITION,
         "reference_derivative_method": REFERENCE_DERIVATIVE_METHOD_SIESTA,
         "predicted_derivative_method": predicted_derivative_method,
+        # Which of the three protocol comparisons this manifest encodes
+        # (audit Fase 11): B model_fd_vs_siesta_fd or C model_autograd_vs_siesta_fd.
+        "comparison_kind": _comparison_kind(
+            predicted_derivative_method, REFERENCE_DERIVATIVE_METHOD_SIESTA
+        ),
         "graph2mat_prediction_method": graph2mat_prediction_method
         if source_model == "graph2mat"
         else None,
@@ -933,6 +939,43 @@ def _finite_or_nan(value: Any) -> float:
         return math.nan
 
 
+def _micro_macro_domain(
+    metric_rows: list[dict[str, Any]],
+    value_key: str,
+    *,
+    weight_key: str = "dh_union_nnz",
+    domain_key: str = "dh_matrix_rows",
+) -> dict[str, Any]:
+    """Micro (element-weighted), macro (per-snapshot) and per-domain means.
+
+    Domains are the distinct structure sizes present (matrix rows), so small
+    structures are visible separately instead of being drowned by large ones
+    (audit Fase 12).
+    """
+    pairs = []
+    for row in metric_rows:
+        value = row.get(value_key)
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            continue
+        weight = row.get(weight_key) or 0
+        pairs.append((float(value), float(weight), row.get(domain_key)))
+    if not pairs:
+        return {"micro": None, "macro_snapshot": None, "by_domain": {}, "macro_domain": None}
+    total_weight = sum(w for _v, w, _d in pairs)
+    micro = sum(v * w for v, w, _d in pairs) / total_weight if total_weight else None
+    macro = sum(v for v, _w, _d in pairs) / len(pairs)
+    by_domain: dict[str, list[float]] = {}
+    for value, _weight, domain in pairs:
+        by_domain.setdefault(str(domain), []).append(value)
+    domain_means = {domain: sum(vals) / len(vals) for domain, vals in by_domain.items()}
+    return {
+        "micro": micro,
+        "macro_snapshot": macro,
+        "by_domain": domain_means,
+        "macro_domain": sum(domain_means.values()) / len(domain_means),
+    }
+
+
 def _summary(
     metric_rows: list[dict[str, Any]],
     stencil_rows: list[dict[str, Any]],
@@ -945,6 +988,15 @@ def _summary(
         "mean_dh_mae_union_eV_per_Ang": _mean(row.get("dh_mae_union_eV_per_Ang") for row in metric_rows),
         "mean_dh_rmse_union_eV_per_Ang": _mean(row.get("dh_rmse_union_eV_per_Ang") for row in metric_rows),
         "mean_dh_relative_frobenius_ref": _mean(row.get("dh_relative_frobenius_ref") for row in metric_rows),
+        "dh_mae_eV_per_Ang_reductions": _micro_macro_domain(metric_rows, "dh_mae_union_eV_per_Ang"),
+        "dh_rmse_eV_per_Ang_reductions": _micro_macro_domain(metric_rows, "dh_rmse_union_eV_per_Ang"),
+        "dh_relative_frobenius_reductions": _micro_macro_domain(
+            metric_rows, "dh_relative_frobenius_union_robust"
+        ),
+        "dh_normalized_frobenius_per_element_reductions": _micro_macro_domain(
+            metric_rows, "dh_normalized_frobenius_per_element_eV_per_Ang"
+        ),
+        "dh_cosine_reductions": _micro_macro_domain(metric_rows, "dh_cosine_similarity_union"),
         "max_dh_hermiticity_ref": _max(row.get("dH_ref_hermiticity_defect") for row in hermiticity_rows),
         "max_dh_hermiticity_pred": _max(row.get("dH_pred_hermiticity_defect") for row in hermiticity_rows),
         "force_constants_used": False,

@@ -29,14 +29,19 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     backed by fewer than ``MIN_SEEDS_FOR_CLAIMS`` seeds are flagged
     ``exploratory`` — treat them as exploratory, not publishable evidence.
     """
-    curves: dict[tuple[str, float, str], dict[str, dict[str, Any]]] = {}
+    curves: dict[tuple, dict[str, dict[str, Any]]] = {}
     payloads: dict[str, dict[str, Any]] = {}
     for record in records:
         try:
+            # Policy fields join the curve identity so records produced under
+            # different loss weighting / split policies never merge into one
+            # curve (audit Fase 12/13).
             key = (
                 str(record["mode"]),
                 round(float(record["ratio"]), 6),
                 str(record["model"]),
+                str(record.get("training_weighting_policy") or "legacy_elementwise"),
+                str(record.get("split_policy") or ""),
             )
             size = int(record.get("size", record["total_size"]))
             mode = str(record["mode"])
@@ -67,6 +72,12 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             {
                 "payload_id": payload_id,
                 "total_size": total_size,
+                "actual_train_size": record.get("actual_train_size"),
+                "n_large_train": record.get("n_large_train"),
+                "actual_large_fraction_by_snapshots": record.get(
+                    "actual_large_fraction_by_snapshots"
+                ),
+                "evaluation_scope": record.get("evaluation_scope"),
                 "values": [],
                 "seeds": set(),
             },
@@ -90,6 +101,9 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         return {
             "payload_id": item["payload_id"],
             "total_size": item["total_size"],
+            "actual_train_size": item.get("actual_train_size"),
+            "n_large_train": item.get("n_large_train"),
+            "actual_large_fraction_by_snapshots": item.get("actual_large_fraction_by_snapshots"),
             "mae": mean,
             "mae_std": std,
             "n_seeds": n_seeds,
@@ -97,18 +111,28 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         }
 
     curve_list: list[dict[str, Any]] = []
-    for (mode, ratio, model), by_payload in sorted(curves.items()):
+    for key, by_payload in sorted(curves.items(), key=lambda kv: tuple(map(str, kv[0]))):
+        mode, ratio, model = key[0], key[1], key[2]
+        weighting_policy = key[3] if len(key) > 3 else "legacy_elementwise"
+        split_policy = key[4] if len(key) > 4 else ""
         points = [
             _point(item)
             for item in sorted(by_payload.values(), key=lambda value: (value["total_size"], value["payload_id"]))
         ]
         curve_exploratory = any(point["exploratory"] for point in points)
+        label = f"{model} · {mode} · ratio={ratio:g}"
+        if weighting_policy != "legacy_elementwise":
+            label += f" · {weighting_policy}"
+        scopes = {item.get("evaluation_scope") for item in by_payload.values() if item.get("evaluation_scope")}
         curve_list.append(
             {
                 "mode": mode,
                 "ratio": ratio,
                 "model": model,
-                "label": f"{model} · {mode} · ratio={ratio:g}",
+                "training_weighting_policy": weighting_policy,
+                "split_policy": split_policy,
+                "evaluation_scope": next(iter(scopes)) if len(scopes) == 1 else None,
+                "label": label,
                 "exploratory": curve_exploratory,
                 "points": points,
             }

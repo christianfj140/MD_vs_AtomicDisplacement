@@ -115,6 +115,15 @@ class DeepHAutogradDerivativeScriptTests(unittest.TestCase):
 
         def fake_run_command(command, *, cwd, env):
             commands.append(Path(command[0]).name)
+            if len(command) >= 3 and command[1] == "-c" and "autograd_capability" in command[2]:
+                # Fase 1 capability preflight: emulate a real JVP backend.
+                capability = {
+                    "available": True,
+                    "implementation": "torch_forward_ad_jvp",
+                    "output_schema": "hamiltonians_grad_pred_v2",
+                }
+                return {"command": command, "returncode": 0, "stdout": json.dumps(capability),
+                        "stderr": "", "started_at": 1.0, "finished_at": 2.0}
             if Path(command[0]).name == "deeph-preprocess":
                 processed_sample.mkdir(parents=True, exist_ok=True)
                 (processed_sample / "lat.dat").write_text("1 0 0\n0 1 0\n0 0 1\n", encoding="utf-8")
@@ -173,7 +182,8 @@ class DeepHAutogradDerivativeScriptTests(unittest.TestCase):
         ):
             manifest = deeph_autograd.run_deeph_autograd_derivative_predictions(args)
 
-        self.assertEqual(commands, ["deeph-preprocess", "deeph-inference"])
+        # 'python' is the Fase 1 capability preflight; it must run FIRST.
+        self.assertEqual(commands, ["python", "deeph-preprocess", "deeph-inference"])
         self.assertEqual(config_checks, [{"with_grad": True, "task": [3], "grad_atom_indices": [0], "grad_axis_indices": [2]}])
         self.assertEqual(manifest["samples_failed"], 0)
         self.assertEqual(manifest["predicted_derivative_method"], PREDICTED_DERIVATIVE_METHOD_AUTOGRAD_DEEPH)

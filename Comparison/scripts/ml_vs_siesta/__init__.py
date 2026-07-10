@@ -84,6 +84,12 @@ from .mixed_dataset_materialize import (  # noqa: E402
     read_dataset_samples,
     validate_datasets_compatible,
 )
+from .cross_structure_materialize import (  # noqa: E402
+    materialize_cross_structure_dataset,
+    materialize_or_reuse_cross_structure_dataset,
+    plan_cross_structure_dataset,
+    run_cross_structure_payload,
+)
 from .mixing_sweep import (  # noqa: E402
     discover_dataset_sizes,
     plan_mixing_sweep,
@@ -142,7 +148,11 @@ __all__ = [
     "dataset_atom_count",
     "fixed_common_test_ids",
     "materialize_mixed_dataset",
+    "materialize_cross_structure_dataset",
+    "materialize_or_reuse_cross_structure_dataset",
+    "plan_cross_structure_dataset",
     "read_dataset_samples",
+    "run_cross_structure_payload",
     "reserved_small_ids_by_size_for_fixed_common_test",
     "validate_datasets_compatible",
     "discover_dataset_sizes",

@@ -1,5 +1,5 @@
 {
- "description": "Paper-ready mixing sweep over nominal sizes 20..500 (single training pass, no seed replication) using the T600/750-epoch Graph2Mat/DeepH anchors hyperparameters instead of the small pipeline_config.yaml defaults.",
+ "description": "Audit-recommended variant of the paper-ready 20-500 mixing sweep: fixed_stratified_test (small+large fixed test), per_structure loss weighting, 3 selection seeds. Costs ~3x the single-seed run.",
  "action": "train",
  "sizes": [
   20,
@@ -21,7 +21,7 @@
   1.0
  ],
  "seed": 0,
- "split_policy": "fixed_common_test",
+ "split_policy": "fixed_stratified_test",
  "confirm_ghost_species_exemption": true,
  "models": [
   "graph2mat",
@@ -37,10 +37,7 @@
    "correlation": 3,
    "max_ell": 3,
    "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
-   "loss": "graph2mat.metrics.block_type_huber",
-   "loss_kwargs": {
-    "beta": 0.006
-   },
+   "loss": "block_type_mse_per_structure",
    "readout": "edge_node_mix",
    "seed_everything": 1
   },
@@ -59,7 +56,8 @@
    "atom_fea_len": 192,
    "num_l": 4,
    "if_edge_update": true,
-   "seed": 1
+   "seed": 1,
+   "training_weighting_policy": "per_structure"
   }
  },
  "small": {
@@ -129,9 +127,17 @@
   "ghost_exemption_note": "confirm_ghost_species_exemption=true: los datasets small (W90, con Ghost-H) y large (5x5, solo C) tienen especies ghost distintas; la exencion se declara explicitamente aqui."
  },
  "schema": "mixing_payload_schema_v2",
- "training_weighting_policy": "legacy_elementwise",
+ "training_weighting_policy": "per_structure",
  "selection_seeds": [
-  0
+  0,
+  1,
+  2
  ],
- "evaluation_scope_note": "fixed_common_test -> small_only test scope"
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "strict_dataset_validation": true,
+ "require_repository_provenance": true
 }

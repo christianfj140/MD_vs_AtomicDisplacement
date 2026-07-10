@@ -964,6 +964,27 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _cross_structure_metadata(dataset_root: Path) -> dict[str, Any]:
+    path = dataset_root / "cross_structure_dataset_provenance.json"
+    if not path.exists():
+        return {}
+    provenance = _load_json(path)
+    metadata = provenance.get("cross_structure_metadata")
+    if isinstance(metadata, dict) and metadata:
+        return metadata
+    return {
+        "evaluation_mode": provenance.get("evaluation_mode"),
+        "transfer_direction": provenance.get("transfer_direction"),
+        "source_atom_counts": provenance.get("source_atom_counts") or [],
+        "target_atom_counts": provenance.get("target_atom_counts") or [],
+        "source_system_labels": provenance.get("source_system_labels") or [],
+        "target_system_labels": provenance.get("target_system_labels") or [],
+        "source_split_hash": provenance.get("source_split_hash"),
+        "target_split_hash": provenance.get("target_split_hash"),
+        "composite_split_hash": provenance.get("composite_split_hash"),
+    }
+
+
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -3766,6 +3787,7 @@ class Graph2MatDeepHBenchmarkRunner:
             ),
             "checkpoint_manifest": checkpoint_manifest,
             "prediction_outputs": prediction_outputs,
+            "cross_structure_metadata": _cross_structure_metadata(context.dataset_root),
             "extra": extra or {},
         }
         _write_json(context.graph2mat_manifest_path, payload)
@@ -3973,6 +3995,7 @@ class Graph2MatDeepHBenchmarkRunner:
             workspace_root=paths.root,
             seed=seed,
         )
+        raw_mirror["cross_structure_metadata"] = _cross_structure_metadata(graph2mat_context.dataset_root)
         orbital_json = str(options.get("orbital") or deeph_orbital_json_from_raw_mirror(raw_mirror))
         dataset_name = str(options.get("dataset_name") or DEEPh_DEFAULT_DATASET_NAME)
         early_stopping_policy = parse_early_stopping_policy(payload)
@@ -4220,6 +4243,7 @@ class Graph2MatDeepHBenchmarkRunner:
                 if (split_audit or previous.get("split_audit"))
                 else "pending"
             ),
+            "cross_structure_metadata": context.raw_mirror.get("cross_structure_metadata") or {},
             "extra": {**(previous.get("extra") or {}), **(extra or {})},
         }
         write_deeph_json(context.manifest_path, payload)

@@ -731,3 +731,16 @@ full PBC equivalence.
 For strict one-click comparisons, geometry leakage diagnostics are run after
 common frozen tests are built and before cross predictions. Any detected leakage
 invalidates that comparison rather than being hidden in a plot.
+
+## Derivative metric reductions (audit 2026-07-10)
+
+`evaluate_hamiltonian_derivative_metrics.py` now writes, per metric, a
+`*_reductions` block in `derivative_summary.json` with `micro`
+(element-weighted by `dh_union_nnz`), `macro_snapshot` (mean of per-snapshot
+values), `by_domain` (mean per distinct structure size, keyed by
+`dh_matrix_rows`) and `macro_domain` (mean of domain means). Per-sample rows
+add `dh_normalized_frobenius_per_element_eV_per_Ang` (size-comparable) and
+`dh_matrix_rows`. The manifest also records `comparison_kind`
+(`model_fd_vs_siesta_fd` or `model_autograd_vs_siesta_fd`); the
+model-autograd-vs-model-FD comparison lives in the backend reports (see
+`docs/mixing_and_autograd_validation_contract.md`, section 13).

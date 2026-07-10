@@ -13319,11 +13319,25 @@ async function mixRenderChart(payload) {
     })
     .filter((item) => item.points.length)
     .map(({ curve, points }) => ({
-      x: points.map((p) => p.total_size),
+      // Prefer the real training size when the backend recorded it (audit
+      // Fase 8): "dataset size" must mean actual_train_size, not train+test.
+      x: points.map((p) => (p.actual_train_size != null ? p.actual_train_size : p.total_size)),
       y: points.map((p) => Number(p.mae) * MIXING_MAE_EV_TO_MEV),
       mode: "lines+markers",
       name: curve.label,
       line: { dash: curve.mode === "replace" ? "dash" : "solid" },
+      text: points.map((p) => [
+        `train real: ${p.actual_train_size != null ? p.actual_train_size : "?"}`,
+        `total materializado: ${p.total_size}`,
+        p.n_large_train != null ? `large en train: ${p.n_large_train}` : "",
+        p.actual_large_fraction_by_snapshots != null
+          ? `fracción large real: ${(p.actual_large_fraction_by_snapshots * 100).toFixed(1)}%`
+          : "",
+        `seeds: ${p.n_seeds != null ? p.n_seeds : "?"}${p.exploratory ? " (EXPLORATORY)" : ""}`,
+        curve.evaluation_scope ? `test scope: ${curve.evaluation_scope}` : "",
+        curve.training_weighting_policy ? `loss: ${curve.training_weighting_policy}` : "",
+      ].filter(Boolean).join("<br>")),
+      hovertemplate: "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
     }));
   if (!traces.length) {
     window.Plotly.purge(host);

@@ -270,7 +270,7 @@ def deeph_autograd_capability_preflight(python_interpreter: str) -> dict[str, An
         "import json; from deeph.inference.capability import autograd_capability; "
         "print(json.dumps(autograd_capability()))"
     )
-    record = run_command([str(python_interpreter), "-c", script])
+    record = run_command([str(python_interpreter), "-c", script], cwd=Path.cwd(), env=None)
     if int(record["returncode"]) != 0:
         raise DeepHAutogradDerivativePredictionError(
             "capability_unavailable: the DeepH backend has no autograd capability module "

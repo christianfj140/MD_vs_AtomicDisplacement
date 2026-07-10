@@ -357,6 +357,28 @@ def write_csv_rows(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]
         writer.writerows([{key: json_safe(value) for key, value in row.items()} for row in rows])
 
 
+def cross_structure_metadata(dataset_manifest_path: Path | None) -> dict[str, Any]:
+    if dataset_manifest_path is None:
+        return {}
+    provenance = read_json(Path(dataset_manifest_path).parent / "cross_structure_dataset_provenance.json")
+    if not provenance:
+        return {}
+    metadata = provenance.get("cross_structure_metadata")
+    if isinstance(metadata, dict) and metadata:
+        return metadata
+    return {
+        "evaluation_mode": provenance.get("evaluation_mode"),
+        "transfer_direction": provenance.get("transfer_direction"),
+        "source_atom_counts": provenance.get("source_atom_counts") or [],
+        "target_atom_counts": provenance.get("target_atom_counts") or [],
+        "source_system_labels": provenance.get("source_system_labels") or [],
+        "target_system_labels": provenance.get("target_system_labels") or [],
+        "source_split_hash": provenance.get("source_split_hash"),
+        "target_split_hash": provenance.get("target_split_hash"),
+        "composite_split_hash": provenance.get("composite_split_hash"),
+    }
+
+
 def finite_or_none(value: Any) -> float | None:
     result = number(value)
     return result if math.isfinite(result) else None
@@ -1077,6 +1099,7 @@ def aggregate_common_metrics(
         "sample_ids": sorted(g2m_ids | deeph_ids),
         "warnings": warnings,
         "summary_rows": summary_rows,
+        "cross_structure_metadata": cross_structure_metadata(dataset_manifest_path),
         "derivative_summary_rows": derivative_summary_rows,
         "derivative_metrics": {
             "available": bool(derivative_summary_rows),

@@ -792,9 +792,17 @@ def materialize_mixed_dataset(
                     "allow_source_test_in_train=True (NOT scientifically valid)."
                 )
 
-    if output_root.exists():
-        shutil.rmtree(output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
+    # Transactional materialization (audit Fase 10): snapshots are copied into
+    # a .partial-<uuid> sibling; only after EVERY snapshot validates is the
+    # partial renamed to the final output_root and the manifests written. A
+    # dataset dir without frozen_split_manifest.json is not consumable, so a
+    # crash mid-write can never leave an apparently complete dataset.
+    import uuid as _uuid
+
+    partial_root = output_root.with_name(f"{output_root.name}.partial-{_uuid.uuid4().hex[:8]}")
+    if partial_root.exists():
+        shutil.rmtree(partial_root)
+    partial_root.mkdir(parents=True, exist_ok=True)
 
     split_rows: dict[str, list[dict[str, str]]] = {split: [] for split in _SPLITS}
     validation_snapshots: list[dict[str, Any]] = []
@@ -803,16 +811,18 @@ def materialize_mixed_dataset(
     for (merged_id, sample), split in zip(selected, split_assignment):
         idx = per_split_index[split]
         per_split_index[split] += 1
-        dest = output_root / "splits" / split / str(idx)
+        dest = partial_root / "splits" / split / str(idx)
         dest.mkdir(parents=True, exist_ok=True)
         for artifact in sorted(p for p in sample.sample_dir.iterdir() if p.is_file()):
             if artifact.name == "ML_prediction.HSX":
                 continue
             _link_or_copy(artifact, dest / artifact.name, link=link)
         result = validate_snapshot(dest)
+        # Final (post-rename) path in every manifest row.
+        final_dest = output_root / "splits" / split / str(idx)
         validation_snapshots.append(
             {
-                "snapshot_dir": str(dest),
+                "snapshot_dir": str(final_dest),
                 "system_label": result.system_label,
                 "valid": bool(result.valid),
                 "repair_required": False,
@@ -825,7 +835,7 @@ def materialize_mixed_dataset(
         split_rows[split].append(
             {
                 "sample_id": merged_id,
-                "sample_dir": str(dest),
+                "sample_dir": str(final_dest),
                 "split": split,
                 "system_label": result.system_label or "",
                 "source_root": str(sample.source_root),
@@ -836,18 +846,36 @@ def materialize_mixed_dataset(
             }
         )
 
+    all_valid = all(s["valid"] for s in validation_snapshots)
+    artifact_validation = {
+        "contract_name": "joint_graph2mat_deeph_artifact_contract_v1",
+        "valid": all_valid,
+        "status": "validated" if all_valid else "failed_validation",
+        "warnings": [] if all_valid else ["some merged snapshots failed validation"],
+        "snapshots": validation_snapshots,
+    }
+    if not all_valid:
+        # Fail closed: keep a clearly-marked diagnostic dir, never a dataset.
+        (partial_root / "MATERIALIZATION_FAILED.json").write_text(
+            json.dumps(artifact_validation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        failed = [s for s in validation_snapshots if not s["valid"]]
+        raise DatasetMaterializeError(
+            f"{len(failed)} snapshot(s) failed artifact validation; the merged "
+            f"dataset was NOT materialized. Diagnostic partial kept at {partial_root} "
+            f"(first failure: {failed[0]['snapshot_dir']}: "
+            f"{failed[0]['missing_required'] or failed[0]['errors']})."
+        )
+
+    if output_root.exists():
+        shutil.rmtree(output_root)
+    partial_root.rename(output_root)
+
     _write_split_csvs(output_root / "splits", split_rows)
     _copy_dataset_level_files(small_root, large_root, output_root, compat)
     if compat.get("compatibility_report"):
         write_compatibility_report(compat["compatibility_report"], output_root)
 
-    all_valid = all(s["valid"] for s in validation_snapshots)
-    artifact_validation = {
-        "contract_name": "joint_graph2mat_deeph_artifact_contract_v1",
-        "valid": all_valid,
-        "warnings": [] if all_valid else ["some merged snapshots failed validation"],
-        "snapshots": validation_snapshots,
-    }
     (output_root / "artifact_validation.json").write_text(
         json.dumps(artifact_validation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

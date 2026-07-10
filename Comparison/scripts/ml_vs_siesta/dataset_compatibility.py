@@ -229,6 +229,8 @@ def species_activity_report(sample_dir: Path, provenance: dict[str, Any]) -> dic
         "active_atomic_species": active_atomic,
         "active_orbital_species": sorted(orb_counts) if orb_counts else None,
         "unit_cell_orbitals_per_species": orb_counts,
+        "kgrid_monkhorst_pack_diagonal": parse_kgrid_diagonal(text),
+        "lattice_vectors_ang": parse_lattice_vectors_ang(text),
         "kpoint_spacing_per_axis": kpoint_spacing_per_axis(text),
         "dft_scalars": {key: fdf_scalar(text, key) for key in _BLOCKING_SCALAR_KEYS},
     }
@@ -329,14 +331,29 @@ def compare_fingerprints(
 
     small_spacing = small_report.get("kpoint_spacing_per_axis")
     large_spacing = large_report.get("kpoint_spacing_per_axis")
+    if small_report.get("kgrid_monkhorst_pack_diagonal") != large_report.get("kgrid_monkhorst_pack_diagonal"):
+        sampling.append(
+            "raw Monkhorst-Pack grids differ but are evaluated by reciprocal-space spacing: "
+            f"{small_report.get('kgrid_monkhorst_pack_diagonal')} vs "
+            f"{large_report.get('kgrid_monkhorst_pack_diagonal')}"
+        )
+    if small_report.get("lattice_vectors_ang") != large_report.get("lattice_vectors_ang"):
+        sampling.append("lattice vectors/cell dimensions differ; atom count/cell size are allowed cross-structure differences")
     if small_spacing and large_spacing:
+        density_compatible = True
         for axis, (s, l) in enumerate(zip(small_spacing, large_spacing)):
             denom = max(abs(s), abs(l), 1e-12)
             if abs(s - l) / denom > _KDENSITY_REL_TOLERANCE:
+                density_compatible = False
                 blocking.append(
                     f"k-point density differs on axis {axis}: "
                     f"spacing {s:.4f} vs {l:.4f} 1/Ang (> {_KDENSITY_REL_TOLERANCE:.0%})"
                 )
+        if density_compatible and small_spacing != large_spacing:
+            sampling.append(
+                "k-point spacing differs but remains within tolerance: "
+                f"{small_spacing} vs {large_spacing}"
+            )
     else:
         warnings.append("k-point density not comparable (missing kgrid or lattice)")
 

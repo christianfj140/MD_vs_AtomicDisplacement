@@ -1,0 +1,24 @@
+{
+  "schema": "g2m_deeph_cross_structure_run_v1",
+  "action": "preview",
+  "case_id": "graphene_w90_2atom_to_graphene_5x5_50atom",
+  "source_dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid10",
+  "target_dataset_root": "${REPO_ROOT}/Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20",
+  "composite_dataset_root": "${REPO_ROOT}/Comparison/results/graphene_w90_to_5x5_cross_structure/dataset",
+  "run_output_root": "${REPO_ROOT}/Comparison/results/graphene_w90_to_5x5_cross_structure/training",
+  "link": true,
+  "overwrite": false,
+  "allow_regenerate_siesta": false,
+  "confirm_incomplete_hamiltonian_semantics": true,
+  "runner_payload": {
+    "selected_methods": [
+      "graph2mat",
+      "deeph"
+    ],
+    "allow_diagnostic_metrics": false,
+    "metric_fail_policy": "fail_closed",
+    "graph2mat_overrides": {},
+    "deeph": {},
+    "performance": {}
+  }
+}

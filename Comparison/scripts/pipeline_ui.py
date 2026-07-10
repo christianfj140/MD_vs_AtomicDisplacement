@@ -4526,6 +4526,53 @@ def graph2mat_git_metadata(config: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
+def run_inventory_payload() -> dict[str, Any]:
+    """Fase 0 (audit): repo SHAs + imported checkouts + reproducibility status."""
+    from run_inventory import collect_run_inventory
+
+    deeph_python = REPO_ROOT.parent / "DeepH-pack" / ".venv" / "bin" / "python"
+    return collect_run_inventory(
+        deeph_python=str(deeph_python) if deeph_python.exists() else None
+    )
+
+
+def deeph_capabilities_payload() -> dict[str, Any]:
+    """Fase 14 (audit): real DeepH autograd capability from the effective backend."""
+    from run_inventory import git_repository_state
+
+    deeph_repo = REPO_ROOT.parent / "DeepH-pack"
+    deeph_python = deeph_repo / ".venv" / "bin" / "python"
+    payload: dict[str, Any] = {
+        "schema": "deeph_capabilities_ui_payload_v1",
+        "repository": git_repository_state(deeph_repo),
+    }
+    if not deeph_python.exists():
+        payload["autograd"] = {"available": False, "errors": ["deeph_python_not_found"]}
+        return payload
+    try:
+        completed = subprocess.run(
+            [
+                str(deeph_python),
+                "-c",
+                "import json; from deeph.inference.capability import autograd_capability; "
+                "print(json.dumps(autograd_capability()))",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+        )
+        if completed.returncode == 0:
+            payload["autograd"] = json.loads(completed.stdout.strip().splitlines()[-1])
+        else:
+            payload["autograd"] = {
+                "available": False,
+                "errors": ["capability_module_unavailable", completed.stderr.strip()[-500:]],
+            }
+    except Exception as exc:  # noqa: BLE001 - UI payloads must not crash the server
+        payload["autograd"] = {"available": False, "errors": [repr(exc)]}
+    return payload
+
+
 def aggressive_local_performance_defaults() -> dict[str, Any]:
     cores = max(1, os.cpu_count() or 1)
     siesta_jobs = max(1, min(max(1, cores // 2), 8))
@@ -17107,6 +17154,9 @@ class MixingSweepRunner:
             modes = tuple(body.get("modes") or ("add", "replace"))
             ratios = tuple(float(r) for r in (body.get("ratios") or (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)))
             sizes = [int(s) for s in body["sizes"]] if body.get("sizes") else None
+            from ml_vs_siesta.mixing_payload_schema import prevalidate_mixing_payload
+
+            body = prevalidate_mixing_payload(body)
             seed = int(body.get("seed") or 0)
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
             epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
@@ -17365,6 +17415,10 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, mixing_discover_payload(threshold))
             elif path == "/api/mixing/status":
                 json_response(self, MIXING_SWEEP_RUNNER.status())
+            elif path == "/api/deeph/capabilities":
+                json_response(self, deeph_capabilities_payload())
+            elif path == "/api/run-inventory":
+                json_response(self, run_inventory_payload())
             elif path == "/api/mixing-e2e/status":
                 json_response(self, MIXING_E2E_RUNNER.status())
             elif path == "/api/mixing-e2e/logs":

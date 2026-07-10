@@ -181,6 +181,9 @@ def build_frozen_split_manifest(dataset_root: Path, split_root: Path) -> dict[st
             "artifact_paths": artifact_paths,
             "artifact_sha256": artifact_hashes,
         }
+        for key, value in row.items():
+            if key not in frozen_row and value not in (None, ""):
+                frozen_row[key] = value
         for artifact_key, artifact_path in sorted(artifact_paths.items()):
             frozen_row[f"{artifact_key}_path"] = artifact_path
             frozen_row[f"{artifact_key}_sha256"] = artifact_hashes.get(artifact_key, "")

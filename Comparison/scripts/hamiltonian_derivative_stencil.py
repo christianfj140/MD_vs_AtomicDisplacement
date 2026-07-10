@@ -905,6 +905,12 @@ def derivative_sparse_metrics(
         "dh_max_abs_error_union_eV_per_Ang": _max_abs(union_errors),
         "dh_relative_frobenius_ref": ref_error_norm / ref_norm if ref_norm else math.nan,
         "dh_relative_frobenius_union": union_error_norm / ref_union_norm if ref_union_norm else math.nan,
+        # Size-normalized Frobenius (audit Fase 12/16.5): comparable between
+        # 2-atom and 50-atom structures, unlike the absolute norm.
+        "dh_normalized_frobenius_per_element_eV_per_Ang": (
+            union_error_norm / math.sqrt(len(union_support)) if union_support else math.nan
+        ),
+        "dh_matrix_rows": int(reference.shape[0]),
         "dh_relative_l1_union": error_l1_union / ref_l1_union if ref_l1_union else math.nan,
         "dh_cosine_similarity_union": cosine,
         "dh_support_precision": len(intersection) / len(pred_support) if pred_support else math.nan,

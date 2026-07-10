@@ -98,3 +98,19 @@ frozen splits for reproducibility of past runs.
 - Not every archived dataset necessarily satisfies the latest joint artifact,
   material-provenance, derivative, or H-only/S_ref expectations until it is
   explicitly revalidated or re-evaluated.
+
+## Audit 2026-07-10: mixing and autograd validation contract
+
+The small/large mixing and autograd-derivative corrections are documented in
+`docs/mixing_and_autograd_validation_contract.md` (semantics, gates, claim
+ladder) and `docs/audit_corrections_implementation_report.md` (what changed,
+what was measured, what remains). Highlights of remaining limitations:
+
+- Effective composition reports node blocks and matrix elements but not edge
+  blocks (neighbour lists would be required).
+- Derivative metrics expose micro/macro/per-domain reductions; absolute-H
+  metrics keep their historical aggregation.
+- DeepH autograd-vs-FD validation in float32 (production dtype) is only
+  conclusive around delta = 1e-4 Ang (FD cancellation noise elsewhere).
+- `paper_ready` claims additionally require `pinned_clean` repositories; any
+  uncommitted change anywhere downgrades runs to `pinned_dirty`.
