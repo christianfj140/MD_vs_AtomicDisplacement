@@ -12,6 +12,7 @@ from typing import Any
 
 ALLOWED_METRIC_MODES = {"min", "max"}
 DEEPh_VAL_LOSS_RE = re.compile(r"Epoch #(?P<epoch>\d+).*?Val loss:\s*(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)")
+METRIC_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,10 @@ class DeepHEarlyStoppingObserver:
         return self.tracker.metadata()
 
 
+def _references_test_metric(metric: str) -> bool:
+    return "test" in [token.lower() for token in METRIC_TOKEN_RE.findall(metric)]
+
+
 def parse_early_stopping_policy(payload: dict[str, Any] | None) -> EarlyStoppingPolicy | None:
     payload = payload or {}
     raw = payload.get("early_stopping")
@@ -132,7 +137,7 @@ def parse_early_stopping_policy(payload: dict[str, Any] | None) -> EarlyStopping
     metric = str(raw.get("metric") or raw.get("validation_metric_name") or "").strip()
     if not metric:
         raise RuntimeError("early_stopping.metric is required.")
-    if metric.lower() == "test" or metric.lower().startswith("test_") or "test." in metric.lower():
+    if _references_test_metric(metric):
         raise RuntimeError("early_stopping.metric must not reference test metrics.")
     mode = str(raw.get("mode") or raw.get("metric_mode") or "").strip().lower()
     if mode not in ALLOWED_METRIC_MODES:

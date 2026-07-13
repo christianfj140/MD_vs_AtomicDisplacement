@@ -1,0 +1,15 @@
+{
+  "action": "preview",
+  "sources": [
+    "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid10",
+    "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid25",
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20"
+  ],
+  "targets": [
+    "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20"
+  ],
+  "models": ["graph2mat", "deeph"],
+  "epochs": 40,
+  "seed": 0,
+  "confirm_incomplete_hamiltonian_semantics": true
+}

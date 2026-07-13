@@ -322,6 +322,56 @@ def test_cross_structure_records_actual_copy_mode(source_target: tuple[Path, Pat
     assert materialization["linked_artifacts"] == 0
 
 
+@pytest.mark.parametrize(
+    "side,key,match",
+    [
+        ("source", "basis_file_sha256", "Missing orbital basis hash"),
+        ("target", "basis_file_sha256", "Missing orbital basis hash"),
+        ("source", "pseudopotential_sha256", "Missing pseudopotential hash"),
+        ("target", "pseudopotential_sha256", "Missing pseudopotential hash"),
+    ],
+)
+def test_cross_structure_missing_basis_or_pseudopotential_hashes_fail_closed(
+    tmp_path: Path,
+    side: str,
+    key: str,
+    match: str,
+) -> None:
+    source = _make_dataset(tmp_path / "source", n_atoms=2, label="source")
+    target = _make_dataset(tmp_path / "target", n_atoms=50, label="target", kgrid=2, lattice_scale=5.0)
+    root = source if side == "source" else target
+    provenance_path = root / "material_provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance[key] = {}
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(mvs.DatasetCompatibilityError, match=match):
+        mvs.plan_cross_structure_dataset(source, target)
+
+
+def test_cross_structure_materialization_failure_removes_partial_and_output(
+    source_target: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, target = source_target
+    out = tmp_path / "dataset"
+    source_frozen_before = (source / "frozen_split_manifest.json").read_text(encoding="utf-8")
+    target_frozen_before = (target / "frozen_split_manifest.json").read_text(encoding="utf-8")
+
+    def fail_validation(_path: Path):
+        raise RuntimeError("forced validation failure")
+
+    monkeypatch.setattr(csm, "validate_snapshot", fail_validation)
+    with pytest.raises(RuntimeError, match="forced validation failure"):
+        mvs.materialize_cross_structure_dataset(source, target, out)
+
+    assert not out.exists()
+    assert not list(tmp_path.glob("dataset.partial-*"))
+    assert (source / "frozen_split_manifest.json").read_text(encoding="utf-8") == source_frozen_before
+    assert (target / "frozen_split_manifest.json").read_text(encoding="utf-8") == target_frozen_before
+
+
 def test_cross_structure_hamiltonian_semantics_fail_closed_without_confirmation(tmp_path: Path) -> None:
     source = _make_dataset(
         tmp_path / "source",

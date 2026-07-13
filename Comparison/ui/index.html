@@ -33,6 +33,7 @@
           <button class="tab hidden" data-view="run" data-icon="RN" aria-hidden="true" tabindex="-1">Run</button>
           <button class="tab active" data-view="g2m-deeph" data-icon="GD">G2M vs DeepH</button>
           <button class="tab" data-view="mixing-datasets" data-icon="MX">Mixing datasets</button>
+          <button class="tab" data-view="cross-testing" data-icon="CT">Cross testing</button>
           <button class="tab" data-view="terminal" data-icon="TM">Terminal</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -1682,6 +1683,138 @@
               <div id="g2m-deeph-derivative-mae-series-list" class="plot-run-list"></div>
             </div>
             <div id="g2m-deeph-derivative-mae-dataset-chart" class="plot-card full"></div>
+          </section>
+        </section>
+
+        <section id="view-cross-testing" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Entrenar en source × testear en target → MAE vs dataset de entrenamiento</p>
+              <h2>Cross testing</h2>
+              <p class="field-help">
+                Flujo: descubre datasets, revisa el plan de pares source→target, materializa los composites y
+                carga las métricas. No lanza SIESTA; el entrenamiento real Graph2Mat/DeepH solo empieza con «Entrenar sweep».
+              </p>
+            </div>
+            <div class="button-row">
+              <button id="ct-discover" class="button secondary" type="button">Descubrir datasets</button>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">1 · Datasets disponibles</p>
+                <h3>Cualquier dataset validado sirve de source o target</h3>
+                <p class="field-help">Primero carga esta lista. Si los campos del paso 2 están vacíos, sources se rellena automáticamente.</p>
+              </div>
+            </div>
+            <div id="ct-discover-output" class="result-list" aria-live="polite"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">2 · Configurar sweep</p>
+                <h3>Sources (eje X) × Targets (una curva por target)</h3>
+                <p class="field-help">Una ruta de dataset por línea. Cada par source→target se materializa por separado; los incompatibles se omiten con warning.</p>
+              </div>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field"><span>Sources (entrenamiento), una ruta por línea</span>
+                <textarea id="ct-sources" rows="5" spellcheck="false" placeholder="Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid10"></textarea>
+                <small>Datasets donde se entrena. El nº de snapshots de train es el eje X del plot.</small></label>
+              <label class="field"><span>Targets (test), una ruta por línea</span>
+                <textarea id="ct-targets" rows="5" spellcheck="false" placeholder="Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20"></textarea>
+                <small>Datasets donde se predice. Cada target es una curva.</small></label>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Modelos</span>
+                <span class="checkbox-row" role="group" aria-label="Models to train">
+                  <label class="toggle-field inline-toggle"><input id="ct-model-g2m" type="checkbox" checked /> <span>graph2mat</span></label>
+                  <label class="toggle-field inline-toggle"><input id="ct-model-deeph" type="checkbox" checked /> <span>deeph</span></label>
+                </span></label>
+              <label class="field"><span>Epochs (opcional)</span>
+                <input id="ct-epochs" type="number" step="1" placeholder="vacío = default del runner" /></label>
+              <label class="field"><span>Seed</span>
+                <input id="ct-seed" type="number" step="1" value="0" /></label>
+              <label class="field toggle-field">
+                <input id="ct-confirm-hamiltonian" type="checkbox" checked />
+                <span>confirm_incomplete_hamiltonian_semantics</span>
+                <small>Necesario para datasets antiguos sin semántica H-only explícita.</small></label>
+            </div>
+            <div class="button-row">
+              <button id="ct-preview" class="button secondary" type="button">Previsualizar (dry-run)</button>
+              <button id="ct-materialize" class="button secondary" type="button">Materializar composites</button>
+              <button id="ct-train" class="button primary" type="button">Entrenar sweep (real)</button>
+              <span class="inline-status">
+                <span id="ct-status-dot" class="status-dot"></span>
+                <span id="ct-status-text">Idle</span>
+              </span>
+            </div>
+            <p class="field-help">
+              «Entrenar sweep» lanza Graph2Mat/DeepH reales por par (requiere los modelos instalados y GPU).
+              «Materializar» solo prepara los composites source→target.
+            </p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">3 · Payloads</p>
+                <h3>Terminal de acciones</h3>
+                <p class="field-help">Registra los payloads enviados y recibidos desde esta pestaña.</p>
+              </div>
+            </div>
+            <div class="terminal-frame">
+              <div class="terminal-navbar">
+                <span>Cross testing payload log</span>
+                <div class="terminal-actions">
+                  <button id="ct-payload-bottom" class="button ghost small" type="button">Bottom</button>
+                  <button id="ct-payload-clear" class="button ghost small" type="button">Clear view</button>
+                </div>
+              </div>
+              <pre id="ct-payload-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando acciones en Cross testing.</pre>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">4 · Pares del sweep</p>
+                <h3>Plan source→target</h3>
+              </div>
+            </div>
+            <pre id="ct-plan-output" class="log-output" aria-live="polite">—</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">5 · MAE vs dataset de entrenamiento</p>
+                <h3>Una curva por (target, modelo)</h3>
+                <p class="field-help">Carga la demo sintética o las métricas reales del sweep cuando el entrenamiento haya producido h_mae_eV. Se actualiza en vivo por par entrenado.</p>
+              </div>
+            </div>
+            <div class="button-row">
+              <button id="ct-metrics-demo" class="button secondary" type="button">Cargar demo</button>
+              <button id="ct-metrics-real" class="button secondary" type="button">Cargar métricas reales</button>
+            </div>
+            <div class="g2m-deeph-run-selector" aria-label="Cross testing payloads to plot">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Payloads a plotear</strong>
+                  <p class="field-help">Marca un target completo o abrelo para ajustar pares individuales.</p>
+                </div>
+                <div class="run-selector-actions">
+                  <button id="ct-payloads-all" class="button ghost small" type="button">All</button>
+                  <button id="ct-payloads-clear" class="button ghost small" type="button">Clear</button>
+                </div>
+              </div>
+              <div id="ct-payload-status" class="muted-text">Carga métricas demo o reales para elegir payloads.</div>
+              <div id="ct-payload-list" class="plot-run-list"></div>
+            </div>
+            <div id="ct-mae-chart" class="plot-card full"></div>
           </section>
         </section>
 

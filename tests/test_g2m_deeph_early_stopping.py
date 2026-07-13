@@ -75,18 +75,44 @@ class Graph2MatDeepHEarlyStoppingTests(unittest.TestCase):
             tracker.metadata()
 
     def test_selection_ignores_test_metrics(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "must not reference test metrics"):
-            parse_early_stopping_policy(
-                {
-                    "early_stopping": {
-                        "metric": "test_loss",
-                        "mode": "min",
-                        "patience": 2,
-                        "min_delta": 0.0,
-                        "max_epochs": 10,
+        for metric in (
+            "test",
+            "test_loss",
+            "test.loss",
+            "test/loss",
+            "loss/test",
+            "mae_test",
+            "target_test_mae",
+            "final_test_mae",
+        ):
+            with self.subTest(metric=metric), self.assertRaisesRegex(RuntimeError, "must not reference test metrics"):
+                parse_early_stopping_policy(
+                    {
+                        "early_stopping": {
+                            "metric": metric,
+                            "mode": "min",
+                            "patience": 2,
+                            "min_delta": 0.0,
+                            "max_epochs": 10,
+                        }
                     }
-                }
-            )
+                )
+
+    def test_selection_accepts_validation_metrics(self) -> None:
+        for metric in ("val_loss", "validation_loss", "val/mae", "validation.mae"):
+            with self.subTest(metric=metric):
+                policy = parse_early_stopping_policy(
+                    {
+                        "early_stopping": {
+                            "metric": metric,
+                            "mode": "min",
+                            "patience": 2,
+                            "min_delta": 0.0,
+                            "max_epochs": 10,
+                        }
+                    }
+                )
+                self.assertEqual(policy.validation_metric_name, metric)
 
     def test_deeph_observer_stops_after_patience(self) -> None:
         observer = DeepHEarlyStoppingObserver(self.policy(patience=1, min_delta=0.0))

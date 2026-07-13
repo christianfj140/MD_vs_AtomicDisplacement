@@ -90,6 +90,11 @@ from .cross_structure_materialize import (  # noqa: E402
     plan_cross_structure_dataset,
     run_cross_structure_payload,
 )
+from .cross_structure_sweep import (  # noqa: E402
+    aggregate_cross_structure_mae,
+    plan_cross_structure_sweep,
+    run_cross_structure_sweep,
+)
 from .mixing_sweep import (  # noqa: E402
     discover_dataset_sizes,
     plan_mixing_sweep,
@@ -151,6 +156,9 @@ __all__ = [
     "materialize_cross_structure_dataset",
     "materialize_or_reuse_cross_structure_dataset",
     "plan_cross_structure_dataset",
+    "plan_cross_structure_sweep",
+    "run_cross_structure_sweep",
+    "aggregate_cross_structure_mae",
     "read_dataset_samples",
     "run_cross_structure_payload",
     "reserved_small_ids_by_size_for_fixed_common_test",

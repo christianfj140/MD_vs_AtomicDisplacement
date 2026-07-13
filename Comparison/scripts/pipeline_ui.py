@@ -16808,9 +16808,9 @@ def _apply_training_weighting_policy(
     domain = dict(domain_weighting or {})
     if model == "graph2mat":
         if policy == "per_structure":
-            overrides.setdefault("loss", "block_type_mse_per_structure")
+            overrides.setdefault("loss", "graph2mat.core.data.metrics.block_type_mse_per_structure")
         else:
-            overrides.setdefault("loss", "block_type_mse_per_domain")
+            overrides.setdefault("loss", "graph2mat.core.data.metrics.block_type_mse_per_domain")
             overrides.setdefault(
                 "loss_kwargs",
                 {
@@ -16850,6 +16850,7 @@ def _run_mixing_sweep_parallel(
     hyperparams: dict[str, dict[str, Any]] | None = None,
     training_weighting_policy: str = "legacy_elementwise",
     domain_weighting: dict[str, Any] | None = None,
+    early_stopping: dict[str, Any] | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None,
     log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -16983,6 +16984,8 @@ def _run_mixing_sweep_parallel(
         runner_payload["epochs"] = int(epochs)
         runner_payload["graph2mat_overrides"] = {"max_epochs": int(epochs)}
         runner_payload["deeph"] = {"epochs": int(epochs)}
+    if early_stopping:
+        runner_payload["early_stopping"] = dict(early_stopping)
     if thread_count not in (None, "", "null"):
         runner_payload.setdefault("deeph", {})["num_threads"] = int(thread_count)
 
@@ -17170,6 +17173,7 @@ class MixingSweepRunner:
                 body.get("training_weighting_policy") or "legacy_elementwise"
             )
             domain_weighting = body.get("domain_weighting") or None
+            early_stopping = body.get("early_stopping") or None
             # Actions:
             #   "preview"     -> plan only (no writes).
             #   "materialize" -> build merged datasets, no training.
@@ -17232,6 +17236,7 @@ class MixingSweepRunner:
                     hyperparams=hyperparams,
                     training_weighting_policy=training_weighting_policy,
                     domain_weighting=domain_weighting,
+                    early_stopping=early_stopping,
                     progress_fn=progress,
                 )
             else:
@@ -17270,6 +17275,327 @@ class MixingSweepRunner:
 
 
 MIXING_SWEEP_RUNNER = MixingSweepRunner()
+
+
+# --------------------------------------------------------------------------- #
+# Cross-testing sweep backend (source×target pairs -> MAE vs training source).
+# Mirrors the mixing sweep: discover/plan are synchronous; launch runs a
+# background thread. Training is never auto-launched; "preview" is a dry plan,
+# "materialize" builds composites, "train" drives the real runner per pair.
+# --------------------------------------------------------------------------- #
+CROSS_TESTING_SWEEP_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_cross_structure_sweep"
+
+
+def cross_testing_discover_payload() -> dict[str, Any]:
+    """Every validated dataset that can be a source or target (single list)."""
+    mvs = _ml_vs_siesta_module()
+    datasets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if DATASETS_ROOT.exists():
+        for manifest_path in sorted(DATASETS_ROOT.rglob("frozen_split_manifest.json")):
+            dataset_root = manifest_path.parent
+            key = str(dataset_root)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                samples = mvs.read_dataset_samples(dataset_root)
+                n_atoms = mvs.dataset_atom_count(dataset_root)
+            except Exception:  # noqa: BLE001 - skip unreadable datasets
+                continue
+            datasets.append(
+                {
+                    "root": _display_path(dataset_root),
+                    "n_snapshots": len(samples),
+                    "n_atoms": n_atoms,
+                }
+            )
+    return {"datasets": datasets, "datasets_root": _display_path(DATASETS_ROOT)}
+
+
+def _cross_testing_roots_from_body(body: dict[str, Any], key: str) -> list[str]:
+    """Resolve a list of dataset roots from ``body[key]`` (list or N=root map)."""
+    raw = body.get(key)
+    roots: list[str] = []
+    if isinstance(raw, dict):
+        raw = list(raw.values())
+    for root in raw or []:
+        resolved = Path(str(root))
+        if not resolved.is_absolute():
+            resolved = REPO_ROOT / resolved
+        roots.append(str(resolved))
+    return roots
+
+
+def cross_testing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    sources = _cross_testing_roots_from_body(body, "sources")
+    targets = _cross_testing_roots_from_body(body, "targets")
+    return mvs.plan_cross_structure_sweep(
+        sources,
+        targets,
+        confirm_ghost_species_exemption=bool(body.get("confirm_ghost_species_exemption")),
+        confirm_incomplete_hamiltonian_semantics=bool(
+            body.get("confirm_incomplete_hamiltonian_semantics")
+        ),
+    )
+
+
+def _cross_testing_payloads_from_permutations(permutations: Any) -> list[dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    if not isinstance(permutations, list):
+        return []
+    for item in permutations:
+        if not isinstance(item, dict):
+            continue
+        payload_id = str(item.get("payload_id") or f"{item.get('source_id')}__to__{item.get('target_id')}")
+        payloads[payload_id] = {
+            "id": payload_id,
+            "label": f"{item.get('source_id')} → {item.get('target_id')}",
+            "source_id": item.get("source_id"),
+            "target_id": item.get("target_id"),
+            "source_n_snapshots": item.get("source_n_snapshots"),
+            "status": item.get("status"),
+            "output_root": item.get("output_root"),
+            "reason": item.get("reason"),
+        }
+    return sorted(
+        payloads.values(),
+        key=lambda item: (
+            str(item.get("target_id") or ""),
+            int(item.get("source_n_snapshots") or 0),
+            str(item["id"]),
+        ),
+    )
+
+
+def _cross_testing_metrics_payload(
+    records: list[dict[str, Any]], summary: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    mvs = _ml_vs_siesta_module()
+    payload = mvs.aggregate_cross_structure_mae(records)
+    by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
+    metric_ids = set(by_id)
+    for item in _cross_testing_payloads_from_permutations((summary or {}).get("permutations")):
+        key = str(item["id"])
+        if key in by_id:
+            by_id[key] = {**item, **by_id[key]}
+        else:
+            by_id[key] = item
+    for key, item in by_id.items():
+        if key in metric_ids:
+            item["status"] = "trained"
+    payload["payloads"] = sorted(
+        by_id.values(),
+        key=lambda item: (
+            str(item.get("target_id") or ""),
+            int(item.get("source_n_snapshots") or 0),
+            str(item.get("id") or ""),
+        ),
+    )
+    return payload
+
+
+def cross_testing_metrics_demo_payload() -> dict[str, Any]:
+    """Synthetic MAE-vs-source curves so the chart renders before training."""
+    mvs = _ml_vs_siesta_module()
+    records: list[dict[str, Any]] = []
+    for target_id in ("t_5x5",):
+        for source_id, n in (("s_w90_10", 10), ("s_w90_20", 20), ("s_5x5_20", 20)):
+            for model, base in (("graph2mat", 0.9), ("deeph", 1.4)):
+                for seed in range(3):
+                    mae = base / (n ** 0.5) * (1.0 + 0.03 * seed)
+                    records.append(
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "payload_id": f"{source_id}__to__{target_id}",
+                            "source_n_snapshots": n,
+                            "model": model,
+                            "seed": seed,
+                            "h_mae_eV": round(mae, 5),
+                        }
+                    )
+    payload = mvs.aggregate_cross_structure_mae(records)
+    payload["note"] = "Synthetic demo curves (no training); replace with real sweep records."
+    return payload
+
+
+def _cross_testing_launch_fn(runner_payload: dict[str, Any]) -> dict[str, Any]:
+    """Synchronously drive the real runner for one composite cross-structure dataset.
+
+    Same convention as ``_mixing_runner_launch_fn``: returns ``ok=False`` (with an
+    ``error``) when the runner failed or produced no ``h_mae_eV``, so a failed
+    pair is never reported as "trained". Spawns real training subprocesses.
+    """
+    runner = Graph2MatDeepHBenchmarkRunner()
+    models = tuple(
+        runner_payload.get("models")
+        or runner_payload.get("selected_methods")
+        or ("graph2mat", "deeph")
+    )
+    runner.start(runner_payload)
+    while True:
+        status = runner.status()
+        if not status.get("running"):
+            break
+        time.sleep(_MIXING_TRAINING_POLL_SECONDS)
+    results = runner.results()
+    runner_status = results.get("status") or {}
+    metrics = _extract_model_h_mae_eV(results, models)
+    if len(metrics) < len(models):
+        metrics.update(_mixing_metrics_from_common_csv(runner_status.get("run_root"), models))
+    ok = _mixing_run_ok(runner_status)
+    error: str | None = runner_status.get("error") if isinstance(runner_status, dict) else None
+    missing_models = [model for model in models if model not in metrics]
+    if ok and missing_models:
+        ok = False
+        error = error or f"runner produced no h_mae_eV for models: {missing_models}"
+    return {
+        "ok": ok,
+        "error": error,
+        "metrics": metrics,
+        "missing_models": missing_models,
+        "runner_status": runner_status,
+    }
+
+
+class CrossStructureSweepRunner:
+    """Minimal background runner for the cross-structure sweep."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._status: dict[str, Any] = {"state": "idle"}
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._status)
+
+    def _latest_persisted_summary(self) -> dict[str, Any]:
+        summary_path = CROSS_TESTING_SWEEP_OUTPUT_ROOT / "cross_structure_sweep_summary.json"
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def metrics(self) -> dict[str, Any]:
+        with self._lock:
+            summary = self._status.get("summary") or {}
+            live_records = self._status.get("live_records") or []
+            live_payloads = self._status.get("payloads") or []
+        records = summary.get("records") or live_records
+        if not records:
+            persisted = self._latest_persisted_summary()
+            records = persisted.get("records") or []
+            if not summary:
+                summary = persisted
+        payload = _cross_testing_metrics_payload(records, summary)
+        if live_payloads:
+            by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
+            for item in live_payloads:
+                if isinstance(item, dict) and item.get("id") is not None:
+                    by_id.setdefault(str(item["id"]), item)
+            payload["payloads"] = list(by_id.values())
+        return payload
+
+    def start(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("A cross-structure sweep is already running.")
+            self._status = {"state": "starting", "started_at": time.time(), "permutations_done": 0}
+            self._thread = threading.Thread(target=self._run, args=(dict(body),), daemon=True)
+            self._thread.start()
+        return {"state": "started"}
+
+    def _run(self, body: dict[str, Any]) -> None:
+        mvs = _ml_vs_siesta_module()
+        try:
+            sources = _cross_testing_roots_from_body(body, "sources")
+            targets = _cross_testing_roots_from_body(body, "targets")
+            models = tuple(body.get("models") or ("graph2mat", "deeph"))
+            epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
+            performance = body.get("performance") or None
+            seed = int(body.get("seed") or 0)
+            confirm_ghost = bool(body.get("confirm_ghost_species_exemption"))
+            confirm_hamiltonian = bool(body.get("confirm_incomplete_hamiltonian_semantics"))
+            action = str(body.get("action") or "preview")
+            launch_fn = _cross_testing_launch_fn if action == "train" else None
+
+            live_records: list[dict[str, Any]] = []
+
+            def progress(entry: dict[str, Any]) -> None:
+                launch = entry.get("launch") or {}
+                for model, model_metrics in (launch.get("metrics") or {}).items():
+                    h_mae = (model_metrics or {}).get("h_mae_eV")
+                    if h_mae is not None:
+                        live_records.append(
+                            {
+                                "source_id": entry.get("source_id"),
+                                "target_id": entry.get("target_id"),
+                                "payload_id": entry.get("payload_id"),
+                                "source_n_snapshots": entry.get("source_n_snapshots"),
+                                "source_n_atoms": entry.get("source_n_atoms"),
+                                "model": model,
+                                "seed": seed,
+                                "h_mae_eV": float(h_mae),
+                            }
+                        )
+                with self._lock:
+                    self._status["permutations_done"] = self._status.get("permutations_done", 0) + 1
+                    self._status["last_permutation"] = entry
+                    self._status["live_records"] = list(live_records)
+
+            with self._lock:
+                self._status["state"] = "running"
+                self._status["action"] = action
+                try:
+                    plan = mvs.plan_cross_structure_sweep(
+                        sources,
+                        targets,
+                        confirm_ghost_species_exemption=confirm_ghost,
+                        confirm_incomplete_hamiltonian_semantics=confirm_hamiltonian,
+                    )
+                    self._status["payloads"] = _cross_testing_payloads_from_permutations(
+                        plan.get("permutations")
+                    )
+                except Exception:  # noqa: BLE001 - surface later
+                    self._status["payloads"] = []
+
+            summary = mvs.run_cross_structure_sweep(
+                sources,
+                targets,
+                CROSS_TESTING_SWEEP_OUTPUT_ROOT,
+                models=models,
+                epochs=epochs,
+                performance=performance,
+                seed=seed,
+                confirm_ghost_species_exemption=confirm_ghost,
+                confirm_incomplete_hamiltonian_semantics=confirm_hamiltonian,
+                action=action,
+                launch_fn=launch_fn,
+                progress_fn=progress,
+            )
+            with self._lock:
+                self._status.update(
+                    {
+                        "state": "completed",
+                        "finished_at": time.time(),
+                        "summary": summary,
+                        "n_permutations": summary.get("n_permutations"),
+                        "n_trained": summary.get("n_trained", 0),
+                        "n_partial": summary.get("n_partial", 0),
+                        "n_failed": summary.get("n_failed", 0),
+                        "n_incompatible": summary.get("n_incompatible", 0),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - surface to UI
+            with self._lock:
+                self._status.update({"state": "error", "error": str(exc), "finished_at": time.time()})
+
+
+CROSS_TESTING_RUNNER = CrossStructureSweepRunner()
 
 
 class ComparisonUIHandler(BaseHTTPRequestHandler):
@@ -17436,6 +17762,14 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, MIXING_SWEEP_RUNNER.metrics())
             elif path == "/api/mixing/metrics-demo":
                 json_response(self, mixing_metrics_demo_payload())
+            elif path == "/api/cross-testing/discover":
+                json_response(self, cross_testing_discover_payload())
+            elif path == "/api/cross-testing/status":
+                json_response(self, CROSS_TESTING_RUNNER.status())
+            elif path == "/api/cross-testing/metrics":
+                json_response(self, CROSS_TESTING_RUNNER.metrics())
+            elif path == "/api/cross-testing/metrics-demo":
+                json_response(self, cross_testing_metrics_demo_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum":
                 json_response(self, dataset_size_minimum_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum/artifact":
@@ -17541,6 +17875,12 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/mixing/launch":
                 payload = read_json_body(self)
                 json_response(self, MIXING_SWEEP_RUNNER.start(payload), status=HTTPStatus.ACCEPTED)
+            elif path == "/api/cross-testing/plan":
+                payload = read_json_body(self)
+                json_response(self, cross_testing_plan_payload(payload))
+            elif path == "/api/cross-testing/launch":
+                payload = read_json_body(self)
+                json_response(self, CROSS_TESTING_RUNNER.start(payload), status=HTTPStatus.ACCEPTED)
             elif path == "/api/mixing-e2e/start":
                 payload = read_json_body(self)
                 json_response(

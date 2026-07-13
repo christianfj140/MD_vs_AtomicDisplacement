@@ -13439,6 +13439,482 @@ function setupMixingDatasets() {
   });
 }
 
+// --------------------------------------------------------------------------- //
+// Cross testing view: source×target pairs -> MAE vs training source (source).
+// Curve identity is (target, model); x = source training snapshots.
+// --------------------------------------------------------------------------- //
+let ctDiscoverLoaded = false;
+let ctStatusTimer = null;
+let ctLastStatusSignature = "";
+let ctMetricsPayload = null;
+let ctSelectedPayloadIds = new Set();
+let ctPayloadSelectionInitialized = false;
+let ctKnownPayloadIds = new Set();
+let ctOpenPayloadGroups = new Set();
+
+function ctParseRoots(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length);
+}
+
+function ctCollectBody() {
+  const models = [];
+  if (document.getElementById("ct-model-g2m")?.checked) models.push("graph2mat");
+  if (document.getElementById("ct-model-deeph")?.checked) models.push("deeph");
+  const epochsText = mvsValue("ct-epochs", "");
+  const body = {
+    sources: ctParseRoots(mvsValue("ct-sources")),
+    targets: ctParseRoots(mvsValue("ct-targets")),
+    models: models.length ? models : ["graph2mat", "deeph"],
+    seed: Number(mvsValue("ct-seed", "0")) || 0,
+    confirm_incomplete_hamiltonian_semantics: !!document.getElementById("ct-confirm-hamiltonian")?.checked,
+    performance: {
+      compute_accelerator: "gpu",
+      max_parallel_graph2mat_training_jobs: 7,
+      max_parallel_deeph_training_jobs: 5,
+      omp_num_threads: 2,
+      torch_num_threads: 2,
+      torch_float32_matmul_precision: "high",
+      torch_mixed_precision: "bf16-mixed",
+      graph2mat_require_cuequivariance: true,
+    },
+  };
+  if (epochsText !== "") {
+    const epochs = parseInt(epochsText, 10);
+    if (!Number.isNaN(epochs)) body.epochs = epochs;
+  }
+  return body;
+}
+
+function ctSetStatus(text, state) {
+  const dot = document.getElementById("ct-status-dot");
+  const label = document.getElementById("ct-status-text");
+  if (label) label.textContent = text;
+  if (dot) {
+    dot.classList.toggle("running", state === "running" || state === "ok");
+    dot.classList.toggle("error", state === "error");
+  }
+}
+
+function ctAppendPayload(label, payload) {
+  const log = document.getElementById("ct-payload-log");
+  if (!log) return;
+  const text = JSON.stringify(payload, null, 2);
+  const stamp = new Date().toLocaleTimeString();
+  const prefix = log.textContent.trim() === "Esperando acciones en Cross testing." ? "" : `${log.textContent}\n\n`;
+  log.textContent = `${prefix}[${stamp}] ${label}\n${text}`;
+  log.scrollTop = log.scrollHeight;
+}
+
+function ctScrollPayloadLogToBottom() {
+  const log = document.getElementById("ct-payload-log");
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function ctClearPayloadLog() {
+  const log = document.getElementById("ct-payload-log");
+  if (log) log.textContent = "Esperando acciones en Cross testing.";
+}
+
+function ctPayloadsForMetrics(payload) {
+  const fromPayload = Array.isArray(payload?.payloads) ? payload.payloads : [];
+  if (fromPayload.length) return fromPayload;
+  const seen = new Map();
+  for (const curve of payload?.curves || []) {
+    for (const point of curve.points || []) {
+      const id = point.payload_id;
+      if (!id || seen.has(id)) continue;
+      seen.set(id, { id, label: id, target_id: point.target_id, source_n_snapshots: point.x });
+    }
+  }
+  return Array.from(seen.values());
+}
+
+function ctPayloadModels(payload, payloadId) {
+  return Array.from(
+    new Set(
+      (payload?.curves || [])
+        .filter((curve) => (curve.points || []).some((point) => point.payload_id === payloadId))
+        .map((curve) => curve.model)
+        .filter(Boolean)
+    )
+  );
+}
+
+// Ids match the backend's canonical source_id__to__target_id scheme so
+// plan-preview payloads merge with /api/cross-testing/metrics payloads.
+function ctPlanPayloads(plan) {
+  return (plan?.permutations || []).map((item) => ({
+    id: item.payload_id || `${item.source_id}__to__${item.target_id}`,
+    label: `${item.source_id} → ${item.target_id}`,
+    source_id: item.source_id,
+    target_id: item.target_id,
+    source_n_snapshots: item.source_n_snapshots,
+    status: item.status || "planned",
+    output_root: item.output_root,
+    reason: item.reason,
+  }));
+}
+
+function ctMergePayloadLists(existing, extra) {
+  const byId = new Map();
+  for (const item of [...(existing || []), ...(extra || [])]) {
+    if (item?.id == null) continue;
+    byId.set(String(item.id), { ...(byId.get(String(item.id)) || {}), ...item, id: String(item.id) });
+  }
+  return Array.from(byId.values()).sort((a, b) => (
+    String(a.target_id || "").localeCompare(String(b.target_id || "")) ||
+    (Number(a.source_n_snapshots || 0) - Number(b.source_n_snapshots || 0)) ||
+    String(a.id || "").localeCompare(String(b.id || ""))
+  ));
+}
+
+function ctSetMetricsPayload(payload, extraPayloads = []) {
+  ctMetricsPayload = {
+    ...(payload || {}),
+    payloads: ctMergePayloadLists(payload?.payloads || [], extraPayloads),
+  };
+  ctRenderPayloadSelector(ctMetricsPayload);
+  return ctRenderChart(ctMetricsPayload);
+}
+
+function ctPayloadGroups(payload, payloads) {
+  const byGroup = new Map();
+  for (const item of payloads) {
+    const key = item.target_id !== undefined ? `target:${item.target_id}` : "cross";
+    const group = byGroup.get(key) || {
+      key,
+      label: item.target_id !== undefined ? `→ ${item.target_id}` : "Cross testing",
+      items: [],
+    };
+    group.items.push(item);
+    byGroup.set(key, group);
+  }
+  return Array.from(byGroup.values()).map((group) => {
+    const ids = group.items.map((item) => String(item.id));
+    const models = Array.from(
+      new Set(ids.flatMap((id) => ctPayloadModels(payload, id).map(methodDisplayLabel)))
+    ).join("+") || "sin metricas";
+    const statuses = Array.from(new Set(group.items.map((item) => item.status).filter(Boolean))).join(", ");
+    return { ...group, ids, models, statuses };
+  });
+}
+
+function ctUpdatePayloadSelectionUi(payload, groups) {
+  const status = document.getElementById("ct-payload-status");
+  if (status) {
+    const total = (groups || []).reduce((sum, group) => sum + group.items.length, 0);
+    status.textContent = `${ctSelectedPayloadIds.size}/${total} par(es) seleccionados.`;
+  }
+  for (const group of groups || []) {
+    const selected = group.ids.filter((id) => ctSelectedPayloadIds.has(id)).length;
+    const checkbox = document.querySelector(`.ct-payload-group-checkbox[data-group="${CSS.escape(group.key)}"]`);
+    if (checkbox) {
+      checkbox.checked = selected === group.ids.length;
+      checkbox.indeterminate = selected > 0 && selected < group.ids.length;
+    }
+    const meta = document.querySelector(`.ct-payload-group-meta[data-group="${CSS.escape(group.key)}"]`);
+    if (meta) {
+      meta.textContent = [
+        `${selected}/${group.items.length} pares`,
+        group.models,
+        group.statuses ? `status=${group.statuses}` : "",
+      ].filter(Boolean).join(" | ");
+    }
+  }
+}
+
+function ctRenderPayloadSelector(payload) {
+  const list = document.getElementById("ct-payload-list");
+  const status = document.getElementById("ct-payload-status");
+  if (!list || !status) return;
+  const payloads = ctPayloadsForMetrics(payload);
+  const ids = payloads.map((item) => String(item.id));
+  if (!payloads.length) {
+    list.innerHTML = "";
+    status.textContent = "No hay payloads disponibles todavia.";
+    ctSelectedPayloadIds = new Set();
+    ctKnownPayloadIds = new Set();
+    return;
+  }
+  const previous = ctSelectedPayloadIds;
+  const allKnownSelected = ctKnownPayloadIds.size > 0 && Array.from(ctKnownPayloadIds).every((id) => previous.has(id));
+  if (!ctPayloadSelectionInitialized) {
+    ctSelectedPayloadIds = new Set(ids);
+    ctPayloadSelectionInitialized = true;
+  } else if (allKnownSelected) {
+    ctSelectedPayloadIds = new Set(ids);
+  } else {
+    ctSelectedPayloadIds = new Set(ids.filter((id) => previous.has(id)));
+  }
+  ctKnownPayloadIds = new Set(ids);
+  const groups = ctPayloadGroups(payload, payloads);
+  list.innerHTML = groups
+    .map((group) => `
+      <details class="mix-payload-group" data-group="${escapeHtml(group.key)}" ${ctOpenPayloadGroups.has(group.key) ? "open" : ""}>
+        <summary>
+          <input class="ct-payload-group-checkbox" data-group="${escapeHtml(group.key)}" type="checkbox" />
+          <span>
+            <strong>${escapeHtml(group.label)}</strong>
+            <span class="ct-payload-group-meta" data-group="${escapeHtml(group.key)}"></span>
+          </span>
+        </summary>
+        <div class="mix-run-list">
+          ${group.items.map((item) => {
+            const id = String(item.id);
+            const label = item.label || id;
+            const models = ctPayloadModels(payload, id).map(methodDisplayLabel).join("+") || "sin metricas";
+            const detail = [
+              models,
+              item.status ? `status=${item.status}` : "",
+              item.source_n_snapshots !== undefined ? `train=${item.source_n_snapshots}` : "",
+              item.reason ? `motivo=${item.reason}` : "",
+              item.output_root || "",
+            ].filter(Boolean).join(" | ");
+            return `
+              <label class="mix-run-option">
+                <input class="ct-payload-checkbox" type="checkbox" value="${escapeHtml(id)}" ${ctSelectedPayloadIds.has(id) ? "checked" : ""} />
+                <span><strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span></span>
+              </label>
+            `;
+          }).join("")}
+        </div>
+      </details>
+    `)
+    .join("");
+  ctUpdatePayloadSelectionUi(payload, groups);
+}
+
+async function ctDiscover() {
+  const payload = await request("/api/cross-testing/discover");
+  ctAppendPayload("GET /api/cross-testing/discover", payload);
+  ctDiscoverLoaded = true;
+  mvsRenderPills("ct-discover-output", [
+    ["Datasets", String((payload.datasets || []).length)],
+    ["Datasets root", payload.datasets_root],
+  ]);
+  const sourcesBox = document.getElementById("ct-sources");
+  if (sourcesBox && !sourcesBox.value.trim() && (payload.datasets || []).length) {
+    sourcesBox.value = payload.datasets.slice(0, 40).map((d) => d.root).join("\n");
+  }
+  await ctRefreshAvailablePayloads({ silent: true });
+}
+
+async function ctPreview() {
+  const body = ctCollectBody();
+  ctAppendPayload("POST /api/cross-testing/plan request", body);
+  const plan = await request("/api/cross-testing/plan", { method: "POST", body: JSON.stringify(body) });
+  ctAppendPayload("POST /api/cross-testing/plan response", plan);
+  const output = document.getElementById("ct-plan-output");
+  if (output) {
+    const lines = (plan.permutations || []).map(
+      (p) => `  ${p.source_id} → ${p.target_id} · ${p.status}` +
+        (p.status === "compatible" ? ` (train=${p.source_n_snapshots})` : ` (${p.reason || ""})`)
+    );
+    output.textContent =
+      `Pares: ${plan.n_permutations} · ${plan.n_compatible} compatibles · ${plan.n_incompatible} incompatibles\n` +
+      (plan.warnings?.length ? `Warnings: ${plan.warnings.join("; ")}\n` : "") +
+      lines.join("\n");
+  }
+  await ctSetMetricsPayload(ctMetricsPayload || {}, ctPlanPayloads(plan));
+}
+
+async function ctLaunch(action, statusText) {
+  const body = ctCollectBody();
+  body.action = action;
+  ctAppendPayload("POST /api/cross-testing/launch request", body);
+  const payload = await request("/api/cross-testing/launch", { method: "POST", body: JSON.stringify(body) });
+  ctAppendPayload("POST /api/cross-testing/launch response", payload);
+  ctLastStatusSignature = "";
+  ctSetStatus(statusText, "running");
+  if (ctStatusTimer) clearInterval(ctStatusTimer);
+  ctStatusTimer = setInterval(() => {
+    ctPollStatus().catch(() => {});
+  }, 1500);
+}
+
+async function ctMaterialize() {
+  await ctLaunch("materialize", "Materializando…");
+}
+
+async function ctTrain() {
+  if (!window.confirm(
+    "Entrenar el sweep lanza Graph2Mat/DeepH reales por par source→target " +
+      "(requiere modelos instalados y GPU). ¿Continuar?"
+  )) {
+    return;
+  }
+  await ctLaunch("train", "Entrenando sweep…");
+}
+
+async function ctPollStatus() {
+  const status = await request("/api/cross-testing/status");
+  const signature = JSON.stringify({
+    state: status.state,
+    action: status.action,
+    done: status.permutations_done,
+    failed: status.n_failed,
+    partial: status.n_partial,
+    incompatible: status.n_incompatible,
+    records: (status.live_records || []).length,
+    error: status.error || "",
+  });
+  if (signature !== ctLastStatusSignature) {
+    ctAppendPayload("GET /api/cross-testing/status", status);
+    ctLastStatusSignature = signature;
+  }
+  const done = status.permutations_done || 0;
+  if (status.state === "completed") {
+    const failed = status.n_failed || 0;
+    const partial = status.n_partial || 0;
+    let text = `Completado (${status.n_permutations} pares)`;
+    let level = "ok";
+    if (failed || partial) {
+      text += ` · ${failed} fallidos, ${partial} parciales`;
+      level = failed ? "error" : "warning";
+    }
+    ctSetStatus(text, level);
+    if (ctStatusTimer) clearInterval(ctStatusTimer);
+    ctStatusTimer = null;
+    ctLoadMetrics(false).catch(() => {});
+  } else if (status.state === "error") {
+    ctSetStatus(`Error: ${status.error || ""}`, "error");
+    if (ctStatusTimer) clearInterval(ctStatusTimer);
+    ctStatusTimer = null;
+  } else if (status.state === "running" || status.state === "starting") {
+    const trained = (status.live_records || []).length;
+    ctSetStatus(`En curso… ${done} pares · ${trained} MAE registrados`, "running");
+    if (status.action === "train" && trained > 0) {
+      ctLoadMetrics(false).catch(() => {});
+    }
+  } else {
+    ctSetStatus("Idle", "");
+  }
+}
+
+async function ctRenderChart(payload) {
+  const host = document.getElementById("ct-mae-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const traces = (payload.curves || [])
+    .map((curve) => {
+      const points = (curve.points || []).filter((point) => ctSelectedPayloadIds.has(point.payload_id));
+      return { curve, points };
+    })
+    .filter((item) => item.points.length)
+    .map(({ curve, points }) => ({
+      x: points.map((p) => (p.x != null ? p.x : p.total_size)),
+      y: points.map((p) => Number(p.mae) * 1000),
+      mode: "lines+markers",
+      name: curve.label,
+      text: points.map((p) => [
+        `source: ${p.source_id}`,
+        `target: ${p.target_id}`,
+        `snapshots train: ${p.x != null ? p.x : "?"}`,
+        `model: ${curve.model}`,
+        `seeds: ${p.n_seeds != null ? p.n_seeds : "?"}${p.exploratory ? " (EXPLORATORY)" : ""}`,
+      ].filter(Boolean).join("<br>")),
+      hovertemplate: "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
+    }));
+  if (!traces.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = `<p class="field-help">${
+      !(payload.curves || []).length
+        ? "Sin datos de MAE todavía (entrena el sweep o carga la demo)."
+        : ctSelectedPayloadIds.size
+          ? "Los payloads seleccionados no tienen metricas disponibles todavia."
+          : "Selecciona al menos un payload para ver sus metricas en el plot."
+    }</p>`;
+    return;
+  }
+  window.Plotly.newPlot(
+    host,
+    traces,
+    {
+      title: "MAE vs dataset de entrenamiento (cross testing)",
+      xaxis: { title: "Snapshots de entrenamiento (source)" },
+      yaxis: { title: "Hamiltonian MAE (meV)" },
+      margin: { l: 60, r: 20, t: 40, b: 50 },
+      height: 460,
+    },
+    { displayModeBar: false, responsive: true }
+  );
+}
+
+async function ctLoadMetrics(demo, { silent = false } = {}) {
+  const path = demo ? "/api/cross-testing/metrics-demo" : "/api/cross-testing/metrics";
+  const payload = await request(path);
+  ctAppendPayload(`GET ${path}`, payload);
+  await ctSetMetricsPayload(payload);
+  if (!silent && !demo && !(payload.curves || []).length) {
+    showToast("Sin métricas reales todavía; usa la demo o entrena el sweep.");
+  }
+}
+
+async function ctRefreshAvailablePayloads({ silent = false } = {}) {
+  await ctLoadMetrics(false, { silent });
+  const body = ctCollectBody();
+  if (!(body.sources || []).length || !(body.targets || []).length) return;
+  const plan = await request("/api/cross-testing/plan", { method: "POST", body: JSON.stringify(body) });
+  if (!silent) ctAppendPayload("POST /api/cross-testing/plan response", plan);
+  await ctSetMetricsPayload(ctMetricsPayload || {}, ctPlanPayloads(plan));
+}
+
+function ctSetAllPayloads(selected) {
+  const payloads = ctPayloadsForMetrics(ctMetricsPayload);
+  ctPayloadSelectionInitialized = true;
+  ctSelectedPayloadIds = new Set(selected ? payloads.map((item) => String(item.id)) : []);
+  ctRenderPayloadSelector(ctMetricsPayload);
+  ctRenderChart(ctMetricsPayload || {}).catch((error) => showToast(error.message));
+}
+
+function setupCrossTesting() {
+  mvsBind("ct-discover", "click", ctDiscover);
+  mvsBind("ct-preview", "click", ctPreview);
+  mvsBind("ct-materialize", "click", ctMaterialize);
+  mvsBind("ct-train", "click", ctTrain);
+  mvsBind("ct-metrics-demo", "click", () => ctLoadMetrics(true));
+  mvsBind("ct-metrics-real", "click", () => ctLoadMetrics(false));
+  mvsBind("ct-payload-bottom", "click", ctScrollPayloadLogToBottom);
+  mvsBind("ct-payload-clear", "click", ctClearPayloadLog);
+  mvsBind("ct-payloads-all", "click", () => ctSetAllPayloads(true));
+  mvsBind("ct-payloads-clear", "click", () => ctSetAllPayloads(false));
+  document.getElementById("ct-payload-list")?.addEventListener("change", (event) => {
+    const target = event.target;
+    const payloads = ctPayloadsForMetrics(ctMetricsPayload);
+    const groups = ctPayloadGroups(ctMetricsPayload, payloads);
+    ctPayloadSelectionInitialized = true;
+    if (target?.classList?.contains("ct-payload-group-checkbox")) {
+      const details = target.closest(".mix-payload-group");
+      details?.querySelectorAll(".ct-payload-checkbox").forEach((node) => {
+        node.checked = target.checked;
+        if (target.checked) ctSelectedPayloadIds.add(node.value);
+        else ctSelectedPayloadIds.delete(node.value);
+      });
+    } else if (target?.classList?.contains("ct-payload-checkbox")) {
+      if (target.checked) ctSelectedPayloadIds.add(target.value);
+      else ctSelectedPayloadIds.delete(target.value);
+    } else {
+      return;
+    }
+    ctUpdatePayloadSelectionUi(ctMetricsPayload, groups);
+    ctRenderChart(ctMetricsPayload || {}).catch((error) => showToast(error.message));
+  });
+  document.getElementById("ct-payload-list")?.addEventListener("toggle", (event) => {
+    const target = event.target;
+    if (!target?.classList?.contains("mix-payload-group")) return;
+    const key = target.dataset.group;
+    if (!key) return;
+    if (target.open) ctOpenPayloadGroups.add(key);
+    else ctOpenPayloadGroups.delete(key);
+  }, true);
+  document.getElementById("ct-payload-list")?.addEventListener("click", (event) => {
+    if (event.target?.classList?.contains("ct-payload-group-checkbox")) event.stopPropagation();
+  });
+}
+
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -13469,6 +13945,12 @@ function setupTabs() {
         loadG2MDeepHPlotRuns({ preserveSelection: true })
           .then(() => loadG2MDeepHDerivativeMetrics())
           .catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "cross-testing") {
+        if (!ctDiscoverLoaded) {
+          ctDiscover().catch((error) => showToast(error.message));
+        } else {
+          ctRefreshAvailablePayloads({ silent: true }).catch((error) => showToast(error.message));
+        }
       } else if (tab.dataset.view === "terminal") {
         renderTerminalView();
         Promise.all([pollMixingE2ELogs(), pollMixingTerminalStatus()])
@@ -13864,6 +14346,7 @@ async function boot() {
   setupEvents();
   setupMlVsSiesta();
   setupMixingDatasets();
+  setupCrossTesting();
   const venvActivateInput = document.getElementById("venv-activate-command");
   if (venvActivateInput && !String(venvActivateInput.value || "").trim()) {
     venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;
