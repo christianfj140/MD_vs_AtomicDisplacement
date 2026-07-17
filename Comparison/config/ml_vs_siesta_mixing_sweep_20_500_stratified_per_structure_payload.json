@@ -38,8 +38,7 @@
    "max_ell": 3,
    "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
    "loss": "block_type_mse_per_structure",
-   "readout": "edge_node_mix",
-   "seed_everything": 1
+   "readout": "edge_node_mix"
   },
   "deeph": {
    "batch_size": 4,
@@ -56,7 +55,6 @@
    "atom_fea_len": 192,
    "num_l": 4,
    "if_edge_update": true,
-   "seed": 1,
    "training_weighting_policy": "per_structure"
   }
  },

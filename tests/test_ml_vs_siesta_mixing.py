@@ -989,6 +989,35 @@ def _write_common_metrics_csv(run_root: Path, model: str, h_mae: float) -> None:
     )
 
 
+def test_parallel_sweep_seed_overrides_payload_hyperparam_seed(small_large, tmp_path, monkeypatch):
+    """The sweep seed must reach the training overrides, beating any payload
+    hyperparam. Otherwise every replicate trains from an identical init and the
+    error bars only measure dataset selection, not optimization variance."""
+    import pipeline_ui as ui
+
+    small, large = small_large
+    captured = []
+
+    class _Capturing(_FakeParallelBenchmarkRunner):
+        def start(self, payload):
+            captured.append(payload)
+            super().start(payload)
+
+    monkeypatch.setattr(ui, "Graph2MatDeepHBenchmarkRunner", _Capturing)
+    ui._run_mixing_sweep_parallel(
+        {8: str(small)}, {8: str(large)}, tmp_path / "out",
+        sizes=None, modes=("add",), ratios=(1.0,), seed=7,
+        models=("graph2mat", "deeph"), epochs=None, performance=None,
+        # Pinned seeds, exactly as the shipped mixing payloads used to carry.
+        hyperparams={"graph2mat": {"seed_everything": 1}, "deeph": {"seed": 1}},
+        progress_fn=None,
+    )
+    runs = captured[0]["training_sweep"]["manual_runs"]
+    by_model = {r["model"]: r["overrides"] for r in runs}
+    assert by_model["graph2mat"]["seed_everything"] == 7
+    assert by_model["deeph"]["seed"] == 7
+
+
 def test_parallel_sweep_marks_partial_when_one_model_missing(small_large, tmp_path, monkeypatch):
     import pipeline_ui as ui
 

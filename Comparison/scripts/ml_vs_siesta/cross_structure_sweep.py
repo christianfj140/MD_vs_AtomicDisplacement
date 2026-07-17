@@ -353,8 +353,10 @@ def _runner_payload(
     }
     graph2mat_overrides = dict((hyperparams or {}).get("graph2mat") or {})
     deeph_options = dict((hyperparams or {}).get("deeph") or {})
-    graph2mat_overrides.setdefault("seed_everything", int(seed))
-    deeph_options.setdefault("seed", int(seed))
+    # Assign, not setdefault: a payload hyperparam must never silently pin the
+    # training seed across replicates of a multi-seed sweep.
+    graph2mat_overrides["seed_everything"] = int(seed)
+    deeph_options["seed"] = int(seed)
     if epochs is not None:
         epochs = int(epochs)
         payload["epochs"] = epochs

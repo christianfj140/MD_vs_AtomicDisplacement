@@ -41,8 +41,7 @@
    "loss_kwargs": {
     "beta": 0.006
    },
-   "readout": "edge_node_mix",
-   "seed_everything": 1
+   "readout": "edge_node_mix"
   },
   "deeph": {
    "batch_size": 4,
@@ -58,8 +57,7 @@
    "gauss_stop": 6,
    "atom_fea_len": 192,
    "num_l": 4,
-   "if_edge_update": true,
-   "seed": 1
+   "if_edge_update": true
   }
  },
  "small": {

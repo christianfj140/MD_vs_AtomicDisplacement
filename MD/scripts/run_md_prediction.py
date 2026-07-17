@@ -10,6 +10,7 @@ import shutil
 import sys
 import glob
 import traceback
+import json
 from pathlib import Path
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
@@ -139,6 +140,61 @@ def validate_prediction_outputs(predict_structs: str, output_file: str) -> None:
         raise RuntimeError("Empty prediction outputs: " + ", ".join(empty[:10]))
 
 
+def _basis_labels(pattern: str) -> set[str]:
+    return {Path(path).name.removesuffix(".ion.xml") for path in glob.glob(pattern)}
+
+
+def _sanitize_prediction_fdf(path: Path, labels: set[str]) -> None:
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        lower = stripped.lower()
+        if lower.startswith("numberofspecies"):
+            out.append(f"NumberOfSpecies        {len(labels)}")
+            i += 1
+            continue
+        if lower == "%block chemicalspecieslabel":
+            out.append(lines[i])
+            i += 1
+            while i < len(lines) and not lines[i].strip().lower().startswith("%endblock"):
+                parts = lines[i].split()
+                if len(parts) >= 3 and parts[2] in labels:
+                    out.append(lines[i])
+                i += 1
+            if i < len(lines):
+                out.append(lines[i])
+                i += 1
+            continue
+        if lower == "%block pao.basis":
+            out.append(lines[i])
+            i += 1
+            keep = True
+            while i < len(lines) and not lines[i].strip().lower().startswith("%endblock"):
+                parts = lines[i].split()
+                if lines[i] and not lines[i][0].isspace() and parts:
+                    keep = parts[0] in labels
+                if keep:
+                    out.append(lines[i])
+                i += 1
+            if i < len(lines):
+                out.append(lines[i])
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def sanitize_prediction_structures_for_basis(predict_structs: str, basis_files: str) -> None:
+    labels = _basis_labels(basis_files)
+    if not labels:
+        return
+    for fdf in glob.glob(predict_structs):
+        _sanitize_prediction_fdf(Path(fdf), labels)
+
+
 def main() -> int:
     config = load_pipeline_config()
     pipeline_paths = paths(config)
@@ -159,11 +215,24 @@ def main() -> int:
         dataset_dir=pipeline_paths["dataset_dir"],
         training_dir=pipeline_paths["training_dir"],
     )
+    checkpoint_manifest_path = pipeline_paths["training_dir"] / "checkpoint_manifest.json"
+    if checkpoint_manifest_path.is_file():
+        checkpoint_manifest = json.loads(checkpoint_manifest_path.read_text(encoding="utf-8"))
+        basis_files = checkpoint_manifest.get("predict_metrics_basis_files")
+        if checkpoint_manifest.get("predict_metrics_only") and basis_files:
+            config["training"]["data"]["basis_files"] = str(basis_files)
     ckpt_path = resolve_checkpoint(config)
     os.chdir(pipeline_paths["training_dir"])
 
     training_data = config["training"]["data"]
     prediction = config["prediction"]
+    if checkpoint_manifest_path.is_file():
+        checkpoint_manifest = json.loads(checkpoint_manifest_path.read_text(encoding="utf-8"))
+        if checkpoint_manifest.get("predict_metrics_only") and checkpoint_manifest.get("predict_metrics_basis_files"):
+            sanitize_prediction_structures_for_basis(
+                str(prediction["predict_structs"]),
+                str(training_data["basis_files"]),
+            )
     allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(
         str(pipeline_paths["training_dir"] / ckpt_path),

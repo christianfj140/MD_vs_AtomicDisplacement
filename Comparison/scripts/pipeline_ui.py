@@ -16989,6 +16989,15 @@ def _run_mixing_sweep_parallel(
         dataset_id = f"perm_{i}"
         for model in models:
             overrides: dict[str, Any] = dict((hyperparams or {}).get(model) or {})
+            # The runner only reads the training seed from overrides
+            # (seed_everything / seed); the manual_run "seed" field below is
+            # bookkeeping. The sweep seed must win over any payload
+            # hyperparam, otherwise every replicate trains from an identical
+            # init and the error bars only measure dataset selection.
+            if model == "graph2mat":
+                overrides["seed_everything"] = int(seed)
+            elif model == "deeph":
+                overrides["seed"] = int(seed)
             if epochs is not None:
                 if model == "graph2mat":
                     overrides["max_epochs"] = int(epochs)

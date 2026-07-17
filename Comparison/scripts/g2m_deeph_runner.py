@@ -7749,6 +7749,22 @@ class Graph2MatDeepHBenchmarkRunner:
                 relative = f"lightning_logs/existing/checkpoints/{checkpoint.name}"
         staged_checkpoint = context.training_dir / str(relative)
         self._link_or_copy_file(checkpoint, staged_checkpoint)
+        basis_glob = None
+        basis_by_species = (
+            (manifest.get("graph2mat_config_provenance") or {})
+            .get("graph2mat", {})
+            .get("basis_files_by_species", {})
+        )
+        if isinstance(basis_by_species, dict) and basis_by_species:
+            basis_dir = context.training_dir / "predict_metrics_checkpoint_basis"
+            for item in basis_by_species.values():
+                if not isinstance(item, dict):
+                    continue
+                source = self._manifest_path_value(item.get("target") or item.get("source"), base_dir=training_dir)
+                if source is not None and source.exists():
+                    self._link_or_copy_file(source, basis_dir / source.name)
+            if sorted(basis_dir.glob("*.ion.xml")):
+                basis_glob = _relative_pattern(basis_dir / "*.ion.xml", context.training_dir)
         staged_manifest = {
             **manifest,
             "checkpoint_path": str(staged_checkpoint),
@@ -7757,6 +7773,7 @@ class Graph2MatDeepHBenchmarkRunner:
             "source_training_dir": str(training_dir),
             "source_checkpoint_path": str(checkpoint),
             "predict_metrics_only": True,
+            "predict_metrics_basis_files": basis_glob,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
         _write_json(context.training_dir / "checkpoint_manifest.json", staged_manifest)
