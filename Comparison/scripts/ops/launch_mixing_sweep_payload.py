@@ -14,7 +14,7 @@ SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from run_mixing_e2e_payload_once import _run_mixing_payload, read_json  # noqa: E402
+from run_mixing_e2e_payload_once import _run_mixing_payload_seeds, read_json  # noqa: E402
 
 
 def _log(line: str) -> None:
@@ -41,26 +41,39 @@ def main() -> int:
         f"temporal_gap={payload.get('temporal_gap')} "
         f"training_weighting_policy={payload.get('training_weighting_policy')}\n"
     )
-    summary: dict[str, Any] = _run_mixing_payload(payload, output_root, log_fn=_log)
+    # _run_mixing_payload_seeds honors "seeds": [...] (one sweep per seed under
+    # seed<N>/ plus the aggregated MAE-vs-size payload) and falls back to the
+    # single "seed" run otherwise. Launching the single-seed path directly
+    # would silently ignore a multi-seed payload.
+    summary: dict[str, Any] = _run_mixing_payload_seeds(payload, output_root, log_fn=_log)
     _log("[LAUNCH] completed\n")
-    _log(
-        json.dumps(
-            {
-                key: summary.get(key)
-                for key in (
-                    "n_permutations",
-                    "n_trained",
-                    "n_partial",
-                    "n_failed",
-                    "parallel_run_root",
-                    "training_weighting_policy",
-                )
+    if summary.get("per_seed") is not None:
+        digest: dict[str, Any] = {
+            "seeds": summary.get("seeds"),
+            "n_seeds": summary.get("n_seeds"),
+            "exploratory": summary.get("exploratory"),
+            "n_records": len(summary.get("records") or []),
+            "per_seed": {
+                str(item.get("seed")): {
+                    key: (item.get("summary") or {}).get(key)
+                    for key in ("n_permutations", "n_trained", "n_partial", "n_failed")
+                }
+                for item in summary.get("per_seed") or []
             },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
+        }
+    else:
+        digest = {
+            key: summary.get(key)
+            for key in (
+                "n_permutations",
+                "n_trained",
+                "n_partial",
+                "n_failed",
+                "parallel_run_root",
+                "training_weighting_policy",
+            )
+        }
+    _log(json.dumps(digest, indent=2, sort_keys=True) + "\n")
     return 0
 
 

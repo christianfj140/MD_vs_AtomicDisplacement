@@ -124,7 +124,10 @@ def aligned_rmsd(
         u_matrix, _singular_values, vt_matrix = np.linalg.svd(covariance)
         correction = np.eye(3)
         correction[2, 2] = np.linalg.det(vt_matrix.T @ u_matrix.T)
-        rotation = vt_matrix.T @ correction @ u_matrix.T
+        # Row-vector Kabsch: minimizing ||P R - Q|| over rotations gives
+        # R = U diag(1,1,det) V^T. The transposed composition rotates the
+        # wrong way and reports ~2*theta mismatch for a rotated duplicate.
+        rotation = u_matrix @ correction @ vt_matrix
         aligned = left_centered @ rotation
         delta = aligned - right_centered
         return float(np.sqrt(np.mean(np.sum(delta * delta, axis=1))))

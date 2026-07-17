@@ -13811,26 +13811,44 @@ async function ctRenderChart(payload) {
   const host = document.getElementById("ct-mae-chart");
   if (!host) return;
   await ensurePlotlyLoaded();
-  const traces = (payload.curves || [])
-    .map((curve) => {
-      const points = (curve.points || []).filter((point) => ctSelectedPayloadIds.has(point.payload_id));
-      return { curve, points };
-    })
-    .filter((item) => item.points.length)
-    .map(({ curve, points }) => ({
+  const markerSymbol = (point) =>
+    String(point.source_id || "").includes("5x5") && String(point.target_id || "").includes("w90")
+      ? "x"
+      : "circle";
+  const directionLabel = (point) => markerSymbol(point) === "x" ? "5x5 -> w90" : "w90 -> 5x5";
+  const grouped = new Map();
+  (payload.curves || []).forEach((curve) => {
+    (curve.points || [])
+      .filter((point) => ctSelectedPayloadIds.has(point.payload_id))
+      .forEach((point) => {
+        const direction = directionLabel(point);
+        const key = `${curve.model}::${direction}`;
+        if (!grouped.has(key)) grouped.set(key, { curve, direction, points: [] });
+        grouped.get(key).points.push(point);
+      });
+  });
+  const traces = Array.from(grouped.values()).map(({ curve, direction, points }) => {
+    points.sort((a, b) => (a.x ?? a.total_size ?? 0) - (b.x ?? b.total_size ?? 0));
+    return {
       x: points.map((p) => (p.x != null ? p.x : p.total_size)),
       y: points.map((p) => Number(p.mae) * 1000),
       mode: "lines+markers",
-      name: curve.label,
+      name: `${curve.model} · ${direction}`,
+      marker: {
+        symbol: points.map(markerSymbol),
+        size: 9,
+      },
       text: points.map((p) => [
         `source: ${p.source_id}`,
         `target: ${p.target_id}`,
+        `direction: ${directionLabel(p)}`,
         `snapshots train: ${p.x != null ? p.x : "?"}`,
         `model: ${curve.model}`,
         `seeds: ${p.n_seeds != null ? p.n_seeds : "?"}${p.exploratory ? " (EXPLORATORY)" : ""}`,
       ].filter(Boolean).join("<br>")),
       hovertemplate: "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
-    }));
+    };
+  });
   if (!traces.length) {
     window.Plotly.purge(host);
     host.innerHTML = `<p class="field-help">${

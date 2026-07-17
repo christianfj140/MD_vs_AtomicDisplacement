@@ -8163,9 +8163,14 @@ class Graph2MatDeepHBenchmarkRunner:
             if not source.exists():
                 continue
             target = model_root / dirname
-            if target.exists():
+            if target.exists() or target.is_symlink():
                 continue
-            shutil.copytree(source, target)
+            # ponytail: symlink instead of copytree — prediction stages only read
+            # these; copying tripled disk usage on large derivative campaigns.
+            try:
+                os.symlink(os.path.relpath(source, model_root), target, target_is_directory=True)
+            except OSError:
+                shutil.copytree(source, target)
         manifest = common_root / "derivative_stencil_manifest.json"
         if manifest.exists():
             target = model_root / "derivative_stencil_manifest.json"

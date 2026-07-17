@@ -197,6 +197,27 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
         self.assertEqual(status["stage"], "idle")
         self.assertEqual(status["contract_name"], "joint_graph2mat_deeph_artifact_contract_v1")
 
+    def test_materialize_derivative_model_root_symlinks_instead_of_copying(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            common_root = Path(tmp) / "derivative_workflow"
+            (common_root / "siesta_hamiltonians" / "md_0_base").mkdir(parents=True)
+            (common_root / "siesta_hamiltonians" / "md_0_base" / "md_0_base.HSX").write_bytes(b"x" * 128)
+            (common_root / "structures" / "md_0_base").mkdir(parents=True)
+            (common_root / "derivative_stencil_manifest.json").write_text("{}", encoding="utf-8")
+            model_root = common_root / "graph2mat_derivative_result"
+            runner = Graph2MatDeepHBenchmarkRunner()
+            runner._materialize_derivative_model_root(common_root, model_root)
+            for dirname in ("siesta_hamiltonians", "structures"):
+                target = model_root / dirname
+                self.assertTrue(target.is_symlink(), f"{dirname} should be a symlink, not a copy")
+                self.assertTrue((target / "md_0_base").is_dir())
+            self.assertEqual(
+                (model_root / "siesta_hamiltonians" / "md_0_base" / "md_0_base.HSX").read_bytes(),
+                b"x" * 128,
+            )
+            # Re-running must be a no-op, not an error.
+            runner._materialize_derivative_model_root(common_root, model_root)
+
     def test_metric_fail_policy_defaults_to_production_fail_closed(self):
         self.assertEqual(_metric_fail_policy({}), METRIC_FAIL_POLICY_FAIL_CLOSED)
         self.assertEqual(_metric_allowed_returncodes(METRIC_FAIL_POLICY_FAIL_CLOSED), (0,))

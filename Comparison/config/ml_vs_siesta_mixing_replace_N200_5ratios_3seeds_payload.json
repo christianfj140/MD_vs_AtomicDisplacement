@@ -1,0 +1,96 @@
+{
+  "schema": "mixing_payload_schema_v2",
+  "description": "E3 (audit 2026-07): fixed-budget composition curve. mode=replace only (total train budget approximately constant, composition varies), nominal N=200, ratios {0, 0.25, 0.5, 0.75, 1}, fixed_stratified_test (same frozen small+large test rows for every ratio and seed), per_structure loss weighting, 3 seeds (selection AND model init: the sweep seed now overrides any hyperparam seed, see test_parallel_sweep_seed_overrides_payload_hyperparam_seed). Reduced from ml_vs_siesta_mixing_sweep_20_500_stratified_per_structure_payload.json per the audit's E3 design. Per-domain H metrics (h_mae_eV_by_domain / macro / worst) are emitted since the 2026-07 pipeline fix, so the small-vs-large trade-off is measurable. action=preview by default: switch to \"train\" to launch.",
+  "action": "preview",
+  "sizes": [200],
+  "modes": ["replace"],
+  "ratios": [0.0, 0.25, 0.5, 0.75, 1.0],
+  "seed": 0,
+  "seeds": [0, 1, 2],
+  "selection_seeds": [0, 1, 2],
+  "split_policy": "fixed_stratified_test",
+  "training_weighting_policy": "per_structure",
+  "confirm_ghost_species_exemption": true,
+  "strict_dataset_validation": true,
+  "require_repository_provenance": true,
+  "models": ["graph2mat", "deeph"],
+  "epochs": 750,
+  "early_stopping": {
+    "max_epochs": 750,
+    "metric": "val_loss",
+    "min_delta": 0.0,
+    "mode": "min",
+    "patience": 80
+  },
+  "small": {
+    "200": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid200"
+  },
+  "large": {
+    "200": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid200"
+  },
+  "hyperparams": {
+    "graph2mat": {
+      "optim_lr": 0.0018,
+      "batch_size": 40,
+      "loader_threads": 4,
+      "num_interactions": 3,
+      "correlation": 3,
+      "max_ell": 3,
+      "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+      "loss": "block_type_mse_per_structure",
+      "readout": "edge_node_mix"
+    },
+    "deeph": {
+      "batch_size": 4,
+      "learning_rate": 0.0003,
+      "criterion": "MaskMSELoss",
+      "retain_edge_fea": true,
+      "weight_decay": 0.0,
+      "optimizer": "adamW",
+      "edge_fea_len": 192,
+      "normalization": "LayerNorm",
+      "atom_update_net": "CGConv",
+      "if_lcmp": true,
+      "gauss_stop": 6,
+      "atom_fea_len": 192,
+      "num_l": 4,
+      "if_edge_update": true,
+      "training_weighting_policy": "per_structure"
+    }
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 2,
+    "max_parallel_deeph_training_jobs": 2,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "notes": {
+    "design": "5 ratios x 3 seeds x 2 models = 30 trainings when launched. Acceptance per audit E3: a ratio is Pareto-superior if it lowers the large-domain error without raising the small-domain error beyond ~10%; judge on h_mae_eV_by_domain, macro_domain and worst_domain, never on the pooled mean alone.",
+    "composition_axes": "Report the curve against real composition (snapshot fraction, atom fraction, matrix-element fraction from the materialize composition summary), not only the nominal ratio.",
+    "concurrency_note": "2/2 training concurrency: measured peak VRAM 10-12 GB per training (5x5 campaign telemetry) on a 32 GB GPU; the 7/5 preset would overcommit.",
+    "launch": ".venv/bin/python Comparison/scripts/ops/launch_mixing_sweep_payload.py Comparison/config/ml_vs_siesta_mixing_replace_N200_5ratios_3seeds_payload.json --output-root Comparison/results/ml_vs_siesta_mixing_replace_N200_3seeds",
+    "no_legacy_mixing": "Do not pool these records with legacy_elementwise runs; weighting policies differ."
+  }
+}

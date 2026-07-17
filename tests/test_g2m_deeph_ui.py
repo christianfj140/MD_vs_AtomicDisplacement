@@ -18,7 +18,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             self.assertIn(f'data-view="{view}"', self.index_html)
 
     def test_dedicated_view_and_primary_buttons_exist(self) -> None:
-        self.assertIn('id="view-g2m-deeph" class="view"', self.index_html)
+        self.assertIn('id="view-g2m-deeph" class="view active"', self.index_html)
         self.assertIn('id="g2m-deeph-validate"', self.index_html)
         self.assertIn("Validate dataset artifacts", self.index_html)
         self.assertIn('id="g2m-deeph-run"', self.index_html)
@@ -131,7 +131,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         self.assertIn("artefactos joint Graph2Mat+DeepH", self.index_html)
 
     def test_dataset_sweep_controls_are_not_added_to_experiment_tab(self) -> None:
-        experiment_html = self.index_html.split('<section id="view-g2m-deeph" class="view">', 1)[0]
+        experiment_html = self.index_html.split('<section id="view-g2m-deeph"', 1)[0]
         self.assertNotIn('id="g2m-deeph-md-dataset-editor"', experiment_html)
         self.assertNotIn('id="g2m-deeph-md-sweep-table"', experiment_html)
 
@@ -147,7 +147,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
             "g2m-deeph-training-sweep-preview",
         ):
             self.assertIn(f'id="{control_id}"', self.index_html)
-        experiment_html = self.index_html.split('<section id="view-g2m-deeph" class="view">', 1)[0]
+        experiment_html = self.index_html.split('<section id="view-g2m-deeph"', 1)[0]
         self.assertNotIn('id="g2m-deeph-training-sweep-enabled"', experiment_html)
 
     def test_javascript_wires_new_backend_endpoints(self) -> None:

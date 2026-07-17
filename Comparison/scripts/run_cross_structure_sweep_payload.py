@@ -122,24 +122,43 @@ def main() -> int:
     action = str(body.get("action") or "preview").strip().lower()
     launch_fn = _launch_fn if action in {"train", "predict_metrics"} else None
 
-    summary = mvs.run_cross_structure_sweep(
-        _roots(body, "sources"),
-        _roots(body, "targets"),
-        args.output_root,
-        pairs=_pairs(body),
-        models=tuple(body.get("models") or ("graph2mat", "deeph")),
-        epochs=int(body["epochs"]) if body.get("epochs") not in (None, "") else None,
-        hyperparams=body.get("hyperparams") or None,
-        early_stopping=body.get("early_stopping") or None,
-        existing_artifacts=body.get("existing_artifacts") or None,
-        performance=body.get("performance") or None,
-        seed=int(body.get("seed") or 0),
-        confirm_ghost_species_exemption=bool(body.get("confirm_ghost_species_exemption")),
-        confirm_incomplete_hamiltonian_semantics=bool(body.get("confirm_incomplete_hamiltonian_semantics")),
-        strict_dataset_validation=bool(body.get("strict_dataset_validation", True)),
-        action=action,
-        launch_fn=launch_fn,
-    )
+    # "seeds": [0, 1, 2] runs the whole sweep once per seed into
+    # output_root/seed_<s>/ (the layout of the existing *_10seeds campaigns).
+    # A bare "seed" keeps the flat single-run layout.
+    seeds = [int(s) for s in (body.get("seeds") or [])] or [int(body.get("seed") or 0)]
+    multi_seed = len(seeds) > 1
+
+    def _run_one(seed: int, output_root: Path) -> dict[str, Any]:
+        return mvs.run_cross_structure_sweep(
+            _roots(body, "sources"),
+            _roots(body, "targets"),
+            output_root,
+            pairs=_pairs(body),
+            models=tuple(body.get("models") or ("graph2mat", "deeph")),
+            epochs=int(body["epochs"]) if body.get("epochs") not in (None, "") else None,
+            hyperparams=body.get("hyperparams") or None,
+            early_stopping=body.get("early_stopping") or None,
+            existing_artifacts=body.get("existing_artifacts") or None,
+            performance=body.get("performance") or None,
+            seed=seed,
+            confirm_ghost_species_exemption=bool(body.get("confirm_ghost_species_exemption")),
+            confirm_incomplete_hamiltonian_semantics=bool(body.get("confirm_incomplete_hamiltonian_semantics")),
+            strict_dataset_validation=bool(body.get("strict_dataset_validation", True)),
+            action=action,
+            launch_fn=launch_fn,
+        )
+
+    if multi_seed:
+        per_seed = {seed: _run_one(seed, args.output_root / f"seed_{seed}") for seed in seeds}
+        summary = {
+            "seeds": seeds,
+            "per_seed_output_roots": {str(s): str(args.output_root / f"seed_{s}") for s in seeds},
+            "records": [record for s in seeds for record in per_seed[s].get("records") or []],
+            "n_failed": sum(int(per_seed[s].get("n_failed") or 0) for s in seeds),
+            "per_seed": {str(s): per_seed[s] for s in seeds},
+        }
+    else:
+        summary = _run_one(seeds[0], args.output_root)
     text = json.dumps(summary, indent=2) + "\n"
     if args.result_json:
         args.result_json.parent.mkdir(parents=True, exist_ok=True)

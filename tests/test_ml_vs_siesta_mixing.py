@@ -1018,6 +1018,39 @@ def test_parallel_sweep_seed_overrides_payload_hyperparam_seed(small_large, tmp_
     assert by_model["deeph"]["seed"] == 7
 
 
+def test_parallel_sweep_records_carry_domain_metrics(small_large, tmp_path, monkeypatch):
+    """Domain reductions must reach the sweep records even when h_mae_eV comes
+    from the pre-averaged common CSV, which cannot carry them itself."""
+    import pipeline_ui as ui
+
+    small, large = small_large
+    monkeypatch.setattr(ui, "Graph2MatDeepHBenchmarkRunner", _FakeParallelBenchmarkRunner)
+    out = tmp_path / "out"
+    run_root = out / "parallel_run" / "sweep" / "graph2mat" / "perm_0"
+    _write_common_metrics_csv(run_root, "graph2mat", 0.05)
+    metrics_dir = run_root / "metrics" / "test" / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / "kpoint_matrix_metrics.csv").write_text(
+        "sample,row_type,h_mae_eV\n"
+        "small__md_0,weighted_sample,0.30\n"
+        "large__md_1,weighted_sample,0.10\n",
+        encoding="utf-8",
+    )
+    summary = ui._run_mixing_sweep_parallel(
+        {8: str(small)}, {8: str(large)}, out,
+        sizes=None, modes=("add",), ratios=(1.0,), seed=0,
+        models=("graph2mat",), epochs=None, performance=None, progress_fn=None,
+    )
+    record = summary["records"][0]
+    # h_mae_eV still comes from the common CSV; domains come from per-sample rows.
+    assert record["h_mae_eV"] == pytest.approx(0.05)
+    assert record["h_mae_eV_by_domain"] == {
+        "small": pytest.approx(0.30),
+        "large": pytest.approx(0.10),
+    }
+    assert record["h_mae_eV_worst_domain"] == pytest.approx(0.30)
+
+
 def test_parallel_sweep_marks_partial_when_one_model_missing(small_large, tmp_path, monkeypatch):
     import pipeline_ui as ui
 
@@ -1220,9 +1253,49 @@ def test_mixing_metrics_from_run_metrics_csv(tmp_path):
     }
 
     # No split evidence at all -> skipped, metric reported missing (not wrong).
+    # "eval" is a generic directory name, not proof of a test split.
     run3 = tmp_path / "run3"
     _write_csv(run3 / "metrics" / "eval" / "metrics", ["s0,weighted_sample,0.40"])
     assert ui._mixing_metrics_from_run_metrics(run3, "graph2mat") == {}
+
+
+def test_mixing_metrics_split_by_structure_domain(tmp_path):
+    """Merged small__/large__ ids must reduce per domain: the pooled mean hides
+    the small-vs-large trade-off a ratio sweep exists to measure."""
+    import pipeline_ui as ui
+
+    metrics_dir = tmp_path / "run" / "metrics" / "test" / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / "kpoint_matrix_metrics.csv").write_text(
+        "sample,row_type,h_mae_eV\n"
+        "small__md_0,weighted_sample,0.30\n"
+        "small__md_1,weighted_sample,0.50\n"
+        "large__md_2,weighted_sample,0.10\n",
+        encoding="utf-8",
+    )
+    metrics = ui._mixing_metrics_from_run_metrics(tmp_path / "run", "graph2mat")["graph2mat"]
+    assert metrics["h_mae_eV_by_domain"] == {
+        "small": pytest.approx(0.40),
+        "large": pytest.approx(0.10),
+    }
+    # Macro weights domains equally: not the 0.30 pooled mean, which 2:1
+    # small-heavy sampling would otherwise bias.
+    assert metrics["h_mae_eV_macro_domain"] == pytest.approx(0.25)
+    assert metrics["h_mae_eV_worst_domain"] == pytest.approx(0.40)
+
+
+def test_mixing_metrics_without_domain_prefix_omit_domain_keys(tmp_path):
+    """Unprefixed (non-merged) datasets must not fabricate domain reductions."""
+    import pipeline_ui as ui
+
+    metrics_dir = tmp_path / "run" / "metrics" / "test" / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / "kpoint_matrix_metrics.csv").write_text(
+        "sample,row_type,h_mae_eV\nmd_0,weighted_sample,0.30\n", encoding="utf-8"
+    )
+    metrics = ui._mixing_metrics_from_run_metrics(tmp_path / "run", "graph2mat")["graph2mat"]
+    assert metrics["h_mae_eV"] == pytest.approx(0.30)
+    assert "h_mae_eV_by_domain" not in metrics
 
 
 def test_http_dispatch_mixing_routes(small_large):

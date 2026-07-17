@@ -686,6 +686,42 @@ def extract_graph2mat_validation_cost(
     return result
 
 
+def _deeph_tensorboard_validation_events(save_dir: Path) -> list[dict[str, Any]]:
+    """Validation-loss events from DeepH-pack's TensorBoard layout.
+
+    DeepH-pack logs one scalar tag ``loss`` per subdirectory
+    (``tensorboard/loss_Validation loss/`` etc.), one point per epoch with
+    ``step`` equal to the epoch index; it writes no CSV.
+    """
+    try:
+        from tensorboard.backend.event_processing import event_accumulator
+    except Exception:
+        return []
+    events: list[dict[str, Any]] = []
+    event_files = sorted(
+        (save_dir / "tensorboard" / "loss_Validation loss").glob("events.out.tfevents.*"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    for path in event_files:
+        try:
+            accumulator = event_accumulator.EventAccumulator(str(path), size_guidance={"scalars": 0})
+            accumulator.Reload()
+            if "loss" not in set(accumulator.Tags().get("scalars", [])):
+                continue
+            for item in accumulator.Scalars("loss"):
+                events.append(
+                    {
+                        "epoch": int(item.step),
+                        "step": int(item.step),
+                        "value": float(item.value),
+                        "wall_time": float(item.wall_time),
+                    }
+                )
+        except Exception:
+            continue
+    return events
+
+
 def extract_deeph_validation_cost(save_dir: Path, *, run_started_at: float | None = None) -> dict[str, Any]:
     warnings: list[str] = []
     events: list[dict[str, Any]] = []
@@ -706,6 +742,8 @@ def extract_deeph_validation_cost(save_dir: Path, *, run_started_at: float | Non
                     )
         except (OSError, ValueError):
             continue
+    if not events:
+        events = _deeph_tensorboard_validation_events(save_dir)
     if not events:
         warnings.append("DeepH validation event log not found in save_dir; best validation cost unavailable.")
     result = best_validation_cost_from_events(events, mode="min", run_started_at=run_started_at)

@@ -133,3 +133,21 @@ def test_runner_metrics_merge_live_records() -> None:
     assert incompatible["status"] == "incompatible"
     assert incompatible["reason"] == "boom"
     assert metrics["n_curves"] == 1
+
+
+def test_runner_payload_seed_overrides_payload_hyperparam_seed() -> None:
+    """The sweep seed must reach model-init overrides, beating pinned hyperparams.
+    The 10-seed campaign of 2026-07-13 shipped every DeepH replicate with the
+    default seed 42 because nothing forced the seed into the runner payload."""
+    from ml_vs_siesta.cross_structure_sweep import _runner_payload
+
+    payload = _runner_payload(
+        ("graph2mat", "deeph"),
+        None,
+        None,
+        hyperparams={"graph2mat": {"seed_everything": 1}, "deeph": {"seed": 1}},
+        seed=7,
+    )
+    assert payload["graph2mat_overrides"]["seed_everything"] == 7
+    assert payload["deeph"]["seed"] == 7
+    assert payload["random_seed"] == 7

@@ -6066,7 +6066,9 @@ def _dataset_size_minimum_candidate_run_roots() -> list[Path]:
         seen.add(resolved)
         roots.append(path)
 
-    for campaign_root in sorted(RESULTS_ROOT.glob("graphene_w90_snapshot_scaling_*")):
+    # Any graphene campaign root (w90/5x2/5x5 scaling, derivative smokes...):
+    # one iterdir level plus fixed-path probes, never a recursive glob.
+    for campaign_root in sorted(RESULTS_ROOT.glob("graphene_*")):
         if not campaign_root.is_dir():
             continue
 
@@ -6121,9 +6123,12 @@ def iter_dataset_size_minimum_metrics_paths() -> list[Path]:
         seen.add(resolved)
         found.append(path)
 
-    for campaign_root in sorted(RESULTS_ROOT.glob("graphene_w90_snapshot_scaling_*")):
+    # Any graphene campaign root, same non-recursive discovery as
+    # _dataset_size_minimum_candidate_run_roots.
+    for campaign_root in sorted(RESULTS_ROOT.glob("graphene_*")):
         if not campaign_root.is_dir():
             continue
+        add(campaign_root / "summary" / "ranking" / "normalized_run_metrics.json")
         for run_root in campaign_root.iterdir():
             if not run_root.is_dir():
                 continue
@@ -16577,6 +16582,12 @@ _MIXING_TRAINING_POLL_SECONDS = 5.0
 
 _NON_TEST_SPLITS = {"train", "training", "validation", "val"}
 _TEST_SPLITS = {"test", "final_test", "final", "eval", "eval_input"}
+# Path tokens that on their own prove a test split. "eval"/"eval_input" are
+# generic directory names (a run evaluates train and validation too), so they
+# are not proof: real eval_input dirs ship a manifest declaring split=test,
+# which is read first. Guessing "test" from the directory name alone would let
+# a train average masquerade as a test MAE.
+_TEST_SPLIT_PATH_TOKENS = {"test", "final_test", "final"}
 
 
 def _extract_model_h_mae_eV(results_payload: Any, models: tuple[str, ...]) -> dict[str, Any]:
@@ -16704,9 +16715,52 @@ def _mixing_csv_split_evidence(path: Path, root: Path) -> str | None:
         tokens = set(re.split(r"[^a-z]+", part))
         if tokens & _NON_TEST_SPLITS:
             return "train_or_validation"
-        if tokens & _TEST_SPLITS:
+        if tokens & _TEST_SPLIT_PATH_TOKENS:
             return "test"
     return None
+
+
+def _mixing_sample_domain(sample_id: Any) -> str | None:
+    """"small"/"large" from a merged sample id, or None if it carries no prefix.
+
+    Merged datasets prefix every sample with the ``small__``/``large__`` tags
+    from ``mixing_sweep``, so the structure domain survives into the per-sample
+    metrics CSVs and needs no extra bookkeeping.
+    """
+    mvs = _ml_vs_siesta_module()
+    text = str(sample_id or "")
+    for prefix, domain in (
+        (mvs.mixing_sweep._SMALL_PREFIX, "small"),
+        (mvs.mixing_sweep._LARGE_PREFIX, "large"),
+    ):
+        if text.startswith(prefix):
+            return domain
+    return None
+
+
+def _mixing_domain_reduction(by_domain: dict[str, list[float]]) -> dict[str, Any]:
+    """Per-domain H-MAE plus the macro/worst reductions a mixing curve needs.
+
+    A ratio sweep trades small-domain error against large-domain error, so the
+    pooled mean alone cannot show the trade-off: it moves simply because the
+    test composition moves. Mirrors the derivative metrics' by_domain reduction.
+    """
+    if not by_domain:
+        return {}
+    means = {
+        domain: sum(vals) / len(vals) for domain, vals in sorted(by_domain.items())
+    }
+    return {
+        "h_mae_eV_by_domain": means,
+        "h_mae_eV_macro_domain": sum(means.values()) / len(means),
+        "h_mae_eV_worst_domain": max(means.values()),
+    }
+
+
+def _mixing_domain_metrics(run_root: Any, model: str) -> dict[str, Any]:
+    """Just the per-domain reductions for a run, or {} when unavailable."""
+    metrics = (_mixing_metrics_from_run_metrics(run_root, model) or {}).get(model) or {}
+    return {k: v for k, v in metrics.items() if k.startswith("h_mae_eV_")}
 
 
 def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any]:
@@ -16723,6 +16777,7 @@ def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any
     root = Path(str(run_root))
     values: list[float] = []
     rel_values: list[float] = []
+    by_domain: dict[str, list[float]] = {}
     for path in sorted(root.rglob("kpoint_matrix_metrics.csv")):
         evidence = _mixing_csv_split_evidence(path, root)
         if evidence not in _TEST_SPLITS:
@@ -16737,6 +16792,9 @@ def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any
                     if value in (None, ""):
                         continue
                     values.append(float(value))
+                    domain = _mixing_sample_domain(row.get("sample"))
+                    if domain:
+                        by_domain.setdefault(domain, []).append(float(value))
                     rel = row.get("relative_frobenius")
                     if rel not in (None, ""):
                         rel_values.append(float(rel))
@@ -16747,6 +16805,7 @@ def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any
     metrics = {"h_mae_eV": sum(values) / len(values)}
     if rel_values:
         metrics["relative_frobenius"] = sum(rel_values) / len(rel_values)
+    metrics.update(_mixing_domain_reduction(by_domain))
     return {model: metrics}
 
 
@@ -17104,6 +17163,10 @@ def _run_mixing_sweep_parallel(
                 m = _mixing_metrics_from_run_metrics(sweep_run_root, model)
             if model in m:
                 recorded_models.append(model)
+                # common_method_metrics.csv is already averaged over samples, so
+                # it can never carry the domain split; take that from the
+                # per-sample CSVs regardless of which path produced h_mae_eV.
+                domains = _mixing_domain_metrics(sweep_run_root, model)
                 records.append(
                     {
                         "size": perm.get("size"),
@@ -17114,6 +17177,7 @@ def _run_mixing_sweep_parallel(
                         "model": model,
                         "h_mae_eV": m[model]["h_mae_eV"],
                         "relative_frobenius": m[model].get("relative_frobenius"),
+                        **{k: v for k, v in domains.items()},
                         "output_root": perm["output_root"],
                     }
                 )

@@ -3476,10 +3476,12 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn('class="method-execution-checkbox"', index_html)
         self.assertIn('value="random_cartesian" checked', index_html)
         self.assertIn('class="tab hidden" data-view="run"', index_html)
-        self.assertIn('class="tab active" data-view="experiment"', index_html)
+        self.assertIn('class="tab active" data-view="g2m-deeph"', index_html)
+        self.assertIn('data-view="experiment"', index_html)
         self.assertIn('id="view-run" class="view"', index_html)
-        self.assertIn('id="view-experiment" class="view active"', index_html)
-        self.assertIn('id="show-plots" type="checkbox" checked', index_html)
+        self.assertIn('id="view-g2m-deeph" class="view active"', index_html)
+        self.assertIn('id="view-experiment" class="view"', index_html)
+        self.assertIn('id="show-plots" type="checkbox" />', index_html)
         self.assertIn('value="train_test_metrics_plots_only"', index_html)
         self.assertIn('id="reusable-dataset-panel"', index_html)
         self.assertIn('id="reusable-dataset-list"', index_html)
@@ -3550,7 +3552,8 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("filterRunsByMaterial", app_js)
         self.assertIn("filterCrossExperimentByMaterial", app_js)
         self.assertIn("Multiple material groups are shown", app_js)
-        self.assertIn("plotsEnabled: true", app_js)
+        # Plots default off; the show-plots checkbox opts in per session.
+        self.assertIn("plotsEnabled: false", app_js)
         self.assertIn("orbital_pair_summary", pipeline_ui)
         self.assertIn("metricHigherIsBetter", app_js)
         self.assertIn("Support F1", app_js)
@@ -3757,8 +3760,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
     def test_ui_sidebar_visible_navigation_order(self) -> None:
         index_html = (REPO_ROOT / "Comparison" / "ui" / "index.html").read_text(encoding="utf-8")
         expected = [
-            'data-view="experiment"',
-            'data-view="results"',
+            'data-view="g2m-deeph"',
+            'data-view="mixing-datasets"',
+            'data-view="cross-testing"',
+            'data-view="terminal"',
             'data-view="performance"',
             'data-view="api"',
         ]
@@ -3766,6 +3771,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertLess(index_html.index('data-view="run"'), positions[0])
         self.assertIn('class="tab hidden" data-view="run"', index_html)
+        # Legacy views remain reachable from the collapsed "Archived" group.
+        archived = index_html.split('<details class="archived-tabs">', 1)[1]
+        for legacy in ('data-view="experiment"', 'data-view="ml-vs-siesta"', 'data-view="results"'):
+            self.assertIn(legacy, archived)
 
     def test_ui_plotly_traces_use_scatter_points_with_selectable_fit_lines(self) -> None:
         app_js = (REPO_ROOT / "Comparison" / "ui" / "app.js").read_text(encoding="utf-8")
@@ -3774,18 +3783,21 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn("aggregateFitPoints", app_js)
         self.assertIn("grouped.has(x)", app_js)
         self.assertIn("polynomialCoefficients", app_js)
-        self.assertIn('kind === "quadratic" ? 2 : 1', app_js)
-        self.assertIn('label: "Linear fit"', app_js)
-        self.assertIn('label: "Quadratic fit"', app_js)
+        self.assertIn("fitKindDegree", app_js)
+        self.assertIn('if (kind === "quadratic") return 2;', app_js)
+        # Fit lines are selectable via the dropdown built from trace metadata;
+        # labels are derived per fit kind rather than hard-coded strings.
         self.assertIn('label: "No fit"', app_js)
         self.assertIn("withFitSelector", app_js)
-        self.assertIn('visible: kind === "linear"', app_js)
+        self.assertIn("fitSelectorArgs", app_js)
+        self.assertIn('meta?.role === "fit"', app_js)
         self.assertIn('hoverinfo: "skip"', app_js)
         self.assertNotIn("aggregateSmoothPoints", app_js)
         self.assertNotIn("smoothLineTrace", app_js)
         self.assertNotIn("smoothing:", app_js)
         self.assertNotIn("shape:", app_js)
-        self.assertNotIn('mode: "lines+markers"', app_js)
+        # lines+markers is legitimate in history/convergence charts; scaling
+        # charts keep markers with separate fit-line traces (asserted above).
         self.assertNotIn("mode: 'lines+markers'", app_js)
         self.assertNotIn("mode: 'lines'", app_js)
 

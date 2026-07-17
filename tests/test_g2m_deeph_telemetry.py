@@ -242,5 +242,38 @@ class Graph2MatDeepHTelemetryTests(unittest.TestCase):
             self.assertIn("telemetry unavailable", old_row["telemetry_warnings"])
 
 
+class DeepHValidationCostTests(unittest.TestCase):
+    def test_extracts_epochs_from_deeph_tensorboard_layout(self):
+        """DeepH-pack writes TensorBoard events (no CSV): tag ``loss`` under
+        ``tensorboard/loss_Validation loss/`` with step == epoch. Historical
+        telemetry had epochs_trained=None in every DeepH run because only CSVs
+        were scanned."""
+        from torch.utils.tensorboard import SummaryWriter
+
+        from g2m_deeph_telemetry import extract_deeph_validation_cost
+
+        with tempfile.TemporaryDirectory() as tmp:
+            save_dir = Path(tmp)
+            writer = SummaryWriter(log_dir=str(save_dir / "tensorboard" / "loss_Validation loss"))
+            for epoch, value in enumerate([0.5, 0.2, 0.3]):
+                writer.add_scalar("loss", value, epoch)
+            writer.close()
+
+            result = extract_deeph_validation_cost(save_dir)
+
+            self.assertEqual(result["epochs_trained"], 2)
+            self.assertEqual(result["best_validation_epoch"], 1)
+            self.assertAlmostEqual(result["best_validation_value"], 0.2, places=6)
+            self.assertIsNone(result.get("warnings"))
+
+    def test_missing_logs_still_warn(self):
+        from g2m_deeph_telemetry import extract_deeph_validation_cost
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = extract_deeph_validation_cost(Path(tmp))
+            self.assertIsNone(result["epochs_trained"])
+            self.assertTrue(result.get("warnings"))
+
+
 if __name__ == "__main__":
     unittest.main()
