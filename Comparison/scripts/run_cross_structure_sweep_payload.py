@@ -4,7 +4,7 @@
 Same body schema as the UI ``/api/cross-testing/launch`` endpoint::
 
     {
-      "action": "preview" | "materialize" | "train",
+      "action": "preview" | "materialize" | "train" | "predict_metrics",
       "sources": ["<dataset_root>", ...],
       "targets": ["<dataset_root>", ...],
       "models": ["graph2mat", "deeph"],
@@ -13,9 +13,10 @@ Same body schema as the UI ``/api/cross-testing/launch`` endpoint::
       "confirm_incomplete_hamiltonian_semantics": true
     }
 
-For ``action=train`` each compatible pair drives the real Graph2Mat/DeepH runner
-(needs the models installed and, for a full sweep, a GPU). Incompatible pairs are
-skipped with a warning; ``training_sweep`` is not supported in cross-structure.
+For ``action=train`` or ``action=predict_metrics`` each compatible pair drives the
+real Graph2Mat/DeepH runner (needs the models installed and, for a full sweep, a
+GPU). Incompatible pairs are skipped with a warning; ``training_sweep`` is not
+supported in cross-structure.
 """
 
 from __future__ import annotations
@@ -49,10 +50,35 @@ def _roots(body: dict[str, Any], key: str) -> list[str]:
     return roots
 
 
+def _pairs(body: dict[str, Any]) -> list[tuple[str, str]] | None:
+    raw = body.get("pairs")
+    if not raw:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for item in raw:
+        source = Path(str(item["source"]))
+        target = Path(str(item["target"]))
+        pairs.append((
+            str(source if source.is_absolute() else REPO_ROOT / source),
+            str(target if target.is_absolute() else REPO_ROOT / target),
+        ))
+    return pairs
+
+
 def _launch_fn(runner_payload: dict[str, Any]) -> dict[str, Any]:
-    """Drive the real runner synchronously for one composite dataset."""
+    """Drive the real runner synchronously for one composite dataset.
+
+    Same logic as ``pipeline_ui._cross_testing_launch_fn`` (used by the UI),
+    including the common-CSV fallback: without it, metrics that only land in
+    the per-model common_metrics CSV (not the in-memory results dict) are
+    silently missed and the pair is wrongly reported as failed.
+    """
     from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner  # noqa: PLC0415
-    from pipeline_ui import _extract_model_h_mae_eV, _mixing_run_ok  # noqa: PLC0415
+    from pipeline_ui import (  # noqa: PLC0415
+        _extract_model_h_mae_eV,
+        _mixing_metrics_from_common_csv,
+        _mixing_run_ok,
+    )
 
     runner = Graph2MatDeepHBenchmarkRunner()
     models = tuple(
@@ -66,11 +92,21 @@ def _launch_fn(runner_payload: dict[str, Any]) -> dict[str, Any]:
     results = runner.results()
     runner_status = results.get("status") or {}
     metrics = _extract_model_h_mae_eV(results, models)
+    if len(metrics) < len(models):
+        metrics.update(_mixing_metrics_from_common_csv(runner_status.get("run_root"), models))
     ok = _mixing_run_ok(runner_status)
-    missing = [model for model in models if model not in metrics]
-    if ok and missing:
+    error: str | None = runner_status.get("error") if isinstance(runner_status, dict) else None
+    missing_models = [model for model in models if model not in metrics]
+    if ok and missing_models:
         ok = False
-    return {"ok": ok, "error": runner_status.get("error"), "metrics": metrics}
+        error = error or f"runner produced no h_mae_eV for models: {missing_models}"
+    return {
+        "ok": ok,
+        "error": error,
+        "metrics": metrics,
+        "missing_models": missing_models,
+        "runner_status": runner_status,
+    }
 
 
 def main() -> int:
@@ -84,18 +120,23 @@ def main() -> int:
     if not isinstance(body, dict):
         raise RuntimeError(f"{args.payload} must contain a JSON object.")
     action = str(body.get("action") or "preview").strip().lower()
-    launch_fn = _launch_fn if action == "train" else None
+    launch_fn = _launch_fn if action in {"train", "predict_metrics"} else None
 
     summary = mvs.run_cross_structure_sweep(
         _roots(body, "sources"),
         _roots(body, "targets"),
         args.output_root,
+        pairs=_pairs(body),
         models=tuple(body.get("models") or ("graph2mat", "deeph")),
         epochs=int(body["epochs"]) if body.get("epochs") not in (None, "") else None,
+        hyperparams=body.get("hyperparams") or None,
+        early_stopping=body.get("early_stopping") or None,
+        existing_artifacts=body.get("existing_artifacts") or None,
         performance=body.get("performance") or None,
         seed=int(body.get("seed") or 0),
         confirm_ghost_species_exemption=bool(body.get("confirm_ghost_species_exemption")),
         confirm_incomplete_hamiltonian_semantics=bool(body.get("confirm_incomplete_hamiltonian_semantics")),
+        strict_dataset_validation=bool(body.get("strict_dataset_validation", True)),
         action=action,
         launch_fn=launch_fn,
     )

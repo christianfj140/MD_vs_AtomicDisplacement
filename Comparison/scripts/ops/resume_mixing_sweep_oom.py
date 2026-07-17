@@ -22,7 +22,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -88,33 +90,78 @@ def _reconstruct_perm_order(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return perms
 
 
-def _latest_training_sweep_manifest(payload: dict[str, Any]) -> Path | None:
+def _training_sweep_manifests(payload: dict[str, Any]) -> list[Path]:
     output_root = MIXING_SWEEP_OUTPUT_ROOT
-    candidates = sorted(
-        (output_root / "parallel_run").glob("*/sweep/training_sweep_manifest.json"),
+    return sorted(
+        [
+            *(output_root / "parallel_run").glob("*/sweep/training_sweep_manifest.json"),
+            *(output_root / "resume_run").glob("*/g2m_deeph_*/sweep/training_sweep_manifest.json"),
+        ],
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
         reverse=True,
     )
+
+
+def _latest_training_sweep_manifest(payload: dict[str, Any]) -> Path | None:
+    candidates = _training_sweep_manifests(payload)
     return candidates[0] if candidates else None
 
 
 def find_incomplete_runs(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], Path | None]:
     """Return (list of {"model","dataset_id","size","mode","ratio","dirname"}, manifest_path)
     for every planned (model, perm) that never reached status "completed"."""
-    perms = _reconstruct_perm_order(payload)
-    perm_by_id = {p["dataset_id"]: p for p in perms}
-    models = tuple(payload.get("models") or ("graph2mat", "deeph"))
-
     manifest_path = _latest_training_sweep_manifest(payload)
     completed: set[tuple[str, str]] = set()
-    if manifest_path is not None and manifest_path.is_file():
-        manifest = json.loads(manifest_path.read_text())
+    planned_runs: list[dict[str, Any]] = []
+    allowed_sizes = {int(size) for size in payload.get("sizes") or []}
+    manifests = _training_sweep_manifests(payload)
+    for path in manifests:
+        manifest = json.loads(path.read_text())
+        if not planned_runs:
+            planned_runs = list(manifest.get("planned_runs") or [])
         for run in manifest.get("runs") or []:
             if run.get("status") == "completed":
                 completed.add((str(run.get("model")), str(run.get("dataset_id"))))
+        metrics_path = path.with_name("training_sweep_metrics.csv")
+        if metrics_path.is_file():
+            with metrics_path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if row.get("status") == "completed":
+                        completed.add((str(row.get("model")), str(row.get("dataset_id"))))
 
     incomplete: list[dict[str, Any]] = []
+    if planned_runs:
+        for run in planned_runs:
+            model = str(run.get("model"))
+            dataset_id = str(run.get("dataset_id"))
+            if (model, dataset_id) in completed:
+                continue
+            dataset_root = Path(str(run.get("dataset_root")))
+            if not dataset_root.is_dir():
+                continue
+            match = re.match(r"size(\d+)_(add|replace)_r(\d+p\d+)", dataset_root.name)
+            if not match:
+                continue
+            size = int(match.group(1))
+            if allowed_sizes and size not in allowed_sizes:
+                continue
+            incomplete.append({
+                "index": int(str(dataset_id).split("_")[-1]),
+                "dataset_id": dataset_id,
+                "size": size,
+                "mode": match.group(2),
+                "ratio": float(match.group(3).replace("p", ".")),
+                "dirname": dataset_root.name,
+                "model": model,
+                "dataset_root": str(dataset_root),
+            })
+        return incomplete, manifest_path
+
+    perms = _reconstruct_perm_order(payload)
+    models = tuple(payload.get("models") or ("graph2mat", "deeph"))
     for perm in perms:
+        if allowed_sizes and int(perm["size"]) not in allowed_sizes:
+            continue
         merged_dir = MIXING_SWEEP_OUTPUT_ROOT / perm["dirname"]
         if not merged_dir.is_dir():
             # Never materialized in the first place -- nothing to resume here;
@@ -186,6 +233,7 @@ def _build_resume_payload(
         "allow_regenerate_siesta": False,
         "strict_dataset_validation": False,
         "performance": performance,
+        "mixing_ui_output_root": str(MIXING_SWEEP_OUTPUT_ROOT),
         "training_sweep": {
             "enabled": True,
             "error_policy": "continue_on_error",

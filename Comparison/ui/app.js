@@ -13305,24 +13305,26 @@ async function mixPollStatus() {
   }
 }
 
-async function mixRenderChart(payload) {
-  const host = document.getElementById("mix-mae-chart");
+// metric: "abs" -> h_mae in meV, "rel" -> relative_frobenius in %.
+async function mixRenderMetricChart(payload, hostId, metric) {
+  const host = document.getElementById(hostId);
   if (!host) return;
   await ensurePlotlyLoaded();
+  const isRel = metric === "rel";
   const traces = (payload.curves || [])
-    .map((curve) => {
-      const points = (curve.points || []).filter((point) => mixSelectedPayloadIds.has(point.payload_id));
-      return {
-        curve,
-        points,
-      };
-    })
+    .map((curve) => ({
+      curve,
+      points: (curve.points || [])
+        .filter((point) => mixSelectedPayloadIds.has(point.payload_id))
+        // rel plot: skip points without a relative_frobenius value.
+        .filter((point) => !isRel || point.relative_frobenius != null),
+    }))
     .filter((item) => item.points.length)
     .map(({ curve, points }) => ({
       // Prefer the real training size when the backend recorded it (audit
       // Fase 8): "dataset size" must mean actual_train_size, not train+test.
       x: points.map((p) => (p.actual_train_size != null ? p.actual_train_size : p.total_size)),
-      y: points.map((p) => Number(p.mae) * MIXING_MAE_EV_TO_MEV),
+      y: points.map((p) => (isRel ? Number(p.relative_frobenius) * 100 : Number(p.mae) * MIXING_MAE_EV_TO_MEV)),
       mode: "lines+markers",
       name: curve.label,
       line: { dash: curve.mode === "replace" ? "dash" : "solid" },
@@ -13337,16 +13339,20 @@ async function mixRenderChart(payload) {
         curve.evaluation_scope ? `test scope: ${curve.evaluation_scope}` : "",
         curve.training_weighting_policy ? `loss: ${curve.training_weighting_policy}` : "",
       ].filter(Boolean).join("<br>")),
-      hovertemplate: "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
+      hovertemplate: isRel
+        ? "rel. Frobenius %{y:.3f} %<br>%{text}<extra>%{fullData.name}</extra>"
+        : "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
     }));
   if (!traces.length) {
     window.Plotly.purge(host);
     host.innerHTML = `<p class="field-help">${
       !(payload.curves || []).length
-        ? "Sin datos de MAE todavía (entrena el sweep o carga la demo)."
-        : mixSelectedPayloadIds.size
-          ? "Los payloads seleccionados no tienen metricas disponibles todavia."
-          : "Selecciona al menos un payload para ver sus metricas en el plot."
+        ? "Sin datos todavía (entrena el sweep o carga la demo)."
+        : isRel
+          ? "Los payloads seleccionados no tienen error relativo disponible todavia."
+          : mixSelectedPayloadIds.size
+            ? "Los payloads seleccionados no tienen metricas disponibles todavia."
+            : "Selecciona al menos un payload para ver sus metricas en el plot."
     }</p>`;
     return;
   }
@@ -13354,14 +13360,21 @@ async function mixRenderChart(payload) {
     host,
     traces,
     {
-      title: "MAE vs tamaño de dataset (mixing)",
+      title: isRel
+        ? "Error relativo (Frobenius) vs tamaño de dataset (mixing)"
+        : "MAE absoluto vs tamaño de dataset (mixing)",
       xaxis: { title: "Total dataset size (snapshots)" },
-      yaxis: { title: "Hamiltonian MAE (meV)" },
+      yaxis: { title: isRel ? "Relative Frobenius error (%)" : "Hamiltonian MAE (meV)" },
       margin: { l: 60, r: 20, t: 40, b: 50 },
       height: 460,
     },
     { displayModeBar: false, responsive: true }
   );
+}
+
+async function mixRenderChart(payload) {
+  await mixRenderMetricChart(payload, "mix-mae-chart", "abs");
+  await mixRenderMetricChart(payload, "mix-rel-chart", "rel");
 }
 
 async function mixLoadMetrics(demo, { silent = false } = {}) {

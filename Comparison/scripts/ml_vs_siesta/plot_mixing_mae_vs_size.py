@@ -79,10 +79,17 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 ),
                 "evaluation_scope": record.get("evaluation_scope"),
                 "values": [],
+                "rel_values": [],
                 "seeds": set(),
             },
         )
         bucket["values"].append(mae)
+        rel = record.get("relative_frobenius")
+        if rel is not None:
+            try:
+                bucket["rel_values"].append(float(rel))
+            except (TypeError, ValueError):
+                pass
         if record.get("seed") is not None:
             try:
                 bucket["seeds"].add(int(record["seed"]))
@@ -98,6 +105,8 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             std = None
         # Replicates = distinct seeds when recorded, else raw value count.
         n_seeds = len(item["seeds"]) if item["seeds"] else len(values)
+        rel_values = item.get("rel_values") or []
+        rel_mean = sum(rel_values) / len(rel_values) if rel_values else None
         return {
             "payload_id": item["payload_id"],
             "total_size": item["total_size"],
@@ -106,6 +115,7 @@ def aggregate_mae_vs_size(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "actual_large_fraction_by_snapshots": item.get("actual_large_fraction_by_snapshots"),
             "mae": mean,
             "mae_std": std,
+            "relative_frobenius": rel_mean,
             "n_seeds": n_seeds,
             "exploratory": n_seeds < MIN_SEEDS_FOR_CLAIMS,
         }

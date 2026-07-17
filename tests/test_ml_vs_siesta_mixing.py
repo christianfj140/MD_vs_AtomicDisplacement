@@ -1029,6 +1029,35 @@ def test_parallel_sweep_marks_failed_without_any_mae(small_large, tmp_path, monk
     assert perm["error"] == "no h_mae_eV produced"
 
 
+def test_parallel_sweep_skips_reconstructed_permutations(small_large, tmp_path, monkeypatch):
+    import pipeline_ui as ui
+
+    small, large = small_large
+    monkeypatch.setattr(ui, "Graph2MatDeepHBenchmarkRunner", _FakeParallelBenchmarkRunner)
+    out = tmp_path / "out"
+    # ratio=0 is reconstructed, so the only trained dataset is ratio=1 -> perm_0.
+    _write_common_metrics_csv(
+        out / "parallel_run" / "sweep" / "graph2mat" / "perm_0", "graph2mat", 0.05
+    )
+    _write_common_metrics_csv(
+        out / "parallel_run" / "sweep" / "deeph" / "perm_0", "deeph", 0.08
+    )
+    reconstructed = [
+        {"size": 8, "mode": "add", "ratio": 0.0, "total_size": 8, "model": "graph2mat", "h_mae_eV": 0.01},
+        {"size": 8, "mode": "add", "ratio": 0.0, "total_size": 8, "model": "deeph", "h_mae_eV": 0.02},
+    ]
+    summary = ui._run_mixing_sweep_parallel(
+        {8: str(small)}, {8: str(large)}, out,
+        sizes=None, modes=("add",), ratios=(0.0, 1.0), seed=0,
+        models=("graph2mat", "deeph"), epochs=None, performance=None,
+        reconstructed_records=reconstructed, progress_fn=None,
+    )
+    by_ratio = {perm["ratio"]: perm for perm in summary["permutations"]}
+    assert by_ratio[0.0]["status"] == "reconstructed"
+    assert by_ratio[1.0]["status"] == "trained"
+    assert len(summary["records"]) == 4
+
+
 def test_backend_mixing_launch_rejects_concurrent(small_large):
     import pipeline_ui as ui
 
@@ -1283,6 +1312,51 @@ def test_fixed_stratified_test_is_identical_across_ratios_and_seeds(small_large,
         rows = list(csv.DictReader((out / "splits" / "test_manifest.csv").open()))
         test_sets.append(sorted(row["sample_id"] for row in rows))
     assert test_sets[0] == test_sets[1] == test_sets[2]
+
+
+def test_blocked_stratified_gap_ratio_zero_keeps_same_composition(small_large, tmp_path):
+    small, large = small_large
+    summary = mvs.run_mixing_sweep(
+        {8: small},
+        {8: large},
+        tmp_path / "blocked",
+        sizes=[8],
+        modes=("add",),
+        ratios=(0.0,),
+        seed=0,
+        split_policy="blocked_stratified_gap",
+        split_fractions=(0.8, 0.1, 0.1),
+        temporal_gap=1,
+        dry_run=False,
+        launch_fn=None,
+    )
+    perm = summary["permutations"][0]
+    composition = perm["materialize"]["composition"]
+    assert perm["n_large_selected"] == 0
+    assert composition["n_large_train"] == 0
+    assert composition["test_large_size"] == 0
+    assert composition["evaluation_scope"] == "small_and_large"
+
+
+def test_blocked_stratified_gap_uses_fresh_split_not_source_labels(small_large, tmp_path):
+    small, large = small_large
+    manifest_path = small / "frozen_split_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["rows"][0]["split"] = "test"
+    manifest_path.write_text(json.dumps(manifest))
+    small_ids = [s.sample_id for s in mvs.read_dataset_samples(small)]
+    large_ids = [s.sample_id for s in mvs.read_dataset_samples(large)]
+    summary = mvs.materialize_mixed_dataset(
+        small,
+        large,
+        selected_small_ids=small_ids,
+        selected_large_ids=large_ids[:4],
+        output_root=tmp_path / "fresh",
+        split_policy="blocked_stratified_gap",
+        split_fractions=(0.8, 0.1, 0.1),
+        temporal_gap=1,
+    )
+    assert summary["split_policy"] == "blocked_stratified_gap"
 
 
 def test_source_test_snapshot_never_trains(small_large, tmp_path):

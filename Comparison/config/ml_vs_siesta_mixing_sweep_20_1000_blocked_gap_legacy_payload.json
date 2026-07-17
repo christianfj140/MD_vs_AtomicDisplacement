@@ -1,5 +1,5 @@
 {
- "description": "Mixing sweep (small=graphene_w90, large=graphene_5x5) using the complete graphene_5x5_snapshot_scaling_complete_paper_ready size grid (20..1000), same sizes as the G2M-vs-DeepH sweep run over 2026-07-10/13. fixed_stratified_test (small+large fixed test), per_structure loss weighting, 3 selection seeds. Costs ~3x the single-seed run and roughly 2x the 20-500 variant (15 sizes instead of 8).",
+ "description": "Mixing sweep (small=graphene_w90, large=graphene_5x5) con datasets add/replace, split temporal blocked_stratified_gap 80/10/10 gap=1 y los hiperparametros efectivos del ultimo payload 5x5 G2M-vs-DeepH paper_ready.",
  "action": "train",
  "sizes": [
   20,
@@ -28,15 +28,15 @@
   1.0
  ],
  "seed": 0,
- "split_policy": "fixed_stratified_test",
+ "split_policy": "blocked_stratified_gap",
  "confirm_ghost_species_exemption": true,
  "models": [
   "graph2mat",
   "deeph"
  ],
- "epochs": 750,
+ "epochs": 600,
  "early_stopping": {
-  "max_epochs": 750,
+  "max_epochs": 600,
   "metric": "val_loss",
   "min_delta": 0.0,
   "mode": "min",
@@ -44,34 +44,36 @@
  },
  "hyperparams": {
   "graph2mat": {
-   "optim_lr": 0.0018,
-   "batch_size": 40,
-   "loader_threads": 4,
-   "num_interactions": 3,
+   "batch_size": 32,
    "correlation": 3,
+   "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+   "loader_threads": 4,
+   "loss": "graph2mat.metrics.block_type_huber",
+   "loss_kwargs": {
+    "beta": 0.01
+   },
    "max_ell": 3,
-   "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
-   "loss": "graph2mat.core.data.metrics.block_type_mse_per_structure",
-   "readout": "edge_node_mix",
-   "seed_everything": 1
+   "max_epochs": 600,
+   "num_interactions": 3,
+   "optim_lr": 0.0018,
+   "readout": "default"
   },
   "deeph": {
-   "batch_size": 4,
-   "learning_rate": 0.0003,
-   "criterion": "MaskMSELoss",
-   "retain_edge_fea": true,
-   "weight_decay": 0.0,
-   "optimizer": "adamW",
-   "edge_fea_len": 192,
-   "normalization": "LayerNorm",
+   "atom_fea_len": 128,
    "atom_update_net": "CGConv",
-   "if_lcmp": true,
+   "batch_size": 8,
+   "criterion": "MaskMSELoss",
+   "edge_fea_len": 128,
+   "epochs": 600,
    "gauss_stop": 6,
-   "atom_fea_len": 192,
-   "num_l": 4,
    "if_edge_update": true,
-   "seed": 1,
-   "training_weighting_policy": "per_structure"
+   "if_lcmp": true,
+   "learning_rate": 0.0003,
+   "normalization": "LayerNorm",
+   "num_l": 4,
+   "optimizer": "adamW",
+   "retain_edge_fea": true,
+   "weight_decay": 0.0001
   }
  },
  "small": {
@@ -119,10 +121,10 @@
   "max_parallel_prediction_jobs": 1,
   "max_parallel_evaluation_jobs": 3,
   "max_parallel_metric_jobs": 8,
-  "max_parallel_graph2mat_training_jobs": 4,
-  "max_parallel_deeph_training_jobs": 3,
+  "max_parallel_graph2mat_training_jobs": 2,
+  "max_parallel_deeph_training_jobs": 2,
   "model_batch_schedule": "alternating",
-  "model_batch_start": "graph2mat",
+  "model_batch_start": "deeph",
   "omp_num_threads": 2,
   "mkl_num_threads": 2,
   "openblas_num_threads": 2,
@@ -143,19 +145,20 @@
    "3. Expect 15 sizes x 2 modes x 3 ratios = 90 permutations, 180 model runs for Graph2Mat+DeepH (single seed, no replication)."
   ],
   "single_seed_note": "seed=0 only, per user request. This is a single training pass per permutation, NOT publication-grade (audit I5 requires >=3 seeds for MAE-vs-size claims with error bars). Treat curves from this sweep as exploratory point estimates.",
-  "hyperparams_note": "Same paper-ready T600/750-epoch anchors as the 20-500 stratified payload (hidden_irreps=64x0e+64x1o+64x2e+64x3o, batch_size=40, lr=0.0018) -- copied verbatim, not the small pipeline_config.yaml defaults.",
+  "hyperparams_note": "Copied from training_sweep.manual_runs effective overrides in graphene_5x5_snapshot_scaling_complete_paper_ready_payload.json.",
   "estimated_disk_gb": {
    "basis": "measured ~1.5 GB for a single size=500 permutation with these exact hyperparameters; iid800/iid1000 permutations will cost proportionally more",
    "expected": 70,
    "expected_plus_30pct": 91,
    "pessimistic_upper_bound_all_sizes_at_size1000_cost": 160
   },
-  "split_policy_note": "fixed_stratified_test: test set fijo derivado de small+large (recomendado, ver docs/mixing_and_autograd_validation_contract.md \u00a75).",
+  "split_policy_note": "fixed_stratified_test: test set fijo derivado de small+large (recomendado, ver docs/mixing_and_autograd_validation_contract.md §5).",
   "iid_naming_note": "Los datasets *_iid* NO son muestras iid: son frames MD consecutivos (1 fs) agrupados en bloques de temperatura. Ver docs/known_limitations.md.",
-  "ghost_exemption_note": "confirm_ghost_species_exemption=true: los datasets small (W90, con Ghost-H) y large (5x5, solo C) tienen especies ghost distintas; la exencion se declara explicitamente aqui (aunque el Ghost-H real es proven_inactive, ver dataset_compatibility.py)."
+  "ghost_exemption_note": "confirm_ghost_species_exemption=true: los datasets small (W90, con Ghost-H) y large (5x5, solo C) tienen especies ghost distintas; la exencion se declara explicitamente aqui (aunque el Ghost-H real es proven_inactive, ver dataset_compatibility.py).",
+  "methodology_note": "blocked_stratified_gap: bloques temporales contiguos [train|gap|val|gap|test] con temporal_gap=1 frame descartado en cada frontera, por estructura. Elimina la fuga temporal del fixed_stratified_test previo (train pegado al test). Comparable 1:1 con el sweep de referencia 5x5 paper_ready."
  },
  "schema": "mixing_payload_schema_v2",
- "training_weighting_policy": "per_structure",
+ "training_weighting_policy": "legacy_elementwise",
  "selection_seeds": [
   0
  ],
@@ -163,5 +166,11 @@
   0
  ],
  "strict_dataset_validation": true,
- "require_repository_provenance": true
+ "require_repository_provenance": true,
+ "split_fractions": [
+  0.8,
+  0.1,
+  0.1
+ ],
+ "temporal_gap": 1
 }

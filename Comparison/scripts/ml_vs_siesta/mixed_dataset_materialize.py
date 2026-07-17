@@ -44,6 +44,10 @@ _SPLITS = ("train", "validation", "test")
 # recommended policy with a fixed small+large test.
 SPLIT_POLICY_EVALUATION_SCOPE = {
     "fixed_stratified_test": "small_and_large",
+    # Like fixed_stratified_test but temporally BLOCKED with a gap between
+    # train/val/test (matches the G2M-vs-DeepH reference sweeps); test scope
+    # is still small+large so each permutation is evaluated on its own mix.
+    "blocked_stratified_gap": "small_and_large",
     "fixed_common_test": "small_only",
     "fixed_common_test_small_only": "small_only",
     "resplit_combined": "combined_resplit_legacy",
@@ -444,6 +448,71 @@ def _temporal_sort_key(sample_id: str) -> tuple[str, int]:
     return (sample_id, -1)
 
 
+def _blocked_gap_split(
+    selected: list[tuple[str, "DatasetSample"]],
+    fractions: tuple[float, float, float],
+    temporal_gap: int,
+) -> list[str]:
+    """Temporally BLOCKED train/val/test with a gap, per structure domain.
+
+    Same idea as the reference ``blocked_with_gap`` split used by the
+    G2M-vs-DeepH snapshot-scaling sweeps: within each domain (``small__`` /
+    ``large__``), order snapshots by MD time, take contiguous blocks
+    ``[train | gap | validation | gap | test]`` and DROP the ``temporal_gap``
+    frames on each block boundary. No shuffling: adjacent (highly correlated)
+    MD frames never straddle a train/test boundary, so the test is not
+    temporally leaked (which a random or gapless split allows). Dropped gap
+    frames are assigned ``""`` and excluded from the materialized dataset.
+
+    The test is the temporal TAIL so it matches ``fixed_common_test_ids``'s
+    tail behaviour; train/validation are the two leading blocks.
+    """
+    assignment = [""] * len(selected)
+    by_domain: dict[str, list[int]] = {}
+    for i, (merged_id, _sample) in enumerate(selected):
+        domain = merged_id.split("__", 1)[0]
+        by_domain.setdefault(domain, []).append(i)
+
+    for _domain, idxs in by_domain.items():
+        ordered = sorted(idxs, key=lambda i: _temporal_sort_key(selected[i][0]))
+        n = len(ordered)
+        if n < 3:
+            # Degenerate: not enough frames for 3 blocks + gaps; fall back to
+            # a plain contiguous train/val/test with no gap.
+            n_train = max(1, min(n - 2, round(fractions[0] * n))) if n >= 3 else max(0, n - 1)
+            for rank, idx in enumerate(ordered):
+                assignment[idx] = "train" if rank < n_train else ("validation" if rank < n else "test")
+            if n == 1:
+                assignment[ordered[0]] = "train"
+            elif n == 2:
+                assignment[ordered[0]] = "train"
+                assignment[ordered[1]] = "test"
+            continue
+        # Block sizes from fractions; reserve at least 1 per block.
+        n_test = max(1, round(fractions[2] * n))
+        n_val = max(1, round(fractions[1] * n))
+        n_train = n - n_test - n_val - 2 * temporal_gap
+        if n_train < 1:
+            # Not enough room for two full gaps; shrink gap so every split is non-empty.
+            gap = max(0, (n - 3) // 2) if temporal_gap else 0
+            gap = min(temporal_gap, gap)
+            n_train = n - n_test - n_val - 2 * gap
+        else:
+            gap = temporal_gap
+        n_train = max(1, n_train)
+        # Layout: [train (n_train)] [gap] [val (n_val)] [gap] [test (n_test)]
+        cursor = 0
+        for _ in range(n_train):
+            assignment[ordered[cursor]] = "train"; cursor += 1
+        cursor += gap  # dropped
+        for _ in range(min(n_val, n - cursor - n_test)):
+            assignment[ordered[cursor]] = "validation"; cursor += 1
+        cursor += gap  # dropped
+        for idx in ordered[max(cursor, n - n_test):]:
+            assignment[idx] = "test"
+    return assignment
+
+
 def fixed_common_test_ids(
     small_pool: list["DatasetSample | str"],
     fractions: tuple[float, float, float],
@@ -519,6 +588,8 @@ def _composition_metrics(
     elements = {"small": 0, "large": 0}
     elements_known = True
     for (merged_id, sample), split in zip(selected, split_assignment):
+        if split == "":  # dropped temporal-gap frame (blocked_stratified_gap)
+            continue
         origin = "small" if merged_id.startswith("small__") else "large"
         per_split_origin[split][origin] += 1
         if split == "train":
@@ -686,6 +757,7 @@ def materialize_mixed_dataset(
     mode: str | None = None,
     ratio: float | None = None,
     split_policy: str = "fixed_common_test",
+    temporal_gap: int = 1,
     overwrite: bool = False,
     confirm_ghost_species_exemption: bool = False,
     allow_source_test_in_train: bool = False,
@@ -774,15 +846,25 @@ def materialize_mixed_dataset(
             split_fractions,
             seed,
         )
+    elif split_policy == "blocked_stratified_gap":
+        split_assignment = _blocked_gap_split(selected, split_fractions, int(temporal_gap))
+        if "test" not in split_assignment:
+            raise DatasetMaterializeError(
+                "split_policy='blocked_stratified_gap' produced an empty test split; "
+                "select more snapshots per structure (need >=3 per domain)."
+            )
     else:
         raise DatasetMaterializeError(
             f"Unknown split_policy {split_policy!r}; use 'fixed_stratified_test', "
-            "'fixed_common_test' (small-only test) or 'resplit_combined' (legacy)."
+            "'blocked_stratified_gap', 'fixed_common_test' (small-only test) or "
+            "'resplit_combined' (legacy)."
         )
 
     # No-leakage guard (audit Fase 7): a snapshot the SOURCE dataset held out
     # as test must never train or validate the mixed model.
-    if not allow_source_test_in_train:
+    # blocked_stratified_gap defines a fresh temporal split for the mixed
+    # permutation; source split labels are historical provenance there.
+    if not allow_source_test_in_train and split_policy != "blocked_stratified_gap":
         for (merged_id, sample), split in zip(selected, split_assignment):
             if sample.split == "test" and split in ("train", "validation"):
                 raise DatasetMaterializeError(
@@ -809,6 +891,10 @@ def materialize_mixed_dataset(
     per_split_index: dict[str, int] = {split: 0 for split in _SPLITS}
 
     for (merged_id, sample), split in zip(selected, split_assignment):
+        # A split of "" marks a snapshot dropped as a temporal gap frame
+        # (blocked_stratified_gap): it must not be materialized into any split.
+        if split == "":
+            continue
         idx = per_split_index[split]
         per_split_index[split] += 1
         dest = partial_root / "splits" / split / str(idx)

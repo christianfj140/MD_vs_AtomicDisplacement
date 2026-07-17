@@ -46,16 +46,16 @@ def _base_payload(**extra: object) -> dict:
     return payload
 
 
-def _run_and_capture_split_policy(payload: dict, tmp_path: Path) -> dict[str, str]:
+def _run_and_capture_mixing_kwargs(payload: dict, tmp_path: Path) -> dict[str, object]:
     """Run _run_mixing_payload with both runner paths mocked; return captured kwargs."""
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     def fake_parallel(*args, **kwargs):
-        captured["parallel"] = kwargs["split_policy"]
+        captured["parallel"] = kwargs
         return {"n_permutations": 0, "permutations": []}
 
     def fake_sweep(*args, **kwargs):
-        captured["sweep"] = kwargs["split_policy"]
+        captured["sweep"] = kwargs
         return {"n_permutations": 0, "permutations": []}
 
     fake_mvs = mock.Mock()
@@ -68,17 +68,29 @@ def _run_and_capture_split_policy(payload: dict, tmp_path: Path) -> dict[str, st
 
 def test_mixing_payload_defaults_to_fixed_common_test(tmp_path: Path) -> None:
     # Train path (parallel runner).
-    captured = _run_and_capture_split_policy(_base_payload(action="train"), tmp_path)
-    assert captured == {"parallel": "fixed_common_test"}
+    captured = _run_and_capture_mixing_kwargs(_base_payload(action="train"), tmp_path)
+    assert captured["parallel"]["split_policy"] == "fixed_common_test"
     # Preview path (library sweep).
-    captured = _run_and_capture_split_policy(_base_payload(action="preview"), tmp_path)
-    assert captured == {"sweep": "fixed_common_test"}
+    captured = _run_and_capture_mixing_kwargs(_base_payload(action="preview"), tmp_path)
+    assert captured["sweep"]["split_policy"] == "fixed_common_test"
 
 
 def test_mixing_payload_explicit_resplit_combined_is_respected(tmp_path: Path) -> None:
     payload = _base_payload(action="train", split_policy="resplit_combined")
-    captured = _run_and_capture_split_policy(payload, tmp_path)
-    assert captured == {"parallel": "resplit_combined"}
+    captured = _run_and_capture_mixing_kwargs(payload, tmp_path)
+    assert captured["parallel"]["split_policy"] == "resplit_combined"
+
+
+def test_mixing_payload_forwards_split_fractions_and_gap(tmp_path: Path) -> None:
+    payload = _base_payload(
+        action="train",
+        split_policy="blocked_stratified_gap",
+        split_fractions=[0.8, 0.1, 0.1],
+        temporal_gap=1,
+    )
+    captured = _run_and_capture_mixing_kwargs(payload, tmp_path)
+    assert captured["parallel"]["split_fractions"] == (0.8, 0.1, 0.1)
+    assert captured["parallel"]["temporal_gap"] == 1
 
 
 def test_mixing_payload_hyperparams_reach_parallel_runner(tmp_path: Path) -> None:

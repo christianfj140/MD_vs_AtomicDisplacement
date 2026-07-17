@@ -12,7 +12,7 @@
 set -u
 
 PROJECT_ROOT="/home/christian/repositorios/MD_vs_AtomicDisplacement"
-PAYLOAD="$PROJECT_ROOT/Comparison/config/ml_vs_siesta_mixing_sweep_20_1000_stratified_per_structure_payload.json"
+PAYLOAD="$PROJECT_ROOT/Comparison/config/ml_vs_siesta_mixing_sweep_20_1000_blocked_gap_5x5_paper_ready_payload.json"
 RESUME_SCRIPT="$PROJECT_ROOT/Comparison/scripts/ops/resume_mixing_sweep_oom.py"
 VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 LOG="$PROJECT_ROOT/Comparison/results/mixing_sweep_watchdog.log"
@@ -54,8 +54,8 @@ if [ -r "$CGROUP_MEMORY_EVENTS" ]; then
     oom_count=$(awk '/^oom_kill /{print $2}' "$CGROUP_MEMORY_EVENTS")
 fi
 
-g2m_parallel=7
-deeph_parallel=5
+g2m_parallel=4
+deeph_parallel=3
 gave_up=0
 if [ ! -f "$STATE_FILE" ]; then
     log "first run: recording oom baseline=${oom_count}, no action taken"
@@ -67,8 +67,8 @@ json.dump({'last_oom_count': $oom_count, 'g2m_parallel': $g2m_parallel, 'deeph_p
 fi
 
 last_oom_count=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('last_oom_count', 0))" 2>/dev/null || echo 0)
-g2m_parallel=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('g2m_parallel', 7))" 2>/dev/null || echo 7)
-deeph_parallel=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('deeph_parallel', 5))" 2>/dev/null || echo 5)
+g2m_parallel=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('g2m_parallel', 4))" 2>/dev/null || echo 4)
+deeph_parallel=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('deeph_parallel', 3))" 2>/dev/null || echo 3)
 gave_up=$(python3 -c "import json; print(int(json.load(open('$STATE_FILE')).get('gave_up', False)))" 2>/dev/null || echo 0)
 
 log "oom_kill_count=${oom_count} last_seen=${last_oom_count} current_parallel(g2m=${g2m_parallel},deeph=${deeph_parallel}) gave_up=${gave_up}"

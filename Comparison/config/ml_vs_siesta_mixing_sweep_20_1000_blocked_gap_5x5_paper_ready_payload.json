@@ -1,0 +1,175 @@
+{
+  "description": "Mixing sweep (small=graphene_w90, large=graphene_5x5) con datasets add/replace, split temporal blocked_stratified_gap 80/10/10 gap=1 y los hiperparametros efectivos del ultimo payload 5x5 G2M-vs-DeepH paper_ready.",
+  "action": "train",
+  "sizes": [
+    20,
+    30,
+    50,
+    60,
+    80,
+    90,
+    100,
+    150,
+    200,
+    300,
+    400,
+    500,
+    600
+  ],
+  "modes": [
+    "add",
+    "replace"
+  ],
+  "ratios": [
+    0.0,
+    0.5,
+    1.0
+  ],
+  "seed": 0,
+  "split_policy": "blocked_stratified_gap",
+  "confirm_ghost_species_exemption": true,
+  "models": [
+    "graph2mat",
+    "deeph"
+  ],
+  "epochs": 600,
+  "early_stopping": {
+    "max_epochs": 600,
+    "metric": "val_loss",
+    "min_delta": 0.0,
+    "mode": "min",
+    "patience": 80
+  },
+  "hyperparams": {
+    "graph2mat": {
+      "batch_size": 32,
+      "correlation": 3,
+      "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+      "loader_threads": 4,
+      "loss": "graph2mat.metrics.block_type_huber",
+      "loss_kwargs": {
+        "beta": 0.01
+      },
+      "max_ell": 3,
+      "max_epochs": 600,
+      "num_interactions": 3,
+      "optim_lr": 0.0018,
+      "readout": "default"
+    },
+    "deeph": {
+      "atom_fea_len": 128,
+      "atom_update_net": "CGConv",
+      "batch_size": 8,
+      "criterion": "MaskMSELoss",
+      "edge_fea_len": 128,
+      "epochs": 600,
+      "gauss_stop": 6,
+      "if_edge_update": true,
+      "if_lcmp": true,
+      "learning_rate": 0.0003,
+      "normalization": "LayerNorm",
+      "num_l": 4,
+      "optimizer": "adamW",
+      "retain_edge_fea": true,
+      "weight_decay": 0.0001
+    }
+  },
+  "small": {
+    "20": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid20",
+    "30": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid30",
+    "50": "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid50",
+    "60": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid60",
+    "80": "Comparison/datasets/graphene_w90_snapshot_scaling_10_1500_dense_10_30_unit/graphene_w90_scale_iid80",
+    "90": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid90",
+    "100": "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid100",
+    "150": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid150",
+    "200": "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid200",
+    "300": "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid300",
+    "400": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid400",
+    "500": "Comparison/datasets/graphene_w90_snapshot_scaling/graphene_w90_scale_iid500",
+    "600": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid600",
+    "800": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid800",
+    "1000": "Comparison/datasets/graphene_w90_snapshot_scaling_150_1000_dense/graphene_w90_scale_iid1000"
+  },
+  "large": {
+    "20": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20",
+    "30": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid30",
+    "50": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid50",
+    "60": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid60",
+    "80": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid80",
+    "90": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid90",
+    "100": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid100",
+    "150": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid150",
+    "200": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid200",
+    "300": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid300",
+    "400": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid400",
+    "500": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid500",
+    "600": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid600",
+    "800": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid800",
+    "1000": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid1000"
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 4,
+    "max_parallel_deeph_training_jobs": 1,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "notes": {
+    "run_order": [
+      "1. Confirm all 15 large (5x5) datasets exist: graphene_5x5_snapshot_scaling_20_50_80 (iid20/50/80), graphene_5x5_snapshot_scaling_100_500_mixing (iid100..iid500), graphene_5x5_snapshot_scaling_complete_paper_ready_missing (iid30/60/90/600/800/1000) -- all already generated on disk as of 2026-07-13.",
+      "2. Launch this payload through /api/mixing/launch or the E2E wrapper (run_mixing_e2e_payload_once.py).",
+      "3. Expect 15 sizes x 2 modes x 3 ratios = 90 permutations, 180 model runs for Graph2Mat+DeepH (single seed, no replication)."
+    ],
+    "single_seed_note": "seed=0 only, per user request. This is a single training pass per permutation, NOT publication-grade (audit I5 requires >=3 seeds for MAE-vs-size claims with error bars). Treat curves from this sweep as exploratory point estimates.",
+    "hyperparams_note": "Copied from training_sweep.manual_runs effective overrides in graphene_5x5_snapshot_scaling_complete_paper_ready_payload.json.",
+    "estimated_disk_gb": {
+      "basis": "measured ~1.5 GB for a single size=500 permutation with these exact hyperparameters; iid800/iid1000 permutations will cost proportionally more",
+      "expected": 70,
+      "expected_plus_30pct": 91,
+      "pessimistic_upper_bound_all_sizes_at_size1000_cost": 160
+    },
+    "split_policy_note": "fixed_stratified_test: test set fijo derivado de small+large (recomendado, ver docs/mixing_and_autograd_validation_contract.md \u00a75).",
+    "iid_naming_note": "Los datasets *_iid* NO son muestras iid: son frames MD consecutivos (1 fs) agrupados en bloques de temperatura. Ver docs/known_limitations.md.",
+    "ghost_exemption_note": "confirm_ghost_species_exemption=true: los datasets small (W90, con Ghost-H) y large (5x5, solo C) tienen especies ghost distintas; la exencion se declara explicitamente aqui (aunque el Ghost-H real es proven_inactive, ver dataset_compatibility.py).",
+    "methodology_note": "blocked_stratified_gap: bloques temporales contiguos [train|gap|val|gap|test] con temporal_gap=1 frame descartado en cada frontera, por estructura. Elimina la fuga temporal del fixed_stratified_test previo (train pegado al test). Comparable 1:1 con el sweep de referencia 5x5 paper_ready."
+  },
+  "schema": "mixing_payload_schema_v2",
+  "training_weighting_policy": "legacy_elementwise",
+  "selection_seeds": [
+    0
+  ],
+  "seeds": [
+    0
+  ],
+  "strict_dataset_validation": true,
+  "require_repository_provenance": true,
+  "reconstructed_records": "Comparison/results/ml_vs_siesta_mixing_sweep/reconstructed_endpoint_records.json",
+  "split_fractions": [
+    0.8,
+    0.1,
+    0.1
+  ],
+  "temporal_gap": 1
+}

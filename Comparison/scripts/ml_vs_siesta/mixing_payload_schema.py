@@ -15,6 +15,7 @@ MIXING_PAYLOAD_SCHEMA_V2 = "mixing_payload_schema_v2"
 _VALID_ACTIONS = {"preview", "materialize", "train"}
 _VALID_MODES = {"add", "replace"}
 _VALID_SPLIT_POLICIES = {
+    "blocked_stratified_gap",
     "fixed_stratified_test",
     "fixed_common_test",
     "fixed_common_test_small_only",

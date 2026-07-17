@@ -28,6 +28,7 @@ VALID_SPLIT_POLICIES = {
     "fixed_common_test",
     "fixed_common_test_small_only",
     "fixed_stratified_test",
+    "blocked_stratified_gap",
 }
 _FIXED_TEST_POLICIES = {
     "fixed_common_test",
@@ -270,10 +271,13 @@ def run_mixing_sweep(
     system_label: str | None = None,
     performance: dict[str, Any] | None = None,
     split_policy: str = "fixed_common_test",
+    split_fractions: tuple[float, float, float] | None = None,
+    temporal_gap: int = 1,
     confirm_ghost_species_exemption: bool = False,
     dry_run: bool = True,
     launch_fn: LaunchFn | None = None,
     progress_fn: Callable[[dict[str, Any]], None] | None = None,
+    skip_permutation_keys: set[tuple[int, str, float]] | None = None,
 ) -> dict[str, Any]:
     """Materialize + (optionally) train one merged dataset per permutation.
 
@@ -299,6 +303,7 @@ def run_mixing_sweep(
 
     records: list[dict[str, Any]] = []
     permutation_results: list[dict[str, Any]] = []
+    skip_permutation_keys = skip_permutation_keys or set()
 
     for size in plan["sizes"]:
         if size not in small_by_size or size not in large_by_size:
@@ -360,6 +365,11 @@ def run_mixing_sweep(
                     "n_large_selected": len(selected_large),
                     "output_root": str(merged_dir),
                 }
+                if (size, mode, round(ratio, 6)) in skip_permutation_keys:
+                    entry["status"] = "reconstructed"
+                    entry["reconstructed"] = True
+                    permutation_results.append(entry)
+                    continue
                 if dry_run:
                     entry["status"] = "planned"
                     permutation_results.append(entry)
@@ -375,6 +385,8 @@ def run_mixing_sweep(
                     mode=mode,
                     ratio=ratio,
                     split_policy=split_policy,
+                    split_fractions=split_fractions or DEFAULT_SPLIT_FRACTIONS,
+                    temporal_gap=temporal_gap,
                     overwrite=True,
                     confirm_ghost_species_exemption=confirm_ghost_species_exemption,
                 )
@@ -417,6 +429,9 @@ def run_mixing_sweep(
                                 "evaluation_scope": composition.get("evaluation_scope"),
                                 "model": model,
                                 "h_mae_eV": float(h_mae),
+                                "relative_frobenius": (model_metrics or {}).get(
+                                    "relative_frobenius"
+                                ),
                                 "output_root": str(merged_dir),
                             }
                         )

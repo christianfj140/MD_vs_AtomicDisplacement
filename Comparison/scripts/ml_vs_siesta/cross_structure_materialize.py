@@ -946,8 +946,8 @@ def run_cross_structure_payload(
 ) -> dict[str, Any]:
     """Run preview/materialize/train for a cross-structure payload."""
     action = str(payload.get("action") or "preview").strip().lower()
-    if action not in {"preview", "materialize", "train"}:
-        raise DatasetMaterializeError("action must be one of: preview, materialize, train.")
+    if action not in {"preview", "materialize", "train", "predict_metrics"}:
+        raise DatasetMaterializeError("action must be one of: preview, materialize, train, predict_metrics.")
     source = _resolve_repo_path(payload.get("source_dataset_root"))
     target = _resolve_repo_path(payload.get("target_dataset_root"))
     composite = _resolve_repo_path(
@@ -969,7 +969,9 @@ def run_cross_structure_payload(
     result = {"action": action, "preview": {key: value for key, value in preview.items() if key != "selected"}}
     if action == "preview":
         return result
-    runner_payload = _build_runner_payload(payload, composite, run_output) if action == "train" else None
+    runner_payload = _build_runner_payload(payload, composite, run_output) if action in {"train", "predict_metrics"} else None
+    if action == "predict_metrics" and runner_payload is not None:
+        runner_payload["predict_metrics_only"] = True
 
     materialized = materialize_or_reuse_cross_structure_dataset(
         source,

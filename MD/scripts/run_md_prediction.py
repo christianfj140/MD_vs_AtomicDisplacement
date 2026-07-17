@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import glob
+import traceback
 from pathlib import Path
 
 TORCH_COMPAT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "torch_serialization_compat"
@@ -166,6 +167,8 @@ def main() -> int:
     allow_graph2mat_checkpoint_globals()
     model = LitMACEMatrixModel.load_from_checkpoint(
         str(pipeline_paths["training_dir"] / ckpt_path),
+        root_dir=str(training_data.get("root_dir") or "."),
+        basis_files=str(training_data["basis_files"]),
         weights_only=False,
     )
     datamodule_kwargs = {
@@ -240,4 +243,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:
         print(f"\n[ERROR] {exc}", file=sys.stderr)
+        traceback.print_exc()
         raise SystemExit(1)

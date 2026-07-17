@@ -156,17 +156,33 @@ def _record(
     }
 
 
+def _artifacts_for_source(existing_artifacts: dict[str, Any], perm: dict[str, Any]) -> dict[str, Any]:
+    for key in (perm.get("source_id"), Path(str(perm.get("source_root") or "")).name):
+        artifacts = existing_artifacts.get(str(key))
+        if isinstance(artifacts, dict):
+            return dict(artifacts)
+    raise ValueError(
+        "predict_metrics requires existing_artifacts for source "
+        f"{perm.get('source_id')} ({perm.get('source_root')})."
+    )
+
+
 def run_cross_structure_sweep(
     sources: list[str | Path],
     targets: list[str | Path],
     output_root: str | Path,
     *,
+    pairs: list[tuple[str | Path, str | Path]] | None = None,
     models: tuple[str, ...] = ("graph2mat", "deeph"),
     epochs: int | None = None,
+    hyperparams: dict[str, dict[str, Any]] | None = None,
+    early_stopping: dict[str, Any] | None = None,
+    existing_artifacts: dict[str, Any] | None = None,
     performance: dict[str, Any] | None = None,
     seed: int = 0,
     confirm_ghost_species_exemption: bool = False,
     confirm_incomplete_hamiltonian_semantics: bool = False,
+    strict_dataset_validation: bool = True,
     action: str = "preview",
     dry_run: bool | None = None,
     launch_fn: LaunchFn | None = None,
@@ -174,8 +190,9 @@ def run_cross_structure_sweep(
 ) -> dict[str, Any]:
     """Materialize + (optionally) train one composite dataset per compatible pair.
 
-    ``action`` is ``preview`` (plan only), ``materialize`` (build composites) or
-    ``train`` (materialize + drive the real runner via ``launch_fn``). Incompatible
+    ``action`` is ``preview`` (plan only), ``materialize`` (build composites),
+    ``train`` (materialize + drive the real runner via ``launch_fn``), or
+    ``predict_metrics`` (same runner path but with existing checkpoints). Incompatible
     pairs are skipped. Per-model ``h_mae_eV`` records (MAE vs training source) are
     emitted through ``progress_fn`` and persisted in ``cross_structure_sweep_summary.json``.
     ``training_sweep`` is not supported in cross-structure (enforced downstream by
@@ -183,17 +200,38 @@ def run_cross_structure_sweep(
     """
     output_root = Path(output_root)
     action = str(action or "preview").strip().lower()
-    if action not in {"preview", "materialize", "train"}:
-        raise ValueError("action must be one of: preview, materialize, train.")
+    if action not in {"preview", "materialize", "train", "predict_metrics"}:
+        raise ValueError("action must be one of: preview, materialize, train, predict_metrics.")
     if dry_run is None:
         dry_run = action == "preview"
 
-    plan = plan_cross_structure_sweep(
-        sources,
-        targets,
-        confirm_ghost_species_exemption=confirm_ghost_species_exemption,
-        confirm_incomplete_hamiltonian_semantics=confirm_incomplete_hamiltonian_semantics,
-    )
+    if pairs:
+        permutations: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for source, target in pairs:
+            pair_plan = plan_cross_structure_sweep(
+                [source],
+                [target],
+                confirm_ghost_species_exemption=confirm_ghost_species_exemption,
+                confirm_incomplete_hamiltonian_semantics=confirm_incomplete_hamiltonian_semantics,
+            )
+            permutations.extend(pair_plan.get("permutations") or [])
+            warnings.extend(pair_plan.get("warnings") or [])
+        plan = {
+            "schema": "ml_vs_siesta_cross_structure_sweep_plan_v1",
+            "n_permutations": len(permutations),
+            "n_compatible": sum(1 for p in permutations if p["status"] == "compatible"),
+            "n_incompatible": sum(1 for p in permutations if p["status"] == "incompatible"),
+            "permutations": permutations,
+            "warnings": warnings,
+        }
+    else:
+        plan = plan_cross_structure_sweep(
+            sources,
+            targets,
+            confirm_ghost_species_exemption=confirm_ghost_species_exemption,
+            confirm_incomplete_hamiltonian_semantics=confirm_incomplete_hamiltonian_semantics,
+        )
 
     records: list[dict[str, Any]] = []
     permutation_results: list[dict[str, Any]] = []
@@ -214,6 +252,19 @@ def run_cross_structure_sweep(
                 progress_fn(dict(perm))
             continue
 
+        runner_payload = _runner_payload(
+            models,
+            epochs,
+            performance,
+            strict_dataset_validation,
+            hyperparams=hyperparams,
+            early_stopping=early_stopping,
+            seed=seed,
+        )
+        source_artifacts = _artifacts_for_source(existing_artifacts or {}, perm)
+        if action == "predict_metrics":
+            runner_payload["predict_metrics_only"] = True
+            runner_payload["existing_model_artifacts"] = source_artifacts
         payload = {
             "action": action,
             "source_dataset_root": perm["source_root"],
@@ -222,7 +273,7 @@ def run_cross_structure_sweep(
             "run_output_root": str(pair_dir / "training"),
             "confirm_ghost_species_exemption": confirm_ghost_species_exemption,
             "confirm_incomplete_hamiltonian_semantics": confirm_incomplete_hamiltonian_semantics,
-            "runner_payload": _runner_payload(models, epochs, performance),
+            "runner_payload": runner_payload,
         }
         if action == "materialize":
             # run_cross_structure_payload only materializes; no runner launch.
@@ -252,7 +303,7 @@ def run_cross_structure_sweep(
                     m for m in models if m not in recorded
                 )
             else:
-                perm["status"] = "trained"
+                perm["status"] = "evaluated" if action == "predict_metrics" else "trained"
         permutation_results.append(perm)
         if progress_fn is not None:
             progress_fn(dict(perm))
@@ -269,6 +320,7 @@ def run_cross_structure_sweep(
         "plan_warnings": plan["warnings"],
         "n_permutations": len(permutation_results),
         "n_trained": _count("trained"),
+        "n_evaluated": _count("evaluated"),
         "n_partial": _count("partial"),
         "n_failed": _count("failed"),
         "n_incompatible": _count("incompatible"),
@@ -287,16 +339,33 @@ def _runner_payload(
     models: tuple[str, ...],
     epochs: int | None,
     performance: dict[str, Any] | None,
+    strict_dataset_validation: bool = True,
+    *,
+    hyperparams: dict[str, dict[str, Any]] | None = None,
+    early_stopping: dict[str, Any] | None = None,
+    seed: int = 0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "selected_methods": list(models),
         "models": list(models),
+        "strict_dataset_validation": bool(strict_dataset_validation),
+        "random_seed": int(seed),
     }
+    graph2mat_overrides = dict((hyperparams or {}).get("graph2mat") or {})
+    deeph_options = dict((hyperparams or {}).get("deeph") or {})
+    graph2mat_overrides.setdefault("seed_everything", int(seed))
+    deeph_options.setdefault("seed", int(seed))
     if epochs is not None:
         epochs = int(epochs)
         payload["epochs"] = epochs
-        payload["graph2mat_overrides"] = {"max_epochs": epochs}
-        payload["deeph"] = {"epochs": epochs}
+        graph2mat_overrides["max_epochs"] = epochs
+        deeph_options["epochs"] = epochs
+    if graph2mat_overrides:
+        payload["graph2mat_overrides"] = graph2mat_overrides
+    if deeph_options:
+        payload["deeph"] = deeph_options
+    if early_stopping:
+        payload["early_stopping"] = dict(early_stopping)
     if performance:
         payload["performance"] = performance
     return payload

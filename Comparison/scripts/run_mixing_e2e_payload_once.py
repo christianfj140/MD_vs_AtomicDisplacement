@@ -114,11 +114,23 @@ def _run_mixing_payload(
         payload.get("training_weighting_policy") or "legacy_elementwise"
     )
     domain_weighting = payload.get("domain_weighting") or None
+    early_stopping = payload.get("early_stopping") or None
+    reconstructed_records = payload.get("reconstructed_records") or []
+    if isinstance(reconstructed_records, (str, Path)):
+        reconstructed_records = read_json(resolve_repo_path(reconstructed_records)).get("records") or []
     action = str(payload.get("action") or "preview")
     # Default fixed_common_test: resplit_combined re-splits the test set per
     # ratio, so MAE differences between ratios can come from the test set
     # changing instead of the composition (see docs/ml_vs_siesta_benchmark.md).
     split_policy = str(payload.get("split_policy") or "fixed_common_test")
+    split_fractions = payload.get("split_fractions") or None
+    if split_fractions is not None:
+        split_fractions = tuple(float(x) for x in split_fractions)
+    temporal_gap = (
+        int(payload["temporal_gap"])
+        if payload.get("temporal_gap") not in (None, "")
+        else None
+    )
     confirm_ghost = bool(payload.get("confirm_ghost_species_exemption"))
     root = output_root or ui.MIXING_SWEEP_OUTPUT_ROOT
     if action == "train":
@@ -134,10 +146,14 @@ def _run_mixing_payload(
             epochs=epochs,
             performance=performance,
             split_policy=split_policy,
+            split_fractions=split_fractions,
+            temporal_gap=temporal_gap,
             confirm_ghost_species_exemption=confirm_ghost,
             hyperparams=hyperparams,
             training_weighting_policy=training_weighting_policy,
             domain_weighting=domain_weighting,
+            early_stopping=early_stopping,
+            reconstructed_records=reconstructed_records,
             progress_fn=None,
             log_fn=log_fn,
         )
@@ -155,6 +171,8 @@ def _run_mixing_payload(
         epochs=epochs,
         performance=performance,
         split_policy=split_policy,
+        split_fractions=split_fractions,
+        temporal_gap=temporal_gap or 1,
         confirm_ghost_species_exemption=confirm_ghost,
         dry_run=dry_run,
         launch_fn=None,

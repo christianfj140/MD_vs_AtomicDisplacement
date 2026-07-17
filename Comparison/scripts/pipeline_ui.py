@@ -16576,7 +16576,7 @@ _MIXING_TRAINING_POLL_SECONDS = 5.0
 
 
 _NON_TEST_SPLITS = {"train", "training", "validation", "val"}
-_TEST_SPLITS = {"test", "final_test", "final"}
+_TEST_SPLITS = {"test", "final_test", "final", "eval", "eval_input"}
 
 
 def _extract_model_h_mae_eV(results_payload: Any, models: tuple[str, ...]) -> dict[str, Any]:
@@ -16672,7 +16672,11 @@ def _mixing_metrics_from_common_csv(run_root: Any, models: tuple[str, ...]) -> d
             if model not in wanted or value in (None, ""):
                 continue
             try:
-                found[wanted[model]] = {"h_mae_eV": float(value)}
+                metrics = {"h_mae_eV": float(value)}
+                rel = row.get("relative_frobenius") or row.get("relative_frobenius_mean")
+                if rel not in (None, ""):
+                    metrics["relative_frobenius"] = float(rel)
+                found[wanted[model]] = metrics
             except ValueError:
                 pass
     return found
@@ -16718,6 +16722,7 @@ def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any
         return {}
     root = Path(str(run_root))
     values: list[float] = []
+    rel_values: list[float] = []
     for path in sorted(root.rglob("kpoint_matrix_metrics.csv")):
         evidence = _mixing_csv_split_evidence(path, root)
         if evidence not in _TEST_SPLITS:
@@ -16732,11 +16737,17 @@ def _mixing_metrics_from_run_metrics(run_root: Any, model: str) -> dict[str, Any
                     if value in (None, ""):
                         continue
                     values.append(float(value))
+                    rel = row.get("relative_frobenius")
+                    if rel not in (None, ""):
+                        rel_values.append(float(rel))
         except (OSError, ValueError):
             continue
     if not values:
         return {}
-    return {model: {"h_mae_eV": sum(values) / len(values)}}
+    metrics = {"h_mae_eV": sum(values) / len(values)}
+    if rel_values:
+        metrics["relative_frobenius"] = sum(rel_values) / len(rel_values)
+    return {model: metrics}
 
 
 def _persist_mixing_summary(output_root: Path, summary: dict[str, Any]) -> None:
@@ -16846,12 +16857,15 @@ def _run_mixing_sweep_parallel(
     epochs: int | None,
     performance: dict[str, Any] | None,
     split_policy: str = "fixed_common_test",
+    split_fractions: tuple[float, float, float] | None = None,
+    temporal_gap: int | None = None,
     confirm_ghost_species_exemption: bool = False,
     hyperparams: dict[str, dict[str, Any]] | None = None,
     training_weighting_policy: str = "legacy_elementwise",
     domain_weighting: dict[str, Any] | None = None,
     early_stopping: dict[str, Any] | None = None,
-    progress_fn: Callable[[dict[str, Any]], None] | None,
+    reconstructed_records: list[dict[str, Any]] | None = None,
+    progress_fn: Callable[[dict[str, Any]], None] | None = None,
     log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Materialize ALL permutation datasets, then train with ONE runner invocation.
@@ -16880,6 +16894,24 @@ def _run_mixing_sweep_parallel(
             f"sizes={sizes or sorted(small)} modes={list(modes)} ratios={list(ratios)} "
             f"split_policy={split_policy} training_weighting_policy={training_weighting_policy}\n"
         )
+    reconstructed_records = list(reconstructed_records or [])
+    reconstructed_models_by_key: dict[tuple[int, str, float], set[str]] = defaultdict(set)
+    for record in reconstructed_records:
+        try:
+            reconstructed_models_by_key[
+                (
+                    int(record["size"]),
+                    str(record["mode"]),
+                    round(float(record["ratio"]), 6),
+                )
+            ].add(str(record["model"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    reconstructed_keys = {
+        key
+        for key, reconstructed_models in reconstructed_models_by_key.items()
+        if set(models).issubset(reconstructed_models)
+    }
 
     # ── Phase 1: materialise all datasets ──────────────────────────────────────
     summary_permutations = mvs.run_mixing_sweep(
@@ -16894,24 +16926,45 @@ def _run_mixing_sweep_parallel(
         epochs=epochs,
         performance=performance,
         split_policy=split_policy,
+        split_fractions=split_fractions,
+        temporal_gap=(DEFAULT_MD_TEMPORAL_GAP if temporal_gap is None else int(temporal_gap)),
         confirm_ghost_species_exemption=confirm_ghost_species_exemption,
         dry_run=False,
         launch_fn=None,          # materialise only, no training yet
         progress_fn=progress_fn,
+        skip_permutation_keys=reconstructed_keys,
     )
 
     materialized = [
         p for p in (summary_permutations.get("permutations") or [])
         if p.get("status") == "materialized"
     ]
+    for perm in materialized:
+        key = (
+            int(perm.get("size")),
+            str(perm.get("mode")),
+            round(float(perm.get("ratio")), 6),
+        )
+        if key in reconstructed_keys:
+            perm["status"] = "reconstructed"
+            perm["reconstructed"] = True
+    trainable = [p for p in materialized if not p.get("reconstructed")]
     if log_fn is not None:
+        reconstructed_count = sum(
+            1
+            for entry in (summary_permutations.get("permutations") or [])
+            if entry.get("status") == "reconstructed"
+        )
         log_fn(
             "[MIXING] Datasets materializados: "
             f"{len(materialized)}/{len(summary_permutations.get('permutations') or [])}. "
+            f"Reconstruidos={reconstructed_count}. "
             "Arrancando entrenamiento Graph2Mat/DeepH.\n"
         )
-    if not materialized:
+    if not trainable:
         summary_permutations["n_trained"] = 0
+        summary_permutations["records"] = reconstructed_records
+        _persist_mixing_summary(output_root, summary_permutations)
         return summary_permutations
 
     # ── Phase 2: one runner invocation with ALL datasets ──────────────────────
@@ -16920,7 +16973,7 @@ def _run_mixing_sweep_parallel(
             "dataset_id": f"perm_{i}",
             "dataset_root": p["output_root"],
         }
-        for i, p in enumerate(materialized)
+        for i, p in enumerate(trainable)
     ]
 
     thread_count = None
@@ -16932,7 +16985,7 @@ def _run_mixing_sweep_parallel(
         )
 
     manual_runs: list[dict[str, Any]] = []
-    for i, _perm in enumerate(materialized):
+    for i, _perm in enumerate(trainable):
         dataset_id = f"perm_{i}"
         for model in models:
             overrides: dict[str, Any] = dict((hyperparams or {}).get(model) or {})
@@ -16960,7 +17013,7 @@ def _run_mixing_sweep_parallel(
         "dataset_mode": "reuse_validated",
         # Point at the first dataset so the runner passes validation;
         # per-run dataset_root is overridden via the training_sweep datasets list.
-        "dataset_root": materialized[0]["output_root"],
+        "dataset_root": trainable[0]["output_root"],
         "output_root": str(output_root / "parallel_run"),
         "allow_regenerate_siesta": False,
         # Mixed datasets never carry strict-only provenance (siesta_version,
@@ -17028,7 +17081,7 @@ def _run_mixing_sweep_parallel(
     # ── Phase 3: collect per-permutation MAE from the common_metrics CSV ───────
     records: list[dict[str, Any]] = []
     requested_models = list(models)
-    for i, perm in enumerate(materialized):
+    for i, perm in enumerate(trainable):
         dataset_id = f"perm_{i}"
         recorded_models: list[str] = []
         # The runner writes per-run metrics under run_root/sweep/<model>/<dataset_id>/…
@@ -17051,6 +17104,7 @@ def _run_mixing_sweep_parallel(
                         "total_size": perm.get("total_size"),
                         "model": model,
                         "h_mae_eV": m[model]["h_mae_eV"],
+                        "relative_frobenius": m[model].get("relative_frobenius"),
                         "output_root": perm["output_root"],
                     }
                 )
@@ -17074,6 +17128,7 @@ def _run_mixing_sweep_parallel(
             if entry.get("status") == status
         )
 
+    records.extend(reconstructed_records)
     summary_permutations["records"] = records
     summary_permutations["n_trained"] = _count("trained")
     summary_permutations["n_partial"] = _count("partial")
@@ -17168,12 +17223,24 @@ class MixingSweepRunner:
             # Default fixed_common_test: with resplit_combined the test set
             # changes with each ratio, confounding MAE-vs-composition curves.
             split_policy = str(body.get("split_policy") or "fixed_common_test")
+            temporal_gap = int(body["temporal_gap"]) if body.get("temporal_gap") not in (None, "") else None
+            split_fractions = body.get("split_fractions") or None
+            if split_fractions is not None:
+                split_fractions = tuple(float(x) for x in split_fractions)
             confirm_ghost = bool(body.get("confirm_ghost_species_exemption"))
             training_weighting_policy = str(
                 body.get("training_weighting_policy") or "legacy_elementwise"
             )
             domain_weighting = body.get("domain_weighting") or None
             early_stopping = body.get("early_stopping") or None
+            reconstructed_records = body.get("reconstructed_records") or []
+            if isinstance(reconstructed_records, str):
+                try:
+                    reconstructed_records = json.loads(
+                        (REPO_ROOT / reconstructed_records).read_text(encoding="utf-8")
+                    ).get("records") or []
+                except (OSError, json.JSONDecodeError):
+                    reconstructed_records = []
             # Actions:
             #   "preview"     -> plan only (no writes).
             #   "materialize" -> build merged datasets, no training.
@@ -17232,11 +17299,14 @@ class MixingSweepRunner:
                     epochs=epochs,
                     performance=performance,
                     split_policy=split_policy,
+                    split_fractions=split_fractions,
+                    temporal_gap=temporal_gap,
                     confirm_ghost_species_exemption=confirm_ghost,
                     hyperparams=hyperparams,
                     training_weighting_policy=training_weighting_policy,
                     domain_weighting=domain_weighting,
                     early_stopping=early_stopping,
+                    reconstructed_records=reconstructed_records,
                     progress_fn=progress,
                 )
             else:
@@ -17327,11 +17397,69 @@ def _cross_testing_roots_from_body(body: dict[str, Any], key: str) -> list[str]:
     return roots
 
 
+def _cross_testing_pairs_from_body(body: dict[str, Any]) -> list[tuple[str, str]] | None:
+    raw = body.get("pairs")
+    if not raw:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        source = Path(str(item.get("source") or ""))
+        target = Path(str(item.get("target") or ""))
+        if not source.is_absolute():
+            source = REPO_ROOT / source
+        if not target.is_absolute():
+            target = REPO_ROOT / target
+        pairs.append((str(source), str(target)))
+    return pairs
+
+
+def _filter_cross_testing_plan_pairs(plan: dict[str, Any], pairs: list[tuple[str, str]] | None) -> dict[str, Any]:
+    if not pairs:
+        return plan
+    allowed = {(str(Path(source)), str(Path(target))) for source, target in pairs}
+    filtered = [
+        perm for perm in plan.get("permutations") or []
+        if (str(Path(str(perm.get("source_root")))), str(Path(str(perm.get("target_root"))))) in allowed
+    ]
+    return {
+        **plan,
+        "n_permutations": len(filtered),
+        "n_compatible": sum(1 for p in filtered if p.get("status") == "compatible"),
+        "n_incompatible": sum(1 for p in filtered if p.get("status") == "incompatible"),
+        "permutations": filtered,
+    }
+
+
 def cross_testing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
     mvs = _ml_vs_siesta_module()
+    pairs = _cross_testing_pairs_from_body(body)
+    if pairs:
+        permutations: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for source, target in pairs:
+            pair_plan = mvs.plan_cross_structure_sweep(
+                [source],
+                [target],
+                confirm_ghost_species_exemption=bool(body.get("confirm_ghost_species_exemption")),
+                confirm_incomplete_hamiltonian_semantics=bool(
+                    body.get("confirm_incomplete_hamiltonian_semantics")
+                ),
+            )
+            permutations.extend(pair_plan.get("permutations") or [])
+            warnings.extend(pair_plan.get("warnings") or [])
+        return {
+            "schema": "ml_vs_siesta_cross_structure_sweep_plan_v1",
+            "n_permutations": len(permutations),
+            "n_compatible": sum(1 for p in permutations if p.get("status") == "compatible"),
+            "n_incompatible": sum(1 for p in permutations if p.get("status") == "incompatible"),
+            "permutations": permutations,
+            "warnings": warnings,
+        }
     sources = _cross_testing_roots_from_body(body, "sources")
     targets = _cross_testing_roots_from_body(body, "targets")
-    return mvs.plan_cross_structure_sweep(
+    plan = mvs.plan_cross_structure_sweep(
         sources,
         targets,
         confirm_ghost_species_exemption=bool(body.get("confirm_ghost_species_exemption")),
@@ -17339,6 +17467,7 @@ def cross_testing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
             body.get("confirm_incomplete_hamiltonian_semantics")
         ),
     )
+    return plan
 
 
 def _cross_testing_payloads_from_permutations(permutations: Any) -> list[dict[str, Any]]:
@@ -17514,14 +17643,22 @@ class CrossStructureSweepRunner:
         try:
             sources = _cross_testing_roots_from_body(body, "sources")
             targets = _cross_testing_roots_from_body(body, "targets")
+            pairs = _cross_testing_pairs_from_body(body)
+            if pairs:
+                sources = [source for source, _target in pairs]
+                targets = [target for _source, target in pairs]
             models = tuple(body.get("models") or ("graph2mat", "deeph"))
             epochs = int(body["epochs"]) if body.get("epochs") not in (None, "") else None
             performance = body.get("performance") or None
+            hyperparams = body.get("hyperparams") or None
+            early_stopping = body.get("early_stopping") or None
+            existing_artifacts = body.get("existing_artifacts") or None
             seed = int(body.get("seed") or 0)
             confirm_ghost = bool(body.get("confirm_ghost_species_exemption"))
             confirm_hamiltonian = bool(body.get("confirm_incomplete_hamiltonian_semantics"))
+            strict_dataset_validation = parse_bool(body.get("strict_dataset_validation"), True)
             action = str(body.get("action") or "preview")
-            launch_fn = _cross_testing_launch_fn if action == "train" else None
+            launch_fn = _cross_testing_launch_fn if action in {"train", "predict_metrics"} else None
 
             live_records: list[dict[str, Any]] = []
 
@@ -17551,12 +17688,7 @@ class CrossStructureSweepRunner:
                 self._status["state"] = "running"
                 self._status["action"] = action
                 try:
-                    plan = mvs.plan_cross_structure_sweep(
-                        sources,
-                        targets,
-                        confirm_ghost_species_exemption=confirm_ghost,
-                        confirm_incomplete_hamiltonian_semantics=confirm_hamiltonian,
-                    )
+                    plan = cross_testing_plan_payload(body)
                     self._status["payloads"] = _cross_testing_payloads_from_permutations(
                         plan.get("permutations")
                     )
@@ -17567,12 +17699,17 @@ class CrossStructureSweepRunner:
                 sources,
                 targets,
                 CROSS_TESTING_SWEEP_OUTPUT_ROOT,
+                pairs=pairs,
                 models=models,
                 epochs=epochs,
+                hyperparams=hyperparams,
+                early_stopping=early_stopping,
+                existing_artifacts=existing_artifacts,
                 performance=performance,
                 seed=seed,
                 confirm_ghost_species_exemption=confirm_ghost,
                 confirm_incomplete_hamiltonian_semantics=confirm_hamiltonian,
+                strict_dataset_validation=strict_dataset_validation,
                 action=action,
                 launch_fn=launch_fn,
                 progress_fn=progress,
@@ -17585,6 +17722,7 @@ class CrossStructureSweepRunner:
                         "summary": summary,
                         "n_permutations": summary.get("n_permutations"),
                         "n_trained": summary.get("n_trained", 0),
+                        "n_evaluated": summary.get("n_evaluated", 0),
                         "n_partial": summary.get("n_partial", 0),
                         "n_failed": summary.get("n_failed", 0),
                         "n_incompatible": summary.get("n_incompatible", 0),

@@ -4817,6 +4817,81 @@ class Graph2MatDeepHBenchmarkRunner:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
+        payload = getattr(self, "_training_sweep_payload", None)
+        if isinstance(payload, dict):
+            self._refresh_mixing_ui_outputs(payload, run_root, summary)
+
+    def _refresh_mixing_ui_outputs(self, payload: dict[str, Any], run_root: Path, summary: dict[str, Any]) -> None:
+        raw_output_root = payload.get("mixing_ui_output_root") or payload.get("_mixing_ui_output_root")
+        if raw_output_root in (None, ""):
+            return
+        output_root = Path(_expand_repo_tokens(raw_output_root)).expanduser()
+        if not output_root.is_absolute():
+            output_root = REPO_ROOT / output_root
+        summary_path = output_root / "mixing_sweep_summary.json"
+        if not summary_path.is_file():
+            return
+        try:
+            mixing_summary = _load_json(summary_path)
+            records = list(mixing_summary.get("records") or [])
+            seed = int(mixing_summary.get("seed") or payload.get("seed") or 0)
+            split_policy = mixing_summary.get("split_policy")
+            weighting = payload.get("training_weighting_policy")
+            for row in summary.get("runs") or []:
+                if not isinstance(row, dict) or row.get("status") != "completed":
+                    continue
+                dataset_root = Path(str(row.get("dataset_root") or ""))
+                match = re.match(r"size(\d+)_(add|replace)_r(\d+p\d+)$", dataset_root.name)
+                if not match:
+                    continue
+                manifest_path = Path(str(row.get("validation_metrics_path") or ""))
+                metrics_csv = manifest_path.parent / "kpoint_matrix_metrics.csv"
+                values: list[float] = []
+                with metrics_csv.open(newline="", encoding="utf-8") as handle:
+                    for metric_row in csv.DictReader(handle):
+                        if metric_row.get("row_type") not in (None, "", "weighted_sample"):
+                            continue
+                        value = metric_row.get("h_mae_eV")
+                        if value not in (None, ""):
+                            values.append(float(value))
+                if not values:
+                    continue
+                records.append({
+                    "h_mae_eV": sum(values) / len(values),
+                    "mode": match.group(2),
+                    "model": str(row.get("model")),
+                    "ratio": float(match.group(3).replace("p", ".")),
+                    "seed": seed,
+                    "size": int(match.group(1)),
+                    "split_policy": split_policy,
+                    "total_size": int(match.group(1)),
+                    "training_weighting_policy": weighting,
+                    "output_root": str(row.get("run_root") or dataset_root),
+                })
+            deduped: dict[tuple[int, str, float, str, int], dict[str, Any]] = {}
+            for record in records:
+                try:
+                    key = (
+                        int(record["size"]),
+                        str(record["mode"]),
+                        round(float(record["ratio"]), 6),
+                        str(record["model"]),
+                        int(record.get("seed") or seed),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if key not in deduped or deduped[key].get("reconstructed"):
+                    deduped[key] = record
+            mixing_summary["records"] = sorted(
+                deduped.values(),
+                key=lambda r: (int(r.get("size") or 0), str(r.get("mode") or ""), float(r.get("ratio") or 0), str(r.get("model") or "")),
+            )
+            _write_json(summary_path, mixing_summary)
+            import ml_vs_siesta as mvs  # noqa: PLC0415
+
+            mvs.write_mae_vs_size_outputs(mixing_summary["records"], output_root, write_png=True)
+        except Exception as exc:  # noqa: BLE001
+            self._logs.append(f"[G2M-DEEPH][WARN] Could not refresh mixing UI outputs from {run_root}: {exc}\n")
 
     def _training_sweep_derivative_child_payload(
         self,
@@ -5421,6 +5496,7 @@ class Graph2MatDeepHBenchmarkRunner:
         plan: dict[str, Any],
     ) -> None:
         planned = list(plan.get("planned_runs") or [])
+        self._training_sweep_payload = payload
         error_policy = str(plan.get("error_policy") or "continue_on_error")
         metric_fail_policy = _metric_fail_policy(payload)
         final_mode = is_final_benchmark_mode(payload)
@@ -7626,6 +7702,100 @@ class Graph2MatDeepHBenchmarkRunner:
         path = Path(str(value))
         return path if path.is_absolute() else base_dir / path
 
+    def _predict_metrics_only(self, payload: dict[str, Any]) -> bool:
+        return _parse_bool(payload.get("predict_metrics_only"), False)
+
+    def _existing_model_artifacts(self, payload: dict[str, Any]) -> dict[str, Any]:
+        artifacts = payload.get("existing_model_artifacts") or {}
+        return artifacts if isinstance(artifacts, dict) else {}
+
+    def _artifact_path(self, value: Any, *, label: str) -> Path:
+        if value in (None, ""):
+            raise RuntimeError(f"predict_metrics_only requires existing_model_artifacts.{label}.")
+        path = _resolve_optional_repo_path(value, Path(str(value)))
+        if not path.exists():
+            raise RuntimeError(f"Existing model artifact does not exist for {label}: {path}")
+        return path
+
+    def _link_or_copy_file(self, source: Path, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        try:
+            target.symlink_to(source)
+        except OSError:
+            shutil.copy2(source, target)
+
+    def _stage_existing_graph2mat_checkpoint(
+        self,
+        payload: dict[str, Any],
+        context: Graph2MatBenchmarkContext,
+    ) -> dict[str, Any]:
+        artifacts = self._existing_model_artifacts(payload)
+        training_dir = self._artifact_path(artifacts.get("graph2mat_training_dir"), label="graph2mat_training_dir")
+        manifest_path = training_dir / "checkpoint_manifest.json"
+        manifest = _load_json(manifest_path) if manifest_path.exists() else {}
+        checkpoint = self._manifest_path_value(manifest.get("checkpoint_path") or manifest.get("path"), base_dir=training_dir)
+        if checkpoint is None or not checkpoint.exists():
+            checkpoints = sorted(training_dir.rglob("best-*.ckpt")) or sorted(training_dir.rglob("*.ckpt"))
+            if not checkpoints:
+                raise RuntimeError(f"No Graph2Mat checkpoint found under existing artifact: {training_dir}")
+            checkpoint = checkpoints[-1]
+        relative = manifest.get("relative_path")
+        if relative in (None, ""):
+            try:
+                relative = str(checkpoint.relative_to(training_dir))
+            except ValueError:
+                relative = f"lightning_logs/existing/checkpoints/{checkpoint.name}"
+        staged_checkpoint = context.training_dir / str(relative)
+        self._link_or_copy_file(checkpoint, staged_checkpoint)
+        staged_manifest = {
+            **manifest,
+            "checkpoint_path": str(staged_checkpoint),
+            "relative_path": str(relative),
+            "checkpoint_sha256": _file_sha256(checkpoint),
+            "source_training_dir": str(training_dir),
+            "source_checkpoint_path": str(checkpoint),
+            "predict_metrics_only": True,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        _write_json(context.training_dir / "checkpoint_manifest.json", staged_manifest)
+        return {
+            "status": "skipped_existing_artifact",
+            "source_training_dir": str(training_dir),
+            "source_checkpoint_path": str(checkpoint),
+            "staged_checkpoint_path": str(staged_checkpoint),
+            "elapsed_seconds": 0.0,
+        }
+
+    def _stage_existing_deeph_model(
+        self,
+        payload: dict[str, Any],
+        context: DeepHBenchmarkContext,
+    ) -> dict[str, Any]:
+        artifacts = self._existing_model_artifacts(payload)
+        save_dir = self._artifact_path(
+            artifacts.get("deeph_save_dir") or artifacts.get("deeph_model_dir"),
+            label="deeph_save_dir",
+        )
+        required = ["config.ini", "best_state_dict.pkl"]
+        optional = ["best_model.pt", "state_dict.pkl", "model.pt"]
+        for name in required:
+            source = save_dir / name
+            if not source.exists():
+                raise RuntimeError(f"Missing DeepH artifact file for predict_metrics_only: {source}")
+            self._link_or_copy_file(source, context.save_dir / name)
+        for name in optional:
+            source = save_dir / name
+            if source.exists():
+                self._link_or_copy_file(source, context.save_dir / name)
+        return {
+            "status": "skipped_existing_artifact",
+            "source_save_dir": str(save_dir),
+            "staged_save_dir": str(context.save_dir),
+            "elapsed_seconds": 0.0,
+        }
+
     def _infer_graph2mat_derivative_checkpoint(self, context: Graph2MatBenchmarkContext | None) -> Path | None:
         if context is None:
             return None
@@ -8739,6 +8909,22 @@ class Graph2MatDeepHBenchmarkRunner:
                         raise RuntimeError("Graph2Mat context was not prepared before graph2mat_train.")
                     if context.dry_run:
                         self._logs.append("[G2M-DEEPH] graph2mat_train: dry-run, no subprocess launched.\n")
+                    elif self._predict_metrics_only(payload):
+                        graph2mat_training_run = self._stage_existing_graph2mat_checkpoint(payload, context)
+                        checkpoint_manifest = _load_json(context.training_dir / "checkpoint_manifest.json")
+                        self._logs.append(
+                            "[G2M-DEEPH] graph2mat_train: skipped; using existing checkpoint "
+                            f"{graph2mat_training_run['source_checkpoint_path']}\n"
+                        )
+                        self._write_graph2mat_manifest(
+                            context,
+                            checkpoint_manifest=checkpoint_manifest,
+                            extra={
+                                "training_completed": False,
+                                "predict_metrics_only": True,
+                                "training_run": graph2mat_training_run,
+                            },
+                        )
                     else:
                         command = [self._graph2mat_python(payload), str(DEFAULT_MD_TRAINING_SCRIPT)]
                         graph2mat_training_run = self._run_command(
@@ -8826,6 +9012,19 @@ class Graph2MatDeepHBenchmarkRunner:
                         raise RuntimeError("DeepH context was not prepared before deeph_train.")
                     if deeph_context.dry_run:
                         self._logs.append("[G2M-DEEPH] deeph_train: dry-run, no subprocess launched.\n")
+                    elif self._predict_metrics_only(payload):
+                        deeph_training_run = self._stage_existing_deeph_model(payload, deeph_context)
+                        training_outputs = self._validate_deeph_training_outputs(deeph_context)
+                        self._logs.append(
+                            "[G2M-DEEPH] deeph_train: skipped; using existing model dir "
+                            f"{deeph_training_run['source_save_dir']}\n"
+                        )
+                        self._write_deeph_manifest(
+                            deeph_context,
+                            train_run=deeph_training_run,
+                            training_outputs=training_outputs,
+                            extra={"predict_metrics_only": True},
+                        )
                     else:
                         command = [
                             self._deeph_command(payload, "deeph-train"),
