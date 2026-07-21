@@ -1724,6 +1724,38 @@ pre {
   min-height: 580px;
 }
 
+.vacancy-matrix-error-panel {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.vacancy-matrix-error-panel h4 {
+  margin: 0 0 4px;
+}
+
+.vacancy-matrix-frame,
+.vacancy-matrix-placeholder {
+  width: 100%;
+  height: 620px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--plot-bg);
+}
+
+.vacancy-matrix-frame {
+  display: block;
+}
+
+.vacancy-matrix-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
 .plot-section-heading {
   grid-column: 1 / -1;
   display: inline-flex;

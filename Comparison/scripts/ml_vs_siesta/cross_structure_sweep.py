@@ -15,6 +15,7 @@ This module never imports the heavy runner and never trains by itself.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -64,6 +65,14 @@ def _dataset_id(root: str | Path) -> str:
     return _slug(f"{label}__{name}")
 
 
+def _dataset_label(root: str | Path) -> str:
+    try:
+        label = _load_json(Path(root) / "material_provenance.json").get("label")
+    except Exception:  # noqa: BLE001 - planner reports unreadable datasets separately
+        label = None
+    return str(label or Path(root).name).strip()
+
+
 def _source_train_count(root: Path) -> int:
     """Number of training snapshots in ``root`` (train + validation)."""
     return sum(
@@ -99,6 +108,7 @@ def plan_cross_structure_sweep(
             warnings.append(f"source {source}: unreadable ({exc}); skipped")
             continue
         source_id = _dataset_id(source)
+        source_system_label = _dataset_label(source)
         for target in targets:
             target_id = _dataset_id(target)
             entry: dict[str, Any] = {
@@ -106,6 +116,8 @@ def plan_cross_structure_sweep(
                 "target_root": str(target),
                 "source_id": source_id,
                 "target_id": target_id,
+                "source_system_label": source_system_label,
+                "target_system_label": _dataset_label(target),
                 "payload_id": f"{source_id}__to__{target_id}",
                 "source_n_snapshots": source_n_snapshots,
                 "source_n_atoms": source_n_atoms,
@@ -140,11 +152,14 @@ def plan_cross_structure_sweep(
 
 
 def _record(
-    perm: dict[str, Any], model: str, h_mae_eV: float, seed: int
+    perm: dict[str, Any], model: str, h_mae_eV: float, seed: int,
+    relative_frobenius: float | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "source_id": perm["source_id"],
         "target_id": perm["target_id"],
+        "source_system_label": perm.get("source_system_label"),
+        "target_system_label": perm.get("target_system_label"),
         "payload_id": perm["payload_id"],
         "source_n_snapshots": perm.get("source_n_snapshots"),
         "source_n_atoms": perm.get("source_n_atoms"),
@@ -154,6 +169,9 @@ def _record(
         "h_mae_eV": float(h_mae_eV),
         "output_root": perm.get("output_root"),
     }
+    if relative_frobenius is not None:
+        record["relative_frobenius"] = float(relative_frobenius)
+    return record
 
 
 def _artifacts_for_source(existing_artifacts: dict[str, Any], perm: dict[str, Any]) -> dict[str, Any]:
@@ -205,6 +223,90 @@ def run_cross_structure_sweep(
     if dry_run is None:
         dry_run = action == "preview"
 
+    cross_schedule = str((performance or {}).get("cross_model_schedule") or "").strip().lower()
+    if (
+        cross_schedule == "deeph_then_graph2mat"
+        and not dry_run
+        and set(models) == {"graph2mat", "deeph"}
+    ):
+        stage_summaries: dict[str, dict[str, Any]] = {}
+        for model, limit_key in (
+            ("deeph", "max_parallel_deeph_training_jobs"),
+            ("graph2mat", "max_parallel_graph2mat_training_jobs"),
+        ):
+            stage_performance = dict(performance or {})
+            stage_performance["cross_model_schedule"] = "single_model"
+            stage_performance["max_parallel_prediction_jobs"] = int(stage_performance.get(limit_key) or 1)
+            stage_summaries[model] = run_cross_structure_sweep(
+                sources,
+                targets,
+                output_root,
+                pairs=pairs,
+                models=(model,),
+                epochs=epochs,
+                hyperparams=hyperparams,
+                early_stopping=early_stopping,
+                existing_artifacts=existing_artifacts,
+                performance=stage_performance,
+                seed=seed,
+                confirm_ghost_species_exemption=confirm_ghost_species_exemption,
+                confirm_incomplete_hamiltonian_semantics=confirm_incomplete_hamiltonian_semantics,
+                strict_dataset_validation=strict_dataset_validation,
+                action=action,
+                dry_run=dry_run,
+                launch_fn=launch_fn,
+                progress_fn=progress_fn,
+            )
+        records = [
+            record
+            for model in ("deeph", "graph2mat")
+            for record in stage_summaries[model].get("records") or []
+        ]
+        by_payload: dict[str, dict[str, Any]] = {}
+        for model in ("deeph", "graph2mat"):
+            for perm in stage_summaries[model].get("permutations") or []:
+                payload_id = str(perm.get("payload_id") or "")
+                merged = by_payload.setdefault(payload_id, dict(perm))
+                merged.setdefault("model_launches", {})[model] = perm.get("launch")
+                merged.setdefault("model_statuses", {})[model] = perm.get("status")
+        expected_status = "evaluated" if action == "predict_metrics" else "trained"
+        for perm in by_payload.values():
+            statuses = perm.get("model_statuses") or {}
+            if all(statuses.get(model) == expected_status for model in ("deeph", "graph2mat")):
+                perm["status"] = expected_status
+            elif any(statuses.get(model) == "incompatible" for model in statuses):
+                perm["status"] = "incompatible"
+            else:
+                perm["status"] = "failed"
+        permutations = list(by_payload.values())
+        summary = {
+            "schema": "ml_vs_siesta_cross_structure_sweep_summary_v1",
+            "dry_run": False,
+            "action": action,
+            "models": ["deeph", "graph2mat"],
+            "model_schedule": "deeph_then_graph2mat",
+            "model_parallelism": {
+                "deeph": int((performance or {}).get("max_parallel_deeph_training_jobs") or 1),
+                "graph2mat": int((performance or {}).get("max_parallel_graph2mat_training_jobs") or 1),
+            },
+            "seed": seed,
+            "plan_warnings": stage_summaries["deeph"].get("plan_warnings") or [],
+            "n_permutations": len(permutations),
+            "n_trained": sum(perm.get("status") == "trained" for perm in permutations),
+            "n_evaluated": sum(perm.get("status") == "evaluated" for perm in permutations),
+            "n_partial": 0,
+            "n_failed": sum(perm.get("status") == "failed" for perm in permutations),
+            "n_incompatible": sum(perm.get("status") == "incompatible" for perm in permutations),
+            "permutations": permutations,
+            "records": records,
+            "model_stage_summaries": stage_summaries,
+        }
+        output_root.mkdir(parents=True, exist_ok=True)
+        (output_root / "cross_structure_sweep_summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
+        return summary
+
     if pairs:
         permutations: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -233,24 +335,27 @@ def run_cross_structure_sweep(
             confirm_incomplete_hamiltonian_semantics=confirm_incomplete_hamiltonian_semantics,
         )
 
+    if action == "predict_metrics" and not plan["n_compatible"]:
+        warnings = plan.get("warnings") or []
+        detail = warnings[0] if warnings else "no readable source/target pairs"
+        if len(warnings) > 1:
+            detail += f" (+{len(warnings) - 1} more incompatible pairs)"
+        raise ValueError(f"predict_metrics has no compatible pairs: {detail}")
+
     records: list[dict[str, Any]] = []
     permutation_results: list[dict[str, Any]] = []
 
-    for perm in plan["permutations"]:
+    def run_permutation(raw_perm: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        perm = dict(raw_perm)
+        local_records: list[dict[str, Any]] = []
         perm = dict(perm)
         pair_dir = output_root / perm["payload_id"]
         perm["output_root"] = str(pair_dir)
         if perm["status"] == "incompatible":
-            permutation_results.append(perm)
-            if progress_fn is not None:
-                progress_fn(dict(perm))
-            continue
+            return perm, local_records
         if dry_run:
             perm["status"] = "planned"
-            permutation_results.append(perm)
-            if progress_fn is not None:
-                progress_fn(dict(perm))
-            continue
+            return perm, local_records
 
         runner_payload = _runner_payload(
             models,
@@ -261,16 +366,17 @@ def run_cross_structure_sweep(
             early_stopping=early_stopping,
             seed=seed,
         )
-        source_artifacts = _artifacts_for_source(existing_artifacts or {}, perm)
         if action == "predict_metrics":
             runner_payload["predict_metrics_only"] = True
-            runner_payload["existing_model_artifacts"] = source_artifacts
+            runner_payload["existing_model_artifacts"] = _artifacts_for_source(
+                existing_artifacts or {}, perm
+            )
         payload = {
             "action": action,
             "source_dataset_root": perm["source_root"],
             "target_dataset_root": perm["target_root"],
             "composite_dataset_root": str(pair_dir / "dataset"),
-            "run_output_root": str(pair_dir / "training"),
+            "run_output_root": str(pair_dir / "training" / models[0] if len(models) == 1 else pair_dir / "training"),
             "confirm_ghost_species_exemption": confirm_ghost_species_exemption,
             "confirm_incomplete_hamiltonian_semantics": confirm_incomplete_hamiltonian_semantics,
             "runner_payload": runner_payload,
@@ -292,7 +398,15 @@ def run_cross_structure_sweep(
                 if h_mae is None:
                     continue
                 recorded.append(model)
-                records.append(_record(perm, model, h_mae, seed))
+                local_records.append(
+                    _record(
+                        perm,
+                        model,
+                        h_mae,
+                        seed,
+                        (model_metrics or {}).get("relative_frobenius"),
+                    )
+                )
             launch_ok = launch_result.get("ok", True)
             if not launch_ok or not recorded:
                 perm["status"] = "failed"
@@ -304,9 +418,30 @@ def run_cross_structure_sweep(
                 )
             else:
                 perm["status"] = "evaluated" if action == "predict_metrics" else "trained"
-        permutation_results.append(perm)
-        if progress_fn is not None:
-            progress_fn(dict(perm))
+        return perm, local_records
+
+    parallel_jobs = max(
+        1,
+        int((performance or {}).get("max_parallel_prediction_jobs") or 1),
+    )
+    if parallel_jobs > 1 and not dry_run:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(parallel_jobs, len(plan["permutations"]) or 1),
+            thread_name_prefix="cross-structure",
+        ) as executor:
+            results = executor.map(run_permutation, plan["permutations"])
+            for perm, local_records in results:
+                permutation_results.append(perm)
+                records.extend(local_records)
+                if progress_fn is not None:
+                    progress_fn(dict(perm))
+    else:
+        for raw_perm in plan["permutations"]:
+            perm, local_records = run_permutation(raw_perm)
+            permutation_results.append(perm)
+            records.extend(local_records)
+            if progress_fn is not None:
+                progress_fn(dict(perm))
 
     def _count(status: str) -> int:
         return sum(1 for entry in permutation_results if entry.get("status") == status)
@@ -316,6 +451,7 @@ def run_cross_structure_sweep(
         "dry_run": dry_run,
         "action": action,
         "models": list(models),
+        "max_parallel_jobs": parallel_jobs,
         "seed": seed,
         "plan_warnings": plan["warnings"],
         "n_permutations": len(permutation_results),
@@ -378,8 +514,8 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
 
     Each record needs ``source_id``, ``target_id``, ``model``,
     ``source_n_snapshots`` (or ``source_n_atoms`` fallback) and ``h_mae_eV``.
-    Curve key is ``(target_id, model)`` — one curve answers "how does the MAE on
-    target Y change with which source X I trained on". Points are seed-aggregated
+    Curve key is ``(source_system_label, target_id, model)`` — one curve answers
+    "how does the MAE on target Y scale for source structure X". Points are seed-aggregated
     (mean ± sample std), with fewer than ``MIN_SEEDS_FOR_CLAIMS`` seeds flagged
     ``exploratory``. Output shape matches the mixing aggregator so the same
     frontend renders it.
@@ -402,6 +538,8 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
         payload_id = str(record.get("payload_id") or f"{source_id}__to__{target_id}")
+        source_system_label = str(record.get("source_system_label") or "source")
+        target_system_label = str(record.get("target_system_label") or target_id)
         payloads.setdefault(
             payload_id,
             {
@@ -409,22 +547,33 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
                 "label": f"{source_id} → {target_id}",
                 "source_id": source_id,
                 "target_id": target_id,
+                "source_system_label": source_system_label,
+                "target_system_label": target_system_label,
                 "source_n_snapshots": x,
                 "output_root": record.get("output_root"),
             },
         )
-        bucket = curves.setdefault((target_id, model), {}).setdefault(
+        bucket = curves.setdefault((source_system_label, target_id, model), {}).setdefault(
             payload_id,
             {
                 "payload_id": payload_id,
                 "source_id": source_id,
                 "target_id": target_id,
+                "source_system_label": source_system_label,
+                "target_system_label": target_system_label,
                 "x": x,
                 "values": [],
+                "relative_frobenius_values": [],
                 "seeds": set(),
             },
         )
         bucket["values"].append(mae)
+        try:
+            relative_frobenius = float(record["relative_frobenius"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            bucket["relative_frobenius_values"].append(relative_frobenius)
         if record.get("seed") is not None:
             try:
                 bucket["seeds"].add(int(record["seed"]))
@@ -440,21 +589,32 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
             else None
         )
         n_seeds = len(item["seeds"]) if item["seeds"] else len(values)
+        relative_values = item["relative_frobenius_values"]
+        relative_mean = sum(relative_values) / len(relative_values) if relative_values else None
+        relative_std = (
+            (sum((v - relative_mean) ** 2 for v in relative_values) / (len(relative_values) - 1)) ** 0.5
+            if len(relative_values) > 1
+            else None
+        )
         return {
             "payload_id": item["payload_id"],
             "source_id": item["source_id"],
             "target_id": item["target_id"],
+            "source_system_label": item["source_system_label"],
+            "target_system_label": item["target_system_label"],
             "x": item["x"],
             "total_size": item["x"],  # frontend reuses total_size as the x fallback
             "actual_train_size": item["x"],
             "mae": mean,
             "mae_std": std,
+            "relative_frobenius": relative_mean,
+            "relative_frobenius_std": relative_std,
             "n_seeds": n_seeds,
             "exploratory": n_seeds < MIN_SEEDS_FOR_CLAIMS,
         }
 
     curve_list: list[dict[str, Any]] = []
-    for (target_id, model), by_payload in sorted(curves.items(), key=lambda kv: kv[0]):
+    for (source_system_label, target_id, model), by_payload in sorted(curves.items(), key=lambda kv: kv[0]):
         points = [
             _point(item)
             for item in sorted(by_payload.values(), key=lambda v: (v["x"], v["payload_id"]))
@@ -462,8 +622,9 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
         curve_list.append(
             {
                 "target_id": target_id,
+                "source_system_label": source_system_label,
                 "model": model,
-                "label": f"→ {target_id} · {model}",
+                "label": f"{source_system_label} → {target_id} · {model}",
                 "exploratory": any(p["exploratory"] for p in points),
                 "points": points,
             }

@@ -8132,6 +8132,10 @@ def _g2m_deeph_standalone_derivative_run_roots() -> list[Path]:
         candidates.extend(candidate for candidate in sorted(smoke_root.iterdir()) if candidate.is_dir())
     for pattern in ("derivative_postprocess", "*/derivative_postprocess", "*/*/derivative_postprocess", "*/*/*/derivative_postprocess"):
         candidates.extend(path for path in sorted(RESULTS_ROOT.glob(pattern)) if path.is_dir())
+    # ui_real_metrics_derivatives campaign: per-case dirs live under
+    # <output_root>/{mixing,cross_testing}/<case_id>/ — validated by contents below.
+    for pattern in ("ui_real_metrics_derivatives/*/*", "*/ui_real_metrics_derivatives/*/*"):
+        candidates.extend(path for path in sorted(RESULTS_ROOT.glob(pattern)) if path.is_dir())
     seen: set[str] = set()
     for candidate in candidates:
         key = str(candidate.resolve(strict=False))
@@ -17427,6 +17431,157 @@ MIXING_SWEEP_RUNNER = MixingSweepRunner()
 # "materialize" builds composites, "train" drives the real runner per pair.
 # --------------------------------------------------------------------------- #
 CROSS_TESTING_SWEEP_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_cross_structure_sweep"
+CROSS_TESTING_VACANCY_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_cross_structure_vacancy"
+CROSS_TESTING_CONFIG_ROOT = COMPARISON_ROOT / "config"
+VACANCY_MATRIX_ERROR_LOCK = threading.Lock()
+
+
+def _vacancy_matrix_error_ready(output_dir: Path, kind: str = "mae") -> bool:
+    html_path = output_dir / f"matrix_error_{kind}.html"
+    manifest_path = output_dir / "matrix_error_manifest.json"
+    if not html_path.is_file() or not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return (
+            manifest.get("status") == "ok"
+            and manifest.get("crop_empty") is True
+            and manifest.get("visualization_version") == 2
+            and manifest.get("aggregation_mode") == "dataset_mean"
+            and int((manifest.get("outputs") or {}).get("n_averaged_samples") or 0) > 0
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _vacancy_matrix_error_inventory(output_root: Path = CROSS_TESTING_VACANCY_OUTPUT_ROOT) -> list[dict[str, Any]]:
+    output_root = output_root.resolve()
+    latest_by_payload: dict[str, dict[str, Any]] = {}
+    for checkpoint_manifest in output_root.rglob("graph2mat/training/checkpoint_manifest.json"):
+        run_root = checkpoint_manifest.parents[2]
+        prediction_root = run_root / "graph2mat" / "prediction_structures" / "test"
+        predictions = sorted(prediction_root.glob("*/ML_prediction.HSX"))
+        config_path = run_root / "graph2mat" / "pipeline_config.yaml"
+        if not predictions or not config_path.is_file():
+            continue
+        try:
+            manifest = json.loads(checkpoint_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        checkpoint = Path(str(manifest.get("checkpoint_path") or manifest.get("source_checkpoint_path") or ""))
+        if not checkpoint.is_absolute():
+            checkpoint = checkpoint_manifest.parent / checkpoint
+        if not checkpoint.exists():
+            continue
+        relative = run_root.relative_to(output_root)
+        payload_id = relative.parts[0]
+        run_id = hashlib.sha256(str(relative).encode("utf-8")).hexdigest()[:20]
+        output_dir = run_root / "matrix_error_plot" / run_id
+        item = {
+            "id": run_id,
+            "payload_id": payload_id,
+            "run_name": run_root.name,
+            "sample_count": len(predictions),
+            "label": f"{payload_id} · media de {len(predictions)} predicciones",
+            "run_root": _display_path(run_root),
+            "prediction_root": _display_path(prediction_root),
+            "checkpoint": _display_path(checkpoint),
+            "cached": _vacancy_matrix_error_ready(output_dir),
+            "modified_at": checkpoint_manifest.stat().st_mtime,
+        }
+        previous = latest_by_payload.get(payload_id)
+        if previous is None or float(item["modified_at"]) > float(previous["modified_at"]):
+            latest_by_payload[payload_id] = item
+    return sorted(latest_by_payload.values(), key=lambda item: str(item["payload_id"]))
+
+
+def vacancy_matrix_error_runs_payload() -> dict[str, Any]:
+    runs = _vacancy_matrix_error_inventory()
+    return {"runs": runs, "n_runs": len(runs)}
+
+
+def _vacancy_matrix_error_run(run_id: str) -> dict[str, Any]:
+    match = next((item for item in _vacancy_matrix_error_inventory() if item["id"] == run_id), None)
+    if match is None:
+        raise RuntimeError("Run Graph2Mat de vacante no reconocido.")
+    return match
+
+
+def generate_vacancy_matrix_error_plot(run_id: str) -> dict[str, Any]:
+    run = _vacancy_matrix_error_run(str(run_id or ""))
+    run_root = (REPO_ROOT / run["run_root"]).resolve()
+    output_dir = run_root / "matrix_error_plot" / run_id
+    html_path = output_dir / "matrix_error_mae.html"
+    if not _vacancy_matrix_error_ready(output_dir):
+        checkpoint_manifest = json.loads(
+            (run_root / "graph2mat" / "training" / "checkpoint_manifest.json").read_text(encoding="utf-8")
+        )
+        checkpoint = Path(str(checkpoint_manifest.get("checkpoint_path") or checkpoint_manifest.get("source_checkpoint_path")))
+        if not checkpoint.is_absolute():
+            checkpoint = run_root / "graph2mat" / "training" / checkpoint
+        config_path = run_root / "graph2mat" / "pipeline_config.yaml"
+        prediction_root = (REPO_ROOT / run["prediction_root"]).resolve()
+        command = [
+            postprocess_python_executable(),
+            str(COMPARISON_ROOT / "scripts" / "export_graph2mat_matrix_error_plot.py"),
+            "--mode", "programmatic",
+            "--ckpt-path", str(checkpoint.resolve()),
+            "--config-yaml", str(config_path),
+            "--test-runs", str(prediction_root / "*" / "RUN.fdf"),
+            "--average-hsx-root", str(prediction_root),
+            "--output-dir", str(output_dir),
+            "--out-matrix", "hamiltonian",
+            "--error-metric", "mae",
+            "--crop-empty", "--no-stretch-matrix",
+            "--no-show", "--no-store-in-logger", "--no-samplewise-metrics", "--no-save-png", "--save-html",
+        ]
+        with VACANCY_MATRIX_ERROR_LOCK:
+            if not _vacancy_matrix_error_ready(output_dir):
+                completed = subprocess.run(
+                    command,
+                    cwd=REPO_ROOT,
+                    env={
+                        **os.environ,
+                        "PYTHONUNBUFFERED": "1",
+                        "OMP_NUM_THREADS": "2",
+                        "MKL_NUM_THREADS": "2",
+                        "OPENBLAS_NUM_THREADS": "2",
+                    },
+                    text=True,
+                    capture_output=True,
+                    timeout=1800,
+                    check=False,
+                )
+                if completed.returncode != 0 or not _vacancy_matrix_error_ready(output_dir):
+                    stderr_log = output_dir / "graph2mat_test_stderr.log"
+                    detail = stderr_log.read_text(encoding="utf-8", errors="replace")[-4000:] if stderr_log.is_file() else completed.stderr[-4000:]
+                    raise RuntimeError(f"PlotMatrixError falló para {run['label']}: {detail.strip()}")
+    return {
+        **run,
+        "cached": True,
+        "artifact_url": f"/api/cross-testing/vacancy/matrix-error/artifact?{urlencode({'run_id': run_id, 'kind': 'mae'})}",
+    }
+
+
+def _cross_testing_resolve_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Load an optional campaign payload, constrained to Comparison/config."""
+    raw = str(body.get("payload_path") or "").strip()
+    if not raw:
+        return dict(body)
+    path = Path(raw).expanduser()
+    path = (REPO_ROOT / path).resolve() if not path.is_absolute() else path.resolve()
+    config_root = CROSS_TESTING_CONFIG_ROOT.resolve()
+    if path.suffix.lower() != ".json":
+        raise RuntimeError("cross-testing payload_path debe ser un archivo .json.")
+    if config_root not in path.parents:
+        raise RuntimeError("cross-testing payload_path debe estar dentro de Comparison/config.")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"cross-testing payload debe contener un objeto JSON: {path}")
+    overrides = {key: value for key, value in body.items() if key != "payload_path"}
+    return {**payload, **overrides, "payload_path": _display_path(path)}
 
 
 def cross_testing_discover_payload() -> dict[str, Any]:
@@ -17506,6 +17661,7 @@ def _filter_cross_testing_plan_pairs(plan: dict[str, Any], pairs: list[tuple[str
 
 
 def cross_testing_plan_payload(body: dict[str, Any]) -> dict[str, Any]:
+    body = _cross_testing_resolve_body(body)
     mvs = _ml_vs_siesta_module()
     pairs = _cross_testing_pairs_from_body(body)
     if pairs:
@@ -17556,6 +17712,8 @@ def _cross_testing_payloads_from_permutations(permutations: Any) -> list[dict[st
             "label": f"{item.get('source_id')} → {item.get('target_id')}",
             "source_id": item.get("source_id"),
             "target_id": item.get("target_id"),
+            "source_system_label": item.get("source_system_label"),
+            "target_system_label": item.get("target_system_label"),
             "source_n_snapshots": item.get("source_n_snapshots"),
             "status": item.get("status"),
             "output_root": item.get("output_root"),
@@ -17575,7 +17733,25 @@ def _cross_testing_metrics_payload(
     records: list[dict[str, Any]], summary: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     mvs = _ml_vs_siesta_module()
-    payload = mvs.aggregate_cross_structure_mae(records)
+    # Older completed summaries kept relative Frobenius inside model_launches
+    # but not in records. Backfill it in memory so no prediction is repeated.
+    relative_by_run: dict[tuple[str, str], float] = {}
+    for permutation in (summary or {}).get("permutations") or []:
+        payload_id = str(permutation.get("payload_id") or "")
+        for model, launch in (permutation.get("model_launches") or {}).items():
+            value = (((launch or {}).get("metrics") or {}).get(model) or {}).get(
+                "relative_frobenius"
+            )
+            if value is not None:
+                relative_by_run[(payload_id, str(model))] = float(value)
+    enriched_records = []
+    for record in records:
+        enriched = dict(record)
+        key = (str(record.get("payload_id") or ""), str(record.get("model") or ""))
+        if enriched.get("relative_frobenius") is None and key in relative_by_run:
+            enriched["relative_frobenius"] = relative_by_run[key]
+        enriched_records.append(enriched)
+    payload = mvs.aggregate_cross_structure_mae(enriched_records)
     by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
     metric_ids = set(by_id)
     for item in _cross_testing_payloads_from_permutations((summary or {}).get("permutations")):
@@ -17584,9 +17760,10 @@ def _cross_testing_metrics_payload(
             by_id[key] = {**item, **by_id[key]}
         else:
             by_id[key] = item
+    metric_status = "evaluated" if (summary or {}).get("action") == "predict_metrics" else "trained"
     for key, item in by_id.items():
         if key in metric_ids:
-            item["status"] = "trained"
+            item["status"] = metric_status
     payload["payloads"] = sorted(
         by_id.values(),
         key=lambda item: (
@@ -17611,6 +17788,8 @@ def cross_testing_metrics_demo_payload() -> dict[str, Any]:
                         {
                             "source_id": source_id,
                             "target_id": target_id,
+                            "source_system_label": "graphene_w90" if "w90" in source_id else "graphene_5x5",
+                            "target_system_label": "graphene_5x5",
                             "payload_id": f"{source_id}__to__{target_id}",
                             "source_n_snapshots": n,
                             "model": model,
@@ -17665,7 +17844,8 @@ def _cross_testing_launch_fn(runner_payload: dict[str, Any]) -> dict[str, Any]:
 class CrossStructureSweepRunner:
     """Minimal background runner for the cross-structure sweep."""
 
-    def __init__(self) -> None:
+    def __init__(self, output_root: Path = CROSS_TESTING_SWEEP_OUTPUT_ROOT) -> None:
+        self._output_root = output_root
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._status: dict[str, Any] = {"state": "idle"}
@@ -17675,16 +17855,30 @@ class CrossStructureSweepRunner:
             return dict(self._status)
 
     def _latest_persisted_summary(self) -> dict[str, Any]:
-        summary_path = CROSS_TESTING_SWEEP_OUTPUT_ROOT / "cross_structure_sweep_summary.json"
-        try:
-            payload = json.loads(summary_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        candidates = [self._output_root / "cross_structure_sweep_summary.json"]
+        candidates.extend(self._output_root.glob("*result.json"))
+        candidates = sorted(
+            (path for path in candidates if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        fallback: dict[str, Any] = {}
+        for path in candidates:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            fallback = fallback or payload
+            if payload.get("records"):
+                return payload
+        return fallback
 
     def metrics(self) -> dict[str, Any]:
         with self._lock:
             summary = self._status.get("summary") or {}
+            action = self._status.get("action")
             live_records = self._status.get("live_records") or []
             live_payloads = self._status.get("payloads") or []
         records = summary.get("records") or live_records
@@ -17693,6 +17887,8 @@ class CrossStructureSweepRunner:
             records = persisted.get("records") or []
             if not summary:
                 summary = persisted
+        if action and not summary.get("action"):
+            summary = {**summary, "action": action}
         payload = _cross_testing_metrics_payload(records, summary)
         if live_payloads:
             by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
@@ -17703,10 +17899,16 @@ class CrossStructureSweepRunner:
         return payload
 
     def start(self, body: dict[str, Any]) -> dict[str, Any]:
+        body = _cross_testing_resolve_body(body)
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("A cross-structure sweep is already running.")
-            self._status = {"state": "starting", "started_at": time.time(), "permutations_done": 0}
+            self._status = {
+                "state": "starting",
+                "action": str(body.get("action") or "preview"),
+                "started_at": time.time(),
+                "permutations_done": 0,
+            }
             self._thread = threading.Thread(target=self._run, args=(dict(body),), daemon=True)
             self._thread.start()
         return {"state": "started"}
@@ -17744,12 +17946,17 @@ class CrossStructureSweepRunner:
                             {
                                 "source_id": entry.get("source_id"),
                                 "target_id": entry.get("target_id"),
+                                "source_system_label": entry.get("source_system_label"),
+                                "target_system_label": entry.get("target_system_label"),
                                 "payload_id": entry.get("payload_id"),
                                 "source_n_snapshots": entry.get("source_n_snapshots"),
                                 "source_n_atoms": entry.get("source_n_atoms"),
                                 "model": model,
                                 "seed": seed,
                                 "h_mae_eV": float(h_mae),
+                                "relative_frobenius": (model_metrics or {}).get(
+                                    "relative_frobenius"
+                                ),
                             }
                         )
                 with self._lock:
@@ -17771,7 +17978,7 @@ class CrossStructureSweepRunner:
             summary = mvs.run_cross_structure_sweep(
                 sources,
                 targets,
-                CROSS_TESTING_SWEEP_OUTPUT_ROOT,
+                self._output_root,
                 pairs=pairs,
                 models=models,
                 epochs=epochs,
@@ -17807,6 +18014,7 @@ class CrossStructureSweepRunner:
 
 
 CROSS_TESTING_RUNNER = CrossStructureSweepRunner()
+CROSS_TESTING_VACANCY_RUNNER = CrossStructureSweepRunner(CROSS_TESTING_VACANCY_OUTPUT_ROOT)
 
 
 class ComparisonUIHandler(BaseHTTPRequestHandler):
@@ -17979,6 +18187,24 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, CROSS_TESTING_RUNNER.status())
             elif path == "/api/cross-testing/metrics":
                 json_response(self, CROSS_TESTING_RUNNER.metrics())
+            elif path == "/api/cross-testing/vacancy/status":
+                json_response(self, CROSS_TESTING_VACANCY_RUNNER.status())
+            elif path == "/api/cross-testing/vacancy/metrics":
+                json_response(self, CROSS_TESTING_VACANCY_RUNNER.metrics())
+            elif path == "/api/cross-testing/vacancy/matrix-errors":
+                json_response(self, vacancy_matrix_error_runs_payload())
+            elif path == "/api/cross-testing/vacancy/matrix-error/artifact":
+                query = parse_qs(parsed_url.query)
+                run_id = str((query.get("run_id") or [""])[0])
+                kind = str((query.get("kind") or ["mae"])[0]).lower()
+                if kind not in {"mae", "rmse"}:
+                    raise RuntimeError("Tipo de PlotMatrixError no permitido.")
+                run = _vacancy_matrix_error_run(run_id)
+                run_root = (REPO_ROOT / run["run_root"]).resolve()
+                output_dir = run_root / "matrix_error_plot" / run_id
+                if not _vacancy_matrix_error_ready(output_dir, kind):
+                    raise RuntimeError("PlotMatrixError todavía no está listo.")
+                self._serve_file(output_dir / f"matrix_error_{kind}.html")
             elif path == "/api/cross-testing/metrics-demo":
                 json_response(self, cross_testing_metrics_demo_payload())
             elif path == "/api/g2m-deeph/dataset-size-minimum":
@@ -18092,6 +18318,16 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/cross-testing/launch":
                 payload = read_json_body(self)
                 json_response(self, CROSS_TESTING_RUNNER.start(payload), status=HTTPStatus.ACCEPTED)
+            elif path == "/api/cross-testing/vacancy/launch":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    CROSS_TESTING_VACANCY_RUNNER.start(payload),
+                    status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/cross-testing/vacancy/matrix-error":
+                payload = read_json_body(self)
+                json_response(self, generate_vacancy_matrix_error_plot(str(payload.get("run_id") or "")))
             elif path == "/api/mixing-e2e/start":
                 payload = read_json_body(self)
                 json_response(

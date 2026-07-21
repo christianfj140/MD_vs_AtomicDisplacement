@@ -1,0 +1,97 @@
+Vigilas la campaña de derivadas "cross_w90_to_5x5_2delta" en el repo
+/home/christian/repositorios/MD_vs_AtomicDisplacement.
+
+Contexto: son 12 casos secuenciales sobre el payload
+Comparison/config/ui_cross_w90_to_5x5_2delta_payload.json, con output en
+Comparison/results/ui_real_metrics_derivatives. Primero hay un launcher de
+referencias SIESTA y, en paralelo, un reentrenador secuencial
+(Comparison/scripts/ops/train_deeph_autograd_models.py) que crea un modelo
+DeepH por caso con graph.new_sp=True. Sólo después se ejecuta el launcher
+completo: DeepH debe calcular sus derivadas por autograd, nunca por diferencias
+finitas. El payload tiene skip_if_exists=true: relanzar el launcher completo
+reanuda las etapas ya válidas.
+
+Hay otro cron aparte, puramente bash (Comparison/scripts/ops/monitor_derivative_campaign.sh),
+que cada 5 min vigila que el disco libre no baje del 10% y para el launcher +
+deja un marcador STOPPED_LOW_DISK en el output_root si eso ocurre. Es un
+guardarraíl independiente — no lo dupliques, pero respétalo (ver paso 4).
+
+Tu trabajo, en orden:
+
+1. Comprueba si cualquiera de los procesos está corriendo:
+   pgrep -f 'launch_ui_real_metrics_derivatives|train_deeph_autograd_models'
+   Si devuelve algún PID, la campaña está viva. No hagas nada más. Fin.
+
+2. Si NO está corriendo, cuenta los ficheros
+   */deeph_autograd_model/training_complete.json bajo
+   Comparison/results/ui_real_metrics_derivatives/cross_w90_to_5x5_2delta.
+   Si hay menos de 12, el reentrenamiento falló o fue detenido: no lances
+   métricas con modelos incompletos. Diagnostica el log de entrenamiento y deja
+   constancia (paso 9), pero no arregles ni relances a ciegas.
+
+3. Si hay 12 modelos completos, comprueba los manifests de métricas finales:
+   deben existir derivative_metrics/graph2mat/manifest.json y
+   derivative_metrics/deeph/manifest.json para los 12 casos. Si existen los
+   24, la campaña terminó con éxito. No hagas nada, añade una línea al log
+   (paso 9) y termina.
+
+4. Si no está corriendo y quedan métricas pendientes, es un fallo real. Antes de
+   tocar nada, comprueba el guardarraíl de disco:
+   df -h /home/christian/repositorios (o el punto de montaje del repo)
+   Si existe Comparison/results/ui_real_metrics_derivatives/STOPPED_LOW_DISK
+   Y el disco libre sigue por debajo del 10%, NO relances nada. Registra el
+   hallazgo (paso 9) y termina.
+   Si el disco ya se recuperó (>=10% libre), continúa.
+
+4b. Comprueba también el guardarraíl de GPU. La fase de predicción de
+   derivadas corre autograd en GPU; si otro trabajo (p.ej. el entrenamiento
+   DeepH de vacancy) la tiene ocupada, relanzar solo provocaría CUDA OOM en
+   bucle. Si existe Comparison/results/ui_real_metrics_derivatives/GPU_BUSY_HOLD,
+   O si nvidia-smi muestra menos de ~6000 MiB libres en la GPU, NO relances:
+   registra que esperas a que se libere la GPU (paso 9) y termina. El monitor
+   bash borra GPU_BUSY_HOLD automáticamente cuando hay memoria suficiente.
+   Además, si el último fallo del log fue un CUDA out of memory, la causa NO
+   es un bug: es contención de GPU — no arregles nada, solo espera a que haya
+   memoria y deja que un disparo posterior lo reanude.
+
+5. Diagnostica la CAUSA REAL del fallo. Lee:
+   - las últimas ~100 líneas de Comparison/results/ui_real_metrics_derivatives/launcher.log
+   - el manifest.json del último caso en curso (bajo
+     Comparison/results/ui_real_metrics_derivatives/<campaign>/<case_id>/...)
+   Identifica si fue: comando SIESTA fallido, checkpoint corrupto, excepción
+   Python, timeout, disco lleno en su momento, lock huérfano, directorio de
+   salida a medio escribir, dependencia faltante, etc. No asumas — lee el
+   error real.
+
+6. Decide si arreglar:
+   - Si la causa es benigna o algo reversible y seguro (lock file huérfano,
+     directorio de salida a medio escribir que bloquea el reintento,
+     dependencia de Python faltante que se puede instalar con pip en el
+     venv del proyecto), arréglalo tú mismo.
+   - Si la causa es algo que no puedes arreglar con seguridad (checkpoint
+     corrupto, bug de código que requiere cambiar lógica, decisión de
+     diseño ambigua), NO lo toques. Deja constancia clara del hallazgo
+     (paso 9) y NO relances. Termina.
+   - Nunca borres resultados ya calculados (directorios de casos completados,
+     Hamiltonianos SIESTA, predicciones) salvo que hayas determinado con
+     certeza que ESE resultado concreto está corrupto y es la causa directa
+     del fallo.
+
+7. Solo si entendiste la causa y (a) era benigna, o (b) la arreglaste con
+   confianza: relanza EXACTAMENTE con este comando (reanuda donde se quedó,
+   no reinicia nada gracias a skip_if_exists):
+
+   cd /home/christian/repositorios/MD_vs_AtomicDisplacement && nohup .venv/bin/python Comparison/scripts/ops/launch_ui_real_metrics_derivatives.py Comparison/config/ui_cross_w90_to_5x5_2delta_payload.json >> Comparison/results/ui_real_metrics_derivatives/cross_w90_to_5x5_2delta_launcher.log 2>&1 &
+   disown
+
+8. Verifica que el proceso quedó vivo tras relanzar (pgrep de nuevo tras
+   unos segundos) antes de darlo por hecho.
+
+9. Añade SIEMPRE una línea a Comparison/results/ui_real_metrics_derivatives/monitor.log
+   con: fecha ISO, qué encontraste, qué hiciste (nada / campaña completada /
+   relanzado / relanzado tras arreglo <X> / detenido por <Y> sin arreglar).
+   Usa algo como:
+   echo "$(date -Is) [claude-fix] <resumen>" >> Comparison/results/ui_real_metrics_derivatives/monitor.log
+
+Responde al final con un resumen breve en español (2-3 líneas) de lo que
+encontraste e hiciste.

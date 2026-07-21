@@ -1817,6 +1817,50 @@
             </div>
             <div id="ct-mae-chart" class="plot-card full"></div>
           </section>
+
+          <section class="panel" aria-labelledby="ct-vacancy-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Checkpoints existentes · sin reentrenamiento</p>
+                <h3 id="ct-vacancy-heading">Cross testing con vacante — checkpoints existentes</h3>
+                <p class="field-help">
+                  Flujo independiente para evaluar Graphene w90 y Graphene 5×5 sobre
+                  graphene_5x5_vacancy. Requiere referencias SIESTA ya generadas.
+                </p>
+              </div>
+            </div>
+            <label class="field"><span>Payload JSON de campaña</span>
+              <input id="ct-vacancy-payload" type="text"
+                value="Comparison/config/graphene_w90_5x5_to_vacancy_predict_metrics_payload.json" />
+              <small>Solo se admiten payloads .json dentro de Comparison/config.</small>
+            </label>
+            <div class="button-row">
+              <button id="ct-vacancy-preview" class="button secondary" type="button">Previsualizar vacante</button>
+              <button id="ct-vacancy-evaluate" class="button primary" type="button">Evaluar checkpoints</button>
+              <button id="ct-vacancy-metrics" class="button secondary" type="button">Cargar métricas</button>
+              <span id="ct-vacancy-status" class="muted-text" aria-live="polite">Idle</span>
+            </div>
+            <div class="terminal-frame">
+              <div class="terminal-navbar"><span>Vacancy payload log</span></div>
+              <pre id="ct-vacancy-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando acciones del cross testing con vacante.</pre>
+            </div>
+            <div id="ct-vacancy-mae-chart" class="plot-card full"></div>
+            <div id="ct-vacancy-frobenius-chart" class="plot-card full"></div>
+            <div class="vacancy-matrix-error-panel" aria-labelledby="ct-vacancy-matrix-heading">
+              <div>
+                <h4 id="ct-vacancy-matrix-heading">PlotMatrixError · Graph2Mat</h4>
+                <p class="field-help">Muestra la media de |H<sub>pred</sub>−H<sub>ref</sub>| de todas las predicciones del dataset.</p>
+              </div>
+              <label class="field"><span>Dataset Graph2Mat</span>
+                <select id="ct-vacancy-matrix-run">
+                  <option value="">Selecciona un run…</option>
+                </select>
+              </label>
+              <p id="ct-vacancy-matrix-status" class="muted-text" aria-live="polite">Carga las métricas para descubrir runs.</p>
+              <div id="ct-vacancy-matrix-placeholder" class="vacancy-matrix-placeholder">La matriz aparecerá aquí.</div>
+              <iframe id="ct-vacancy-matrix-frame" class="vacancy-matrix-frame" title="Graph2Mat PlotMatrixError MAE" hidden></iframe>
+            </div>
+          </section>
         </section>
 
         <section id="view-terminal" class="view">

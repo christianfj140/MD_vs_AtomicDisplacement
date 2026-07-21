@@ -125,6 +125,41 @@ def build(base: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_vacancy(base: dict[str, Any], target: str) -> dict[str, Any]:
+    pairs = []
+    for size in SIZES:
+        pairs.append({"size": size, "direction": "w90_to_vacancy", "source": w90_dataset(size), "target": target})
+        pairs.append({"size": size, "direction": "5x5_to_vacancy", "source": x5_dataset(size), "target": target})
+    return {
+        **base,
+        "schema": "g2m_deeph_cross_structure_predict_metrics_payload_v1",
+        "description": "Predict+metrics-only transfer from existing W90/5x5 checkpoints to graphene 5x5 monovacancy.",
+        "action": "predict_metrics",
+        "sources": {},
+        "targets": {},
+        "pairs": pairs,
+        "existing_artifacts": existing_artifacts(),
+        "notes": {
+            **(base.get("notes") or {}),
+            "predict_metrics_only": "Existing checkpoints are staged; Graph2Mat and DeepH training are skipped.",
+            "target": "Unrelaxed, non-spin-polarized 49-carbon graphene 5x5 monovacancy test dataset.",
+        },
+    }
+
+
+def _pin_deeph_threads(payload: dict[str, Any], num_threads: int = 2) -> dict[str, Any]:
+    # The base paper-ready payload omits deeph.num_threads, so it defaults to -1
+    # (every process grabs all cores). Under parallel training that oversubscribes
+    # the CPU and slows the graph builder ~30-40x, starving the GPU. Pin it to a
+    # small value like the fast snapshot-scaling sweep did.
+    hyperparams = dict(payload.get("hyperparams") or {})
+    deeph = dict(hyperparams.get("deeph") or {})
+    deeph.setdefault("num_threads", num_threads)
+    hyperparams["deeph"] = deeph
+    payload["hyperparams"] = hyperparams
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -137,12 +172,25 @@ def main() -> int:
         type=Path,
         default=REPO_ROOT / "Comparison/config/graphene_w90_5x5_cross_structure_predict_metrics_payload.json",
     )
+    parser.add_argument(
+        "--vacancy-output",
+        type=Path,
+        default=REPO_ROOT / "Comparison/config/graphene_w90_5x5_to_vacancy_predict_metrics_payload.json",
+    )
+    parser.add_argument(
+        "--vacancy-target",
+        default="Comparison/datasets/graphene_5x5_vacancy",
+    )
     args = parser.parse_args()
     base = json.loads(args.base.read_text(encoding="utf-8"))
-    payload = build(base)
+    payload = _pin_deeph_threads(build(base))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(args.output)
+    vacancy_payload = _pin_deeph_threads(build_vacancy(base, args.vacancy_target))
+    args.vacancy_output.parent.mkdir(parents=True, exist_ok=True)
+    args.vacancy_output.write_text(json.dumps(vacancy_payload, indent=2) + "\n", encoding="utf-8")
+    print(args.vacancy_output)
     return 0
 
 

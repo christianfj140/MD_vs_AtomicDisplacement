@@ -33,9 +33,11 @@ from evaluate_hamiltonian_metrics import (
     LOW_ENERGY_ALIGNMENT,
     LOW_ENERGY_N_STATES,
     complex_generalized_eigenvalues,
+    configure_eigensolver,
     complex_hermiticity_defect,
     complex_matrix_error_metrics,
     eigen_error_metrics,
+    eigensolver_name,
     kpoint_weighted_dos_metrics,
     low_energy_metrics_from_eigenvalues,
     parse_monkhorst_pack_kgrid,
@@ -255,7 +257,7 @@ def evaluate_sample(args: argparse.Namespace, sample, rows: dict[str, list[dict[
                 "low_energy_aligned_rmse_eV": math.nan,
                 "low_energy_overlap_used": True,
                 "low_energy_overlap_required": True,
-                "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+                "low_energy_solver": eigensolver_name(generalized=True, kpoint=True),
                 "low_energy_warning": "low-energy metrics disabled by CLI option.",
             }
             if args.disable_low_energy
@@ -327,7 +329,7 @@ def evaluate_sample(args: argparse.Namespace, sample, rows: dict[str, list[dict[
         "low_energy_aligned_rmse_eV": weighted_metric_rmse(per_k_spectral, "low_energy_aligned_rmse_eV"),
         "low_energy_overlap_used": True,
         "low_energy_overlap_required": True,
-        "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+        "low_energy_solver": eigensolver_name(generalized=True, kpoint=True),
         "low_energy_warning": "; ".join(
             sorted(
                 {
@@ -446,6 +448,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", choices=["train", "validation", "test"], default="test")
     parser.add_argument("--sample-limit-per-split", type=int, default=None)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--metrics-device", default="cpu")
     parser.add_argument("--disable-cuda", action="store_true")
     parser.add_argument("--fail-closed", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--disable-low-energy", action="store_true")
@@ -459,7 +462,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     try:
-        manifest = run(parse_args())
+        args = parse_args()
+        configure_eigensolver(args.metrics_device)
+        manifest = run(args)
     except DeepHFairBenchmarkError as exc:
         raise SystemExit(f"[DEEPh-FAIR][ERROR] {exc}") from exc
     print(

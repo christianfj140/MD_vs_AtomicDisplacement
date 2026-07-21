@@ -49,6 +49,20 @@ from g2m_deeph_runner import (  # noqa: E402
 )
 
 
+def test_model_command_semaphore_is_shared_and_enforces_limit():
+    first = Graph2MatDeepHBenchmarkRunner()
+    second = Graph2MatDeepHBenchmarkRunner()
+    first._model_command_limits["deeph"] = 2
+    second._model_command_limits["deeph"] = 2
+    semaphore = first._command_semaphore("DeepH inference")
+    assert semaphore is second._command_semaphore("DeepH common metrics")
+    assert semaphore.acquire(blocking=False)
+    assert semaphore.acquire(blocking=False)
+    assert not semaphore.acquire(blocking=False)
+    semaphore.release()
+    semaphore.release()
+
+
 def _write_fake_deeph_cli(repo_or_bin: Path, command_name: str) -> Path:
     bin_dir = repo_or_bin / ".venv" / "bin" if repo_or_bin.name != "bin" else repo_or_bin
     bin_dir.mkdir(parents=True, exist_ok=True)

@@ -204,6 +204,8 @@ def validate_inputs(args: argparse.Namespace) -> list[Path]:
         raise RuntimeError(f"Checkpoint not found: {args.ckpt_path}")
     if args.config_yaml is not None and not args.config_yaml.exists():
         raise RuntimeError(f"Config YAML not found: {args.config_yaml}")
+    if args.average_hsx_root is not None and not args.average_hsx_root.is_dir():
+        raise RuntimeError(f"Average HSX root not found: {args.average_hsx_root}")
     test_runs = resolve_test_run_inputs(args.test_runs)
     if not test_runs:
         raise RuntimeError(f"--test-runs did not match any files: {args.test_runs}")
@@ -226,6 +228,11 @@ def base_manifest(args: argparse.Namespace, test_run_paths: list[Path], *, statu
         "python_version": platform.python_version(),
         "output_dir": args.output_dir,
         "save_flags": {"png": args.save_png, "pdf": args.save_pdf, "html": args.save_html},
+        "error_metric": args.error_metric,
+        "crop_empty": args.crop_empty,
+        "visualization_version": 2,
+        "aggregation_mode": "dataset_mean" if args.average_hsx_root else "callback",
+        "average_hsx_root": args.average_hsx_root,
         "image_export": {
             "width": args.image_width,
             "height": args.image_height,
@@ -322,6 +329,22 @@ def first_present(*values: Any) -> Any:
     return None
 
 
+def matrix_plot_ranges(matrix: Any) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Return primary-cell and full ranges, preserving imshow's reversed Y axis."""
+    primary = matrix[:, : matrix.shape[0]] if matrix.shape[1] > matrix.shape[0] else matrix
+    rows, cols = primary.nonzero()
+    full_x = [-0.5, matrix.shape[1] - 0.5]
+    full_y = [matrix.shape[0] - 0.5, -0.5]
+    if not len(rows):
+        return full_x, full_y, full_x, full_y
+    return (
+        [float(cols.min()) - 0.5, float(cols.max()) + 0.5],
+        [float(rows.max()) + 0.5, float(rows.min()) - 0.5],
+        full_x,
+        full_y,
+    )
+
+
 def programmatic_datamodule_kwargs(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     data_cfg = first_present(
         config.get("data") if isinstance(config.get("data"), dict) else None,
@@ -329,10 +352,19 @@ def programmatic_datamodule_kwargs(args: argparse.Namespace, config: dict[str, A
         nested_get(config, "testing", "data"),
         {},
     )
+    root_dir = data_cfg.get("root_dir")
+    if args.config_yaml is not None and root_dir and not Path(str(root_dir)).is_absolute():
+        root_dir = str((args.config_yaml.parent / str(root_dir)).resolve())
+    test_runs = list(args.test_runs)
+    if root_dir:
+        test_runs = [
+            os.path.relpath(pattern, root_dir) if Path(pattern).is_absolute() else pattern
+            for pattern in test_runs
+        ]
     kwargs = {
         "out_matrix": first_present(args.out_matrix, data_cfg.get("out_matrix"), "hamiltonian"),
         "basis_files": first_present(args.basis_files, data_cfg.get("basis_files")),
-        "test_runs": args.test_runs[0] if len(args.test_runs) == 1 else ",".join(args.test_runs),
+        "test_runs": test_runs[0] if len(test_runs) == 1 else ",".join(test_runs),
         "symmetric_matrix": bool(first_present(args.symmetric_matrix, data_cfg.get("symmetric_matrix"), False)),
         "sub_point_matrix": bool(first_present(args.sub_point_matrix, data_cfg.get("sub_point_matrix"), True)),
         "batch_size": int(first_present(args.batch_size, data_cfg.get("batch_size"), 1)),
@@ -341,6 +373,8 @@ def programmatic_datamodule_kwargs(args: argparse.Namespace, config: dict[str, A
     for key in ("n_matrix_components", "matrix_component_policy", "loader_threads", "root_dir", "no_basis", "initial_node_feats"):
         if key in data_cfg and data_cfg[key] is not None:
             kwargs[key] = data_cfg[key]
+    if root_dir:
+        kwargs["root_dir"] = root_dir
     return kwargs
 
 
@@ -402,11 +436,10 @@ def _run_programmatic_graph2mat_test(args: argparse.Namespace, *, sample_metrics
 
         def _save_figure(self, fig: Any, label: str) -> None:
             slug = label.lower()
-            fig.update_layout(width=args.image_width, height=args.image_height)
             if args.save_html:
                 path = self.output_dir / f"matrix_error_{slug}.html"
                 try:
-                    fig.write_html(path)
+                    fig.write_html(path, config={"responsive": True})
                     self.saved[f"{slug}_html"] = path
                 except Exception as exc:
                     message = f"Could not save {label} HTML: {exc}"
@@ -431,6 +464,41 @@ def _run_programmatic_graph2mat_test(args: argparse.Namespace, *, sample_metrics
                     print(f"[WARN] {message}", file=sys.stderr)
                     self.save_warnings.append(message)
 
+        def _render_matrix(self, matrix: Any, geometry: Any, label: str, title: str) -> Any:
+            fig = plot_basis_matrix(
+                matrix,
+                configuration=geometry,
+                point_lines=True,
+                basis_lines=True,
+                text=".3f",
+                colorscale="temps",
+            ).update_layout(title=title)
+            if args.crop_empty:
+                crop_x, crop_y, full_x, full_y = matrix_plot_ranges(matrix)
+                fig.update_xaxes(range=crop_x, scaleanchor="y", constrain="domain")
+                fig.update_yaxes(range=crop_y, constrain="domain")
+                fig.update_layout(
+                    margin={"l": 80, "r": 120, "t": 120, "b": 80},
+                    updatemenus=[{
+                        "type": "buttons",
+                        "direction": "left",
+                        "x": 0,
+                        "y": 1.12,
+                        "buttons": [
+                            {"label": "Celda primaria", "method": "relayout", "args": [{"xaxis.range": crop_x, "yaxis.range": crop_y}]},
+                            {"label": "Matriz completa", "method": "relayout", "args": [{"xaxis.range": full_x, "yaxis.range": full_y}]},
+                        ],
+                    }],
+                )
+            elif args.stretch_matrix:
+                fig.update_yaxes(scaleanchor=False, constrain=None)
+                fig.update_xaxes(constrain=None)
+                fig.update_layout(margin={"l": 80, "r": 120, "t": 80, "b": 80})
+            self._save_figure(fig, label)
+            if self.show:
+                fig.show("browser")
+            return fig
+
         def _on_epoch_end(self, trainer: Any, pl_module: Any) -> None:
             matrix_cls = {
                 "density_matrix": sisl.DensityMatrix,
@@ -439,11 +507,13 @@ def _run_programmatic_graph2mat_test(args: argparse.Namespace, *, sample_metrics
                 "dynamical_matrix": sisl.DynamicalMatrix,
             }[trainer.datamodule.out_matrix]
             basis_table: AtomicTableWithEdges = trainer.datamodule.basis_table
-            labels = ["MAE", "RMSE"]
-            node_errors = [self.node_running_ae, self.node_running_se]
-            edge_errors = [self.edge_running_ae, self.edge_running_se]
+            metrics = {
+                "mae": ("MAE", self.node_running_ae, self.edge_running_ae),
+                "rmse": ("RMSE", self.node_running_se, self.edge_running_se),
+            }
+            selected_metrics = metrics.values() if args.error_metric == "both" else [metrics[args.error_metric]]
             assert self.point_types is not None
-            for label, node_error, edge_error in zip(labels, node_errors, edge_errors):
+            for label, node_error, edge_error in selected_metrics:
                 unique_atoms = basis_table.get_sisl_atoms()
                 point_types = np.asarray(self.point_types, dtype=int)
                 edge_index = np.asarray(self.edge_index, dtype=int)
@@ -470,23 +540,7 @@ def _run_programmatic_graph2mat_test(args: argparse.Namespace, *, sample_metrics
                     symmetrize_edges=trainer.datamodule.symmetric_matrix,
                     matrix_component_policy=getattr(trainer.datamodule, "matrix_component_policy", None),
                 ).tocsr()
-                fig = plot_basis_matrix(
-                    matrix,
-                    configuration=geometry,
-                    point_lines=True,
-                    basis_lines=True,
-                    text=".3f",
-                    colorscale="temps",
-                ).update_layout(
-                    title=f"Graph2Mat {args.split} matrix error: {label}",
-                )
-                if args.stretch_matrix:
-                    fig.update_yaxes(scaleanchor=False, constrain=None)
-                    fig.update_xaxes(constrain=None)
-                    fig.update_layout(margin={"l": 80, "r": 120, "t": 80, "b": 80})
-                self._save_figure(fig, label)
-                if self.show:
-                    fig.show("browser")
+                fig = self._render_matrix(matrix, geometry, label, f"Graph2Mat {args.split} matrix error: {label}")
                 if self.store_in_logger and trainer.logger is not None:
                     import io
                     import PIL.Image
@@ -500,6 +554,47 @@ def _run_programmatic_graph2mat_test(args: argparse.Namespace, *, sample_metrics
                         dataformats="HWC",
                         global_step=trainer.global_step,
                     )
+
+    if args.average_hsx_root is not None:
+        prediction_paths = sorted(args.average_hsx_root.glob("*/ML_prediction.HSX"))
+        if not prediction_paths:
+            raise RuntimeError(f"No ML_prediction.HSX files found under {args.average_hsx_root}")
+        sums: dict[str, Any] = {"mae": None, "rmse": None}
+        geometry = None
+        for prediction_path in prediction_paths:
+            references = sorted(prediction_path.parent.glob("*.TSHS"))
+            if len(references) != 1:
+                raise RuntimeError(f"Expected one reference TSHS next to {prediction_path}, found {len(references)}")
+            predicted_obj = sisl.get_sile(str(prediction_path)).read_hamiltonian()
+            predicted = predicted_obj.tocsr(0)
+            reference_obj = sisl.get_sile(str(references[0])).read_hamiltonian()
+            reference = reference_obj.tocsr(0)
+            if predicted.shape != reference.shape:
+                raise RuntimeError(f"Matrix shape mismatch for {prediction_path.parent.name}: {predicted.shape} != {reference.shape}")
+            delta = predicted - reference
+            absolute = abs(delta)
+            squared = delta.multiply(delta)
+            sums["mae"] = absolute if sums["mae"] is None else sums["mae"] + absolute
+            sums["rmse"] = squared if sums["rmse"] is None else sums["rmse"] + squared
+            if geometry is None:
+                geometry = predicted_obj.geometry
+        callback = SavingPlotMatrixError(split=args.split, show=args.show, store_in_logger=False, output_dir=args.output_dir)
+        selected = ("mae", "rmse") if args.error_metric == "both" else (args.error_metric,)
+        for metric in selected:
+            matrix = sums[metric] / len(prediction_paths)
+            if metric == "rmse":
+                matrix = matrix.sqrt()
+            callback._render_matrix(
+                matrix,
+                geometry,
+                metric.upper(),
+                f"Graph2Mat dataset mean matrix error: {metric.upper()} (n={len(prediction_paths)})",
+            )
+        return {
+            **{key: path for key, path in callback.saved.items()},
+            "_warnings": callback.save_warnings,
+            "n_averaged_samples": len(prediction_paths),
+        }
 
     config = load_yaml_config(args.config_yaml)
     datamodule_kwargs = programmatic_datamodule_kwargs(args, config)
@@ -591,6 +686,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--store-in-memory", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--accelerator", default=None)
     parser.add_argument("--plot-matrix-error", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--error-metric", choices=["mae", "rmse", "both"], default="both")
+    parser.add_argument("--average-hsx-root", type=Path, default=None)
+    parser.add_argument("--crop-empty", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--samplewise-metrics", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--show", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--store-in-logger", action=argparse.BooleanOptionalAction, default=True)

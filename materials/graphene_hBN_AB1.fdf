@@ -1,0 +1,118 @@
+SystemName         graphene_hBN_AB1
+SystemLabel        graphene_hBN_AB1
+
+NumberOfAtoms          4
+NumberOfSpecies        3
+
+%block ChemicalSpeciesLabel
+  1   6  C
+  2   5  B
+  3   7  N
+%endblock ChemicalSpeciesLabel
+
+%block PAO.Basis
+C           2
+ n=2   0   1
+   4.088
+   1.000
+ n=2   1   1
+   4.870
+   1.000
+B                     2
+ n=2   0   2
+   5.254      3.670
+   1.000      1.000
+ n=2   1   2 P   1
+   6.393      4.475
+   1.000      1.000
+N                     2
+ n=2   0   2
+   3.944      2.617
+   1.000      1.000
+ n=2   1   2 P   1
+   4.781      3.167
+   1.000      1.000
+%endblock PAO.Basis
+
+#
+# Atomic structure
+#
+
+LatticeConstant      1.00000 Ang
+
+%block LatticeVectors
+   2.4800000000       0.0000000000       0.0000000000
+  -1.2400000000       2.1477430000       0.0000000000
+   0.0000000000       0.0000000000      20.0000000000
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Fractional
+%block AtomicCoordinatesAndAtomicSpecies
+# Graphene layer
+   0.0000000000   0.0000000000   0.4000000000   1
+   0.3333333333   0.6666666667   0.4000000000   1
+
+# h-BN layer: B over C2, N over hollow site
+   0.3333333333   0.6666666667   0.5675000000   2
+   0.6666666667   0.3333333333   0.5675000000   3
+%endblock AtomicCoordinatesAndAtomicSpecies
+
+#
+# k-point sampling
+#
+
+%block kgrid_Monkhorst_Pack
+  20   0   0  0.0
+   0  20   0  0.0
+   0   0   1  0.0
+%endblock kgrid_Monkhorst_Pack
+
+#
+# DFT, grid and SCF
+#
+
+XC.functional          VDW
+XC.authors             DRSLL
+
+MeshCutoff             600.0 Ry
+MaxSCFIterations       500
+DM.MixingWeight        0.1
+DM.NumberPulay         5
+DM.Tolerance           1.d-4
+DM.UseSaveDM           F
+SolutionMethod         diagon
+ElectronicTemperature  0.075 eV
+
+#
+# Raw SIESTA artifacts for Graph2Mat/DeepH
+#
+
+SaveHS                 T
+Save.HS                T
+TS.HS.Save             T
+TS.DE.Save             T
+XML.Write              T
+
+WriteMullikenPop       1
+Write.OrbitalIndex     T
+WriteForces            T
+WriteCoorXmol          T
+
+#
+# Molecular dynamics
+#
+
+MD.TypeOfRun           Verlet
+MD.Steps               10
+MD.InitialTimeStep     1
+MD.FinalTimeStep       10
+MD.LengthTimeStep      1 fs
+MD.InitialTemperature  300 K
+
+WriteMDHistory         T
+
+#
+# Store Hamiltonians for each MD step
+#
+
+Lua.Script             md_store.lua

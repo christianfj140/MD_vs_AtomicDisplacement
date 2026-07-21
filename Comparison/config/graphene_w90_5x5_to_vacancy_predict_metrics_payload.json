@@ -1,6 +1,6 @@
 {
   "schema": "g2m_deeph_cross_structure_predict_metrics_payload_v1",
-  "description": "Predict+metrics-only cross testing for W90<->5x5, same size grid and hparams/performance inherited from the paper-ready cross payload.",
+  "description": "Predict+metrics-only transfer from existing W90/5x5 checkpoints to graphene 5x5 monovacancy.",
   "action": "predict_metrics",
   "sizes": [
     20,
@@ -34,159 +34,159 @@
   "pairs": [
     {
       "size": 20,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid20",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 20,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid20",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid20"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 30,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid30",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid30"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 30,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid30",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid30"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 50,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid50",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid50"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 50,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid50",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid50"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 60,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid60",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid60"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 60,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid60",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid60"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 80,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid80",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid80"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 80,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid80",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid80"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 90,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid90",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid90"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 90,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid90",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid90"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 100,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid100",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid100"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 100,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid100",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid100"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 150,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid150",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid150"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 150,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid150",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid150"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 200,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid200",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid200"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 200,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid200",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid200"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 300,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid300",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid300"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 300,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid300",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid300"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 400,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid400",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid400"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 400,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid400",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid400"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 500,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid500"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 500,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid500",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 600,
-      "direction": "w90_to_5x5",
+      "direction": "w90_to_vacancy",
       "source": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid600",
-      "target": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid600"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     },
     {
       "size": 600,
-      "direction": "5x5_to_w90",
+      "direction": "5x5_to_vacancy",
       "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid600",
-      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_12_1300_600epochs_1train_derivatives/graphene_w90_scale_iid600"
+      "target": "Comparison/datasets/graphene_5x5_vacancy"
     }
   ],
   "early_stopping": {
@@ -264,8 +264,8 @@
     "direction": "Train/validation splits come from graphene_w90 source; test split comes from graphene_5x5 target.",
     "size_policy": "Uses the active size grid after dropping 800 and 1000 for time/disk control. Add those two sizes back if needed.",
     "seed_policy": "Single seed=0 payload, matching the active mixing payload. For 10-seed replication, run copies with seed changed or extend the runner to loop seeds.",
-    "predict_metrics_only": "Skips training and fails closed if a source checkpoint/model dir is missing.",
-    "directions": "Includes w90->5x5 and 5x5->w90. Self baselines are copied separately into the graph."
+    "predict_metrics_only": "Existing checkpoints are staged; Graph2Mat and DeepH training are skipped.",
+    "target": "Unrelaxed, non-spin-polarized 49-carbon graphene 5x5 monovacancy test dataset."
   },
   "existing_artifacts": {
     "graphene_w90_scale_iid20": {

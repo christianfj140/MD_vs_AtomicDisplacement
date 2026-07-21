@@ -97,7 +97,12 @@ def _cross_cases(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
-def _payload(case: dict[str, Any], settings: dict[str, Any], output_root: Path) -> dict[str, Any]:
+def _payload(
+    case: dict[str, Any],
+    settings: dict[str, Any],
+    output_root: Path,
+    stages_override: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     result_dir = output_root / str(case["campaign"]) / str(case["id"])
     derivative = {
         **settings,
@@ -134,7 +139,7 @@ def _payload(case: dict[str, Any], settings: dict[str, Any], output_root: Path) 
             "derivative_metrics_deeph": True,
             "derivative_gate_check": True,
             "derivative_plots": True
-        },
+        } if stages_override is None else stages_override,
         "derivative": derivative,
         "derivative_metrics": {"enabled": True, "method": "central", "require_central": True},
         "dataset_size_metadata": case["dataset_size_metadata"],
@@ -160,22 +165,59 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("payload", type=Path)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--reference-only", action="store_true")
     args = parser.parse_args()
     config = _read(_path(args.payload))
     output_root = _path(str(config["output_root"]))
     cases = _mixing_cases(_read(_path(str(config["mixing_summary"]))))
     cases.extend(_cross_cases(_read(_path(str(config["cross_summary"])))))
+    selected_ids = {str(value) for value in config.get("include_case_ids") or []}
+    if selected_ids:
+        available_ids = {str(case["id"]) for case in cases}
+        unknown_ids = selected_ids - available_ids
+        if unknown_ids:
+            raise RuntimeError(f"Unknown derivative campaign case ids: {sorted(unknown_ids)}")
+        cases = [case for case in cases if str(case["id"]) in selected_ids]
+    output_campaign = str(config.get("output_campaign") or "").strip()
+    if output_campaign:
+        for case in cases:
+            case["campaign"] = output_campaign
+    deeph_autograd_model_subdir = str(config.get("deeph_autograd_model_subdir") or "").strip()
+    if deeph_autograd_model_subdir:
+        for case in cases:
+            case["deeph_model_dir"] = output_root / str(case["campaign"]) / str(case["id"]) / deeph_autograd_model_subdir / "train"
     settings = dict(config["derivative"])
+    state_id = str(config.get("campaign_state_id") or "").strip()
+    plan_path = output_root / (f"derivative_campaign_plan_{state_id}.json" if state_id else "derivative_campaign_plan.json")
+    status_path = output_root / (f"derivative_campaign_status_{state_id}.json" if state_id else "derivative_campaign_status.json")
     plan = {"schema": "ui_real_metrics_derivative_plan_v1", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "cases": [{**case, "dataset_root": str(case["dataset_root"]), "graph2mat_checkpoint": str(case["graph2mat_checkpoint"]), "deeph_model_dir": str(case["deeph_model_dir"])} for case in cases]}
-    _write(output_root / "derivative_campaign_plan.json", plan)
+    _write(plan_path, plan)
     print(f"[DERIVATIVES] planned={len(cases)} output_root={output_root}", flush=True)
     if args.plan_only:
         return 0
+    reference_only_stages = {
+        "generate_or_validate_dataset": False,
+        "freeze_splits": False,
+        "train_graph2mat": False,
+        "predict_graph2mat": False,
+        "train_deeph": False,
+        "predict_deeph": False,
+        "hamiltonian_metrics": False,
+        "build_derivative_stencils": True,
+        "validate_derivative_stencils": True,
+        "run_derivative_siesta_reference": True,
+        "predict_derivative_graph2mat": False,
+        "predict_derivative_deeph": False,
+        "derivative_metrics_graph2mat": False,
+        "derivative_metrics_deeph": False,
+        "derivative_gate_check": False,
+        "derivative_plots": False,
+    } if args.reference_only else None
     completed: list[dict[str, Any]] = []
     for index, case in enumerate(cases, start=1):
         print(f"[DERIVATIVES] {index}/{len(cases)} {case['id']}", flush=True)
         runner = Graph2MatDeepHBenchmarkRunner()
-        runner.start(_payload(case, settings, output_root))
+        runner.start(_payload(case, settings, output_root, stages_override=reference_only_stages))
         offset = 0
         while runner.status().get("running"):
             logs = runner.logs(since=offset, limit=None)
@@ -189,7 +231,7 @@ def main() -> int:
             dict(case["dataset_size_metadata"]),
         )
         completed.append({"id": case["id"], "campaign": case["campaign"], "status": status, "result": runner.results()})
-        _write(output_root / "derivative_campaign_status.json", {"plan": str(output_root / "derivative_campaign_plan.json"), "completed": completed})
+        _write(status_path, {"plan": str(plan_path), "completed": completed})
     roots = [output_root / item["campaign"] / item["id"] / "derivative_metrics" / model for item in completed if item["status"].get("returncode") == 0 for model in ("graph2mat", "deeph")]
     roots = [root for root in roots if (root / "manifest.json").exists()]
     if roots:

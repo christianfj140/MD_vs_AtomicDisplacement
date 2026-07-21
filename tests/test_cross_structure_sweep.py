@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ for path in (SCRIPTS_DIR, SHARED_DIR):
         sys.path.insert(0, str(path))
 
 import ml_vs_siesta as mvs  # noqa: E402
+from ml_vs_siesta import cross_structure_sweep as sweep  # noqa: E402
 from test_cross_structure_evaluation import _make_dataset  # noqa: E402
 
 
@@ -75,9 +78,9 @@ def test_incompatible_pair_does_not_abort(tmp_path: Path) -> None:
 def test_aggregate_groups_by_target_model() -> None:
     records = [
         {"source_id": "s10", "target_id": "t50", "source_n_snapshots": 10,
-         "model": "graph2mat", "seed": 0, "h_mae_eV": 0.4},
+         "model": "graph2mat", "seed": 0, "h_mae_eV": 0.4, "relative_frobenius": 0.1},
         {"source_id": "s10", "target_id": "t50", "source_n_snapshots": 10,
-         "model": "graph2mat", "seed": 1, "h_mae_eV": 0.6},
+         "model": "graph2mat", "seed": 1, "h_mae_eV": 0.6, "relative_frobenius": 0.3},
         {"source_id": "s50", "target_id": "t50", "source_n_snapshots": 50,
          "model": "graph2mat", "seed": 0, "h_mae_eV": 0.2},
         {"source_id": "s10", "target_id": "t50", "source_n_snapshots": 10,
@@ -90,6 +93,8 @@ def test_aggregate_groups_by_target_model() -> None:
     assert [p["x"] for p in g2m["points"]] == [10, 50]
     first = g2m["points"][0]
     assert abs(first["mae"] - 0.5) < 1e-9
+    assert abs(first["relative_frobenius"] - 0.2) < 1e-9
+    assert first["relative_frobenius_std"] is not None
     assert first["n_seeds"] == 2
     assert {p["id"] for p in agg["payloads"]} == {"s10__to__t50", "s50__to__t50"}
 
@@ -101,6 +106,172 @@ def test_aggregate_falls_back_to_atoms_for_x() -> None:
     ]
     agg = mvs.aggregate_cross_structure_mae(records)
     assert agg["curves"][0]["points"][0]["x"] == 2
+
+
+def test_aggregate_keeps_source_structures_in_distinct_curves() -> None:
+    records = [
+        {"source_id": "w90_iid20", "source_system_label": "graphene_w90",
+         "target_id": "vacancy", "source_n_snapshots": 20,
+         "model": "graph2mat", "seed": 0, "h_mae_eV": 0.4},
+        {"source_id": "x5_iid20", "source_system_label": "graphene_5x5",
+         "target_id": "vacancy", "source_n_snapshots": 20,
+         "model": "graph2mat", "seed": 0, "h_mae_eV": 0.2},
+    ]
+    agg = mvs.aggregate_cross_structure_mae(records)
+    assert agg["n_curves"] == 2
+    assert {curve["source_system_label"] for curve in agg["curves"]} == {
+        "graphene_w90", "graphene_5x5",
+    }
+
+
+@pytest.mark.parametrize("action", ["materialize", "train"])
+def test_non_prediction_actions_do_not_require_existing_artifacts(
+    source_pair, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str,
+) -> None:
+    small, _big, target = source_pair
+    seen: list[dict] = []
+
+    def fake_run(payload, launch_fn=None):
+        seen.append(payload)
+        if payload["action"] == "materialize":
+            return {"materialized": {"reused": False}}
+        return {
+            "materialized": {"reused": False},
+            "runner_result": {
+                "ok": True,
+                "metrics": {
+                    "graph2mat": {"h_mae_eV": 0.1},
+                    "deeph": {"h_mae_eV": 0.2},
+                },
+            },
+        }
+
+    monkeypatch.setattr(sweep, "run_cross_structure_payload", fake_run)
+    summary = sweep.run_cross_structure_sweep(
+        [small], [target], tmp_path / f"out_{action}", action=action, dry_run=False,
+    )
+    assert len(seen) == 1
+    assert "existing_model_artifacts" not in seen[0]["runner_payload"]
+    expected_status = "materialized" if action == "materialize" else "trained"
+    assert summary["permutations"][0]["status"] == expected_status
+
+
+def test_predict_metrics_requires_source_artifacts(source_pair, tmp_path: Path) -> None:
+    small, _big, target = source_pair
+    with pytest.raises(ValueError, match="requires existing_artifacts"):
+        sweep.run_cross_structure_sweep(
+            [small], [target], tmp_path / "missing_artifacts",
+            action="predict_metrics", dry_run=False,
+        )
+
+
+def test_predict_metrics_fails_when_no_target_is_compatible(
+    source_pair, tmp_path: Path,
+) -> None:
+    small, _big, _target = source_pair
+    missing = tmp_path / "missing_vacancy"
+    with pytest.raises(ValueError, match="predict_metrics has no compatible pairs.*missing_vacancy"):
+        sweep.run_cross_structure_sweep(
+            [small], [missing], tmp_path / "no_target",
+            action="predict_metrics", dry_run=False,
+        )
+
+
+def test_predict_metrics_passes_exact_source_artifacts(
+    source_pair, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    small, _big, target = source_pair
+    source_id = mvs.plan_cross_structure_sweep([small], [target])["permutations"][0]["source_id"]
+    artifacts = {
+        "graph2mat": {"checkpoint": "/models/w90.ckpt", "run_dir": "/models/w90"},
+        "deeph": {"checkpoint": "/models/w90.pt", "run_dir": "/models/w90_deeph"},
+    }
+    seen: list[dict] = []
+
+    def fake_run(payload, launch_fn=None):
+        seen.append(payload)
+        return {
+            "materialized": {"reused": True},
+            "runner_result": {
+                "ok": True,
+                "metrics": {
+                    "graph2mat": {"h_mae_eV": 0.1},
+                    "deeph": {"h_mae_eV": 0.2},
+                },
+            },
+        }
+
+    monkeypatch.setattr(sweep, "run_cross_structure_payload", fake_run)
+    summary = sweep.run_cross_structure_sweep(
+        [small], [target], tmp_path / "predict",
+        action="predict_metrics", dry_run=False,
+        existing_artifacts={source_id: artifacts},
+    )
+    runner_payload = seen[0]["runner_payload"]
+    assert runner_payload["predict_metrics_only"] is True
+    assert runner_payload["existing_model_artifacts"] == artifacts
+    assert summary["n_evaluated"] == 1
+    assert summary["n_trained"] == 0
+
+
+def test_cross_structure_pairs_run_in_parallel(source_pair, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    small, big, target = source_pair
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def fake_run(payload, launch_fn=None):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return {
+            "materialized": {"reused": True},
+            "runner_result": {
+                "ok": True,
+                "metrics": {"graph2mat": {"h_mae_eV": 0.1}, "deeph": {"h_mae_eV": 0.2}},
+            },
+        }
+
+    monkeypatch.setattr(sweep, "run_cross_structure_payload", fake_run)
+    summary = sweep.run_cross_structure_sweep(
+        [small, big], [target], tmp_path / "parallel", action="train", dry_run=False,
+        performance={"max_parallel_prediction_jobs": 2},
+    )
+
+    assert peak == 2
+    assert summary["max_parallel_jobs"] == 2
+    assert summary["n_trained"] == 2
+
+
+def test_cross_structure_runs_deeph_batch_before_graph2mat(source_pair, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    small, big, target = source_pair
+    calls: list[str] = []
+
+    def fake_run(payload, launch_fn=None):
+        model = payload["runner_payload"]["models"][0]
+        calls.append(model)
+        return {
+            "materialized": {"reused": True},
+            "runner_result": {"ok": True, "metrics": {model: {"h_mae_eV": 0.1}}},
+        }
+
+    monkeypatch.setattr(sweep, "run_cross_structure_payload", fake_run)
+    summary = sweep.run_cross_structure_sweep(
+        [small, big], [target], tmp_path / "ordered", action="train", dry_run=False,
+        performance={
+            "cross_model_schedule": "deeph_then_graph2mat",
+            "max_parallel_deeph_training_jobs": 2,
+            "max_parallel_graph2mat_training_jobs": 2,
+        },
+    )
+
+    assert calls == ["deeph", "deeph", "graph2mat", "graph2mat"]
+    assert summary["model_schedule"] == "deeph_then_graph2mat"
+    assert summary["n_trained"] == 2
 
 
 def test_runner_metrics_merge_live_records() -> None:
@@ -120,6 +291,7 @@ def test_runner_metrics_merge_live_records() -> None:
     ]
     runner._status = {
         "state": "running",
+        "action": "predict_metrics",
         "live_records": records,
         "payloads": ui._cross_testing_payloads_from_permutations(perms),
     }
@@ -132,7 +304,29 @@ def test_runner_metrics_merge_live_records() -> None:
     incompatible = next(p for p in metrics["payloads"] if p["id"] == "s99__to__t50")
     assert incompatible["status"] == "incompatible"
     assert incompatible["reason"] == "boom"
+    evaluated = next(p for p in metrics["payloads"] if p["id"] == "s10__to__t50")
+    assert evaluated["status"] == "evaluated"
     assert metrics["n_curves"] == 1
+
+
+def test_runner_metrics_ignores_empty_summary_and_loads_real_result(tmp_path: Path) -> None:
+    import json
+    import pipeline_ui as ui
+
+    (tmp_path / "cross_structure_sweep_summary.json").write_text(
+        json.dumps({"action": "predict_metrics", "records": []}), encoding="utf-8"
+    )
+    records = [
+        {"source_id": "w90", "target_id": "x5", "source_n_snapshots": 20,
+         "model": "graph2mat", "seed": 0, "h_mae_eV": 0.1},
+    ]
+    (tmp_path / "predict_metrics_result.json").write_text(
+        json.dumps({"action": "predict_metrics", "records": records}), encoding="utf-8"
+    )
+    runner = ui.CrossStructureSweepRunner(tmp_path)
+    metrics = runner.metrics()
+    assert metrics["n_curves"] == 1
+    assert metrics["curves"][0]["points"][0]["mae"] == 0.1
 
 
 def test_runner_payload_seed_overrides_payload_hyperparam_seed() -> None:

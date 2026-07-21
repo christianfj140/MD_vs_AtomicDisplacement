@@ -758,6 +758,21 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
 
         np.testing.assert_allclose(values, expected)
 
+    def test_cuda_generalized_eigenproblem_matches_cpu_when_available(self) -> None:
+        import numpy as np
+
+        try:
+            self.module.configure_eigensolver("cuda:0")
+        except RuntimeError:
+            self.skipTest("CUDA/CuPy is unavailable")
+        hamiltonian = np.asarray([[1.0, 0.2 + 0.3j], [0.2 - 0.3j, 2.0]], dtype=complex)
+        overlap = np.asarray([[1.4, 0.1j], [-0.1j, 1.2]], dtype=complex)
+        gpu_values = self.module.complex_generalized_eigenvalues(hamiltonian, overlap)
+        self.module.configure_eigensolver("cpu")
+        cpu_values = self.module.complex_generalized_eigenvalues(hamiltonian, overlap)
+
+        np.testing.assert_allclose(gpu_values, cpu_values, rtol=1e-12, atol=1e-12)
+
     def test_non_hermitian_complex_input_is_measured_and_symmetrized(self) -> None:
         import numpy as np
 

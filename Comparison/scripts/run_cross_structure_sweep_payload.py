@@ -112,20 +112,28 @@ def _launch_fn(runner_payload: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("payload", type=Path)
+    parser.add_argument(
+        "--action",
+        choices=("preview", "materialize", "train", "predict_metrics"),
+        help="Override payload action; use preview to validate a campaign without launching models.",
+    )
     parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "Comparison/results/ml_vs_siesta_cross_structure_sweep")
     parser.add_argument("--result-json", type=Path)
+    parser.add_argument("--seeds", type=int, nargs="+")
+    parser.add_argument("--baseline-result-json", type=Path)
     args = parser.parse_args()
 
     body = json.loads(args.payload.read_text(encoding="utf-8"))
     if not isinstance(body, dict):
         raise RuntimeError(f"{args.payload} must contain a JSON object.")
-    action = str(body.get("action") or "preview").strip().lower()
+    action = str(args.action or body.get("action") or "preview").strip().lower()
+    body["action"] = action
     launch_fn = _launch_fn if action in {"train", "predict_metrics"} else None
 
     # "seeds": [0, 1, 2] runs the whole sweep once per seed into
     # output_root/seed_<s>/ (the layout of the existing *_10seeds campaigns).
     # A bare "seed" keeps the flat single-run layout.
-    seeds = [int(s) for s in (body.get("seeds") or [])] or [int(body.get("seed") or 0)]
+    seeds = list(args.seeds or [int(s) for s in (body.get("seeds") or [])]) or [int(body.get("seed") or 0)]
     multi_seed = len(seeds) > 1
 
     def _run_one(seed: int, output_root: Path) -> dict[str, Any]:
@@ -150,10 +158,15 @@ def main() -> int:
 
     if multi_seed:
         per_seed = {seed: _run_one(seed, args.output_root / f"seed_{seed}") for seed in seeds}
+        baseline: dict[str, Any] = {}
+        if args.baseline_result_json:
+            baseline = json.loads(args.baseline_result_json.read_text(encoding="utf-8"))
         summary = {
-            "seeds": seeds,
+            "action": action,
+            "seeds": sorted({int(record.get("seed") or 0) for record in baseline.get("records") or []} | set(seeds)),
             "per_seed_output_roots": {str(s): str(args.output_root / f"seed_{s}") for s in seeds},
-            "records": [record for s in seeds for record in per_seed[s].get("records") or []],
+            "records": list(baseline.get("records") or []) + [record for s in seeds for record in per_seed[s].get("records") or []],
+            "permutations": list(baseline.get("permutations") or []) + [permutation for s in seeds for permutation in per_seed[s].get("permutations") or []],
             "n_failed": sum(int(per_seed[s].get("n_failed") or 0) for s in seeds),
             "per_seed": {str(s): per_seed[s] for s in seeds},
         }

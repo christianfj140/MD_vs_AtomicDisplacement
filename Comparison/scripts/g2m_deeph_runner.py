@@ -1436,6 +1436,7 @@ def _deeph_metric_command_args(
     output_dir: Path,
     metric_fail_policy: str,
     split: str = "test",
+    metrics_device: str = "cpu",
 ) -> list[str]:
     command = [
         python_executable,
@@ -1452,10 +1453,17 @@ def _deeph_metric_command_args(
         "hamiltonians_pred.h5",
         "--split",
         split,
+        "--metrics-device",
+        metrics_device,
     ]
     if metric_fail_policy == METRIC_FAIL_POLICY_DIAGNOSTIC_ONLY:
         command.append("--no-fail-closed")
     return command
+
+
+def _metric_eigensolver_device(payload: dict[str, Any]) -> str:
+    accelerator = _performance_settings_from_payload(payload)["compute_accelerator"]
+    return "cuda:0" if accelerator == "gpu" else accelerator
 
 
 def _derivative_metrics_settings(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2453,6 +2461,16 @@ def _frozen_split_snapshot_dirs(dataset_root: Path) -> list[Path] | None:
     return dirs or None
 
 
+_MODEL_COMMAND_SEMAPHORES_LOCK = threading.Lock()
+_MODEL_COMMAND_SEMAPHORES: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+
+
+def _model_command_semaphore(model: str, limit: int) -> threading.BoundedSemaphore:
+    key = (model, max(1, int(limit)))
+    with _MODEL_COMMAND_SEMAPHORES_LOCK:
+        return _MODEL_COMMAND_SEMAPHORES.setdefault(key, threading.BoundedSemaphore(key[1]))
+
+
 class Graph2MatDeepHBenchmarkRunner:
     """Dedicated backend runner for the joint Graph2Mat/DeepH workflow."""
 
@@ -2475,6 +2493,14 @@ class Graph2MatDeepHBenchmarkRunner:
         self._external_detached_run_root: Path | None = None
         self._external_detached_status: dict[str, Any] = {}
         self._external_detached_status_signature = ""
+        self._model_command_limits = {"graph2mat": 1, "deeph": 1}
+
+    def _command_semaphore(self, label: str) -> threading.BoundedSemaphore | None:
+        normalized = label.strip().lower()
+        for model in ("graph2mat", "deeph"):
+            if normalized.startswith(model):
+                return _model_command_semaphore(model, self._model_command_limits[model])
+        return None
 
     def _external_final_process_lines(self) -> list[str]:
         workflow_lines = _process_table_lines_for_text("paper_ready_final70")
@@ -3244,7 +3270,11 @@ class Graph2MatDeepHBenchmarkRunner:
         )
 
     def _deeph_command_env(self, payload: dict[str, Any]) -> dict[str, str]:
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        env = {
+            **os.environ,
+            "PYTHONUNBUFFERED": "1",
+            **_performance_env(_performance_settings_from_payload(payload)),
+        }
         discovery = self._deeph_discovery(payload)
         python_path = str(discovery.get("python") or "")
         if python_path:
@@ -3282,6 +3312,9 @@ class Graph2MatDeepHBenchmarkRunner:
     ) -> dict[str, Any]:
         started_at = time.time()
         controlled_stop_reason: str | None = None
+        command_semaphore = self._command_semaphore(label)
+        if command_semaphore is not None:
+            command_semaphore.acquire()
         with self._lock:
             self._logs.append(f"[G2M-DEEPH][RUN] {label}: {' '.join(command)}\n")
         try:
@@ -3296,6 +3329,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 bufsize=1,
             )
         except OSError as exc:
+            if command_semaphore is not None:
+                command_semaphore.release()
             finished_at = time.time()
             failure = classify_failure(returncode=127, output_excerpt=str(exc))
             run_record = {
@@ -3412,6 +3447,8 @@ class Graph2MatDeepHBenchmarkRunner:
                 process.stdout.close()
             with self._lock:
                 self._processes = [item for item in self._processes if item is not process]
+            if command_semaphore is not None:
+                command_semaphore.release()
         finished_at = time.time()
         output_excerpt = "\n".join(line for line in output_tail if line)
         failure = classify_failure(
@@ -4550,13 +4587,15 @@ class Graph2MatDeepHBenchmarkRunner:
                 str(staged.result_dir),
                 "--workers",
                 "1",
+                "--device",
+                _metric_eigensolver_device(child),
                 "--enable-kpoint-metrics",
                 "--overwrite",
                 "--split",
                 context.prediction_split,
             ],
             cwd=REPO_ROOT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=self._graph2mat_command_env(context, child),
             label=f"Graph2Mat sweep metrics {record['config_id']}",
             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
         )
@@ -4751,11 +4790,12 @@ class Graph2MatDeepHBenchmarkRunner:
             output_dir=metrics_root / "eval",
             metric_fail_policy=metric_fail_policy,
             split=deeph_context.inference_split,
+            metrics_device=_metric_eigensolver_device(child),
         )
         metrics_run = self._run_command(
             deeph_metric_command,
             cwd=REPO_ROOT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=self._deeph_command_env(child),
             label=f"DeepH sweep metrics {record['config_id']}",
             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
         )
@@ -6173,6 +6213,11 @@ class Graph2MatDeepHBenchmarkRunner:
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload or {})
+        performance = _performance_settings_from_payload(payload)
+        self._model_command_limits = {
+            "graph2mat": int(performance.get("max_parallel_graph2mat_training_jobs") or 1),
+            "deeph": int(performance.get("max_parallel_deeph_training_jobs") or 1),
+        }
         payload["derivative_metrics"] = _normalized_derivative_metrics_payload(payload)
         payload["modular_workflow"] = _normalized_modular_workflow_payload(payload)
         workflow = payload["modular_workflow"]
@@ -8858,6 +8903,85 @@ class Graph2MatDeepHBenchmarkRunner:
         except Exception as exc:
             self._finish(returncode=1, error=str(exc))
 
+    def _run_single_model_common_metrics(
+        self,
+        payload: dict[str, Any],
+        context: Graph2MatBenchmarkContext,
+        deeph_context: DeepHBenchmarkContext | None,
+        model: str,
+    ) -> dict[str, Any]:
+        common_root = context.run_root / "common_metrics"
+        metric_fail_policy = _metric_fail_policy(payload)
+        graph_metrics_root: Path | None = None
+        deeph_metrics_root: Path | None = None
+        eval_run: dict[str, Any]
+        if model == "graph2mat":
+            staged = stage_graph2mat_metric_result(
+                frozen_split_manifest=_load_json(context.frozen_split_manifest_path),
+                prediction_structs_dir=context.prediction_structs_dir,
+                output_dir=common_root / "graph2mat_eval",
+                dataset_root=context.dataset_root,
+            )
+            eval_run = self._run_command(
+                [
+                    self._graph2mat_python(payload),
+                    str(DEFAULT_HAMILTONIAN_METRICS_SCRIPT),
+                    str(staged.result_dir),
+                    "--workers", "1",
+                    "--device", _metric_eigensolver_device(payload),
+                    "--enable-kpoint-metrics", "--overwrite", "--split", "test",
+                ],
+                cwd=REPO_ROOT,
+                env=self._graph2mat_command_env(context, payload),
+                label="Graph2Mat common metrics",
+                allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
+            )
+            graph_metrics_root = staged.result_dir / "metrics"
+        else:
+            if deeph_context is None:
+                raise RuntimeError("DeepH context was not prepared before common_metrics.")
+            reference_dir = self._stage_reference_metric_result(
+                frozen_split_manifest=_load_json(context.frozen_split_manifest_path),
+                output_dir=common_root / "reference_input",
+                dataset_root=context.dataset_root,
+                split=deeph_context.inference_split,
+            )
+            staged = stage_deeph_metric_inputs(
+                raw_mirror=deeph_context.raw_mirror,
+                processed_dir=deeph_context.processed_dir,
+                inference_dir=deeph_context.inference_dir,
+                output_dir=common_root / "deeph_inputs",
+            )
+            command = _deeph_metric_command_args(
+                python_executable=self._graph2mat_python(payload),
+                graph2mat_result_dir=reference_dir,
+                processed_dir=staged.processed_dir,
+                predictions_dir=staged.predictions_dir,
+                output_dir=common_root / "deeph_eval",
+                metric_fail_policy=metric_fail_policy,
+                metrics_device=_metric_eigensolver_device(payload),
+            )
+            eval_run = self._run_command(
+                command,
+                cwd=REPO_ROOT,
+                env=self._deeph_command_env(payload),
+                label="DeepH common metrics",
+                allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
+            )
+            deeph_metrics_root = common_root / "deeph_eval" / "metrics"
+        manifest = aggregate_common_metrics(
+            graph2mat_metrics_root=graph_metrics_root,
+            deeph_metrics_root=deeph_metrics_root,
+            output_dir=common_root / "summary",
+            frozen_split_manifest_path=context.frozen_split_manifest_path,
+            dataset_manifest_path=context.benchmark_dataset_manifest_path,
+        )
+        manifest["runs"] = {f"{model}_eval": eval_run}
+        _force_diagnostic_metric_manifest(manifest, metric_fail_policy=metric_fail_policy)
+        _write_json(common_root / "summary" / "common_summary.json", manifest)
+        _write_json(common_root / "summary" / "benchmark_manifest.json", manifest)
+        return manifest
+
     def _run_workflow(
         self,
         payload: dict[str, Any],
@@ -8879,6 +9003,12 @@ class Graph2MatDeepHBenchmarkRunner:
         deeph_early_stopping: dict[str, Any] | None = None
         test_blindness_manifest: dict[str, Any] | None = None
         derivative_workflow_summary: dict[str, Any] | None = None
+        selected_models = {
+            str(model).strip().lower()
+            for model in (payload.get("selected_methods") or payload.get("models") or ("graph2mat", "deeph"))
+        }
+        if not selected_models or not selected_models <= {"graph2mat", "deeph"}:
+            raise RuntimeError(f"selected_methods must contain graph2mat and/or deeph, got {sorted(selected_models)}")
         try:
             final_mode = is_final_benchmark_mode(payload)
             sweep_info = self.dataset_sweep_info_from_payload(payload)
@@ -8929,7 +9059,9 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif phase == "graph2mat_train":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before graph2mat_train.")
-                    if context.dry_run:
+                    if "graph2mat" not in selected_models:
+                        self._logs.append("[G2M-DEEPH] graph2mat_train: skipped by selected_methods.\n")
+                    elif context.dry_run:
                         self._logs.append("[G2M-DEEPH] graph2mat_train: dry-run, no subprocess launched.\n")
                     elif self._predict_metrics_only(payload):
                         graph2mat_training_run = self._stage_existing_graph2mat_checkpoint(payload, context)
@@ -8976,7 +9108,9 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif phase == "graph2mat_predict":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before graph2mat_predict.")
-                    if final_mode:
+                    if "graph2mat" not in selected_models:
+                        self._logs.append("[G2M-DEEPH] graph2mat_predict: skipped by selected_methods.\n")
+                    elif final_mode:
                         self._logs.append(f"[G2M-DEEPH] graph2mat_predict: {TEST_METRICS_LOCKED_MESSAGE}\n")
                     elif context.dry_run:
                         self._logs.append("[G2M-DEEPH] graph2mat_predict: dry-run, no subprocess launched.\n")
@@ -9003,6 +9137,9 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif phase == "deeph_preprocess":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before deeph_preprocess.")
+                    if "deeph" not in selected_models:
+                        self._logs.append("[G2M-DEEPH] deeph_preprocess: skipped by selected_methods.\n")
+                        continue
                     deeph_context = self._prepare_deeph_context(payload, context)
                     with self._lock:
                         self._state.deeph_manifest_path = str(deeph_context.manifest_path)
@@ -9030,9 +9167,11 @@ class Graph2MatDeepHBenchmarkRunner:
                             split_audit=split_audit,
                         )
                 elif phase == "deeph_train":
-                    if deeph_context is None:
+                    if "deeph" not in selected_models:
+                        self._logs.append("[G2M-DEEPH] deeph_train: skipped by selected_methods.\n")
+                    elif deeph_context is None:
                         raise RuntimeError("DeepH context was not prepared before deeph_train.")
-                    if deeph_context.dry_run:
+                    elif deeph_context.dry_run:
                         self._logs.append("[G2M-DEEPH] deeph_train: dry-run, no subprocess launched.\n")
                     elif self._predict_metrics_only(payload):
                         deeph_training_run = self._stage_existing_deeph_model(payload, deeph_context)
@@ -9071,9 +9210,11 @@ class Graph2MatDeepHBenchmarkRunner:
                             extra={"early_stopping": deeph_early_stopping},
                         )
                 elif phase == "deeph_predict":
-                    if deeph_context is None:
+                    if "deeph" not in selected_models:
+                        self._logs.append("[G2M-DEEPH] deeph_predict: skipped by selected_methods.\n")
+                    elif deeph_context is None:
                         raise RuntimeError("DeepH context was not prepared before deeph_predict.")
-                    if final_mode:
+                    elif final_mode:
                         self._logs.append(f"[G2M-DEEPH] deeph_predict: {TEST_METRICS_LOCKED_MESSAGE}\n")
                     elif deeph_context.dry_run:
                         self._logs.append("[G2M-DEEPH] deeph_predict: dry-run, no subprocess launched.\n")
@@ -9110,8 +9251,16 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif phase == "common_metrics":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before common_metrics.")
-                    if deeph_context is None:
+                    if "deeph" in selected_models and deeph_context is None:
                         raise RuntimeError("DeepH context was not prepared before common_metrics.")
+                    if len(selected_models) == 1 and not context.dry_run and not final_mode:
+                        common_metrics_manifest = self._run_single_model_common_metrics(
+                            payload, context, deeph_context, next(iter(selected_models))
+                        )
+                        self._logs.append(
+                            f"[G2M-DEEPH] Single-model common metrics completed: {next(iter(selected_models))}.\n"
+                        )
+                        continue
                     metric_fail_policy = _metric_fail_policy(payload)
                     if final_mode:
                         self._logs.append(f"[G2M-DEEPH] common_metrics: {TEST_METRICS_LOCKED_MESSAGE}\n")
@@ -9133,13 +9282,15 @@ class Graph2MatDeepHBenchmarkRunner:
                                 str(staged_graph2mat.result_dir),
                                 "--workers",
                                 "1",
+                                "--device",
+                                _metric_eigensolver_device(payload),
                                 "--enable-kpoint-metrics",
                                 "--overwrite",
                                 "--split",
                                 "test",
                             ],
                             cwd=REPO_ROOT,
-                            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                            env=self._graph2mat_command_env(context, payload),
                             label="Graph2Mat common metrics",
                             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
                         )
@@ -9156,11 +9307,12 @@ class Graph2MatDeepHBenchmarkRunner:
                             predictions_dir=staged_deeph.predictions_dir,
                             output_dir=common_root / "deeph_eval",
                             metric_fail_policy=metric_fail_policy,
+                            metrics_device=_metric_eigensolver_device(payload),
                         )
                         deeph_eval_run = self._run_command(
                             deeph_metric_command,
                             cwd=REPO_ROOT,
-                            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                            env=self._deeph_command_env(payload),
                             label="DeepH common metrics",
                             allowed_returncodes=_metric_allowed_returncodes(metric_fail_policy),
                         )
@@ -9280,7 +9432,9 @@ class Graph2MatDeepHBenchmarkRunner:
                 elif phase == "ranking":
                     if context is None:
                         raise RuntimeError("Graph2Mat context was not prepared before ranking.")
-                    if final_mode:
+                    if len(selected_models) == 1:
+                        self._logs.append("[G2M-DEEPH] ranking: skipped for single-model cross testing.\n")
+                    elif final_mode:
                         test_blindness_manifest = build_search_stage_manifest(
                             run_root=context.run_root,
                             summary={

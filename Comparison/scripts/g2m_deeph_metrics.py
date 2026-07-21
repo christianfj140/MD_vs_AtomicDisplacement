@@ -1010,8 +1010,8 @@ def build_common_plot_payload(
 
 def aggregate_common_metrics(
     *,
-    graph2mat_metrics_root: Path,
-    deeph_metrics_root: Path,
+    graph2mat_metrics_root: Path | None,
+    deeph_metrics_root: Path | None,
     output_dir: Path,
     frozen_split_manifest_path: Path | None = None,
     dataset_manifest_path: Path | None = None,
@@ -1027,9 +1027,9 @@ def aggregate_common_metrics(
     status, dataset_warnings = dataset_status(dataset_manifest)
     warnings.extend(dataset_warnings)
 
-    g2m_ids = sample_ids_from_metrics(graph2mat_metrics_root)
-    deeph_ids = sample_ids_from_metrics(deeph_metrics_root)
-    if g2m_ids != deeph_ids:
+    g2m_ids = sample_ids_from_metrics(graph2mat_metrics_root) if graph2mat_metrics_root else set()
+    deeph_ids = sample_ids_from_metrics(deeph_metrics_root) if deeph_metrics_root else set()
+    if graph2mat_metrics_root and deeph_metrics_root and g2m_ids != deeph_ids:
         status = "invalid_incompatible_splits"
         warnings.append(
             {
@@ -1041,8 +1041,9 @@ def aggregate_common_metrics(
         )
 
     summary_rows = [
-        summarize_method("graph2mat", graph2mat_metrics_root),
-        summarize_method("deeph", deeph_metrics_root),
+        summarize_method(method, root)
+        for method, root in (("graph2mat", graph2mat_metrics_root), ("deeph", deeph_metrics_root))
+        if root is not None
     ]
     derivative_summary_rows = [
         row
@@ -1080,7 +1081,12 @@ def aggregate_common_metrics(
                 status = "diagnostic_only"
             warnings.append({"severity": "severe", "kind": f"{row['method']}_unsupported_kgrid"})
 
-    sample_rows = [*sample_metric_rows("graph2mat", graph2mat_metrics_root), *sample_metric_rows("deeph", deeph_metrics_root)]
+    sample_rows = [
+        row
+        for method, root in (("graph2mat", graph2mat_metrics_root), ("deeph", deeph_metrics_root))
+        if root is not None
+        for row in sample_metric_rows(method, root)
+    ]
     recommendation = build_recommendation(summary_rows, status, warnings)
     recommendation = add_derivative_diagnostic_notes(recommendation, derivative_summary_rows)
     write_csv_rows(output_dir / "common_method_metrics.csv", summary_rows)
@@ -1093,8 +1099,8 @@ def aggregate_common_metrics(
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "status": status,
         "status_values": sorted(STATUS_VALUES),
-        "graph2mat_metrics_root": str(graph2mat_metrics_root),
-        "deeph_metrics_root": str(deeph_metrics_root),
+        "graph2mat_metrics_root": str(graph2mat_metrics_root) if graph2mat_metrics_root else "",
+        "deeph_metrics_root": str(deeph_metrics_root) if deeph_metrics_root else "",
         "output_dir": str(output_dir),
         "sample_ids": sorted(g2m_ids | deeph_ids),
         "warnings": warnings,

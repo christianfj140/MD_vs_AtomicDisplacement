@@ -120,6 +120,46 @@ DIAGNOSTIC_ONLY_RECOMMENDATION_METRICS = [
     "false_nonzeros",
     "hermiticity",
 ]
+EIGENSOLVER_DEVICE = "cpu"
+_CUPY: Any | None = None
+
+
+def configure_eigensolver(device: str) -> str:
+    """Select the process-wide dense eigensolver backend."""
+    global EIGENSOLVER_DEVICE, _CUPY
+    requested = str(device or "cpu").strip().lower()
+    if requested == "gpu":
+        requested = "cuda:0"
+    if requested == "auto":
+        try:
+            import cupy as cp
+
+            requested = "cuda:0" if cp.cuda.runtime.getDeviceCount() else "cpu"
+        except Exception:
+            requested = "cpu"
+    if requested == "cpu":
+        EIGENSOLVER_DEVICE = "cpu"
+        _CUPY = None
+        return EIGENSOLVER_DEVICE
+    if not requested.startswith("cuda"):
+        raise RuntimeError(f"Metric eigensolver device must be cpu, auto, gpu, or cuda[:index], got {device!r}.")
+    try:
+        import cupy as cp
+
+        index = int(requested.split(":", 1)[1]) if ":" in requested else 0
+        cp.cuda.Device(index).use()
+        cp.asarray([0.0])
+    except Exception as exc:
+        raise RuntimeError(f"CUDA metric eigensolver requested but unavailable: {exc}") from exc
+    _CUPY = cp
+    EIGENSOLVER_DEVICE = f"cuda:{index}"
+    return EIGENSOLVER_DEVICE
+
+
+def eigensolver_name(*, generalized: bool, kpoint: bool = False) -> str:
+    backend = "cupy.cuda" if EIGENSOLVER_DEVICE.startswith("cuda") else ("scipy" if generalized else "numpy")
+    problem = "eigh_generalized" if generalized else "eigvalsh_standard"
+    return f"{backend}.{problem}{'_kpoint' if kpoint else ''}"
 
 
 @dataclass
@@ -1057,7 +1097,7 @@ def evaluate_kpoint_sample(
             "low_energy_aligned_rmse_eV": weighted_metric_rmse(per_k_spectral, "low_energy_aligned_rmse_eV"),
             "low_energy_overlap_used": True,
             "low_energy_overlap_required": True,
-            "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+            "low_energy_solver": eigensolver_name(generalized=True, kpoint=True),
             "low_energy_warning": "",
             **semantics,
         }
@@ -2521,6 +2561,18 @@ def kpoint_overlap_matrix(hamiltonian_obj: Any, kpoint: tuple[float, float, floa
 
 def complex_generalized_eigenvalues(hamiltonian: Any, overlap: Any | None = None) -> np.ndarray:
     dense_h = symmetrized_hermitian_dense(hamiltonian)
+    if EIGENSOLVER_DEVICE.startswith("cuda"):
+        cp = _CUPY
+        if cp is None:
+            raise RuntimeError("CUDA eigensolver is not configured.")
+        gpu_h = cp.asarray(dense_h)
+        if overlap is None:
+            return cp.asnumpy(cp.linalg.eigvalsh(gpu_h)).astype(float, copy=False)
+        gpu_s = cp.asarray(symmetrized_hermitian_dense(overlap))
+        factor = cp.linalg.cholesky(gpu_s)
+        reduced = cp.linalg.solve(factor.conj(), cp.linalg.solve(factor, gpu_h).T).T
+        reduced = (reduced + reduced.conj().T) * 0.5
+        return cp.asnumpy(cp.linalg.eigvalsh(reduced)).astype(float, copy=False)
     if overlap is None:
         return np.asarray(np.linalg.eigvalsh(dense_h), dtype=float)
     dense_s = symmetrized_hermitian_dense(overlap)
@@ -2595,7 +2647,7 @@ def low_energy_metrics(
         "low_energy_alignment": alignment,
         "low_energy_overlap_used": overlap_used,
         "low_energy_overlap_required": overlap_required,
-        "low_energy_solver": "scipy.linalg.eigh_generalized" if overlap_used else "numpy.linalg.eigvalsh_standard",
+        "low_energy_solver": eigensolver_name(generalized=overlap_used),
         "low_energy_warning": "",
     }
     ref_eig, ref_warning = low_energy_eigenvalues(
@@ -2945,7 +2997,7 @@ def low_energy_metrics_from_eigenvalues(
         "low_energy_alignment": alignment,
         "low_energy_overlap_used": True,
         "low_energy_overlap_required": True,
-        "low_energy_solver": "scipy.linalg.eigh_generalized_kpoint",
+        "low_energy_solver": eigensolver_name(generalized=True, kpoint=True),
         "low_energy_warning": "",
     }
     count = min(n_states, reference.size, predicted.size)
@@ -4144,6 +4196,11 @@ def main() -> int:
     parser.add_argument("--low-energy-alignment", default=LOW_ENERGY_ALIGNMENT, choices=["none", "global_shift"])
     parser.add_argument("--workers", type=int, default=1, help="Parallel sample workers for metric extraction.")
     parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Dense eigensolver device: cpu, auto, gpu, or cuda[:index].",
+    )
+    parser.add_argument(
         "--enable-kpoint-metrics",
         action="store_true",
         help="Opt in to k-point-aware periodic Hamiltonian metrics for non-gamma Monkhorst-Pack inputs.",
@@ -4158,6 +4215,7 @@ def main() -> int:
     )
     parser.add_argument("--split", choices=["train", "validation", "test"], default="test")
     args = parser.parse_args()
+    configure_eigensolver(args.device)
     manifest = extract(
         args.result_dir,
         low_energy_enabled=not args.disable_low_energy,

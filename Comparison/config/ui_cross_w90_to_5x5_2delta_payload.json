@@ -1,0 +1,43 @@
+{
+  "schema": "ui_real_metrics_derivative_campaign_v1",
+  "description": "Cross-testing derivative sweep: graphene w90 to graphene 5x5, with DeepH models retrained using graph.new_sp=True for autograd derivatives.",
+  "mixing_summary": "Comparison/results/ml_vs_siesta_mixing_sweep/mixing_sweep_summary.json",
+  "cross_summary": "Comparison/results/ml_vs_siesta_cross_structure_sweep/cross_structure_sweep_summary.json",
+  "output_root": "Comparison/results/ui_real_metrics_derivatives",
+  "campaign_state_id": "cross_w90_to_5x5_2delta",
+  "output_campaign": "cross_w90_to_5x5_2delta",
+  "deeph_autograd_model_subdir": "deeph_autograd_model",
+  "max_parallel_deeph_autograd_jobs": 3,
+  "deeph_autograd_num_threads": 2,
+  "include_case_ids": [
+    "cross_graphene__graphene_w90_scale_iid20__to__graphene_5x5__graphene_5x5_scale_iid20",
+    "cross_graphene__graphene_w90_scale_iid30__to__graphene_5x5__graphene_5x5_scale_iid30",
+    "cross_graphene__graphene_w90_scale_iid50__to__graphene_5x5__graphene_5x5_scale_iid50",
+    "cross_graphene__graphene_w90_scale_iid60__to__graphene_5x5__graphene_5x5_scale_iid60",
+    "cross_graphene__graphene_w90_scale_iid80__to__graphene_5x5__graphene_5x5_scale_iid80",
+    "cross_graphene__graphene_w90_scale_iid90__to__graphene_5x5__graphene_5x5_scale_iid90",
+    "cross_graphene__graphene_w90_scale_iid100__to__graphene_5x5__graphene_5x5_scale_iid100",
+    "cross_graphene__graphene_w90_scale_iid150__to__graphene_5x5__graphene_5x5_scale_iid150",
+    "cross_graphene__graphene_w90_scale_iid200__to__graphene_5x5__graphene_5x5_scale_iid200",
+    "cross_graphene__graphene_w90_scale_iid300__to__graphene_5x5__graphene_5x5_scale_iid300",
+    "cross_graphene__graphene_w90_scale_iid400__to__graphene_5x5__graphene_5x5_scale_iid400",
+    "cross_graphene__graphene_w90_scale_iid500__to__graphene_5x5__graphene_5x5_scale_iid500"
+  ],
+  "derivative": {
+    "method": "central",
+    "base_split": "test",
+    "base_selection_policy": "adaptive_min_fraction",
+    "min_base_snapshots": 10,
+    "base_fraction": 0.2,
+    "base_selection_seed": 0,
+    "atoms": ["0"],
+    "axes": ["x", "y", "z"],
+    "delta_ang": [0.005, 0.01],
+    "reference_workers": 16,
+    "skip_if_exists": true,
+    "diagnostic_only": false,
+    "require_central": true,
+    "graph2mat_prediction_method": "autograd_vectorized",
+    "deeph_prediction_method": "autograd_vectorized"
+  }
+}

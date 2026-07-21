@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+from scipy.sparse import csr_matrix
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "Comparison" / "scripts" / "export_graph2mat_matrix_error_plot.py"
@@ -125,12 +128,21 @@ class ExportGraph2MatMatrixErrorPlotTests(unittest.TestCase):
         self.assertEqual(command[show_index + 1], "false")
 
     def test_save_flags_are_reflected_in_manifest(self) -> None:
-        args = self.parse("--mode", "programmatic", "--dry-run", "--save-pdf", "--no-save-html", "--no-save-png")
+        average_root = self.root / "predictions"
+        average_root.mkdir()
+        args = self.parse(
+            "--mode", "programmatic", "--dry-run", "--error-metric", "mae",
+            "--average-hsx-root", str(average_root),
+            "--crop-empty", "--save-pdf", "--no-save-html", "--no-save-png",
+        )
         self.module.run(args)
         manifest = json.loads((self.output / "matrix_error_manifest.json").read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["mode"], "programmatic")
         self.assertEqual(manifest["save_flags"], {"html": False, "pdf": True, "png": False})
+        self.assertEqual(manifest["error_metric"], "mae")
+        self.assertTrue(manifest["crop_empty"])
+        self.assertEqual(manifest["aggregation_mode"], "dataset_mean")
         self.assertEqual(manifest["status"], "planned_dry_run")
 
     def test_glob_test_runs_are_resolved(self) -> None:
@@ -148,6 +160,32 @@ class ExportGraph2MatMatrixErrorPlotTests(unittest.TestCase):
         runs = self.module.validate_inputs(args)
 
         self.assertEqual(runs, [self.run])
+
+    def test_programmatic_paths_are_resolved_from_config_directory(self) -> None:
+        config_dir = self.root / "run" / "graph2mat"
+        config_dir.mkdir(parents=True)
+        config = config_dir / "pipeline_config.yaml"
+        config.write_text(
+            "training:\n  data:\n    basis_files: ../dataset/*.ion.xml\n    root_dir: .\n",
+            encoding="utf-8",
+        )
+        args = self.parse("--mode", "programmatic", "--config-yaml", str(config), "--dry-run")
+
+        kwargs = self.module.programmatic_datamodule_kwargs(args, self.module.load_yaml_config(config))
+
+        self.assertEqual(kwargs["basis_files"], "../dataset/*.ion.xml")
+        self.assertEqual(kwargs["root_dir"], str(config_dir.resolve()))
+
+    def test_matrix_plot_ranges_crop_empty_supercell_blocks(self) -> None:
+        matrix = csr_matrix(np.pad(np.ones((2, 2)), ((0, 0), (0, 4))))
+        matrix[0, 4] = 1
+
+        crop_x, crop_y, full_x, full_y = self.module.matrix_plot_ranges(matrix)
+
+        self.assertEqual(crop_x, [-0.5, 1.5])
+        self.assertEqual(crop_y, [1.5, -0.5])
+        self.assertEqual(full_x, [-0.5, 5.5])
+        self.assertEqual(full_y, [1.5, -0.5])
 
 
 if __name__ == "__main__":

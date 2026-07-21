@@ -13464,6 +13464,8 @@ let ctSelectedPayloadIds = new Set();
 let ctPayloadSelectionInitialized = false;
 let ctKnownPayloadIds = new Set();
 let ctOpenPayloadGroups = new Set();
+let ctVacancyStatusTimer = null;
+let ctVacancyLastStatusSignature = "";
 
 function ctParseRoots(text) {
   return String(text || "")
@@ -13499,6 +13501,26 @@ function ctCollectBody() {
     if (!Number.isNaN(epochs)) body.epochs = epochs;
   }
   return body;
+}
+
+function ctVacancyBody(action) {
+  const body = { payload_path: mvsValue("ct-vacancy-payload", "").trim() };
+  if (action) body.action = action;
+  return body;
+}
+
+function ctSetVacancyStatus(text) {
+  const status = document.getElementById("ct-vacancy-status");
+  if (status) status.textContent = text;
+}
+
+function ctAppendVacancyPayload(label, payload) {
+  const log = document.getElementById("ct-vacancy-log");
+  if (!log) return;
+  const initial = "Esperando acciones del cross testing con vacante.";
+  const prefix = log.textContent.trim() === initial ? "" : `${log.textContent}\n\n`;
+  log.textContent = `${prefix}[${new Date().toLocaleTimeString()}] ${label}\n${JSON.stringify(payload, null, 2)}`;
+  log.scrollTop = log.scrollHeight;
 }
 
 function ctSetStatus(text, state) {
@@ -13564,6 +13586,8 @@ function ctPlanPayloads(plan) {
     label: `${item.source_id} → ${item.target_id}`,
     source_id: item.source_id,
     target_id: item.target_id,
+    source_system_label: item.source_system_label,
+    target_system_label: item.target_system_label,
     source_n_snapshots: item.source_n_snapshots,
     status: item.status || "planned",
     output_root: item.output_root,
@@ -13734,6 +13758,37 @@ async function ctPreview() {
   await ctSetMetricsPayload(ctMetricsPayload || {}, ctPlanPayloads(plan));
 }
 
+async function ctVacancyPreview() {
+  const body = ctVacancyBody();
+  ctAppendVacancyPayload("POST /api/cross-testing/plan request", body);
+  try {
+    const plan = await request("/api/cross-testing/plan", { method: "POST", body: JSON.stringify(body) });
+    ctAppendVacancyPayload("POST /api/cross-testing/plan response", plan);
+    ctSetVacancyStatus(`${plan.n_compatible || 0} compatibles · ${plan.n_incompatible || 0} incompatibles`);
+  } catch (error) {
+    ctAppendVacancyPayload("POST /api/cross-testing/plan error", { error: error.message });
+    ctSetVacancyStatus(`Error: ${error.message}`);
+    throw error;
+  }
+}
+
+async function ctVacancyEvaluate() {
+  const body = ctVacancyBody("predict_metrics");
+  ctAppendVacancyPayload("POST /api/cross-testing/vacancy/launch request", body);
+  try {
+    const payload = await request("/api/cross-testing/vacancy/launch", { method: "POST", body: JSON.stringify(body) });
+    ctAppendVacancyPayload("POST /api/cross-testing/vacancy/launch response", payload);
+    ctVacancyLastStatusSignature = "";
+    ctSetVacancyStatus("Evaluando checkpoints existentes…");
+    if (ctVacancyStatusTimer) clearInterval(ctVacancyStatusTimer);
+    ctVacancyStatusTimer = setInterval(() => ctVacancyPollStatus().catch(() => {}), 1500);
+  } catch (error) {
+    ctAppendVacancyPayload("POST /api/cross-testing/vacancy/launch error", { error: error.message });
+    ctSetVacancyStatus(`Error: ${error.message}`);
+    throw error;
+  }
+}
+
 async function ctLaunch(action, statusText) {
   const body = ctCollectBody();
   body.action = action;
@@ -13804,6 +13859,160 @@ async function ctPollStatus() {
     }
   } else {
     ctSetStatus("Idle", "");
+  }
+}
+
+async function ctVacancyPollStatus() {
+  const status = await request("/api/cross-testing/vacancy/status");
+  const signature = JSON.stringify({
+    state: status.state,
+    done: status.permutations_done,
+    evaluated: status.n_evaluated,
+    incompatible: status.n_incompatible,
+    records: (status.live_records || []).length,
+    error: status.error || "",
+  });
+  if (signature !== ctVacancyLastStatusSignature) {
+    ctAppendVacancyPayload("GET /api/cross-testing/vacancy/status", status);
+    ctVacancyLastStatusSignature = signature;
+  }
+  const records = (status.live_records || []).length;
+  if (status.state === "completed") {
+    ctSetVacancyStatus(
+      `Completado · ${status.n_evaluated || 0} evaluados · ${status.n_incompatible || 0} incompatibles`
+    );
+    if (ctVacancyStatusTimer) clearInterval(ctVacancyStatusTimer);
+    ctVacancyStatusTimer = null;
+    ctVacancyLoadMetrics().catch(() => {});
+  } else if (status.state === "error") {
+    ctSetVacancyStatus(`Error: ${status.error || ""}`);
+    if (ctVacancyStatusTimer) clearInterval(ctVacancyStatusTimer);
+    ctVacancyStatusTimer = null;
+  } else if (status.state === "running" || status.state === "starting") {
+    ctSetVacancyStatus(`En curso · ${status.permutations_done || 0} pares · ${records} MAE`);
+    if (records > 0) ctVacancyLoadMetrics().catch(() => {});
+  }
+}
+
+async function ctVacancyRenderChart(payload, metric = "mae") {
+  const isFrobenius = metric === "relative_frobenius";
+  const host = document.getElementById(
+    isFrobenius ? "ct-vacancy-frobenius-chart" : "ct-vacancy-mae-chart"
+  );
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const traces = (payload.curves || []).map((curve) => {
+    const points = [...(curve.points || [])]
+      .filter((point) => !isFrobenius || point.relative_frobenius != null)
+      .sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
+    if (!points.length) return null;
+    const source = curve.source_system_label || points[0].source_system_label || "source";
+    const target = points[0].target_system_label || curve.target_id || "graphene_5x5_vacancy";
+    return {
+      x: points.map((point) => point.x),
+      y: points.map((point) => isFrobenius
+        ? Number(point.relative_frobenius) * 100
+        : Number(point.mae) * 1000),
+      mode: "lines+markers",
+      name: `${methodDisplayLabel(curve.model)} · ${source} → ${target}`,
+      marker: { size: 9 },
+      error_y: {
+        type: "data",
+        array: points.map((point) => isFrobenius
+          ? Number(point.relative_frobenius_std || 0) * 100
+          : Number(point.mae_std || 0) * 1000),
+        visible: points.some((point) => isFrobenius
+          ? point.relative_frobenius_std != null
+          : point.mae_std != null),
+      },
+      text: points.map((point) => `source: ${point.source_id}<br>seeds: ${point.n_seeds ?? "?"}`),
+      hovertemplate: isFrobenius
+        ? "Frobenius relativo %{y:.3f} %<br>%{text}<extra>%{fullData.name}</extra>"
+        : "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
+    };
+  }).filter(Boolean);
+  if (!traces.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">Sin métricas de vacante todavía.</p>';
+    return;
+  }
+  window.Plotly.newPlot(host, traces, {
+    title: isFrobenius
+      ? "Error relativo de Frobenius sobre graphene_5x5_vacancy"
+      : "Cross testing sobre graphene_5x5_vacancy",
+    xaxis: { title: "Snapshots de entrenamiento (source)" },
+    yaxis: { title: isFrobenius ? "Relative Frobenius error (%)" : "Hamiltonian MAE (meV)" },
+    margin: { l: 60, r: 20, t: 40, b: 50 },
+    height: 460,
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ctVacancyLoadMetrics() {
+  const payload = await request("/api/cross-testing/vacancy/metrics");
+  ctAppendVacancyPayload("GET /api/cross-testing/vacancy/metrics", payload);
+  await ctVacancyRenderChart(payload);
+  await ctVacancyRenderChart(payload, "relative_frobenius");
+  await ctVacancyLoadMatrixRuns();
+}
+
+async function ctVacancyLoadMatrixRuns() {
+  const select = document.getElementById("ct-vacancy-matrix-run");
+  const status = document.getElementById("ct-vacancy-matrix-status");
+  if (!select) return;
+  const selected = select.value;
+  const payload = await request("/api/cross-testing/vacancy/matrix-errors");
+  select.innerHTML = '<option value="">Selecciona un run…</option>';
+  const groups = new Map();
+  (payload.runs || []).forEach((run) => {
+    if (!groups.has(run.payload_id)) {
+      const group = document.createElement("optgroup");
+      group.label = run.payload_id;
+      groups.set(run.payload_id, group);
+      select.appendChild(group);
+    }
+    const option = document.createElement("option");
+    option.value = run.id;
+    option.textContent = `${run.run_name} · media de ${run.sample_count} predicciones${run.cached ? " · cached" : ""}`;
+    groups.get(run.payload_id).appendChild(option);
+  });
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+  if (status) status.textContent = payload.n_runs
+    ? `${payload.n_runs} datasets Graph2Mat disponibles.`
+    : "Todavía no hay datasets Graph2Mat con predicciones de vacante.";
+}
+
+async function ctVacancyShowMatrixError() {
+  const select = document.getElementById("ct-vacancy-matrix-run");
+  const status = document.getElementById("ct-vacancy-matrix-status");
+  const frame = document.getElementById("ct-vacancy-matrix-frame");
+  const placeholder = document.getElementById("ct-vacancy-matrix-placeholder");
+  const runId = select?.value || "";
+  if (!runId || !frame) {
+    if (frame) frame.hidden = true;
+    if (placeholder) placeholder.hidden = false;
+    return;
+  }
+  frame.hidden = true;
+  if (placeholder) {
+    placeholder.hidden = false;
+    placeholder.textContent = "Promediando las matrices del dataset…";
+  }
+  if (status) status.textContent = "Calculando el MAE medio desde las predicciones Graph2Mat…";
+  try {
+    const result = await request("/api/cross-testing/vacancy/matrix-error", {
+      method: "POST",
+      body: JSON.stringify({ run_id: runId }),
+    });
+    frame.onload = () => {
+      if (status) status.textContent = `MAE orbital · ${result.label}`;
+    };
+    frame.src = `${result.artifact_url}&t=${Date.now()}`;
+    frame.hidden = false;
+    if (placeholder) placeholder.hidden = true;
+    await ctVacancyLoadMatrixRuns();
+  } catch (error) {
+    if (placeholder) placeholder.textContent = `No se pudo generar la matriz: ${error.message}`;
+    if (status) status.textContent = "Error generando PlotMatrixError.";
   }
 }
 
@@ -13906,6 +14115,10 @@ function setupCrossTesting() {
   mvsBind("ct-preview", "click", ctPreview);
   mvsBind("ct-materialize", "click", ctMaterialize);
   mvsBind("ct-train", "click", ctTrain);
+  mvsBind("ct-vacancy-preview", "click", ctVacancyPreview);
+  mvsBind("ct-vacancy-evaluate", "click", ctVacancyEvaluate);
+  mvsBind("ct-vacancy-metrics", "click", ctVacancyLoadMetrics);
+  mvsBind("ct-vacancy-matrix-run", "change", ctVacancyShowMatrixError);
   mvsBind("ct-metrics-demo", "click", () => ctLoadMetrics(true));
   mvsBind("ct-metrics-real", "click", () => ctLoadMetrics(false));
   mvsBind("ct-payload-bottom", "click", ctScrollPayloadLogToBottom);
@@ -13944,6 +14157,7 @@ function setupCrossTesting() {
   document.getElementById("ct-payload-list")?.addEventListener("click", (event) => {
     if (event.target?.classList?.contains("ct-payload-group-checkbox")) event.stopPropagation();
   });
+  ctVacancyLoadMatrixRuns().catch(() => {});
 }
 
 function setupTabs() {
