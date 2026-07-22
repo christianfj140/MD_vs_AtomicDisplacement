@@ -299,12 +299,13 @@ def validate_prediction_outputs(
     }
 
 
-def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
+def run_prediction(args: argparse.Namespace, predict_glob: str, *, basis_files_absolute: str) -> None:
     import inspect
     import pytorch_lightning as pl
     from graph2mat.core.data.processing import MatrixDataProcessor
     from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
     from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
+    from graph2mat import AtomicTableWithEdges
 
     matrix_component_policy, n_matrix_components = resolve_cli_matrix_component_policy(args)
     if args.patch_graph2mat_basis_loading:
@@ -318,7 +319,18 @@ def run_prediction(args: argparse.Namespace, predict_glob: str) -> None:
         MatrixDataProcessor.get_config_kwargs = patched
 
     allow_graph2mat_checkpoint_globals()
-    model = LitMACEMatrixModel.load_from_checkpoint(str(args.checkpoint), weights_only=False)
+    # The checkpoint's saved basis_files hparam is a path relative to the cwd
+    # used at training time, which does not always match the directory layout
+    # reconstructed by checkpoint_training_dir() (e.g. after a run root was
+    # moved or restructured). Build the basis table directly from the
+    # absolute --basis-files CLI arg and pass it as a load_from_checkpoint
+    # override instead of relying on that glob being resolvable from cwd.
+    basis_table = AtomicTableWithEdges.from_basis_glob(
+        Path(basis_files_absolute).parent.glob(Path(basis_files_absolute).name)
+    )
+    model = LitMACEMatrixModel.load_from_checkpoint(
+        str(args.checkpoint), weights_only=False, basis_table=basis_table
+    )
     datamodule_kwargs: dict[str, Any] = {
         "out_matrix": args.out_matrix,
         "symmetric_matrix": bool(args.symmetric_matrix),
@@ -469,6 +481,7 @@ def main() -> int:
     copied_rows = copy_sample_inputs(rows, workspace)
     run_cwd = checkpoint_training_dir(args.checkpoint)
     source_cwd = Path.cwd()
+    absolute_basis_files = os.path.abspath(source_cwd / args.basis_files)
     args.basis_files = normalize_pattern_for_workdir(
         str(args.basis_files),
         source_cwd=source_cwd,
@@ -484,7 +497,7 @@ def main() -> int:
         cwd = Path.cwd()
         try:
             os.chdir(run_cwd)
-            run_prediction(args, predict_glob)
+            run_prediction(args, predict_glob, basis_files_absolute=absolute_basis_files)
             prediction_status = "completed"
         except (RuntimeError, ValueError, OSError) as exc:
             prediction_status = "failed"

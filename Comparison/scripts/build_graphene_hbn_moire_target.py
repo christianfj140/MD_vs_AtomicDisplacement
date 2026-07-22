@@ -3,14 +3,13 @@
 
 Geometry: start from a single graphene/hBN stacking cell (4 atoms: 2 C graphene
 layer + B + N hBN layer, both layers on the same in-plane hexagonal lattice),
-tile it into an ``approximant`` (p x p) supercell (4*p^2 atoms, N >> 4), then
-apply a rigid in-plane rotation to the hBN sublayer by a *commensurate* twist
-angle and wrap it back into the supercell. Species, PAO basis and
+then build the standard periodic commensurate supercell: layer 1 uses the
+``(m,n)`` basis and layer 2 the ``(n,m)`` basis. Species, PAO basis and
 pseudopotentials are byte-for-byte identical to the flat stackings, so the
 cross-sweep planner accepts the bilayer->moire pair.
 
 PHYSICS CAVEAT (documented, not hidden): graphene and hBN are incommensurate
-(~1.8% lattice mismatch). This builder does NOT resolve the true incommensurate
+(~1.8% for native 2.46-A graphene). This builder does NOT resolve the true incommensurate
 moire; it applies a rigid commensurate-angle twist of the hBN layer on the
 *shared* graphene lattice, which imposes an effective in-plane strain on hBN.
 The applied angle and the implied strain are recorded in
@@ -63,6 +62,9 @@ STATIC_DROP_PREFIXES = ("md.",)
 STATIC_DROP_KEYS = {"writemdhistory", "lua.script"}
 # hBN layer is the fractional-z upper sublayer in the stacking fdf (~0.5675 > 0.5).
 HBN_Z_THRESHOLD = 0.5
+HBN_NATIVE_LATTICE_ANG = 2.504
+HBN_NATIVE_LATTICE_REFERENCE = "https://doi.org/10.1038/s42005-020-0335-1"
+DEFAULT_MIN_ATOM_DISTANCE_ANG = 1.2
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -100,8 +102,8 @@ def commensurate_angle_degrees(m: int, n: int) -> float:
     return math.degrees(math.acos(numerator / denominator))
 
 
-def _rescale_inplane_kgrid(text: str, approximant: int) -> str:
-    """Divide the two in-plane MP counts by ``approximant`` (min 1); keep k_z."""
+def _rescale_inplane_kgrid(text: str, linear_scale: float) -> str:
+    """Scale the two in-plane MP counts by cell length (min 1); keep k_z."""
     lines = text.splitlines()
     out: list[str] = []
     inblock = False
@@ -120,7 +122,7 @@ def _rescale_inplane_kgrid(text: str, approximant: int) -> str:
         if inblock and low:
             parts = line.split()
             if len(parts) >= 4 and row < 2:  # only the two in-plane rows
-                parts[row] = str(max(1, int(parts[row]) // approximant))
+                parts[row] = str(max(1, round(int(parts[row]) / linear_scale)))
                 out.append("  " + "  ".join(parts))
                 row += 1
                 continue
@@ -129,19 +131,76 @@ def _rescale_inplane_kgrid(text: str, approximant: int) -> str:
     return "\n".join(out)
 
 
+def minimum_periodic_distance(positions: np.ndarray, lattice: np.ndarray) -> float:
+    """Return the minimum pair distance over 3x3 in-plane periodic images."""
+    best = math.inf
+    shifts = [i * lattice[0] + j * lattice[1] for i in (-1, 0, 1) for j in (-1, 0, 1)]
+    for left in range(len(positions)):
+        for right in range(left + 1, len(positions)):
+            delta = positions[right] - positions[left]
+            best = min(best, *(float(np.linalg.norm(delta + shift)) for shift in shifts))
+    return best
+
+
+def validate_minimum_atom_distance(
+    positions: np.ndarray,
+    lattice: np.ndarray,
+    minimum_distance_ang: float = DEFAULT_MIN_ATOM_DISTANCE_ANG,
+) -> float:
+    """Abort on overlapping atoms and return the measured periodic distance."""
+    if minimum_distance_ang <= 0:
+        raise RuntimeError(f"--min-atom-distance must be positive, got {minimum_distance_ang}.")
+    distance = minimum_periodic_distance(np.asarray(positions, dtype=float), np.asarray(lattice, dtype=float))
+    if distance < minimum_distance_ang:
+        raise RuntimeError(
+            f"Invalid moire geometry: minimum periodic atom distance {distance:.6f} Ang "
+            f"is below --min-atom-distance {minimum_distance_ang:.6f} Ang."
+        )
+    return distance
+
+
+def _layer_positions(
+    atoms: list[Any],
+    primitive_lattice: np.ndarray,
+    super_lattice: np.ndarray,
+    rotation: np.ndarray,
+    expected: int,
+) -> tuple[list[list[float]], list[int]]:
+    """Materialize one periodic layer inside a common commensurate cell."""
+    inverse = np.linalg.inv(super_lattice)
+    bound = expected + 1
+    positions: list[list[float]] = []
+    species: list[int] = []
+    for i in range(-bound, bound + 1):
+        for j in range(-bound, bound + 1):
+            shift = i * primitive_lattice[0] + j * primitive_lattice[1]
+            for atom in atoms:
+                cart = np.asarray(atom.position_ang, dtype=float) + shift
+                cart[:2] = cart[:2] @ rotation
+                frac = cart @ inverse
+                if np.all(frac[:2] >= -1e-9) and np.all(frac[:2] < 1.0 - 1e-9):
+                    frac[:2] %= 1.0
+                    positions.append((frac @ super_lattice).tolist())
+                    species.append(atom.species_index)
+    if len(positions) != 2 * expected:
+        raise RuntimeError(f"Commensurate layer produced {len(positions)} atoms, expected {2 * expected}.")
+    return positions, species
+
+
 def moire_geometry(
     stacking_fdf: Path,
     *,
     approximant: int,
     m: int,
     n: int,
+    min_atom_distance: float = DEFAULT_MIN_ATOM_DISTANCE_ANG,
 ) -> tuple[str, dict[str, Any]]:
     """Return a static moire FDF plus geometry metadata."""
     structure = extract_fdf_structure(stacking_fdf, structure_type="crystal")
     if structure.atom_count != 4:
         raise RuntimeError(f"Expected a 4-atom stacking cell in {stacking_fdf}, found {structure.atom_count}.")
-    if approximant < 2:
-        raise RuntimeError(f"--approximant must be >= 2 (need N >> 4), got {approximant}.")
+    if approximant != 2:
+        raise RuntimeError("--approximant is retained for CLI compatibility and must be 2; cell size comes from (m,n).")
 
     lattice = np.asarray(structure.lattice_vectors_ang, dtype=float)
     a1, a2, a3 = lattice
@@ -149,35 +208,24 @@ def moire_geometry(
     twist_deg = commensurate_angle_degrees(m, n)
     theta = math.radians(twist_deg)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
+    rotation = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=float)
+    index = m * m + m * n + n * n
+    layer1_matrix = np.array([[m + n, n], [m, m + n]], dtype=int)
+    layer2_matrix = np.array([[m + n, m], [n, m + n]], dtype=int)
+    super_lattice = np.array([*(layer1_matrix @ lattice[:2]), a3], dtype=float)
+    if not np.allclose((layer2_matrix @ lattice[:2])[:, :2] @ rotation, super_lattice[:2, :2]):
+        raise RuntimeError(f"({m},{n}) does not materialize the requested commensurate rotation.")
 
-    # Supercell lattice: enlarge the two in-plane vectors; keep vacuum vector.
-    super_lattice = np.array([a1 * approximant, a2 * approximant, a3], dtype=float)
-    super_inv = np.linalg.inv(super_lattice)
-    center = 0.5 * (super_lattice[0] + super_lattice[1])
-
-    positions: list[list[float]] = []
-    species: list[int] = []
-    for i in range(approximant):
-        for j in range(approximant):
-            shift = i * a1 + j * a2
-            for atom in structure.atoms:
-                cart = np.asarray(atom.position_ang, dtype=float) + shift
-                frac_z = float((np.asarray(atom.position_ang) @ inv_lattice)[2])
-                if frac_z > HBN_Z_THRESHOLD:
-                    # Rotate hBN sublayer rigidly about the supercell center (in plane).
-                    rel = cart - center
-                    x = rel[0] * cos_t - rel[1] * sin_t
-                    y = rel[0] * sin_t + rel[1] * cos_t
-                    cart = np.array([center[0] + x, center[1] + y, cart[2]])
-                # Wrap into the supercell.
-                frac = (cart @ super_inv) % 1.0
-                cart = frac @ super_lattice
-                positions.append(cart.tolist())
-                species.append(atom.species_index)
-
-    expected = 4 * approximant * approximant
+    graphene = [atom for atom in structure.atoms if float((np.asarray(atom.position_ang) @ inv_lattice)[2]) <= HBN_Z_THRESHOLD]
+    hbn = [atom for atom in structure.atoms if float((np.asarray(atom.position_ang) @ inv_lattice)[2]) > HBN_Z_THRESHOLD]
+    positions, species = _layer_positions(graphene, lattice, super_lattice, np.eye(2), index)
+    hbn_positions, hbn_species = _layer_positions(hbn, lattice, super_lattice, rotation, index)
+    positions += hbn_positions
+    species += hbn_species
+    expected = 4 * index
     if len(positions) != expected:
         raise RuntimeError(f"Moire geometry produced {len(positions)} atoms, expected {expected}.")
+    dist_min = validate_minimum_atom_distance(np.asarray(positions), super_lattice, min_atom_distance)
 
     text = materialize_fdf_text(
         stacking_fdf.read_text(encoding="utf-8", errors="ignore"),
@@ -188,26 +236,36 @@ def moire_geometry(
         system_label=SYSTEM_LABEL,
         system_name=SYSTEM_LABEL,
     )
-    # The p x p supercell is p times larger in each in-plane direction, so its
-    # Monkhorst-Pack mesh must be divided by p to keep the SAME k-point density
+    # The commensurate cell is sqrt(index) larger in-plane, so its
+    # Monkhorst-Pack mesh is scaled to keep the same k-point density
     # as the flat stacking. Otherwise the cross-sweep planner rejects the pair
     # for differing k-density (integer MP counts may differ, density may not).
-    text = _rescale_inplane_kgrid(text, approximant)
-    # In-plane strain proxy: rigid twist on a shared lattice cannot honor the
-    # true ~1.8% graphene/hBN mismatch; record it explicitly.
-    lattice_mismatch_percent = 1.8
+    text = _rescale_inplane_kgrid(text, math.sqrt(index))
+    actual_lattice_ang = float(np.linalg.norm(a1[:2]))
+    lattice_mismatch_percent = (HBN_NATIVE_LATTICE_ANG / actual_lattice_ang - 1.0) * 100.0
+    hbn_strain_percent = (actual_lattice_ang / HBN_NATIVE_LATTICE_ANG - 1.0) * 100.0
     metadata = {
         "structure_type": "crystal",
         "source_stacking": stacking_fdf.parent.name,
         "approximant": approximant,
         "commensurate_index": [m, n],
+        "commensurate_cell_index": index,
+        "layer1_supercell_matrix": layer1_matrix.tolist(),
+        "layer2_supercell_matrix": layer2_matrix.tolist(),
         "twist_angle_deg": twist_deg,
-        "num_atoms": expected,
+        "materialized_twist_angle_deg": math.degrees(math.atan2(rotation[0, 1], rotation[0, 0])),
+        "num_atoms": len(positions),
         "twisted_sublayer": "hBN",
+        "geometry_inplane_lattice_ang": actual_lattice_ang,
+        "native_hBN_lattice_ang": HBN_NATIVE_LATTICE_ANG,
+        "native_hBN_lattice_reference": HBN_NATIVE_LATTICE_REFERENCE,
         "graphene_hBN_lattice_mismatch_percent": lattice_mismatch_percent,
-        "effective_hBN_strain_percent": lattice_mismatch_percent,
+        "effective_hBN_strain_percent": hbn_strain_percent,
+        "minimum_periodic_atom_distance_ang": dist_min,
+        "minimum_atom_distance_threshold_ang": min_atom_distance,
         "approximation": (
-            "rigid commensurate-angle twist of hBN on the shared graphene lattice; "
+            "standard periodic (m,n)/(n,m) commensurate twist; both layers use the shared graphene lattice, "
+            "so hBN is biaxially compressed relative to its native 2.504-A lattice; "
             "true incommensurate moire is NOT resolved"
         ),
         "system_label": SYSTEM_LABEL,
@@ -285,20 +343,50 @@ def _material_provenance(
     }
 
 
-def _prepare_geometry(stacking_fdf: Path, destination: Path, *, approximant: int, m: int, n: int) -> dict[str, Any]:
-    text, metadata = moire_geometry(stacking_fdf, approximant=approximant, m=m, n=n)
+def _prepare_geometry(
+    stacking_fdf: Path,
+    destination: Path,
+    *,
+    approximant: int,
+    m: int,
+    n: int,
+    min_atom_distance: float,
+) -> dict[str, Any]:
+    text, metadata = moire_geometry(
+        stacking_fdf, approximant=approximant, m=m, n=n, min_atom_distance=min_atom_distance
+    )
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "RUN.fdf").write_text(text, encoding="utf-8")
     _write_json(destination / "metadata.json", metadata)
     parsed = extract_fdf_structure(destination / "RUN.fdf", structure_type="crystal")
     if parsed.atom_count != metadata["num_atoms"]:
         raise RuntimeError(f"Moire geometry validation failed for {destination}: {parsed.atom_count} atoms.")
+    validate_minimum_atom_distance(
+        np.asarray([atom.position_ang for atom in parsed.atoms]),
+        np.asarray(parsed.lattice_vectors_ang),
+        min_atom_distance,
+    )
     return metadata
 
 
-def dry_run_plan(stacking_fdf: Path, *, approximant: int, m: int, n: int, limit: int) -> dict[str, Any]:
+def dry_run_plan(
+    stacking_fdf: Path,
+    *,
+    approximant: int,
+    m: int,
+    n: int,
+    limit: int,
+    min_atom_distance: float = DEFAULT_MIN_ATOM_DISTANCE_ANG,
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="moire_dry_run_") as tmp:
-        metadata = _prepare_geometry(stacking_fdf, Path(tmp) / "0", approximant=approximant, m=m, n=n)
+        metadata = _prepare_geometry(
+            stacking_fdf,
+            Path(tmp) / "0",
+            approximant=approximant,
+            m=m,
+            n=n,
+            min_atom_distance=min_atom_distance,
+        )
     return {
         "dry_run": True,
         "stacking_fdf": str(stacking_fdf),
@@ -306,6 +394,8 @@ def dry_run_plan(stacking_fdf: Path, *, approximant: int, m: int, n: int, limit:
         "commensurate_index": [m, n],
         "twist_angle_deg": metadata["twist_angle_deg"],
         "num_atoms": metadata["num_atoms"],
+        "minimum_periodic_atom_distance_ang": metadata["minimum_periodic_atom_distance_ang"],
+        "effective_hBN_strain_percent": metadata["effective_hBN_strain_percent"],
         "n_selected": max(1, limit),
         "siesta_invoked": False,
     }
@@ -322,6 +412,7 @@ def build_target(
     limit: int,
     siesta_command: str,
     overwrite: bool,
+    min_atom_distance: float = DEFAULT_MIN_ATOM_DISTANCE_ANG,
 ) -> dict[str, Any]:
     output_root = _safe_output_root(output_root)
     if limit < 1:
@@ -341,7 +432,14 @@ def build_target(
         _copy_basis(output_root)
         for index in range(limit):
             destination = output_root / "splits" / "test" / str(index)
-            geometry = _prepare_geometry(stacking_fdf, destination, approximant=approximant, m=m, n=n)
+            geometry = _prepare_geometry(
+                stacking_fdf,
+                destination,
+                approximant=approximant,
+                m=m,
+                n=n,
+                min_atom_distance=min_atom_distance,
+            )
             stage_required_pseudopotentials(reference_dir=destination, source_dataset_root=COMMON_MATERIAL_ROOT)
             run = run_siesta(destination, command=siesta_command, use_shell=False)
             validation = validate_snapshot(destination)
@@ -402,6 +500,8 @@ def build_target(
             "n_samples": len(rows),
             "num_atoms": geometry["num_atoms"],
             "twist_angle_deg": geometry["twist_angle_deg"],
+            "minimum_periodic_atom_distance_ang": geometry["minimum_periodic_atom_distance_ang"],
+            "effective_hBN_strain_percent": geometry["effective_hBN_strain_percent"],
             "split_counts": frozen["split_counts"],
             "benchmark_dataset_id": dataset_manifest["benchmark_dataset_id"],
             "benchmark_ready": dataset_manifest["benchmark_ready"],
@@ -417,8 +517,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stacking-preset", default=DEFAULT_STACKING)
     parser.add_argument("--output-root", type=Path, default=None)
-    parser.add_argument("--approximant", type=int, default=2, help="p in a p x p supercell (4*p^2 atoms).")
+    parser.add_argument("--approximant", type=int, default=2, help="Legacy compatibility option; must be 2.")
     parser.add_argument("--commensurate-angle", default="1,2", help="coprime (m,n) e.g. '1,2'.")
+    parser.add_argument("--min-atom-distance", type=float, default=DEFAULT_MIN_ATOM_DISTANCE_ANG)
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--siesta-command", default="siesta")
     parser.add_argument("--dry-run", action="store_true")
@@ -437,7 +538,14 @@ def main() -> int:
         output_root = REPO_ROOT / "Comparison" / "datasets" / f"graphene_hBN_moire_{angle:.0f}deg"
 
     if args.dry_run:
-        result = dry_run_plan(stacking_fdf, approximant=args.approximant, m=m, n=n, limit=args.limit)
+        result = dry_run_plan(
+            stacking_fdf,
+            approximant=args.approximant,
+            m=m,
+            n=n,
+            limit=args.limit,
+            min_atom_distance=args.min_atom_distance,
+        )
     else:
         result = build_target(
             stacking_fdf,
@@ -449,6 +557,7 @@ def main() -> int:
             limit=args.limit,
             siesta_command=args.siesta_command,
             overwrite=args.overwrite,
+            min_atom_distance=args.min_atom_distance,
         )
     print(json.dumps(result, indent=2))
     return 0

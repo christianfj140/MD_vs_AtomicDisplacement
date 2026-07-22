@@ -1844,6 +1844,20 @@
               <div class="terminal-navbar"><span>Vacancy payload log</span></div>
               <pre id="ct-vacancy-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando acciones del cross testing con vacante.</pre>
             </div>
+            <div class="g2m-deeph-run-selector" aria-label="Vacancy runs (seed) to plot">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Runs (seed) a plotear</strong>
+                  <p class="field-help">Marca un seed completo o ábrelo para ajustar pares individuales.</p>
+                </div>
+                <div class="run-selector-actions">
+                  <button id="ct-vacancy-payloads-all" class="button ghost small" type="button">All</button>
+                  <button id="ct-vacancy-payloads-clear" class="button ghost small" type="button">Clear</button>
+                </div>
+              </div>
+              <div id="ct-vacancy-payload-status" class="muted-text">Carga métricas para elegir runs por seed.</div>
+              <div id="ct-vacancy-payload-list" class="plot-run-list"></div>
+            </div>
             <div id="ct-vacancy-mae-chart" class="plot-card full"></div>
             <div id="ct-vacancy-frobenius-chart" class="plot-card full"></div>
             <div class="vacancy-matrix-error-panel" aria-labelledby="ct-vacancy-matrix-heading">

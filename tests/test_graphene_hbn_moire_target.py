@@ -34,29 +34,30 @@ def test_commensurate_angle_matches_known_values() -> None:
 
 def test_moire_geometry_atom_count_and_species(tmp_path: Path) -> None:
     text, metadata = moire.moire_geometry(STACKING_FDF, approximant=2, m=1, n=2)
-    assert metadata["num_atoms"] == 4 * 2 * 2 == 16
+    assert metadata["num_atoms"] == 4 * (1 * 1 + 1 * 2 + 2 * 2) == 28
     assert metadata["twisted_sublayer"] == "hBN"
-    assert metadata["graphene_hBN_lattice_mismatch_percent"] == 1.8
+    assert math.isclose(metadata["materialized_twist_angle_deg"], metadata["twist_angle_deg"])
+    expected_strain = (
+        metadata["geometry_inplane_lattice_ang"] / metadata["native_hBN_lattice_ang"] - 1.0
+    ) * 100.0
+    assert math.isclose(metadata["effective_hBN_strain_percent"], expected_strain)
+    assert metadata["minimum_periodic_atom_distance_ang"] > 1.2
     out = tmp_path / "RUN.fdf"
     out.write_text(text, encoding="utf-8")
     parsed = extract_fdf_structure(out, structure_type="crystal")
-    assert parsed.atom_count == 16
+    assert parsed.atom_count == 28
     labels = {sp.label for sp in parsed.species}
     assert labels == {"C", "B", "N"}
-    # 3x3 approximant -> 36 atoms, N >> 4.
-    _, meta3 = moire.moire_geometry(STACKING_FDF, approximant=3, m=1, n=2)
-    assert meta3["num_atoms"] == 36
     assert "MD.TypeOfRun" not in text and "Lua.Script" not in text
 
 
 def test_kgrid_is_divided_by_approximant_to_match_density(tmp_path: Path) -> None:
-    # p x p supercell must divide the two in-plane MP counts by p (keep k_z=1).
+    # The index-7 cell is sqrt(7) larger in-plane; 20/sqrt(7) rounds to 8.
     text, _ = moire.moire_geometry(STACKING_FDF, approximant=2, m=1, n=2)
     block = text[text.index("%block kgrid_Monkhorst_Pack"):text.index("%endblock kgrid_Monkhorst_Pack")]
     rows = [line.split() for line in block.splitlines() if line.split() and line.split()[0].lstrip("-").isdigit()]
-    # stacking is 20x20x1 -> moire (approximant 2) must be 10x10x1.
-    assert int(rows[0][0]) == 10
-    assert int(rows[1][1]) == 10
+    assert int(rows[0][0]) == 8
+    assert int(rows[1][1]) == 8
     assert int(rows[2][2]) == 1
 
 
@@ -64,8 +65,21 @@ def test_dry_run_never_invokes_siesta(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(moire, "run_siesta", lambda *_a, **_k: pytest.fail("SIESTA invoked"))
     plan = moire.dry_run_plan(STACKING_FDF, approximant=2, m=1, n=2, limit=1)
     assert plan["siesta_invoked"] is False
-    assert plan["num_atoms"] == 16
+    assert plan["num_atoms"] == 28
     assert math.isclose(plan["twist_angle_deg"], 21.7867892, abs_tol=1e-4)
+    assert plan["minimum_periodic_atom_distance_ang"] > 1.2
+
+
+def test_minimum_distance_guard_rejects_overlap_and_accepts_valid_geometry() -> None:
+    lattice = moire.np.diag([10.0, 10.0, 10.0])
+    assert math.isclose(
+        moire.validate_minimum_atom_distance(moire.np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]]), lattice),
+        1.5,
+    )
+    with pytest.raises(RuntimeError, match="minimum periodic atom distance"):
+        moire.validate_minimum_atom_distance(
+            moire.np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]), lattice
+        )
 
 
 def test_moire_basis_hashes_match_bilayer_train_presets() -> None:

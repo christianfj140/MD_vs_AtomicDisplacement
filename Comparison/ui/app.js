@@ -13464,6 +13464,13 @@ let ctSelectedPayloadIds = new Set();
 let ctPayloadSelectionInitialized = false;
 let ctKnownPayloadIds = new Set();
 let ctOpenPayloadGroups = new Set();
+// Vacancy selector state (independent from the w90→5x5 selector above): its
+// payloads are grouped by seed (id prefix "seed{N}::") instead of by target.
+let ctVacancyMetricsPayload = null;
+let ctVacancySelectedPayloadIds = new Set();
+let ctVacancySelectionInitialized = false;
+let ctVacancyKnownPayloadIds = new Set();
+let ctVacancyOpenGroups = new Set();
 let ctVacancyStatusTimer = null;
 let ctVacancyLastStatusSignature = "";
 let ctBilayerStatusTimer = null;
@@ -13896,6 +13903,123 @@ async function ctVacancyPollStatus() {
   }
 }
 
+// Vacancy selector: same shape as the w90→5x5 selector but grouped by seed
+// (payload ids come prefixed "seed{N}::" from the seed-aware backend). Kept as a
+// separate set of functions with its own state so it can never affect w90→5x5.
+function ctVacancyPayloadGroups(payload, payloads) {
+  const byGroup = new Map();
+  for (const item of payloads) {
+    const seed = item.seed !== undefined && item.seed !== null ? item.seed : "?";
+    const key = `seed:${seed}`;
+    const group = byGroup.get(key) || { key, label: `Seed ${seed}`, items: [] };
+    group.items.push(item);
+    byGroup.set(key, group);
+  }
+  return Array.from(byGroup.values())
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map((group) => {
+      const ids = group.items.map((item) => String(item.id));
+      const models = Array.from(
+        new Set(ids.flatMap((id) => ctPayloadModels(payload, id).map(methodDisplayLabel)))
+      ).join("+") || "sin metricas";
+      const statuses = Array.from(new Set(group.items.map((item) => item.status).filter(Boolean))).join(", ");
+      return { ...group, ids, models, statuses };
+    });
+}
+
+function ctVacancyUpdateSelectionUi(payload, groups) {
+  const status = document.getElementById("ct-vacancy-payload-status");
+  if (status) {
+    const total = (groups || []).reduce((sum, group) => sum + group.items.length, 0);
+    status.textContent = `${ctVacancySelectedPayloadIds.size}/${total} par(es) seleccionados.`;
+  }
+  for (const group of groups || []) {
+    const selected = group.ids.filter((id) => ctVacancySelectedPayloadIds.has(id)).length;
+    const checkbox = document.querySelector(`.ct-vacancy-payload-group-checkbox[data-group="${CSS.escape(group.key)}"]`);
+    if (checkbox) {
+      checkbox.checked = selected === group.ids.length;
+      checkbox.indeterminate = selected > 0 && selected < group.ids.length;
+    }
+    const meta = document.querySelector(`.ct-vacancy-payload-group-meta[data-group="${CSS.escape(group.key)}"]`);
+    if (meta) {
+      meta.textContent = [
+        `${selected}/${group.items.length} pares`,
+        group.models,
+        group.statuses ? `status=${group.statuses}` : "",
+      ].filter(Boolean).join(" | ");
+    }
+  }
+}
+
+function ctVacancyRenderPayloadSelector(payload) {
+  const list = document.getElementById("ct-vacancy-payload-list");
+  const status = document.getElementById("ct-vacancy-payload-status");
+  if (!list || !status) return;
+  const payloads = ctPayloadsForMetrics(payload);
+  const ids = payloads.map((item) => String(item.id));
+  if (!payloads.length) {
+    list.innerHTML = "";
+    status.textContent = "No hay runs de vacante todavia.";
+    ctVacancySelectedPayloadIds = new Set();
+    ctVacancyKnownPayloadIds = new Set();
+    return;
+  }
+  const previous = ctVacancySelectedPayloadIds;
+  const allKnownSelected = ctVacancyKnownPayloadIds.size > 0 && Array.from(ctVacancyKnownPayloadIds).every((id) => previous.has(id));
+  if (!ctVacancySelectionInitialized) {
+    ctVacancySelectedPayloadIds = new Set(ids);
+    ctVacancySelectionInitialized = true;
+  } else if (allKnownSelected) {
+    ctVacancySelectedPayloadIds = new Set(ids);
+  } else {
+    ctVacancySelectedPayloadIds = new Set(ids.filter((id) => previous.has(id)));
+  }
+  ctVacancyKnownPayloadIds = new Set(ids);
+  const groups = ctVacancyPayloadGroups(payload, payloads);
+  list.innerHTML = groups
+    .map((group) => `
+      <details class="mix-payload-group" data-group="${escapeHtml(group.key)}" ${ctVacancyOpenGroups.has(group.key) ? "open" : ""}>
+        <summary>
+          <input class="ct-vacancy-payload-group-checkbox" data-group="${escapeHtml(group.key)}" type="checkbox" />
+          <span>
+            <strong>${escapeHtml(group.label)}</strong>
+            <span class="ct-vacancy-payload-group-meta" data-group="${escapeHtml(group.key)}"></span>
+          </span>
+        </summary>
+        <div class="mix-run-list">
+          ${group.items.map((item) => {
+            const id = String(item.id);
+            const label = item.label || id;
+            const models = ctPayloadModels(payload, id).map(methodDisplayLabel).join("+") || "sin metricas";
+            const detail = [
+              models,
+              item.status ? `status=${item.status}` : "",
+              item.source_n_snapshots !== undefined ? `train=${item.source_n_snapshots}` : "",
+              item.output_root || "",
+            ].filter(Boolean).join(" | ");
+            return `
+              <label class="mix-run-option">
+                <input class="ct-vacancy-payload-checkbox" type="checkbox" value="${escapeHtml(id)}" ${ctVacancySelectedPayloadIds.has(id) ? "checked" : ""} />
+                <span><strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span></span>
+              </label>
+            `;
+          }).join("")}
+        </div>
+      </details>
+    `)
+    .join("");
+  ctVacancyUpdateSelectionUi(payload, groups);
+}
+
+function ctVacancySetAllPayloads(selected) {
+  const payloads = ctPayloadsForMetrics(ctVacancyMetricsPayload);
+  ctVacancySelectionInitialized = true;
+  ctVacancySelectedPayloadIds = new Set(selected ? payloads.map((item) => String(item.id)) : []);
+  ctVacancyRenderPayloadSelector(ctVacancyMetricsPayload);
+  ctVacancyRenderChart(ctVacancyMetricsPayload || {}).catch((error) => showToast(error.message));
+  ctVacancyRenderChart(ctVacancyMetricsPayload || {}, "relative_frobenius").catch((error) => showToast(error.message));
+}
+
 async function ctVacancyRenderChart(payload, metric = "mae") {
   const isFrobenius = metric === "relative_frobenius";
   const host = document.getElementById(
@@ -13903,20 +14027,26 @@ async function ctVacancyRenderChart(payload, metric = "mae") {
   );
   if (!host) return;
   await ensurePlotlyLoaded();
+  // Only plot points whose seed-aware payload_id is checked in the selector.
+  // When the selector hasn't been populated yet, ctVacancyKnownPayloadIds is
+  // empty and we plot everything (initial load before "Cargar métricas").
+  const hasSelector = ctVacancyKnownPayloadIds.size > 0;
   const traces = (payload.curves || []).map((curve) => {
     const points = [...(curve.points || [])]
       .filter((point) => !isFrobenius || point.relative_frobenius != null)
+      .filter((point) => !hasSelector || ctVacancySelectedPayloadIds.has(String(point.payload_id)))
       .sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
     if (!points.length) return null;
     const source = curve.source_system_label || points[0].source_system_label || "source";
     const target = points[0].target_system_label || curve.target_id || "graphene_5x5_vacancy";
+    const seed = curve.seed !== undefined && curve.seed !== null ? ` · seed ${curve.seed}` : "";
     return {
       x: points.map((point) => point.x),
       y: points.map((point) => isFrobenius
         ? Number(point.relative_frobenius) * 100
         : Number(point.mae) * 1000),
       mode: "lines+markers",
-      name: `${methodDisplayLabel(curve.model)} · ${source} → ${target}`,
+      name: `${methodDisplayLabel(curve.model)} · ${source} → ${target}${seed}`,
       marker: { size: 9 },
       error_y: {
         type: "data",
@@ -13935,7 +14065,9 @@ async function ctVacancyRenderChart(payload, metric = "mae") {
   }).filter(Boolean);
   if (!traces.length) {
     window.Plotly.purge(host);
-    host.innerHTML = '<p class="field-help">Sin métricas de vacante todavía.</p>';
+    host.innerHTML = hasSelector
+      ? '<p class="field-help">Ningún run seleccionado. Marca uno o más seeds/pares arriba.</p>'
+      : '<p class="field-help">Sin métricas de vacante todavía.</p>';
     return;
   }
   window.Plotly.newPlot(host, traces, {
@@ -13952,6 +14084,8 @@ async function ctVacancyRenderChart(payload, metric = "mae") {
 async function ctVacancyLoadMetrics() {
   const payload = await request("/api/cross-testing/vacancy/metrics");
   ctAppendVacancyPayload("GET /api/cross-testing/vacancy/metrics", payload);
+  ctVacancyMetricsPayload = payload;
+  ctVacancyRenderPayloadSelector(payload);
   await ctVacancyRenderChart(payload);
   await ctVacancyRenderChart(payload, "relative_frobenius");
   await ctVacancyLoadMatrixRuns();
@@ -14289,6 +14423,41 @@ function setupCrossTesting() {
   }, true);
   document.getElementById("ct-payload-list")?.addEventListener("click", (event) => {
     if (event.target?.classList?.contains("ct-payload-group-checkbox")) event.stopPropagation();
+  });
+  mvsBind("ct-vacancy-payloads-all", "click", () => ctVacancySetAllPayloads(true));
+  mvsBind("ct-vacancy-payloads-clear", "click", () => ctVacancySetAllPayloads(false));
+  document.getElementById("ct-vacancy-payload-list")?.addEventListener("change", (event) => {
+    const target = event.target;
+    const payloads = ctPayloadsForMetrics(ctVacancyMetricsPayload);
+    const groups = ctVacancyPayloadGroups(ctVacancyMetricsPayload, payloads);
+    ctVacancySelectionInitialized = true;
+    if (target?.classList?.contains("ct-vacancy-payload-group-checkbox")) {
+      const details = target.closest(".mix-payload-group");
+      details?.querySelectorAll(".ct-vacancy-payload-checkbox").forEach((node) => {
+        node.checked = target.checked;
+        if (target.checked) ctVacancySelectedPayloadIds.add(node.value);
+        else ctVacancySelectedPayloadIds.delete(node.value);
+      });
+    } else if (target?.classList?.contains("ct-vacancy-payload-checkbox")) {
+      if (target.checked) ctVacancySelectedPayloadIds.add(target.value);
+      else ctVacancySelectedPayloadIds.delete(target.value);
+    } else {
+      return;
+    }
+    ctVacancyUpdateSelectionUi(ctVacancyMetricsPayload, groups);
+    ctVacancyRenderChart(ctVacancyMetricsPayload || {}).catch((error) => showToast(error.message));
+    ctVacancyRenderChart(ctVacancyMetricsPayload || {}, "relative_frobenius").catch((error) => showToast(error.message));
+  });
+  document.getElementById("ct-vacancy-payload-list")?.addEventListener("toggle", (event) => {
+    const target = event.target;
+    if (!target?.classList?.contains("mix-payload-group")) return;
+    const key = target.dataset.group;
+    if (!key) return;
+    if (target.open) ctVacancyOpenGroups.add(key);
+    else ctVacancyOpenGroups.delete(key);
+  }, true);
+  document.getElementById("ct-vacancy-payload-list")?.addEventListener("click", (event) => {
+    if (event.target?.classList?.contains("ct-vacancy-payload-group-checkbox")) event.stopPropagation();
   });
   ctVacancyLoadMatrixRuns().catch(() => {});
 }

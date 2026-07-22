@@ -276,10 +276,11 @@ Persist the checkpoints where the Phase 5 payload expects them
 (`graph2mat_training_dir` with `checkpoint_manifest.json` + `*.ckpt`;
 `deeph_save_dir` with `config.ini` + `best_state_dict.pkl`).
 
-**Phase 4 — twisted-moire target.** `build_graphene_hbn_moire_target.py` tiles a
-stacking cell into a `p x p` supercell (`4*p^2` atoms) and applies a rigid
-commensurate-angle twist to the hBN sublayer, then runs static SIESTA per
-snapshot into a frozen `test` split:
+**Phase 4 — twisted-moire target.** `build_graphene_hbn_moire_target.py` builds
+the standard periodic commensurate cell: graphene uses the `(m,n)` supercell
+basis and hBN the rotated `(n,m)` basis. For `(1,2)` the coincidence index is 7,
+so the physically periodic bilayer has 28 atoms (14 per layer), then static
+SIESTA runs into a frozen `test` split:
 
 ```bash
 # geometry-only preview (no SIESTA)
@@ -292,15 +293,16 @@ snapshot into a frozen `test` split:
   --output-root Comparison/datasets/graphene_hBN_moire_22deg --siesta-command siesta
 ```
 
-**Physics caveat (documented, not hidden).** Graphene and hBN are incommensurate
-(~1.8% lattice mismatch). This builder does **not** resolve the true
-incommensurate moire; it applies a rigid commensurate-angle twist of the hBN
-layer on the *shared* graphene lattice, which imposes an effective in-plane
-strain on hBN. The applied twist angle and the ~1.8% strain proxy are recorded in
-`material_provenance.json` under `moire`. It is a smoke-scale surrogate target
-for transfer testing, not a paper-ready incommensurate moire. `(m,n)=(1,2)` gives
-a ~21.79° commensurate angle; `--approximant`/`--commensurate-angle` are free
-parameters.
+**Physics caveat (documented, not hidden).** Graphene and hBN are naturally
+incommensurate. This smoke target uses the 2.480 Å graphene lattice for both
+layers, so hBN is biaxially compressed by `(2.480/2.504 - 1)*100 = -0.9585%`
+relative to the recorded 2.504 Å native reference. The strain is calculated
+from the written geometry, not stored as a mismatch proxy. The builder also
+measures the minimum atom distance over 3x3 in-plane periodic images before
+writing/running SIESTA and aborts below `--min-atom-distance` (1.2 Å by default).
+For `(m,n)=(1,2)`, the written layer bases reproduce the calculated ~21.79°
+twist. This remains a smoke-scale commensurate surrogate, not a relaxed
+paper-ready incommensurate moire.
 
 **Phase 5 — predict_metrics payload** (reproducible via the ops generator):
 

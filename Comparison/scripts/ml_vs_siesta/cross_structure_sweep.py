@@ -509,7 +509,7 @@ def _runner_payload(
     return payload
 
 
-def aggregate_cross_structure_mae(records) -> dict[str, Any]:
+def aggregate_cross_structure_mae(records, *, by_seed: bool = False) -> dict[str, Any]:
     """Group ``h_mae_eV`` records into MAE-vs-training-source curves.
 
     Each record needs ``source_id``, ``target_id``, ``model``,
@@ -519,6 +519,11 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
     (mean ± sample std), with fewer than ``MIN_SEEDS_FOR_CLAIMS`` seeds flagged
     ``exploratory``. Output shape matches the mixing aggregator so the same
     frontend renders it.
+
+    When ``by_seed`` is True, seeds are NOT aggregated: the curve key also
+    includes the seed and each effective ``payload_id`` is prefixed with
+    ``seed{N}::`` so every (seed, pair, model) is a distinct selectable payload
+    and point. Used by the vacancy selector to plot per-seed curves.
     """
     curves: dict[tuple, dict[str, dict[str, Any]]] = {}
     payloads: dict[str, dict[str, Any]] = {}
@@ -537,23 +542,36 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
             x = int(x)
         except (TypeError, ValueError):
             continue
-        payload_id = str(record.get("payload_id") or f"{source_id}__to__{target_id}")
+        raw_payload_id = str(record.get("payload_id") or f"{source_id}__to__{target_id}")
         source_system_label = str(record.get("source_system_label") or "source")
         target_system_label = str(record.get("target_system_label") or target_id)
-        payloads.setdefault(
-            payload_id,
-            {
-                "id": payload_id,
-                "label": f"{source_id} → {target_id}",
-                "source_id": source_id,
-                "target_id": target_id,
-                "source_system_label": source_system_label,
-                "target_system_label": target_system_label,
-                "source_n_snapshots": x,
-                "output_root": record.get("output_root"),
-            },
+        seed_value = record.get("seed")
+        try:
+            seed = int(seed_value)
+        except (TypeError, ValueError):
+            seed = 0
+        # Seed-aware mode makes each (seed, pair) a distinct selectable payload
+        # by prefixing the id; the curve key gains the seed so seeds are not merged.
+        payload_id = f"seed{seed}::{raw_payload_id}" if by_seed else raw_payload_id
+        curve_key = (
+            (source_system_label, target_id, model, seed)
+            if by_seed
+            else (source_system_label, target_id, model)
         )
-        bucket = curves.setdefault((source_system_label, target_id, model), {}).setdefault(
+        payload_entry = {
+            "id": payload_id,
+            "label": f"{source_id} → {target_id}",
+            "source_id": source_id,
+            "target_id": target_id,
+            "source_system_label": source_system_label,
+            "target_system_label": target_system_label,
+            "source_n_snapshots": x,
+            "output_root": record.get("output_root"),
+        }
+        if by_seed:
+            payload_entry["seed"] = seed
+        payloads.setdefault(payload_id, payload_entry)
+        bucket = curves.setdefault(curve_key, {}).setdefault(
             payload_id,
             {
                 "payload_id": payload_id,
@@ -561,6 +579,7 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
                 "target_id": target_id,
                 "source_system_label": source_system_label,
                 "target_system_label": target_system_label,
+                "seed": seed,
                 "x": x,
                 "values": [],
                 "relative_frobenius_values": [],
@@ -602,6 +621,7 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
             "target_id": item["target_id"],
             "source_system_label": item["source_system_label"],
             "target_system_label": item["target_system_label"],
+            "seed": item.get("seed"),
             "x": item["x"],
             "total_size": item["x"],  # frontend reuses total_size as the x fallback
             "actual_train_size": item["x"],
@@ -614,21 +634,25 @@ def aggregate_cross_structure_mae(records) -> dict[str, Any]:
         }
 
     curve_list: list[dict[str, Any]] = []
-    for (source_system_label, target_id, model), by_payload in sorted(curves.items(), key=lambda kv: kv[0]):
+    for curve_key, by_payload in sorted(curves.items(), key=lambda kv: kv[0]):
+        source_system_label, target_id, model = curve_key[0], curve_key[1], curve_key[2]
+        seed = curve_key[3] if len(curve_key) > 3 else None
         points = [
             _point(item)
             for item in sorted(by_payload.values(), key=lambda v: (v["x"], v["payload_id"]))
         ]
-        curve_list.append(
-            {
-                "target_id": target_id,
-                "source_system_label": source_system_label,
-                "model": model,
-                "label": f"{source_system_label} → {target_id} · {model}",
-                "exploratory": any(p["exploratory"] for p in points),
-                "points": points,
-            }
-        )
+        curve = {
+            "target_id": target_id,
+            "source_system_label": source_system_label,
+            "model": model,
+            "label": f"{source_system_label} → {target_id} · {model}"
+            + (f" · seed {seed}" if seed is not None else ""),
+            "exploratory": any(p["exploratory"] for p in points),
+            "points": points,
+        }
+        if seed is not None:
+            curve["seed"] = seed
+        curve_list.append(curve)
     exploratory = any(curve["exploratory"] for curve in curve_list)
     warnings: list[str] = []
     if exploratory and curve_list:
@@ -670,6 +694,19 @@ def _demo() -> None:
     p0 = curve["points"][0]
     assert abs(p0["mae"] - 0.5) < 1e-9 and p0["n_seeds"] == 2, p0
     assert len(agg["payloads"]) == 2
+
+    # Seed-aware aggregation: seeds are not merged. Curves are keyed by seed too,
+    # so seed 0 (s10+s50) and seed 1 (s10) are separate curves; each (seed, pair)
+    # is a distinct payload with an id prefixed by seed{N}::.
+    agg_seed = aggregate_cross_structure_mae(records, by_seed=True)
+    assert agg_seed["n_curves"] == 2, agg_seed  # seed 0 curve, seed 1 curve
+    ids = sorted(p["id"] for p in agg_seed["payloads"])
+    assert ids == ["seed0::s10__to__t50", "seed0::s50__to__t50", "seed1::s10__to__t50"], ids
+    assert all(p.get("seed") in (0, 1) for p in agg_seed["payloads"]), agg_seed["payloads"]
+    seed0_curve = next(c for c in agg_seed["curves"] if c.get("seed") == 0)
+    s10_pt = next(p for p in seed0_curve["points"] if p["source_id"] == "s10")
+    assert abs(s10_pt["mae"] - 0.4) < 1e-9, s10_pt  # seed 0 only, not averaged with 0.6
+    assert s10_pt["seed"] == 0 and s10_pt["n_seeds"] == 1
     print("cross_structure_sweep._demo OK")
 
 

@@ -17731,7 +17731,10 @@ def _cross_testing_payloads_from_permutations(permutations: Any) -> list[dict[st
 
 
 def _cross_testing_metrics_payload(
-    records: list[dict[str, Any]], summary: dict[str, Any] | None = None
+    records: list[dict[str, Any]],
+    summary: dict[str, Any] | None = None,
+    *,
+    by_seed: bool = False,
 ) -> dict[str, Any]:
     mvs = _ml_vs_siesta_module()
     # Older completed summaries kept relative Frobenius inside model_launches
@@ -17752,15 +17755,19 @@ def _cross_testing_metrics_payload(
         if enriched.get("relative_frobenius") is None and key in relative_by_run:
             enriched["relative_frobenius"] = relative_by_run[key]
         enriched_records.append(enriched)
-    payload = mvs.aggregate_cross_structure_mae(enriched_records)
+    payload = mvs.aggregate_cross_structure_mae(enriched_records, by_seed=by_seed)
     by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
     metric_ids = set(by_id)
-    for item in _cross_testing_payloads_from_permutations((summary or {}).get("permutations")):
-        key = str(item["id"])
-        if key in by_id:
-            by_id[key] = {**item, **by_id[key]}
-        else:
-            by_id[key] = item
+    # Permutation-derived payloads carry plain (non-seed-prefixed) ids, so they
+    # only merge cleanly with the aggregate payload ids in non-seed mode. In
+    # seed-aware mode the aggregate already produced the seed{N}::-keyed payloads.
+    if not by_seed:
+        for item in _cross_testing_payloads_from_permutations((summary or {}).get("permutations")):
+            key = str(item["id"])
+            if key in by_id:
+                by_id[key] = {**item, **by_id[key]}
+            else:
+                by_id[key] = item
     metric_status = "evaluated" if (summary or {}).get("action") == "predict_metrics" else "trained"
     for key, item in by_id.items():
         if key in metric_ids:
@@ -17845,8 +17852,17 @@ def _cross_testing_launch_fn(runner_payload: dict[str, Any]) -> dict[str, Any]:
 class CrossStructureSweepRunner:
     """Minimal background runner for the cross-structure sweep."""
 
-    def __init__(self, output_root: Path = CROSS_TESTING_SWEEP_OUTPUT_ROOT) -> None:
+    def __init__(
+        self,
+        output_root: Path = CROSS_TESTING_SWEEP_OUTPUT_ROOT,
+        *,
+        merge_all_results: bool = False,
+    ) -> None:
         self._output_root = output_root
+        # When True, .metrics() merges the records of ALL *result.json files in
+        # output_root (one per seed sweep) and aggregates per-seed, so the UI can
+        # select individual seeds. Used by the vacancy runner.
+        self._merge_all_results = merge_all_results
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._status: dict[str, Any] = {"state": "idle"}
@@ -17854,6 +17870,32 @@ class CrossStructureSweepRunner:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._status)
+
+    def _merged_persisted_records(self) -> list[dict[str, Any]]:
+        """Concatenate the flat ``records`` of every ``*result.json`` in the output
+        root, de-duplicated by (payload_id, model, seed). Each seed sweep writes a
+        separate result file with its own seed stamped on every record, so this
+        surfaces all seeds at once instead of only the most recent file."""
+        merged: dict[tuple[str, str, Any], dict[str, Any]] = {}
+        for path in sorted(self._output_root.glob("*result.json")):
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for record in payload.get("records") or []:
+                if not isinstance(record, dict):
+                    continue
+                key = (
+                    str(record.get("payload_id") or ""),
+                    str(record.get("model") or ""),
+                    record.get("seed"),
+                )
+                merged[key] = record
+        return list(merged.values())
 
     def _latest_persisted_summary(self) -> dict[str, Any]:
         candidates = [self._output_root / "cross_structure_sweep_summary.json"]
@@ -17884,13 +17926,18 @@ class CrossStructureSweepRunner:
             live_payloads = self._status.get("payloads") or []
         records = summary.get("records") or live_records
         if not records:
-            persisted = self._latest_persisted_summary()
-            records = persisted.get("records") or []
-            if not summary:
-                summary = persisted
+            if self._merge_all_results:
+                records = self._merged_persisted_records()
+            if not records:
+                persisted = self._latest_persisted_summary()
+                records = persisted.get("records") or []
+                if not summary:
+                    summary = persisted
         if action and not summary.get("action"):
             summary = {**summary, "action": action}
-        payload = _cross_testing_metrics_payload(records, summary)
+        payload = _cross_testing_metrics_payload(
+            records, summary, by_seed=self._merge_all_results
+        )
         if live_payloads:
             by_id = {str(item["id"]): item for item in payload.get("payloads", [])}
             for item in live_payloads:
@@ -18015,7 +18062,9 @@ class CrossStructureSweepRunner:
 
 
 CROSS_TESTING_RUNNER = CrossStructureSweepRunner()
-CROSS_TESTING_VACANCY_RUNNER = CrossStructureSweepRunner(CROSS_TESTING_VACANCY_OUTPUT_ROOT)
+CROSS_TESTING_VACANCY_RUNNER = CrossStructureSweepRunner(
+    CROSS_TESTING_VACANCY_OUTPUT_ROOT, merge_all_results=True
+)
 CROSS_TESTING_BILAYER_RUNNER = CrossStructureSweepRunner(CROSS_TESTING_BILAYER_OUTPUT_ROOT)
 
 
