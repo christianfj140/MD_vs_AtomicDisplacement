@@ -432,6 +432,7 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
 
     from graph2mat.tools.lightning import MatrixDataModule
     from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
+    from graph2mat import AtomicTableWithEdges
 
     from graph2mat_autograd_derivatives import (
         Graph2MatAutogradDerivativeError,
@@ -456,10 +457,15 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
         )
     device = torch.device("cpu")
 
-    # Checkpoint hparams and the datamodule resolve basis/predict globs
-    # relative to the current working directory (same convention as
-    # predict_model_on_dataset.py), so run from the checkpoint training
-    # directory and re-anchor CLI patterns.
+    # The checkpoint's saved basis_files hparam is a path relative to the cwd
+    # used at training time, which does not always match the directory
+    # layout reconstructed by checkpoint_training_dir() (e.g. after a run
+    # root was moved or restructured). Build the basis table directly from
+    # the real --basis-files CLI arg (absolute, always correct) and pass it
+    # as a load_from_checkpoint override instead of relying on that glob.
+    basis_table = AtomicTableWithEdges.from_basis_glob(
+        Path(args.basis_files).parent.glob(Path(args.basis_files).name)
+    )
     run_cwd = checkpoint_training_dir(checkpoint)
     source_cwd = Path.cwd()
     basis_files = normalize_pattern_for_workdir(
@@ -502,7 +508,9 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
     cwd = Path.cwd()
     try:
         os.chdir(run_cwd)
-        model = LitMACEMatrixModel.load_from_checkpoint(str(checkpoint), weights_only=False)
+        model = LitMACEMatrixModel.load_from_checkpoint(
+            str(checkpoint), weights_only=False, basis_table=basis_table
+        )
         validate_model_matrix_component_policy(
             model,
             matrix_component_policy=matrix_component_policy,
