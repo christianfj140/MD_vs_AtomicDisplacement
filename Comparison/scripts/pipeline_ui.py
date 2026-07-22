@@ -17432,6 +17432,7 @@ MIXING_SWEEP_RUNNER = MixingSweepRunner()
 # --------------------------------------------------------------------------- #
 CROSS_TESTING_SWEEP_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_cross_structure_sweep"
 CROSS_TESTING_VACANCY_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_cross_structure_vacancy"
+CROSS_TESTING_BILAYER_OUTPUT_ROOT = RESULTS_ROOT / "ml_vs_siesta_cross_structure_bilayer_moire"
 CROSS_TESTING_CONFIG_ROOT = COMPARISON_ROOT / "config"
 VACANCY_MATRIX_ERROR_LOCK = threading.Lock()
 
@@ -18015,6 +18016,7 @@ class CrossStructureSweepRunner:
 
 CROSS_TESTING_RUNNER = CrossStructureSweepRunner()
 CROSS_TESTING_VACANCY_RUNNER = CrossStructureSweepRunner(CROSS_TESTING_VACANCY_OUTPUT_ROOT)
+CROSS_TESTING_BILAYER_RUNNER = CrossStructureSweepRunner(CROSS_TESTING_BILAYER_OUTPUT_ROOT)
 
 
 class ComparisonUIHandler(BaseHTTPRequestHandler):
@@ -18191,6 +18193,10 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, CROSS_TESTING_VACANCY_RUNNER.status())
             elif path == "/api/cross-testing/vacancy/metrics":
                 json_response(self, CROSS_TESTING_VACANCY_RUNNER.metrics())
+            elif path == "/api/cross-testing/bilayer/status":
+                json_response(self, CROSS_TESTING_BILAYER_RUNNER.status())
+            elif path == "/api/cross-testing/bilayer/metrics":
+                json_response(self, CROSS_TESTING_BILAYER_RUNNER.metrics())
             elif path == "/api/cross-testing/vacancy/matrix-errors":
                 json_response(self, vacancy_matrix_error_runs_payload())
             elif path == "/api/cross-testing/vacancy/matrix-error/artifact":
@@ -18323,6 +18329,13 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(
                     self,
                     CROSS_TESTING_VACANCY_RUNNER.start(payload),
+                    status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/cross-testing/bilayer/launch":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    CROSS_TESTING_BILAYER_RUNNER.start(payload),
                     status=HTTPStatus.ACCEPTED,
                 )
             elif path == "/api/cross-testing/vacancy/matrix-error":

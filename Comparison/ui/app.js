@@ -13466,6 +13466,8 @@ let ctKnownPayloadIds = new Set();
 let ctOpenPayloadGroups = new Set();
 let ctVacancyStatusTimer = null;
 let ctVacancyLastStatusSignature = "";
+let ctBilayerStatusTimer = null;
+let ctBilayerLastStatusSignature = "";
 
 function ctParseRoots(text) {
   return String(text || "")
@@ -13955,6 +13957,134 @@ async function ctVacancyLoadMetrics() {
   await ctVacancyLoadMatrixRuns();
 }
 
+// ---- Cross testing bilayer -> moire (independent subsection) ---------------
+function ctBilayerBody(action) {
+  const body = { payload_path: mvsValue("ct-bilayer-payload", "").trim() };
+  if (action) body.action = action;
+  return body;
+}
+
+function ctSetBilayerStatus(text) {
+  const status = document.getElementById("ct-bilayer-status");
+  if (status) status.textContent = text;
+}
+
+function ctAppendBilayerPayload(label, payload) {
+  const log = document.getElementById("ct-bilayer-log");
+  if (!log) return;
+  const initial = "Esperando acciones del cross testing bicapa→moiré.";
+  const prefix = log.textContent.trim() === initial ? "" : `${log.textContent}\n\n`;
+  log.textContent = `${prefix}[${new Date().toLocaleTimeString()}] ${label}\n${JSON.stringify(payload, null, 2)}`;
+  log.scrollTop = log.scrollHeight;
+}
+
+async function ctBilayerPreview() {
+  const body = ctBilayerBody();
+  ctAppendBilayerPayload("POST /api/cross-testing/plan request", body);
+  try {
+    const plan = await request("/api/cross-testing/plan", { method: "POST", body: JSON.stringify(body) });
+    ctAppendBilayerPayload("POST /api/cross-testing/plan response", plan);
+    ctSetBilayerStatus(`${plan.n_compatible || 0} compatibles · ${plan.n_incompatible || 0} incompatibles`);
+  } catch (error) {
+    ctAppendBilayerPayload("POST /api/cross-testing/plan error", { error: error.message });
+    ctSetBilayerStatus(`Error: ${error.message}`);
+    throw error;
+  }
+}
+
+async function ctBilayerEvaluate() {
+  const body = ctBilayerBody("predict_metrics");
+  ctAppendBilayerPayload("POST /api/cross-testing/bilayer/launch request", body);
+  try {
+    const payload = await request("/api/cross-testing/bilayer/launch", { method: "POST", body: JSON.stringify(body) });
+    ctAppendBilayerPayload("POST /api/cross-testing/bilayer/launch response", payload);
+    ctBilayerLastStatusSignature = "";
+    ctSetBilayerStatus("Evaluando checkpoints existentes…");
+    if (ctBilayerStatusTimer) clearInterval(ctBilayerStatusTimer);
+    ctBilayerStatusTimer = setInterval(() => ctBilayerPollStatus().catch(() => {}), 1500);
+  } catch (error) {
+    ctAppendBilayerPayload("POST /api/cross-testing/bilayer/launch error", { error: error.message });
+    ctSetBilayerStatus(`Error: ${error.message}`);
+    throw error;
+  }
+}
+
+async function ctBilayerPollStatus() {
+  const status = await request("/api/cross-testing/bilayer/status");
+  const signature = JSON.stringify({
+    state: status.state,
+    done: status.permutations_done,
+    evaluated: status.n_evaluated,
+    incompatible: status.n_incompatible,
+    records: (status.live_records || []).length,
+    error: status.error || "",
+  });
+  if (signature !== ctBilayerLastStatusSignature) {
+    ctAppendBilayerPayload("GET /api/cross-testing/bilayer/status", status);
+    ctBilayerLastStatusSignature = signature;
+  }
+  const records = (status.live_records || []).length;
+  if (status.state === "completed") {
+    ctSetBilayerStatus(
+      `Completado · ${status.n_evaluated || 0} evaluados · ${status.n_incompatible || 0} incompatibles`
+    );
+    if (ctBilayerStatusTimer) clearInterval(ctBilayerStatusTimer);
+    ctBilayerStatusTimer = null;
+    ctBilayerLoadMetrics().catch(() => {});
+  } else if (status.state === "error") {
+    ctSetBilayerStatus(`Error: ${status.error || ""}`);
+    if (ctBilayerStatusTimer) clearInterval(ctBilayerStatusTimer);
+    ctBilayerStatusTimer = null;
+  } else if (status.state === "running" || status.state === "starting") {
+    ctSetBilayerStatus(`En curso · ${status.permutations_done || 0} pares · ${records} MAE`);
+    if (records > 0) ctBilayerLoadMetrics().catch(() => {});
+  }
+}
+
+async function ctBilayerRenderChart(payload) {
+  const host = document.getElementById("ct-bilayer-mae-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const traces = (payload.curves || []).map((curve) => {
+    const points = [...(curve.points || [])].sort((a, b) => (a.x ?? 0) - (b.x ?? 0));
+    if (!points.length) return null;
+    const source = curve.source_system_label || points[0].source_system_label || "graphene_hBN_bilayer";
+    const target = points[0].target_system_label || curve.target_id || "graphene_hBN_moire";
+    return {
+      x: points.map((point) => point.x),
+      y: points.map((point) => Number(point.mae) * 1000),
+      mode: "lines+markers",
+      name: `${methodDisplayLabel(curve.model)} · ${source} → ${target}`,
+      marker: { size: 9 },
+      error_y: {
+        type: "data",
+        array: points.map((point) => Number(point.mae_std || 0) * 1000),
+        visible: points.some((point) => point.mae_std != null),
+      },
+      text: points.map((point) => `source: ${point.source_id}<br>seeds: ${point.n_seeds ?? "?"}`),
+      hovertemplate: "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
+    };
+  }).filter(Boolean);
+  if (!traces.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">Sin métricas de moiré todavía.</p>';
+    return;
+  }
+  window.Plotly.newPlot(host, traces, {
+    title: "Cross testing bicapa grafeno/hBN → moiré rotado",
+    xaxis: { title: "Snapshots de entrenamiento (source)" },
+    yaxis: { title: "Hamiltonian MAE (meV)" },
+    margin: { l: 60, r: 20, t: 40, b: 50 },
+    height: 460,
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ctBilayerLoadMetrics() {
+  const payload = await request("/api/cross-testing/bilayer/metrics");
+  ctAppendBilayerPayload("GET /api/cross-testing/bilayer/metrics", payload);
+  await ctBilayerRenderChart(payload);
+}
+
 async function ctVacancyLoadMatrixRuns() {
   const select = document.getElementById("ct-vacancy-matrix-run");
   const status = document.getElementById("ct-vacancy-matrix-status");
@@ -14119,6 +14249,9 @@ function setupCrossTesting() {
   mvsBind("ct-vacancy-evaluate", "click", ctVacancyEvaluate);
   mvsBind("ct-vacancy-metrics", "click", ctVacancyLoadMetrics);
   mvsBind("ct-vacancy-matrix-run", "change", ctVacancyShowMatrixError);
+  mvsBind("ct-bilayer-preview", "click", ctBilayerPreview);
+  mvsBind("ct-bilayer-evaluate", "click", ctBilayerEvaluate);
+  mvsBind("ct-bilayer-metrics", "click", ctBilayerLoadMetrics);
   mvsBind("ct-metrics-demo", "click", () => ctLoadMetrics(true));
   mvsBind("ct-metrics-real", "click", () => ctLoadMetrics(false));
   mvsBind("ct-payload-bottom", "click", ctScrollPayloadLogToBottom);

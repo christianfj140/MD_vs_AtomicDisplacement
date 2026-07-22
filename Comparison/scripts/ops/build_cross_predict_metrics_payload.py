@@ -147,6 +147,57 @@ def build_vacancy(base: dict[str, Any], target: str) -> dict[str, Any]:
     }
 
 
+def build_bilayer_moire(
+    base: dict[str, Any],
+    *,
+    source: str,
+    target: str,
+    graph2mat_training_dir: str,
+    deeph_save_dir: str,
+) -> dict[str, Any]:
+    """One-pair bilayer->moire predict_metrics payload.
+
+    The single source is the fused AA/AB1/AB2 bilayer train pool; the target is
+    the twisted-moire test dataset. existing_artifacts is keyed by the source
+    dataset basename (what the runner looks up), pointing at the checkpoints
+    trained on the combined dataset in Phase 3.
+    """
+    from pathlib import PurePosixPath
+
+    source_key = PurePosixPath(source).name
+    return {
+        **base,
+        "schema": "g2m_deeph_cross_structure_predict_metrics_payload_v1",
+        "description": (
+            "Predict+metrics-only transfer from a graphene/hBN bilayer model "
+            "(trained on fused AA/AB1/AB2 MD) to a twisted moire supercell."
+        ),
+        "action": "predict_metrics",
+        "sources": {},
+        "targets": {},
+        "pairs": [
+            {
+                "size": 0,
+                "direction": "bilayer_to_moire",
+                "source": source,
+                "target": target,
+            }
+        ],
+        "existing_artifacts": {
+            source_key: {
+                "graph2mat_training_dir": graph2mat_training_dir,
+                "deeph_save_dir": deeph_save_dir,
+            }
+        },
+        "notes": {
+            **(base.get("notes") or {}),
+            "predict_metrics_only": "Existing bilayer checkpoints are staged; training is skipped.",
+            "train_pool": "Fused AA/AB1/AB2 graphene-hBN MD snapshots (single combined train+validation).",
+            "target": "Twisted-bilayer graphene/hBN moire supercell (rigid commensurate-angle twist of hBN).",
+        },
+    }
+
+
 def _pin_deeph_threads(payload: dict[str, Any], num_threads: int = 2) -> dict[str, Any]:
     # The base paper-ready payload omits deeph.num_threads, so it defaults to -1
     # (every process grabs all cores). Under parallel training that oversubscribes
@@ -181,6 +232,21 @@ def main() -> int:
         "--vacancy-target",
         default="Comparison/datasets/graphene_5x5_vacancy",
     )
+    parser.add_argument(
+        "--bilayer-output",
+        type=Path,
+        default=REPO_ROOT / "Comparison/config/graphene_hbn_bilayer_to_moire_predict_metrics_payload.json",
+    )
+    parser.add_argument("--bilayer-source", default="Comparison/datasets/graphene_hBN_bilayer_train")
+    parser.add_argument("--bilayer-target", default="Comparison/datasets/graphene_hBN_moire_22deg")
+    parser.add_argument(
+        "--bilayer-graph2mat-training-dir",
+        default="Comparison/results/graphene_hBN_bilayer_train_models/graph2mat/training",
+    )
+    parser.add_argument(
+        "--bilayer-deeph-save-dir",
+        default="Comparison/results/graphene_hBN_bilayer_train_models/deeph/train",
+    )
     args = parser.parse_args()
     base = json.loads(args.base.read_text(encoding="utf-8"))
     payload = _pin_deeph_threads(build(base))
@@ -191,6 +257,19 @@ def main() -> int:
     args.vacancy_output.parent.mkdir(parents=True, exist_ok=True)
     args.vacancy_output.write_text(json.dumps(vacancy_payload, indent=2) + "\n", encoding="utf-8")
     print(args.vacancy_output)
+
+    bilayer_payload = _pin_deeph_threads(
+        build_bilayer_moire(
+            base,
+            source=args.bilayer_source,
+            target=args.bilayer_target,
+            graph2mat_training_dir=args.bilayer_graph2mat_training_dir,
+            deeph_save_dir=args.bilayer_deeph_save_dir,
+        )
+    )
+    args.bilayer_output.parent.mkdir(parents=True, exist_ok=True)
+    args.bilayer_output.write_text(json.dumps(bilayer_payload, indent=2) + "\n", encoding="utf-8")
+    print(args.bilayer_output)
     return 0
 
 

@@ -1861,6 +1861,36 @@
               <iframe id="ct-vacancy-matrix-frame" class="vacancy-matrix-frame" title="Graph2Mat PlotMatrixError MAE" hidden></iframe>
             </div>
           </section>
+
+          <section class="panel" aria-labelledby="ct-bilayer-heading">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Checkpoints existentes · bicapa→moiré</p>
+                <h3 id="ct-bilayer-heading">Cross testing bicapa grafeno/hBN → moiré rotado</h3>
+                <p class="field-help">
+                  Flujo independiente: evalúa el modelo bicapa (entrenado sobre la
+                  mezcla AA/AB1/AB2) sobre una supercelda moiré rotada. Requiere
+                  referencias SIESTA del moiré ya generadas.
+                </p>
+              </div>
+            </div>
+            <label class="field"><span>Payload JSON de campaña</span>
+              <input id="ct-bilayer-payload" type="text"
+                value="Comparison/config/graphene_hbn_bilayer_to_moire_predict_metrics_payload.json" />
+              <small>Solo se admiten payloads .json dentro de Comparison/config.</small>
+            </label>
+            <div class="button-row">
+              <button id="ct-bilayer-preview" class="button secondary" type="button">Previsualizar moiré</button>
+              <button id="ct-bilayer-evaluate" class="button primary" type="button">Evaluar checkpoints</button>
+              <button id="ct-bilayer-metrics" class="button secondary" type="button">Cargar métricas</button>
+              <span id="ct-bilayer-status" class="muted-text" aria-live="polite">Idle</span>
+            </div>
+            <div class="terminal-frame">
+              <div class="terminal-navbar"><span>Bilayer payload log</span></div>
+              <pre id="ct-bilayer-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando acciones del cross testing bicapa→moiré.</pre>
+            </div>
+            <div id="ct-bilayer-mae-chart" class="plot-card full"></div>
+          </section>
         </section>
 
         <section id="view-terminal" class="view">

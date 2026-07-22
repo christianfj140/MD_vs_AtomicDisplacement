@@ -1,0 +1,179 @@
+paths:
+  dataset_dir: ${REPO_ROOT}/MD/dataset
+  training_dir: ${REPO_ROOT}/MD/training
+  run_fdf_name: RUN.fdf
+  run_out_name: RUN.out
+  training_config_name: config.yaml
+  venv_activate: ${REPO_ROOT}/.venv/bin/activate
+material:
+  preset: graphene_hBN_AA
+commands:
+  graph2mat: graph2mat
+  siesta: siesta
+  shell: bash
+md:
+  system_name: Graphene/hBN bilayer MD dataset
+  system_label: graphene_hBN_AA
+  run_fdf_template: ${REPO_ROOT}/materials/graphene_hBN_AA/RUN.fdf
+  type_of_run: verlet
+  steps: 70
+  temperature_K: 300.0
+  timestep_fs: 1.0
+  ensemble: nve
+  thermostat: none
+  write_md_history: true
+  temperature_blocks: []
+  basis_size: SZP
+  basis_type: split
+  energy_shift: 0.275 eV
+  mesh_cutoff: 250 Ry
+  xc_functional: LDA
+  xc_authors: PZ
+  max_scf_iterations: 200
+  solution_method: diagon
+  dm_mixing_weight: 0.02
+  dm_number_pulay: 3
+  dm_tolerance: 1.d-5
+  dm_require_energy_convergence: T
+  dm_energy_tolerance: 1.e-5 eV
+  spin_polarized: F
+  fix_spin: F
+  non_collinear_spin: F
+  xml_write: true
+  save_hs_file: true
+  save_hs: true
+  save_de: true
+  lua_script: md_store.lua
+  force_aux_cell: true
+  lattice_constant:
+    value: 1.0
+    unit: Ang
+  lattice_vectors:
+  - - 2.48
+    - 0.0
+    - 0.0
+  - - -1.24
+    - 2.147743
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 20.0
+  species:
+  - index: 1
+    atomic_number: 6
+    symbol: C
+  - index: 2
+    atomic_number: 5
+    symbol: B
+  - index: 3
+    atomic_number: 7
+    symbol: N
+  coordinates_format: Ang
+  atoms:
+  - label: C
+    x: 0.0
+    y: 0.0
+    z: 8.0
+  - label: C
+    x: -1.0e-10
+    y: 1.4318286667
+    z: 8.0
+  - label: B
+    x: 0.0
+    y: 0.0
+    z: 11.35
+  - label: N
+    x: -1.0e-10
+    y: 1.4318286667
+    z: 11.35
+  kgrid_monkhorst_pack:
+  - - 20
+    - 0
+    - 0
+    - 0.0
+  - - 0
+    - 20
+    - 0
+    - 0.0
+  - - 0
+    - 0
+    - 1
+    - 0.0
+training:
+  torch_float32_matmul_precision: null
+  data:
+    out_matrix: hamiltonian
+    symmetric_matrix: true
+    sub_point_matrix: false
+    matrix_component_policy: h_only
+    n_matrix_components: 1
+    basis_files: ../dataset/MD_steps/basis/*.ion.xml
+    train_runs: ../dataset/splits/train/*/RUN.fdf
+    val_runs: ../dataset/splits/validation/*/RUN.fdf
+    batch_size: 10
+    store_in_memory: true
+  model:
+    num_interactions: 1
+    correlation: 1
+    max_ell: 2
+    hidden_irreps: 10x0e + 10x1o + 10x2e
+    loss: graph2mat.metrics.block_type_mae
+    optim_lr: 0.005
+  trainer:
+    accelerator: cpu
+    logger:
+      class_path: TensorBoardLogger
+      init_args:
+        name: my_first_model
+        save_dir: lightning_logs
+    max_epochs: 200
+checkpoint:
+  path: null
+  auto_best: true
+  search_glob: lightning_logs/**/checkpoints/best-*.ckpt
+  selection: latest_version
+testing:
+  test_runs: ../dataset/splits/test/*/RUN.fdf
+  callbacks:
+    plot_matrix_error: false
+    show_plot: false
+    samplewise_metrics_logger: false
+prediction:
+  predict_structs: ../dataset/splits/test/*/RUN.fdf
+  output_file: ML_prediction.HSX
+  callbacks:
+    matrix_writer: true
+pipeline:
+  skip_model_test: false
+  steps:
+  - generate_md_dataset
+  - run_md_training
+  - run_md_testing
+  - run_md_prediction
+performance:
+  max_parallel_siesta_jobs: 1
+  max_parallel_dataset_jobs: 1
+  max_parallel_prediction_jobs: 1
+  max_parallel_evaluation_jobs: 1
+  max_parallel_metric_jobs: 1
+  omp_num_threads: null
+  mkl_num_threads: null
+  openblas_num_threads: null
+  numexpr_num_threads: null
+  torch_num_threads: null
+  compute_accelerator: cpu
+  batch_size: null
+  store_in_memory: null
+  reuse_validated_siesta_outputs: true
+  enable_experiment_cache: false
+  error_policy: fail_fast
+  preset: null
+  torch_float32_matmul_precision: null
+splits:
+  enabled: true
+  strategy: blocked_with_gap
+  temporal_gap: 30
+  block_order: train,validation,test
+  train: 6
+  validation: 1
+  test: 1

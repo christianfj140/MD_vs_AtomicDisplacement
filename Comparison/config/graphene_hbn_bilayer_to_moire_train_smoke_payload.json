@@ -1,0 +1,107 @@
+{
+  "action": "train",
+  "confirm_ghost_species_exemption": true,
+  "confirm_incomplete_hamiltonian_semantics": true,
+  "description": "SMOKE (10 epochs): train G2M+DeepH on graphene/hBN bilayer pool, evaluate on twisted moire target. Single-pass action=train.",
+  "early_stopping": {
+    "max_epochs": 10,
+    "metric": "val_loss",
+    "min_delta": 0.0,
+    "mode": "min",
+    "patience": 10
+  },
+  "epochs": 10,
+  "hyperparams": {
+    "deeph": {
+      "atom_fea_len": 128,
+      "atom_update_net": "CGConv",
+      "batch_size": 8,
+      "criterion": "MaskMSELoss",
+      "edge_fea_len": 128,
+      "epochs": 10,
+      "gauss_stop": 6,
+      "if_edge_update": true,
+      "if_lcmp": true,
+      "learning_rate": 0.0003,
+      "normalization": "LayerNorm",
+      "num_l": 4,
+      "num_threads": 2,
+      "optimizer": "adamW",
+      "retain_edge_fea": true,
+      "weight_decay": 0.0001
+    },
+    "graph2mat": {
+      "batch_size": 32,
+      "correlation": 3,
+      "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+      "loader_threads": 4,
+      "loss": "graph2mat.metrics.block_type_huber",
+      "loss_kwargs": {
+        "beta": 0.01
+      },
+      "max_ell": 3,
+      "max_epochs": 10,
+      "num_interactions": 3,
+      "optim_lr": 0.0018,
+      "readout": "default"
+    }
+  },
+  "models": [
+    "graph2mat",
+    "deeph"
+  ],
+  "notes": {
+    "direction": "Train/validation splits come from graphene_w90 source; test split comes from graphene_5x5 target.",
+    "pairing": "Only paired same-size transfers are intended: w90_iidN -> 5x5_iidN. The pairs field prevents accidental source x target Cartesian expansion.",
+    "predict_metrics_only": "Existing bilayer checkpoints are staged; training is skipped.",
+    "seed_policy": "Single seed=0 payload, matching the active mixing payload. For 10-seed replication, run copies with seed changed or extend the runner to loop seeds.",
+    "size_policy": "Uses the active size grid after dropping 800 and 1000 for time/disk control. Add those two sizes back if needed.",
+    "smoke": "10-epoch smoke to prove the train->cross-eval flow end to end on RTX 5090; not paper-ready.",
+    "target": "Twisted-bilayer graphene/hBN moire supercell (rigid commensurate-angle twist of hBN).",
+    "train_pool": "Fused AA/AB1/AB2 graphene-hBN MD snapshots (single combined train+validation)."
+  },
+  "pairs": [
+    {
+      "direction": "bilayer_to_moire",
+      "size": 0,
+      "source": "Comparison/datasets/graphene_hBN_bilayer_train",
+      "target": "Comparison/datasets/graphene_hBN_moire_22deg"
+    }
+  ],
+  "performance": {
+    "compute_accelerator": "gpu",
+    "enable_experiment_cache": false,
+    "error_policy": "continue_on_error",
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_require_cuequivariance": true,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_deeph_training_jobs": 5,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "mkl_num_threads": 2,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "numexpr_num_threads": 2,
+    "omp_num_threads": 2,
+    "openblas_num_threads": 2,
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "reuse_validated_siesta_outputs": true,
+    "store_in_memory": true,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "torch_num_threads": 2
+  },
+  "schema": "g2m_deeph_cross_structure_sweep_payload_v2",
+  "seed": 0,
+  "seeds": [
+    0
+  ],
+  "sources": {},
+  "strict_dataset_validation": false,
+  "targets": {}
+}

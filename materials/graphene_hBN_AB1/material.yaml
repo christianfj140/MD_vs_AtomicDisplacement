@@ -1,0 +1,6 @@
+material:
+  label: graphene_hBN_AB1
+  fdf: materials/graphene_hBN_AB1/RUN.fdf
+  pseudopotential_dir: materials/graphene_hBN_common/pseudos
+  basis_dir: materials/graphene_hBN_common/basis
+  structure_type: crystal

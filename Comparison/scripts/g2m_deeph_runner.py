@@ -1027,6 +1027,69 @@ def _link_or_copy_file(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _bind_graph2mat_material_to_dataset(config: dict[str, Any], dataset_root: Path) -> None:
+    """Point config['material'] at the dataset's own material_provenance.json.
+
+    Writes an explicit bundle (fdf + basis_dir + pseudopotential_dir, no preset)
+    so resolve_material_bundle uses the dataset's real species/basis rather than
+    the pipeline_config template's pinned material. No-op if provenance is absent
+    or lacks a basis_dir (leaves the template material untouched).
+    """
+    dataset_root = Path(dataset_root)
+    provenance_path = dataset_root / "material_provenance.json"
+    provenance: dict[str, Any] = {}
+    if provenance_path.is_file():
+        try:
+            loaded = json.loads(provenance_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, dict):
+            provenance = loaded
+
+    # basis_dir: prefer provenance, else the dataset's own materialized basis.
+    # Cross-structure composites carry a synthetic provenance with basis_dir=None
+    # but do materialize material_basis/*.ion.xml on disk.
+    basis_dir = provenance.get("basis_dir")
+    if not basis_dir:
+        materialized = dataset_root / "material_basis"
+        if materialized.is_dir() and any(materialized.glob("*.ion.xml")):
+            basis_dir = str(materialized)
+    if not basis_dir:
+        return  # nothing better than the template; leave it untouched
+
+    material: dict[str, Any] = {"basis_dir": str(basis_dir)}
+    # Bundle labels allow only [A-Za-z0-9._-]; composite provenance labels like
+    # "cross_structure(a->b)" would be rejected, so sanitize to a safe slug.
+    raw_label = str(provenance.get("label") or dataset_root.name)
+    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_label).strip("_") or "dataset"
+    material["label"] = safe_label
+    material["structure_type"] = str(provenance.get("structure_type") or "crystal")
+    # fdf / pseudopotential_dir are needed for bundle validation but not for the
+    # ML fit; borrow the composite's source bundle when provenance omits them.
+    fdf = provenance.get("fdf") or provenance.get("source_fdf")
+    pseudo_dir = provenance.get("pseudopotential_dir")
+    for source_key in ("source_dataset_root", "source_root"):
+        if fdf and pseudo_dir:
+            break
+        source_root = provenance.get(source_key)
+        if not source_root:
+            continue
+        src_prov_path = Path(source_root) / "material_provenance.json"
+        if not src_prov_path.is_file():
+            continue
+        try:
+            src_prov = json.loads(src_prov_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        fdf = fdf or src_prov.get("fdf")
+        pseudo_dir = pseudo_dir or src_prov.get("pseudopotential_dir")
+    if fdf:
+        material["fdf"] = str(fdf)
+    if pseudo_dir:
+        material["pseudopotential_dir"] = str(pseudo_dir)
+    config["material"] = material
+
+
 def _graph2mat_basis_files_for_dataset(dataset_root: Path) -> list[Path]:
     by_name: dict[str, Path] = {}
     for basis_dir in (
@@ -3161,6 +3224,13 @@ class Graph2MatDeepHBenchmarkRunner:
             DEFAULT_MD_PIPELINE_CONFIG,
         )
         config = _load_yaml(template_path)
+        # The pipeline_config template pins a material (default: graphene). When
+        # training on an already-materialized dataset (cross-structure composites,
+        # merged pools, any non-graphene material) the template's material is stale
+        # and would resolve the wrong bundle — Graph2Mat then rejects the dataset's
+        # real basis files as "undeclared". Bind the material to the dataset's own
+        # provenance instead, as an explicit bundle (no preset lookup required).
+        _bind_graph2mat_material_to_dataset(config, dataset_root)
         config.setdefault("paths", {})
         config["paths"]["dataset_dir"] = str(dataset_root)
         config["paths"]["training_dir"] = str(training_dir)

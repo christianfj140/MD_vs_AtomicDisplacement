@@ -223,6 +223,119 @@ current evaluator intentionally disables those bins because it does not apply
 the periodic minimum-image convention. DOS, LDOS, IPR and spin analysis are not
 part of this initial campaign.
 
+## Graphene/hBN bilayer → twisted-moire campaign
+
+This variant trains one Graph2Mat and one DeepH on a **single** dataset that
+fuses the AA/AB1/AB2 graphene-hBN stackings, then cross tests them against an
+independent **twisted-moire** supercell (many more atoms). The three stackings
+share species (C/B/N), PAO basis and pseudopotentials, so the fused pool is
+physically meaningful and the planner accepts the bilayer→moire pair (more
+atoms and a larger cell are allowed; species/basis/pseudo hashes must match).
+
+**Material bundles.** `materials/graphene_hBN_{AA,AB1,AB2}/` each hold a static
+electronic `RUN.fdf` template (no MD block; the MD layer is appended at
+generation time) and a `material.yaml` that points pseudopotentials and basis at
+the shared `materials/graphene_hBN_common/{pseudos,basis}` directory (symlinks to
+`C.psf`, `B.psml`, `N.psml`, `C.ion.xml`, `B.ion.xml`, `N.ion.xml`).
+
+**Phase 1 — per-stacking MD datasets (payload only, no new code).** One small MD
+dataset per stacking via `run_g2m_deeph_payload_once.py`:
+
+```bash
+for S in AA AB1 AB2; do
+  .venv/bin/python Comparison/scripts/run_g2m_deeph_payload_once.py \
+    Comparison/config/graphene_hbn_${S}_md30_payload.json \
+    --status-json /tmp/${S}_md_status.json \
+    --manifest-json /tmp/${S}_md_manifest.json
+done
+```
+
+Each writes `Comparison/datasets/graphene_hBN_<S>_md30` with `*.HSX`,
+`*.ORB_INDX`, `*.STRUCT_OUT` present for all three species (the shared MD
+pipeline config keeps `Write.OrbitalIndex`, `XML.Write` and `SaveHS`).
+
+**Phase 2 — fuse into one train pool.** `build_graphene_hbn_bilayer_train_dataset.py`
+copies the train+validation snapshots of the three datasets into one
+`dataset_root` with re-indexed, stacking-prefixed ids. It never re-runs SIESTA
+and fails closed if basis or pseudopotential hashes differ between stackings:
+
+```bash
+# The sweep nests each dataset under its recipe slug (graphene_hbn_<s>_md30).
+.venv/bin/python Comparison/scripts/build_graphene_hbn_bilayer_train_dataset.py \
+  --source-dataset Comparison/datasets/graphene_hBN_AA_md30/graphene_hbn_aa_md30 \
+  --source-dataset Comparison/datasets/graphene_hBN_AB1_md30/graphene_hbn_ab1_md30 \
+  --source-dataset Comparison/datasets/graphene_hBN_AB2_md30/graphene_hbn_ab2_md30 \
+  --output-root Comparison/datasets/graphene_hBN_bilayer_train
+```
+
+`material_provenance.json` records the mixture (three source datasets + hashes).
+
+**Phase 3 — train one G2M + one DeepH on the fused pool** with a small-epoch
+snapshot-scaling payload whose `dataset_root` is `graphene_hBN_bilayer_train`.
+Persist the checkpoints where the Phase 5 payload expects them
+(`graph2mat_training_dir` with `checkpoint_manifest.json` + `*.ckpt`;
+`deeph_save_dir` with `config.ini` + `best_state_dict.pkl`).
+
+**Phase 4 — twisted-moire target.** `build_graphene_hbn_moire_target.py` tiles a
+stacking cell into a `p x p` supercell (`4*p^2` atoms) and applies a rigid
+commensurate-angle twist to the hBN sublayer, then runs static SIESTA per
+snapshot into a frozen `test` split:
+
+```bash
+# geometry-only preview (no SIESTA)
+.venv/bin/python Comparison/scripts/build_graphene_hbn_moire_target.py \
+  --approximant 2 --commensurate-angle 1,2 --dry-run
+
+# real static references
+.venv/bin/python Comparison/scripts/build_graphene_hbn_moire_target.py \
+  --approximant 2 --commensurate-angle 1,2 --limit 1 --overwrite \
+  --output-root Comparison/datasets/graphene_hBN_moire_22deg --siesta-command siesta
+```
+
+**Physics caveat (documented, not hidden).** Graphene and hBN are incommensurate
+(~1.8% lattice mismatch). This builder does **not** resolve the true
+incommensurate moire; it applies a rigid commensurate-angle twist of the hBN
+layer on the *shared* graphene lattice, which imposes an effective in-plane
+strain on hBN. The applied twist angle and the ~1.8% strain proxy are recorded in
+`material_provenance.json` under `moire`. It is a smoke-scale surrogate target
+for transfer testing, not a paper-ready incommensurate moire. `(m,n)=(1,2)` gives
+a ~21.79° commensurate angle; `--approximant`/`--commensurate-angle` are free
+parameters.
+
+**Phase 5 — predict_metrics payload** (reproducible via the ops generator):
+
+```bash
+.venv/bin/python Comparison/scripts/ops/build_cross_predict_metrics_payload.py \
+  --bilayer-output Comparison/config/graphene_hbn_bilayer_to_moire_predict_metrics_payload.json \
+  --bilayer-source Comparison/datasets/graphene_hBN_bilayer_train \
+  --bilayer-target Comparison/datasets/graphene_hBN_moire_22deg
+```
+
+The payload has a single `bilayer_to_moire` pair; `existing_artifacts` is keyed
+by the source dataset basename (`graphene_hBN_bilayer_train`). Preview then
+evaluate:
+
+```bash
+.venv/bin/python Comparison/scripts/run_cross_structure_sweep_payload.py \
+  Comparison/config/graphene_hbn_bilayer_to_moire_predict_metrics_payload.json --action preview
+
+.venv/bin/python Comparison/scripts/run_cross_structure_sweep_payload.py \
+  Comparison/config/graphene_hbn_bilayer_to_moire_predict_metrics_payload.json \
+  --action predict_metrics \
+  --output-root Comparison/results/ml_vs_siesta_cross_structure_bilayer_moire
+```
+
+`records[]` carry `h_mae_eV` for both models; the payload id is
+`graphene_hBN_bilayer__to__graphene_hBN_moire_<ang>` (auto-derived, never
+hardcoded).
+
+**Phase 6 — UI.** Start `python3 Comparison/scripts/pipeline_ui.py`, open **Cross
+testing**, scroll to the last subsection **Cross testing bicapa grafeno/hBN →
+moiré rotado**. Its payload field is restricted to JSON under `Comparison/config`
+and defaults to the Phase 5 payload; preview/evaluate/metrics use their own log,
+status and MAE chart on `/api/cross-testing/bilayer/*` without touching the
+normal or vacancy subsections.
+
 ## Outputs
 
 `materialize` writes:
