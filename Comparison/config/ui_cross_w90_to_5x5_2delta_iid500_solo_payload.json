@@ -1,0 +1,42 @@
+{
+  "schema": "ui_real_metrics_derivative_campaign_v1",
+  "description": "Parallel per-case retry (stencil+SIESTA+autograd) for iid500. overwrite:true clears partial leftovers.",
+  "mixing_summary": "Comparison/results/ml_vs_siesta_mixing_sweep/mixing_sweep_summary.json",
+  "cross_summary": "Comparison/results/ml_vs_siesta_cross_structure_sweep/cross_structure_sweep_summary.json",
+  "output_root": "Comparison/results/ui_real_metrics_derivatives",
+  "campaign_state_id": "cross_w90_to_5x5_2delta_iid500_solo",
+  "output_campaign": "cross_w90_to_5x5_2delta",
+  "deeph_autograd_model_subdir": "deeph_autograd_model",
+  "max_parallel_deeph_autograd_jobs": 3,
+  "deeph_autograd_num_threads": 2,
+  "include_case_ids": [
+    "cross_graphene__graphene_w90_scale_iid500__to__graphene_5x5__graphene_5x5_scale_iid500"
+  ],
+  "derivative": {
+    "overwrite": true,
+    "method": "central",
+    "base_split": "test",
+    "base_selection_policy": "adaptive_min_fraction",
+    "min_base_snapshots": 10,
+    "base_fraction": 0.2,
+    "base_selection_seed": 0,
+    "atoms": [
+      "0"
+    ],
+    "axes": [
+      "x",
+      "y",
+      "z"
+    ],
+    "delta_ang": [
+      0.005,
+      0.01
+    ],
+    "reference_workers": 16,
+    "skip_if_exists": true,
+    "diagnostic_only": false,
+    "require_central": true,
+    "graph2mat_prediction_method": "autograd_vectorized",
+    "deeph_prediction_method": "autograd_vectorized"
+  }
+}
