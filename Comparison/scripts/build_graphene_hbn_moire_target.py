@@ -401,6 +401,71 @@ def dry_run_plan(
     }
 
 
+def build_geometry_only(
+    stacking_fdf: Path,
+    output_root: Path,
+    *,
+    approximant: int,
+    m: int,
+    n: int,
+    overwrite: bool,
+    min_atom_distance: float = DEFAULT_MIN_ATOM_DISTANCE_ANG,
+) -> dict[str, Any]:
+    """Materialize the moire geometry + basis + a predict-only manifest, no SIESTA.
+
+    For twist angles whose commensurate cell is too large for a SIESTA
+    reference (e.g. ~1.08 deg -> ~11k atoms), the ML models can still predict a
+    Hamiltonian from the structure alone. This writes a test_manifest.csv with
+    only sample_id + structure_path, which predict_model_on_dataset.py / the
+    DeepH adapter consume WITHOUT a reference Hamiltonian. There is no reference,
+    so no MAE/relative_frobenius can be computed: the output is an unvalidated
+    ML prediction, not a benchmarked one.
+    """
+    output_root = _safe_output_root(output_root)
+    if output_root.exists():
+        if not overwrite:
+            raise RuntimeError(f"Output exists: {output_root}; pass --overwrite to replace it.")
+        shutil.rmtree(output_root)
+    output_root.mkdir(parents=True)
+    _copy_basis(output_root)
+    destination = output_root / "splits" / "test" / "0"
+    geometry = _prepare_geometry(
+        stacking_fdf, destination, approximant=approximant, m=m, n=n, min_atom_distance=min_atom_distance
+    )
+    _write_test_manifest(
+        output_root,
+        [
+            {
+                "sample_id": "moire_0",
+                "method": "static_moire_geometry_only",
+                "source_run": str(stacking_fdf),
+                "source_sample_id": f"{stacking_fdf.parent.name}_0",
+                "structure_path": str(destination / "RUN.fdf"),
+                "hamiltonian_path": "",  # no SIESTA reference: prediction only
+                "run_out_path": "",
+                "metadata_path": str(destination / "metadata.json"),
+                "valid": True,
+                "split": "test",
+                "status": "geometry_only",
+                "sample_dir": str(destination),
+            }
+        ],
+    )
+    _write_json(output_root / "moire_geometry.json", geometry)
+    return {
+        "dry_run": False,
+        "geometry_only": True,
+        "siesta_invoked": False,
+        "reference_available": False,
+        "output_root": str(output_root),
+        "test_manifest": str(output_root / "splits" / "test_manifest.csv"),
+        "num_atoms": geometry["num_atoms"],
+        "twist_angle_deg": geometry["twist_angle_deg"],
+        "minimum_periodic_atom_distance_ang": geometry["minimum_periodic_atom_distance_ang"],
+        "effective_hBN_strain_percent": geometry["effective_hBN_strain_percent"],
+    }
+
+
 def build_target(
     stacking_fdf: Path,
     output_root: Path,
@@ -523,6 +588,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--siesta-command", default="siesta")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--geometry-only",
+        action="store_true",
+        help="Materialize geometry + predict-only manifest without SIESTA (for cells too large to reference, e.g. ~1.08 deg). Output is an unvalidated ML prediction target.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -544,6 +614,16 @@ def main() -> int:
             m=m,
             n=n,
             limit=args.limit,
+            min_atom_distance=args.min_atom_distance,
+        )
+    elif args.geometry_only:
+        result = build_geometry_only(
+            stacking_fdf,
+            output_root,
+            approximant=args.approximant,
+            m=m,
+            n=n,
+            overwrite=args.overwrite,
             min_atom_distance=args.min_atom_distance,
         )
     else:

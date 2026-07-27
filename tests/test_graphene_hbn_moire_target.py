@@ -70,6 +70,29 @@ def test_dry_run_never_invokes_siesta(monkeypatch: pytest.MonkeyPatch) -> None:
     assert plan["minimum_periodic_atom_distance_ang"] > 1.2
 
 
+def test_geometry_only_writes_predict_manifest_without_siesta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csv
+
+    monkeypatch.setattr(moire, "run_siesta", lambda *_a, **_k: pytest.fail("SIESTA invoked"))
+    result = moire.build_geometry_only(
+        STACKING_FDF, tmp_path / "moire_geom", approximant=2, m=1, n=2, overwrite=True
+    )
+    assert result["siesta_invoked"] is False
+    assert result["reference_available"] is False
+    assert result["num_atoms"] == 28
+    manifest = tmp_path / "moire_geom" / "splits" / "test_manifest.csv"
+    rows = list(csv.DictReader(manifest.open(encoding="utf-8")))
+    assert len(rows) == 1
+    row = rows[0]
+    # Predict path needs only sample_id + a real structure; reference stays empty.
+    assert row["sample_id"] == "moire_0"
+    assert row["hamiltonian_path"] == ""
+    assert Path(row["structure_path"]).is_file()
+    assert extract_fdf_structure(Path(row["structure_path"]), structure_type="crystal").atom_count == 28
+
+
 def test_minimum_distance_guard_rejects_overlap_and_accepts_valid_geometry() -> None:
     lattice = moire.np.diag([10.0, 10.0, 10.0])
     assert math.isclose(

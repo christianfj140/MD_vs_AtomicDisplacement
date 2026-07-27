@@ -1,0 +1,150 @@
+{
+  "schema": "g2m_deeph_cross_structure_predict_metrics_payload_v1",
+  "description": "Cross-testing 5x5 (50 atoms, train) -> graphene w90 (2 atoms, test), seed 0. Predict+metrics only: reuses checkpoints already trained on the 5x5 sources, no retraining. Frozen target graphene_w90_scale_iid500 so the OOD curve varies only with source size.",
+  "action": "predict_metrics",
+  "sizes": [
+    60,
+    80,
+    100,
+    400,
+    500
+  ],
+  "models": [
+    "graph2mat",
+    "deeph"
+  ],
+  "epochs": 600,
+  "seed": 0,
+  "seeds": [
+    0
+  ],
+  "confirm_ghost_species_exemption": true,
+  "confirm_incomplete_hamiltonian_semantics": true,
+  "strict_dataset_validation": false,
+  "sources": {},
+  "targets": {},
+  "pairs": [
+    {
+      "size": 60,
+      "direction": "5x5_to_w90",
+      "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_complete_paper_ready_missing/graphene_5x5_scale_iid60",
+      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500"
+    },
+    {
+      "size": 80,
+      "direction": "5x5_to_w90",
+      "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_20_50_80/graphene_5x5_scale_iid80",
+      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500"
+    },
+    {
+      "size": 100,
+      "direction": "5x5_to_w90",
+      "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid100",
+      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500"
+    },
+    {
+      "size": 400,
+      "direction": "5x5_to_w90",
+      "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid400",
+      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500"
+    },
+    {
+      "size": 500,
+      "direction": "5x5_to_w90",
+      "source": "Comparison/datasets/graphene_5x5_snapshot_scaling_100_500_mixing/graphene_5x5_scale_iid500",
+      "target": "Comparison/datasets/graphene_w90_snapshot_scaling_20_1100_600epochs_1train_derivatives/graphene_w90_scale_iid500"
+    }
+  ],
+  "existing_artifacts": {
+    "graphene_5x5_scale_iid60": {
+      "graph2mat_training_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/graph2mat/graphene_5x5_scale_iid60/G2M-T1000-03-anchor-G5x5-N60/graph2mat/training",
+      "deeph_save_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/deeph/graphene_5x5_scale_iid60/DH-T1000-04-anchor-G5x5-N60/deeph/train"
+    },
+    "graphene_5x5_scale_iid80": {
+      "graph2mat_training_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/graph2mat/graphene_5x5_scale_iid80/G2M-T1000-03-anchor-G5x5-N80/graph2mat/training",
+      "deeph_save_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/deeph/graphene_5x5_scale_iid80/DH-T1000-04-anchor-G5x5-N80/deeph/train"
+    },
+    "graphene_5x5_scale_iid100": {
+      "graph2mat_training_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/graph2mat/graphene_5x5_scale_iid100/G2M-T1000-03-anchor-G5x5-N100/graph2mat/training",
+      "deeph_save_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/deeph/graphene_5x5_scale_iid100/DH-T1000-04-anchor-G5x5-N100/deeph/train"
+    },
+    "graphene_5x5_scale_iid400": {
+      "graph2mat_training_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/graph2mat/graphene_5x5_scale_iid400/G2M-T1000-03-anchor-G5x5-N400/graph2mat/training",
+      "deeph_save_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/deeph/graphene_5x5_scale_iid400/DH-T1000-04-anchor-G5x5-N400/deeph/train"
+    },
+    "graphene_5x5_scale_iid500": {
+      "graph2mat_training_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/graph2mat/graphene_5x5_scale_iid500/G2M-T1000-03-anchor-G5x5-N500/graph2mat/training",
+      "deeph_save_dir": "Comparison/results/graphene_5x5_snapshot_scaling_complete_paper_ready/graphene_5x5_snapshot_scaling_complete_paper_ready/sweep/deeph/graphene_5x5_scale_iid500/DH-T1000-04-anchor-G5x5-N500/deeph/train"
+    }
+  },
+  "early_stopping": {
+    "max_epochs": 600,
+    "metric": "val_loss",
+    "min_delta": 0.0,
+    "mode": "min",
+    "patience": 80
+  },
+  "hyperparams": {
+    "graph2mat": {
+      "batch_size": 32,
+      "correlation": 3,
+      "hidden_irreps": "48x0e + 48x1o + 48x2e + 48x3o",
+      "loader_threads": 4,
+      "loss": "graph2mat.metrics.block_type_huber",
+      "loss_kwargs": {
+        "beta": 0.01
+      },
+      "max_ell": 3,
+      "max_epochs": 600,
+      "num_interactions": 3,
+      "optim_lr": 0.0018,
+      "readout": "default"
+    },
+    "deeph": {
+      "atom_fea_len": 128,
+      "atom_update_net": "CGConv",
+      "batch_size": 8,
+      "criterion": "MaskMSELoss",
+      "edge_fea_len": 128,
+      "epochs": 600,
+      "gauss_stop": 6,
+      "if_edge_update": true,
+      "if_lcmp": true,
+      "learning_rate": 0.0003,
+      "normalization": "LayerNorm",
+      "num_l": 4,
+      "optimizer": "adamW",
+      "retain_edge_fea": true,
+      "weight_decay": 0.0001
+    }
+  },
+  "performance": {
+    "preset": "paper_ready_parallel_trains_snapshot_scaling_no_global_batch",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "cross_model_schedule": "deeph_then_graph2mat",
+    "max_parallel_deeph_training_jobs": 4,
+    "max_parallel_graph2mat_training_jobs": 6,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 1,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "omp_num_threads": 2,
+    "mkl_num_threads": 2,
+    "openblas_num_threads": 2,
+    "numexpr_num_threads": 2,
+    "torch_num_threads": 2,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "notes": {
+    "seed_policy": "One payload per seed. run_cross_structure_sweep_payload.py reuses the same existing_artifacts for every seed of a seeds:[...] loop, and predict_metrics does not train, so a multi-seed payload would emit identical MAEs per seed.",
+    "checkpoint_provenance": "seed 0: graphene_5x5_snapshot_scaling_complete_paper_ready. seeds 1-2: ml_vs_siesta_cross_structure_vacancy seed_1/seed_2 retrains, which trained on these same 5x5 sources (train/val are source-only, so target-agnostic).",
+    "size_policy": "N in {20,30,50,60,80,100,400,500}: the sizes with complete artifacts for all 3 seeds."
+  }
+}

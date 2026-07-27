@@ -23,6 +23,7 @@ from hamiltonian_derivative_stencil import discover_derivative_stencils  # noqa:
 from run_hamiltonian_derivative_siesta_references import (  # noqa: E402
     DerivativeSiestaReferenceError,
     build_argument_parser,
+    geometry_mismatch_message,
     run_derivative_siesta_references,
 )
 
@@ -61,6 +62,15 @@ def synthetic_base_fdf(*, include_ghost: bool = False) -> str:
 
 class DerivativeSiestaReferenceStageTests(unittest.TestCase):
     def setUp(self) -> None:
+        # These tests stage fake (non-sisl-readable) matrices; the geometry
+        # guard fails closed on unreadable files, so neutralize it here. The
+        # guard itself is unit-tested in ReferenceGeometryGuardTests.
+        guard_patcher = mock.patch(
+            "run_hamiltonian_derivative_siesta_references.reference_output_geometry_error",
+            return_value="",
+        )
+        guard_patcher.start()
+        self.addCleanup(guard_patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.dataset_root = self.root / "source_dataset"
@@ -480,6 +490,43 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         self.assertIsNotNone(discoveries[0].stencil.siesta_plus)
         self.assertIsNotNone(discoveries[0].stencil.siesta_minus)
         self.assertNotEqual(discoveries[0].stencil.siesta_plus.matrix_path.name, "ML_prediction.HSX")
+
+
+class ReferenceGeometryGuardTests(unittest.TestCase):
+    # Regression: MD settings leaked into stencil fdfs made SIESTA evolve the
+    # geometry, so the stored TSHS no longer matched the +-delta displacement.
+    CELL = [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]
+
+    def test_matching_geometry_passes(self) -> None:
+        fdf = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+        matrix = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.00005]]
+        self.assertEqual(geometry_mismatch_message(fdf, matrix), "")
+
+    def test_md_drifted_geometry_fails_closed(self) -> None:
+        fdf = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.01]]
+        matrix = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.045]]
+        message = geometry_mismatch_message(fdf, matrix, fdf_cell=self.CELL, matrix_cell=self.CELL)
+        self.assertIn("reference_geometry_mismatch", message)
+        self.assertIn("single-point", message)
+
+    def test_periodically_wrapped_positions_pass_with_minimum_image(self) -> None:
+        # Same physical position, wrapped across the boundary: |raw diff| ~ 10 Ang.
+        fdf = [[9.99995, 0.0, 0.0]]
+        matrix = [[-0.00005, 0.0, 0.0]]
+        self.assertEqual(
+            geometry_mismatch_message(fdf, matrix, fdf_cell=self.CELL, matrix_cell=self.CELL), ""
+        )
+
+    def test_cell_mismatch_fails_closed(self) -> None:
+        other_cell = [[10.5, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]]
+        message = geometry_mismatch_message(
+            [[0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0]], fdf_cell=self.CELL, matrix_cell=other_cell
+        )
+        self.assertIn("lattice vectors differ", message)
+
+    def test_atom_count_mismatch_fails_closed(self) -> None:
+        message = geometry_mismatch_message([[0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        self.assertIn("reference_geometry_mismatch", message)
 
 
 if __name__ == "__main__":

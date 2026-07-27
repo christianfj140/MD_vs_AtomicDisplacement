@@ -161,11 +161,41 @@ def _annotate_metric_manifests(result_dir: Path, metadata: dict[str, Any]) -> No
         _write(path, manifest)
 
 
+def _refresh_plots(output_root: Path, campaigns: set[str]) -> None:
+    roots = [
+        root
+        for campaign in campaigns
+        for model in ("graph2mat", "deeph")
+        for root in (output_root / campaign).glob(f"*/derivative_metrics/{model}")
+        if (root / "manifest.json").exists()
+    ]
+    if not roots:
+        return
+    plots = write_derivative_plot_outputs(
+        derivative_roots=roots,
+        output_dir=output_root / "derivative_metrics" / "summary" / "derivative_plots",
+    )
+    for result_dir in {root.parent.parent for root in roots}:
+        summary_dir = result_dir / "derivative_metrics" / "summary" / "derivative_plots"
+        payload_path = summary_dir / "derivative_plot_payload.json"
+        manifest_path = summary_dir / "derivative_plot_manifest.json"
+        _write(payload_path, plots["payload"])
+        _write(
+            manifest_path,
+            {
+                **plots["manifest"],
+                "plot_payload": str(payload_path),
+                "outputs": {"plot_payload": str(payload_path)},
+            },
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("payload", type=Path)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--reference-only", action="store_true")
+    parser.add_argument("--plots-only", action="store_true")
     args = parser.parse_args()
     config = _read(_path(args.payload))
     output_root = _path(str(config["output_root"]))
@@ -182,6 +212,10 @@ def main() -> int:
     if output_campaign:
         for case in cases:
             case["campaign"] = output_campaign
+    campaigns = {str(case["campaign"]) for case in cases}
+    if args.plots_only:
+        _refresh_plots(output_root, campaigns)
+        return 0
     deeph_autograd_model_subdir = str(config.get("deeph_autograd_model_subdir") or "").strip()
     if deeph_autograd_model_subdir:
         for case in cases:
@@ -232,10 +266,7 @@ def main() -> int:
         )
         completed.append({"id": case["id"], "campaign": case["campaign"], "status": status, "result": runner.results()})
         _write(status_path, {"plan": str(plan_path), "completed": completed})
-    roots = [output_root / item["campaign"] / item["id"] / "derivative_metrics" / model for item in completed if item["status"].get("returncode") == 0 for model in ("graph2mat", "deeph")]
-    roots = [root for root in roots if (root / "manifest.json").exists()]
-    if roots:
-        write_derivative_plot_outputs(derivative_roots=roots, output_dir=output_root / "derivative_metrics" / "summary" / "derivative_plots")
+    _refresh_plots(output_root, campaigns)
     return 0 if all(item["status"].get("returncode") == 0 for item in completed) else 1
 
 

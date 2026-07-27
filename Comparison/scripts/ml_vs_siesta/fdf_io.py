@@ -107,6 +107,9 @@ def generate_siesta_displacement_inputs(
                 atom_species=structure.species_index,
                 lattice_vectors_ang=[tuple(v) for v in structure.cell.tolist()],
                 system_label=f"{base.stem}_{label}",
+                # Derivative reference/plus/minus fdfs must be single-point SCF:
+                # inherited MD settings evolve the geometry away from +-delta.
+                single_point=True,
             )
             record["fdf_sha256"] = materialized.metadata.get("materialized_fdf_sha256")
         generated[label] = record

@@ -313,6 +313,31 @@ def _coordinate_block_lines(
     return lines
 
 
+_SINGLE_POINT_STRIPPED_KEYS = {"lua.script", "writemdhistory"}
+
+
+def strip_to_single_point(text: str) -> str:
+    """Drop MD/Lua directives so SIESTA runs one SCF at the given geometry.
+
+    Derivative stencils need the Hamiltonian at exactly the written positions.
+    A base fdf inherited from an MD dataset carries ``MD.TypeOfRun Verlet`` and
+    ``Lua.Script``: SIESTA then evolves the structure for MD.Steps before the
+    stored TSHS, silently invalidating the finite-difference reference.
+    """
+    lines: list[str] = []
+    for line in text.splitlines():
+        clean = _strip_comment(line)
+        first = clean.split(None, 1)[0].lower() if clean else ""
+        if first.startswith("md.") or first in _SINGLE_POINT_STRIPPED_KEYS:
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    text = _set_fdf_directive(text, "MD.TypeOfRun", "CG")
+    return _set_fdf_directive(text, "MD.NumCGsteps", "0")
+
+
 def materialize_fdf_text(
     base_text: str,
     structure: FdfStructure,
@@ -323,6 +348,7 @@ def materialize_fdf_text(
     system_label: str | None = None,
     system_name: str | None = None,
     required_output_flags: dict[str, str] | None = None,
+    single_point: bool = False,
 ) -> str:
     positions = _normalized_positions(positions_ang)
     species_indices = list(atom_species or structure.atom_species)
@@ -355,6 +381,8 @@ def materialize_fdf_text(
         "AtomicCoordinatesAndAtomicSpecies",
         _coordinate_block_lines(positions, species_indices, species_by_index),
     )
+    if single_point:
+        text = strip_to_single_point(text)
     return ensure_required_output_flags(text, required_output_flags)
 
 
@@ -369,6 +397,7 @@ def materialize_sample_fdf(
     system_name: str | None = None,
     structure_type: str | None = None,
     required_output_flags: dict[str, str] | None = None,
+    single_point: bool = False,
 ) -> MaterializedFdf:
     structure = extract_fdf_structure(base_fdf, structure_type=structure_type)
     base_text = base_fdf.read_text(encoding="utf-8", errors="ignore")
@@ -381,6 +410,7 @@ def materialize_sample_fdf(
         system_label=system_label,
         system_name=system_name,
         required_output_flags=required_output_flags,
+        single_point=single_point,
     )
     output_fdf.parent.mkdir(parents=True, exist_ok=True)
     output_fdf.write_text(materialized_text, encoding="utf-8")
@@ -392,6 +422,7 @@ def materialize_sample_fdf(
             "base_fdf_sha256": file_sha256(base_fdf),
             "materialized_fdf_sha256": file_sha256(output_fdf),
             "required_output_flags": required_output_flags or DEFAULT_REQUIRED_OUTPUT_FLAGS,
+            "single_point": bool(single_point),
         }
     )
     return MaterializedFdf(path=output_fdf, metadata=metadata)

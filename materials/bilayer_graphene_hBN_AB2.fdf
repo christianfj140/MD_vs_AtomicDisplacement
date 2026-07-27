@@ -1,0 +1,115 @@
+SystemName         bilayer_graphene_hBN_AB2
+SystemLabel        bilayer_graphene_hBN_AB2
+
+NumberOfAtoms      6
+NumberOfSpecies    3
+
+%block ChemicalSpeciesLabel
+  1   6  C
+  2   5  B
+  3   7  N
+%endblock ChemicalSpeciesLabel
+
+
+# ============================================================
+# Atomic structure
+# Stacking along z:
+# hBN / graphene-1 / graphene-2
+#
+# hBN--graphene-1 distance = 3.35 Ang
+# graphene-1--graphene-2 distance = 3.35 Ang
+#
+# Graphene bilayer stacking: Bernal AB
+# Interface registry: N below C2; B below hollow
+# ============================================================
+
+LatticeConstant    1.00000 Ang
+
+%block LatticeVectors
+   2.4800000000       0.0000000000       0.0000000000
+  -1.2400000000       2.1477430000       0.0000000000
+   0.0000000000       0.0000000000      20.0000000000
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Fractional
+
+%block AtomicCoordinatesAndAtomicSpecies
+
+# hBN substrate
+# B below a hollow site
+# N below C2 of graphene-1
+   0.6666666667   0.3333333333   0.3000000000   2
+   0.3333333333   0.6666666667   0.3000000000   3
+
+# Graphene layer 1: layer in contact with hBN
+   0.0000000000   0.0000000000   0.4675000000   1
+   0.3333333333   0.6666666667   0.4675000000   1
+
+# Graphene layer 2: Bernal AB relative to graphene-1
+   0.3333333333   0.6666666667   0.6350000000   1
+   0.6666666667   0.3333333333   0.6350000000   1
+
+%endblock AtomicCoordinatesAndAtomicSpecies
+
+
+# ============================================================
+# k-point sampling
+# ============================================================
+
+%block kgrid_Monkhorst_Pack
+  20   0   0   0.0
+   0  20   0   0.0
+   0   0   1   0.0
+%endblock kgrid_Monkhorst_Pack
+
+
+# ============================================================
+# DFT, real-space grid and SCF
+# ============================================================
+
+XC.functional          VDW
+XC.authors             DRSLL
+
+MeshCutoff             600.0 Ry
+
+MaxSCFIterations       500
+DM.MixingWeight        0.1
+DM.NumberPulay         5
+DM.Tolerance           1.d-4
+DM.UseSaveDM           F
+
+SolutionMethod         diagon
+ElectronicTemperature 0.075 eV
+
+
+# ============================================================
+# SIESTA output for Graph2Mat / DeepH
+# ============================================================
+
+SaveHS                 T
+Save.HS                T
+TS.HS.Save             T
+TS.DE.Save             T
+XML.Write              T
+
+WriteMullikenPop       1
+Write.OrbitalIndex     T
+WriteForces            T
+WriteCoorXmol          T
+
+
+# ============================================================
+# Molecular dynamics
+# ============================================================
+
+MD.TypeOfRun           Verlet
+MD.Steps               10
+MD.InitialTimeStep     1
+MD.FinalTimeStep       10
+MD.LengthTimeStep      1 fs
+MD.InitialTemperature  300 K
+
+WriteMDHistory         T
+
+# Store Hamiltonians for each MD step
+Lua.Script             md_store.lua

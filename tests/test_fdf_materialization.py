@@ -127,6 +127,42 @@ class FdfMaterializationTests(unittest.TestCase):
         self.assertEqual(len(result.metadata["base_fdf_sha256"]), 64)
         self.assertEqual(len(result.metadata["materialized_fdf_sha256"]), 64)
 
+    def test_single_point_strips_md_and_lua_directives(self) -> None:
+        base = self.write_base_fdf(
+            simple_fdf_text()
+            + "MD.TypeOfRun Verlet\nMD.Steps 20\nMD.InitialTemperature 450 K\nWriteMDHistory T\nLua.Script md_store.lua\n"
+        )
+        output = self.root / "single_point" / "RUN.fdf"
+
+        result = materialize_sample_fdf(
+            base,
+            output,
+            positions_ang=[[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]],
+            single_point=True,
+        )
+        text = output.read_text(encoding="utf-8")
+
+        self.assertNotIn("Verlet", text)
+        self.assertNotIn("MD.Steps", text)
+        self.assertNotIn("MD.InitialTemperature", text)
+        self.assertNotIn("WriteMDHistory", text)
+        self.assertNotIn("Lua.Script", text)
+        self.assertIn("MD.TypeOfRun", text)
+        self.assertIn("CG", text)
+        self.assertIn("MD.NumCGsteps", text)
+        self.assertTrue(result.metadata["single_point"])
+
+    def test_default_materialization_preserves_md_directives(self) -> None:
+        base = self.write_base_fdf(simple_fdf_text() + "MD.TypeOfRun Verlet\nMD.Steps 20\nLua.Script md_store.lua\n")
+        output = self.root / "with_md" / "RUN.fdf"
+
+        result = materialize_sample_fdf(base, output, positions_ang=[[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]])
+        text = output.read_text(encoding="utf-8")
+
+        self.assertIn("Verlet", text)
+        self.assertIn("Lua.Script", text)
+        self.assertFalse(result.metadata["single_point"])
+
     def test_unsupported_coordinate_format_fails_clearly(self) -> None:
         path = self.write_base_fdf(simple_fdf_text(coordinate_format="Fractional"))
 

@@ -8300,6 +8300,11 @@ class Graph2MatDeepHBenchmarkRunner:
             raise RuntimeError(f"derivative stage {stage!r} reported failed samples in {path}")
         return manifest
 
+    def _can_skip_derivative_manifest(self, path: Path, *, fail_on_samples_failed: bool) -> bool:
+        return path.exists() and not (
+            fail_on_samples_failed and int(_load_json(path).get("samples_failed") or 0) > 0
+        )
+
     def _run_derivative_stage_command(
         self,
         command: list[str],
@@ -8343,7 +8348,10 @@ class Graph2MatDeepHBenchmarkRunner:
             model_root / "predicted_derivative_hamiltonians"
         )
         manifest_path = output_root / AUTOGRAD_DERIVATIVE_PREDICTION_MANIFEST
-        if skip_if_exists and not overwrite and manifest_path.exists():
+        if skip_if_exists and not overwrite and self._can_skip_derivative_manifest(
+            manifest_path,
+            fail_on_samples_failed=not diagnostic_only,
+        ):
             self._check_derivative_manifest(
                 manifest_path,
                 stage="predict_derivative_graph2mat",
@@ -8446,7 +8454,10 @@ class Graph2MatDeepHBenchmarkRunner:
             model_root / "predicted_derivative_hamiltonians"
         )
         manifest_path = output_root / DEEPH_AUTOGRAD_DERIVATIVE_PREDICTION_MANIFEST
-        if skip_if_exists and not overwrite and manifest_path.exists():
+        if skip_if_exists and not overwrite and self._can_skip_derivative_manifest(
+            manifest_path,
+            fail_on_samples_failed=not diagnostic_only,
+        ):
             self._check_derivative_manifest(
                 manifest_path,
                 stage="predict_derivative_deeph",
@@ -8670,7 +8681,10 @@ class Graph2MatDeepHBenchmarkRunner:
         if stages.get("run_derivative_siesta_reference"):
             reference_root = self._derivative_path(config, "reference_root") or (common_root / "siesta_hamiltonians")
             manifest_path = reference_root / "derivative_siesta_reference_manifest.json"
-            if skip_if_exists and not overwrite and manifest_path.exists():
+            if skip_if_exists and not overwrite and self._can_skip_derivative_manifest(
+                manifest_path,
+                fail_on_samples_failed=not diagnostic_only,
+            ):
                 self._check_derivative_manifest(manifest_path, stage="run_derivative_siesta_reference", fail_on_samples_failed=not diagnostic_only)
                 mark(
                     "run_derivative_siesta_reference",
@@ -8772,7 +8786,10 @@ class Graph2MatDeepHBenchmarkRunner:
                 continue
             output_root = self._derivative_path(config, f"{model}_prediction_root") or (model_root / "predicted_hamiltonians")
             manifest_path = output_root / f"derivative_{model}_prediction_manifest.json"
-            if skip_if_exists and not overwrite and manifest_path.exists():
+            if skip_if_exists and not overwrite and self._can_skip_derivative_manifest(
+                manifest_path,
+                fail_on_samples_failed=not diagnostic_only,
+            ):
                 self._check_derivative_manifest(manifest_path, stage=f"predict_derivative_{model}", fail_on_samples_failed=not diagnostic_only)
                 mark(f"predict_derivative_{model}", {"status": "skipped_existing", "manifest": str(manifest_path)})
                 continue

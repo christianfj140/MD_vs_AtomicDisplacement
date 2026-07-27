@@ -27,7 +27,7 @@
     "atoms": ["0"],
     "axes": ["x", "y", "z"],
     "delta_ang": [0.005, 0.01],
-    "reference_workers": 16,
+    "reference_workers": 12,
     "skip_if_exists": true,
     "diagnostic_only": false,
     "require_central": true,

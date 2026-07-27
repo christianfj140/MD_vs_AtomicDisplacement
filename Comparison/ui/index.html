@@ -1818,6 +1818,34 @@
             <div id="ct-mae-chart" class="plot-card full"></div>
           </section>
 
+          <section class="panel derivative-mae-dataset-size-section">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">6 · MAE de derivadas vs tamaño de dataset</p>
+                <h3>Una curva por (target, modelo)</h3>
+                <p class="field-help">Usa exclusivamente los resultados de derivadas de campañas de Cross testing.</p>
+              </div>
+            </div>
+            <div class="button-row">
+              <button id="ct-derivative-metrics-real" class="button secondary" type="button">Cargar métricas</button>
+            </div>
+            <div class="g2m-deeph-run-selector" aria-label="Cross-testing derivative MAE series selector">
+              <div class="run-selector-heading">
+                <div>
+                  <strong>Curvas a plotear</strong>
+                  <p class="field-help">Marca las series disponibles para el MAE de dH/dR.</p>
+                </div>
+                <div class="run-selector-actions">
+                  <button id="ct-derivative-mae-series-all" class="button ghost small" type="button">All</button>
+                  <button id="ct-derivative-mae-series-clear" class="button ghost small" type="button">Clear</button>
+                </div>
+              </div>
+              <div id="ct-derivative-mae-series-status" class="muted-text">Derivative MAE series not loaded yet.</div>
+              <div id="ct-derivative-mae-series-list" class="plot-run-list"></div>
+            </div>
+            <div id="ct-derivative-mae-dataset-chart" class="plot-card full"></div>
+          </section>
+
           <section class="panel" aria-labelledby="ct-vacancy-heading">
             <div class="panel-heading">
               <div>
@@ -2336,6 +2364,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260708-terminal-tab"></script>
+    <script src="/app.js?v=20260724-cross-derivative-metrics"></script>
   </body>
 </html>

@@ -558,6 +558,15 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--workers") + 1], "2")
             self.assertEqual(summary["stages"]["run_derivative_siesta_reference"]["reference_workers"], 2)
 
+    def test_failed_derivative_manifest_is_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text(json.dumps({"samples_failed": 1}) + "\n", encoding="utf-8")
+            runner = Graph2MatDeepHBenchmarkRunner()
+
+            self.assertFalse(runner._can_skip_derivative_manifest(path, fail_on_samples_failed=True))
+            self.assertTrue(runner._can_skip_derivative_manifest(path, fail_on_samples_failed=False))
+
     def test_derivative_siesta_reference_command_uses_performance_worker_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -183,6 +183,30 @@ class HamiltonianDerivativeStencilBuilderTests(unittest.TestCase):
         self.assertEqual(discoveries[0].stencil.base_structure_path.parent.name, base["sample_id"])
         self.assertEqual(validate_derivative_geometry(discoveries[0]), [])
 
+    def test_stencil_run_fdfs_are_single_point_even_when_base_has_md(self) -> None:
+        # Regression: MD settings inherited from the dataset fdf made SIESTA evolve
+        # the geometry before writing TSHS, invalidating the FD reference.
+        (self.sample_dir / "RUN.fdf").write_text(
+            synthetic_base_fdf() + "MD.TypeOfRun Verlet\nMD.Steps 20\nLua.Script md_store.lua\n",
+            encoding="utf-8",
+        )
+        manifest = build_derivative_stencils(
+            source_dataset_root=self.dataset_root,
+            output_stencil_root=self.root / "stencils_md",
+            split="test",
+            method="central",
+            delta_ang_values=[0.1],
+            atom_indices_zero_based=[1],
+            axes=["y"],
+        )
+
+        self.assertEqual(manifest["sample_count"], 3)
+        for record in manifest["samples"]:
+            text = Path(record["run_fdf"]).read_text(encoding="utf-8")
+            self.assertNotIn("Verlet", text)
+            self.assertNotIn("Lua.Script", text)
+            self.assertIn("MD.NumCGsteps", text)
+
     def test_adaptive_min_fraction_selects_expected_base_counts(self) -> None:
         cases = [(10, 10), (20, 20), (30, 20), (80, 20), (110, 22)]
 

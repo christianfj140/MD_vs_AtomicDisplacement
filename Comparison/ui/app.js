@@ -672,6 +672,9 @@ const state = {
   g2mDeephDerivativeRunIds: [],
   g2mDeephDerivativeDatasetSizeAxis: "n_train",
   g2mDeephDerivativeMaeSeriesIds: null,
+  mixingDerivativePayload: null,
+  crossTestingDerivativePayload: null,
+  crossTestingDerivativeMaeSeriesIds: null,
   datasetMinimumPayload: null,
   datasetMinimumRunRootSelection: null,
   datasetMinimumThresholdPresetKey: "h_mae_relaxed_10",
@@ -680,6 +683,7 @@ const state = {
   datasetMinimumViewRequestId: 0,
   g2mDeephPlotsInFlight: false,
   g2mDeephLastPlotRefreshAt: 0,
+  g2mDeephLastDerivativeRefreshAt: 0,
   g2mDeephLastCompletedPlotSignature: null,
   g2mDeephDatasets: [],
   g2mDeephDatasetsLoaded: false,
@@ -3301,21 +3305,40 @@ function g2mDeephDerivativeMaeSeries(plot = {}) {
   return Array.from(byId.values()).sort((left, right) => left.label.localeCompare(right.label));
 }
 
-function renderG2MDeepHDerivativeMaeSeriesSelector(plot) {
-  const status = document.getElementById("g2m-deeph-derivative-mae-series-status");
-  const list = document.getElementById("g2m-deeph-derivative-mae-series-list");
+function g2mDeephDerivativeMaeScope(scope) {
+  return scope === "cross-testing"
+    ? {
+        chartId: "ct-derivative-mae-dataset-chart",
+        listId: "ct-derivative-mae-series-list",
+        payloadKey: "crossTestingDerivativePayload",
+        selectionKey: "crossTestingDerivativeMaeSeriesIds",
+        statusId: "ct-derivative-mae-series-status",
+      }
+    : {
+        chartId: "g2m-deeph-derivative-mae-dataset-chart",
+        listId: "g2m-deeph-derivative-mae-series-list",
+        payloadKey: "mixingDerivativePayload",
+        selectionKey: "g2mDeephDerivativeMaeSeriesIds",
+        statusId: "g2m-deeph-derivative-mae-series-status",
+      };
+}
+
+function renderG2MDeepHDerivativeMaeSeriesSelector(plot, scope = "mixing") {
+  const config = g2mDeephDerivativeMaeScope(scope);
+  const status = document.getElementById(config.statusId);
+  const list = document.getElementById(config.listId);
   if (!status || !list) return;
   const series = plot ? g2mDeephDerivativeMaeSeries(plot) : [];
   list.textContent = "";
   if (!series.length) {
     status.textContent = "No derivative MAE dataset-size series available yet.";
-    state.g2mDeephDerivativeMaeSeriesIds = null;
+    state[config.selectionKey] = null;
     return;
   }
   const visibleIds = new Set(series.map((item) => item.id));
-  let selected = state.g2mDeephDerivativeMaeSeriesIds;
+  let selected = state[config.selectionKey];
   selected = selected == null ? series.map((item) => item.id) : selected.filter((id) => visibleIds.has(id));
-  state.g2mDeephDerivativeMaeSeriesIds = selected;
+  state[config.selectionKey] = selected;
   status.textContent = `${selected.length}/${series.length} curve(s) selected.`;
   for (const item of series) {
     const option = document.createElement("label");
@@ -3326,11 +3349,11 @@ function renderG2MDeepHDerivativeMaeSeriesSelector(plot) {
     checkbox.value = item.id;
     checkbox.checked = selected.includes(item.id);
     checkbox.addEventListener("change", () => {
-      const next = new Set(state.g2mDeephDerivativeMaeSeriesIds || []);
+      const next = new Set(state[config.selectionKey] || []);
       if (checkbox.checked) next.add(item.id);
       else next.delete(item.id);
-      state.g2mDeephDerivativeMaeSeriesIds = Array.from(next);
-      renderG2MDeepHDerivativeMaeDatasetPlot(state.g2mDeephDerivativePayload || {});
+      state[config.selectionKey] = Array.from(next);
+      renderG2MDeepHDerivativeMaeDatasetPlot(state[config.payloadKey] || {}, scope);
     });
     const body = document.createElement("span");
     const title = document.createElement("strong");
@@ -3343,25 +3366,28 @@ function renderG2MDeepHDerivativeMaeSeriesSelector(plot) {
   }
 }
 
-function setG2MDeepHDerivativeMaeSeriesSelection(selected) {
-  const plot = g2mDeephDerivativeMaePlot(state.g2mDeephDerivativePayload || {});
+function setG2MDeepHDerivativeMaeSeriesSelection(selected, scope = "mixing") {
+  const config = g2mDeephDerivativeMaeScope(scope);
+  const payload = state[config.payloadKey] || {};
+  const plot = g2mDeephDerivativeMaePlot(payload);
   const ids = g2mDeephDerivativeMaeSeries(plot || {}).map((item) => item.id);
-  state.g2mDeephDerivativeMaeSeriesIds = selected ? ids : [];
-  renderG2MDeepHDerivativeMaeDatasetPlot(state.g2mDeephDerivativePayload || {});
+  state[config.selectionKey] = selected ? ids : [];
+  renderG2MDeepHDerivativeMaeDatasetPlot(payload, scope);
 }
 
-function renderG2MDeepHDerivativeMaeDatasetPlot(payload = {}) {
-  const host = document.getElementById("g2m-deeph-derivative-mae-dataset-chart");
+function renderG2MDeepHDerivativeMaeDatasetPlot(payload = {}, scope = "mixing") {
+  const config = g2mDeephDerivativeMaeScope(scope);
+  const host = document.getElementById(config.chartId);
   if (!host) return;
   const plot = g2mDeephDerivativeMaePlot(payload);
-  renderG2MDeepHDerivativeMaeSeriesSelector(plot);
+  renderG2MDeepHDerivativeMaeSeriesSelector(plot, scope);
   if (!payload.available || !plot || !(plot.rows || []).length) {
     host.textContent = payload.not_computed
       ? (payload.message || G2M_DEEPH_DERIVATIVE_OPTIONAL_POSTPROCESSING)
       : "No derivative MAE vs dataset size data available yet.";
     return;
   }
-  const selected = new Set(state.g2mDeephDerivativeMaeSeriesIds || []);
+  const selected = new Set(state[config.selectionKey] || []);
   const rows = (plot.rows || [])
     .map((row) => ({
       ...row,
@@ -3399,7 +3425,6 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
   container.textContent = "";
   const plotPayload = payload.plot_payload || {};
   if (!payload.available || !plotPayload.available || !(plotPayload.plots || []).length) {
-    renderG2MDeepHDerivativeMaeDatasetPlot(payload);
     const placeholder = document.createElement("div");
     placeholder.className = "plot-card full placeholder-card";
     placeholder.textContent = payload.not_computed
@@ -3408,7 +3433,6 @@ function renderG2MDeepHDerivativePlotsPayload(payload = {}) {
     container.appendChild(placeholder);
     return;
   }
-  renderG2MDeepHDerivativeMaeDatasetPlot(payload);
   renderG2MDeepHDerivativeDatasetSizeAxisControl(container, plotPayload);
   const datasetSizeNotice = g2mDeephDerivativeDatasetSizeNotice(plotPayload);
   if (datasetSizeNotice) {
@@ -3671,6 +3695,32 @@ async function loadG2MDeepHDerivativeMetrics({ runId = null } = {}) {
   state.g2mDeephDerivativePayload = payload;
   renderG2MDeepHDerivativeRunSelector();
   renderG2MDeepHDerivativePayload(payload);
+  return payload;
+}
+
+function g2mDeephDerivativeCampaign(run = {}) {
+  const marker = "/ui_real_metrics_derivatives/";
+  const path = String(run.run_root || "").replaceAll("\\", "/");
+  const campaign = path.includes(marker) ? path.split(marker, 2)[1].split("/", 1)[0] : "";
+  if (campaign === "mixing") return "mixing";
+  return campaign.startsWith("cross") ? "cross-testing" : null;
+}
+
+async function loadG2MDeepHDerivativeMaeCampaign(scope) {
+  if (!state.g2mDeephPlotRuns?.length) {
+    await loadG2MDeepHPlotRuns({ preserveSelection: true });
+  }
+  const config = g2mDeephDerivativeMaeScope(scope);
+  const run = (state.g2mDeephPlotRuns || []).find((item) => g2mDeephDerivativeCampaign(item) === scope);
+  const payload = run
+    ? await request(`/api/g2m-deeph/derivative-metrics?run_id=${encodeURIComponent(run.run_id || run.id)}`)
+    : {
+        available: false,
+        not_computed: true,
+        message: `No hay resultados de derivadas de ${scope === "mixing" ? "Mixing datasets" : "Cross testing"} todavía.`,
+      };
+  state[config.payloadKey] = payload;
+  renderG2MDeepHDerivativeMaeDatasetPlot(payload, scope);
   return payload;
 }
 
@@ -6535,6 +6585,18 @@ async function pollG2MDeepHLogs() {
     await loadG2MDeepHDerivativeMetrics();
   } else if (payload.status?.running) {
     await maybeRefreshG2MDeepHLivePlots(payload.status);
+  } else if (Date.now() - state.g2mDeephLastDerivativeRefreshAt >= 60_000) {
+    const scope = document.getElementById("view-mixing-datasets")?.classList.contains("active")
+      ? "mixing"
+      : document.getElementById("view-cross-testing")?.classList.contains("active")
+        ? "cross-testing"
+        : null;
+    const genericViewActive = document.getElementById("view-g2m-deeph")?.classList.contains("active");
+    if (!scope && !genericViewActive) return;
+    state.g2mDeephLastDerivativeRefreshAt = Date.now();
+    await loadG2MDeepHPlotRuns({ preserveSelection: true });
+    if (scope) await loadG2MDeepHDerivativeMaeCampaign(scope);
+    else await loadG2MDeepHDerivativeMetrics();
   }
 }
 
@@ -14379,6 +14441,11 @@ function setupCrossTesting() {
   mvsBind("ct-preview", "click", ctPreview);
   mvsBind("ct-materialize", "click", ctMaterialize);
   mvsBind("ct-train", "click", ctTrain);
+  mvsBind("ct-derivative-metrics-real", "click", async () => {
+    await loadG2MDeepHPlotRuns({ preserveSelection: true });
+    const payload = await loadG2MDeepHDerivativeMaeCampaign("cross-testing");
+    showToast(payload.available ? "Métricas de derivadas cargadas" : payload.message);
+  });
   mvsBind("ct-vacancy-preview", "click", ctVacancyPreview);
   mvsBind("ct-vacancy-evaluate", "click", ctVacancyEvaluate);
   mvsBind("ct-vacancy-metrics", "click", ctVacancyLoadMetrics);
@@ -14490,7 +14557,7 @@ function setupTabs() {
           mixRefreshAvailablePayloads({ silent: true }).catch((error) => showToast(error.message));
         }
         loadG2MDeepHPlotRuns({ preserveSelection: true })
-          .then(() => loadG2MDeepHDerivativeMetrics())
+          .then(() => loadG2MDeepHDerivativeMaeCampaign("mixing"))
           .catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "cross-testing") {
         if (!ctDiscoverLoaded) {
@@ -14498,6 +14565,9 @@ function setupTabs() {
         } else {
           ctRefreshAvailablePayloads({ silent: true }).catch((error) => showToast(error.message));
         }
+        loadG2MDeepHPlotRuns({ preserveSelection: true })
+          .then(() => loadG2MDeepHDerivativeMaeCampaign("cross-testing"))
+          .catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "terminal") {
         renderTerminalView();
         Promise.all([pollMixingE2ELogs(), pollMixingTerminalStatus()])
@@ -14704,6 +14774,12 @@ function setupEvents() {
   });
   document.getElementById("g2m-deeph-derivative-mae-series-clear")?.addEventListener("click", () => {
     setG2MDeepHDerivativeMaeSeriesSelection(false);
+  });
+  document.getElementById("ct-derivative-mae-series-all")?.addEventListener("click", () => {
+    setG2MDeepHDerivativeMaeSeriesSelection(true, "cross-testing");
+  });
+  document.getElementById("ct-derivative-mae-series-clear")?.addEventListener("click", () => {
+    setG2MDeepHDerivativeMaeSeriesSelection(false, "cross-testing");
   });
   document.getElementById("g2m-deeph-dataset-minimum-refresh")?.addEventListener("click", () => {
     loadDatasetMinimum()

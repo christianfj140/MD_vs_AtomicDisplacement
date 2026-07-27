@@ -344,6 +344,9 @@ def write_structure_sample(
         system_label=sample_id,
         system_name=sample_id,
         structure_type=base_structure.structure_type,
+        # Stencil references must be single-point SCF: an inherited MD block
+        # makes SIESTA evolve the geometry away from the +-delta displacement.
+        single_point=True,
     )
     payload = {**materialized.metadata, **metadata}
     payload["support_files_copied"] = copied_support_files

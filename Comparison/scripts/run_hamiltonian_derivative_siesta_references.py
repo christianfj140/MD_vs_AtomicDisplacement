@@ -20,6 +20,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+if str(REPO_ROOT / "shared") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "shared"))
 
 from reference_selection import choose_reference_matrix, file_sha256  # noqa: E402
 
@@ -259,6 +261,85 @@ def sample_row(
     }
 
 
+GEOMETRY_MATCH_TOLERANCE_ANG = 1e-4
+CELL_MATCH_TOLERANCE_ANG = 1e-3
+
+
+def geometry_mismatch_message(
+    fdf_xyz: Any,
+    matrix_xyz: Any,
+    *,
+    fdf_cell: Any | None = None,
+    matrix_cell: Any | None = None,
+    tolerance_ang: float = GEOMETRY_MATCH_TOLERANCE_ANG,
+) -> str:
+    """Compare stencil RUN.fdf positions against the geometry stored in the output matrix.
+
+    Returns "" when they match. A derivative stencil reference must be a
+    single-point SCF at exactly the +-delta displaced positions; if the fdf
+    leaked MD settings, SIESTA evolves the structure and the stored TSHS
+    geometry drifts, silently invalidating the finite-difference reference.
+    Deviations are compared minimum-image (when a cell is available) so
+    periodically wrapped but equivalent positions do not false-positive.
+    """
+    import numpy as np
+
+    fdf = np.asarray(fdf_xyz, dtype=float)
+    matrix = np.asarray(matrix_xyz, dtype=float)
+    if fdf.shape != matrix.shape:
+        return f"reference_geometry_mismatch: fdf atoms {fdf.shape} vs matrix atoms {matrix.shape}"
+    if fdf_cell is not None and matrix_cell is not None:
+        cell_dev = float(np.abs(np.asarray(fdf_cell, dtype=float) - np.asarray(matrix_cell, dtype=float)).max())
+        if cell_dev > CELL_MATCH_TOLERANCE_ANG:
+            return f"reference_geometry_mismatch: lattice vectors differ by {cell_dev:.6f} Ang"
+    delta = fdf - matrix
+    cell_for_wrap = matrix_cell if matrix_cell is not None else fdf_cell
+    if cell_for_wrap is not None and delta.size:
+        cell = np.asarray(cell_for_wrap, dtype=float)
+        fractional = delta @ np.linalg.inv(cell)
+        fractional -= np.round(fractional)
+        delta = fractional @ cell
+    max_dev = float(np.abs(delta).max()) if delta.size else 0.0
+    if max_dev > tolerance_ang:
+        return (
+            f"reference_geometry_mismatch: max |fdf - matrix| = {max_dev:.6f} Ang > {tolerance_ang:g} "
+            "(reference is not a single-point run at the stencil geometry; MD likely evolved it)"
+        )
+    return ""
+
+
+def reference_output_geometry_error(
+    reference_dir: Path,
+    matrix_path: Path | None,
+    *,
+    fdf_path: Path | None = None,
+) -> str:
+    """Fail-closed check that the reference matrix geometry matches the stencil RUN.fdf.
+
+    ``fdf_path`` overrides the fdf to compare against (the skip path passes the
+    CURRENT stencil fdf from structures/, not the copy stored alongside a
+    possibly stale reference). Read failures fail closed: an unreadable matrix
+    or fdf cannot be certified as a valid single-point reference.
+    """
+    if matrix_path is None:
+        return ""
+    try:
+        import sisl
+
+        from fdf_materialization import extract_fdf_structure
+
+        structure = extract_fdf_structure(Path(fdf_path) if fdf_path is not None else reference_dir / "RUN.fdf")
+        geometry = sisl.get_sile(str(matrix_path)).read_geometry()
+    except Exception as exc:
+        return f"reference_geometry_check_failed: {exc}"
+    return geometry_mismatch_message(
+        structure.positions_ang,
+        geometry.xyz,
+        fdf_cell=structure.lattice_vectors_ang,
+        matrix_cell=geometry.lattice.cell,
+    )
+
+
 def _process_siesta_reference_sample(
     *,
     structure_dir: Path,
@@ -286,6 +367,21 @@ def _process_siesta_reference_sample(
             )
         existing_selection = choose_reference_matrix(reference_dir)
         if existing_selection.ok and skip_if_exists and not overwrite:
+            # Compare against the CURRENT stencil fdf, not the copy stored next
+            # to the existing reference (which may be internally consistent but stale).
+            geometry_error = reference_output_geometry_error(
+                reference_dir, existing_selection.path, fdf_path=structure_dir / "RUN.fdf"
+            )
+            if geometry_error:
+                return sample_row(
+                    sample_id=sample_id,
+                    status="error",
+                    structure_dir=structure_dir,
+                    reference_dir=reference_dir,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    error=f"existing_{geometry_error}",
+                )
             return sample_row(
                 sample_id=sample_id,
                 status="skipped_existing",
@@ -298,6 +394,18 @@ def _process_siesta_reference_sample(
         copy_structure_inputs(structure_dir, reference_dir)
         staged = copy_existing_reference(sample_id, reference_dir, existing_reference_root)
         if staged is not None:
+            staged_selection = choose_reference_matrix(reference_dir)
+            geometry_error = reference_output_geometry_error(reference_dir, staged_selection.path)
+            if geometry_error:
+                return sample_row(
+                    sample_id=sample_id,
+                    status="error",
+                    structure_dir=structure_dir,
+                    reference_dir=reference_dir,
+                    started_at=started_at,
+                    finished_at=time.time(),
+                    error=f"staged_{geometry_error}",
+                )
             return sample_row(
                 sample_id=sample_id,
                 status="staged",
@@ -320,6 +428,10 @@ def _process_siesta_reference_sample(
         selection = choose_reference_matrix(reference_dir)
         status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
         error = "" if status == "ok" else selection.reason if run_record["returncode"] == 0 else "siesta_returncode_nonzero"
+        if status == "ok":
+            geometry_error = reference_output_geometry_error(reference_dir, selection.path)
+            if geometry_error:
+                status, error = "error", geometry_error
         return sample_row(
             sample_id=sample_id,
             status=status,

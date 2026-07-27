@@ -79,7 +79,7 @@ class Graph2MatDeepHUITests(unittest.TestCase):
 
     def test_mixing_datasets_accessibility_controls_exist(self) -> None:
         mixing_html = self.index_html.split('<section id="view-mixing-datasets" class="view">', 1)[1].split(
-            '<section id="view-terminal" class="view">',
+            '<section id="view-cross-testing" class="view">',
             1,
         )[0]
         for control_id in (
@@ -109,6 +109,23 @@ class Graph2MatDeepHUITests(unittest.TestCase):
         ):
             self.assertIn(token, self.app_js)
         self.assertIn(".mix-payload-log", self.styles_css)
+
+    def test_cross_testing_has_its_own_derivative_mae_section(self) -> None:
+        mixing_html, cross_html = self.index_html.split('<section id="view-cross-testing" class="view">', 1)
+        for control_id in (
+            "ct-derivative-metrics-real",
+            "ct-derivative-mae-series-status",
+            "ct-derivative-mae-series-list",
+            "ct-derivative-mae-series-all",
+            "ct-derivative-mae-series-clear",
+            "ct-derivative-mae-dataset-chart",
+        ):
+            self.assertNotIn(f'id="{control_id}"', mixing_html)
+            self.assertIn(f'id="{control_id}"', cross_html)
+        self.assertIn('loadG2MDeepHDerivativeMaeCampaign("mixing")', self.app_js)
+        self.assertIn('loadG2MDeepHDerivativeMaeCampaign("cross-testing")', self.app_js)
+        self.assertIn('campaign === "mixing"', self.app_js)
+        self.assertIn('campaign.startsWith("cross")', self.app_js)
 
     def test_mixing_dataset_plot_displays_mae_in_mev(self) -> None:
         self.assertIn("MIXING_MAE_EV_TO_MEV = 1000", self.app_js)
