@@ -7,6 +7,7 @@ import os
 import csv
 import copy
 import json
+import math
 import platform
 import shutil
 import subprocess
@@ -14,6 +15,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata as importlib_metadata
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+COMPARISON_SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
+if str(COMPARISON_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(COMPARISON_SCRIPTS_DIR))
 
 from md_pipeline_config import (
     command,
@@ -36,6 +42,7 @@ from joint_artifact_contract import (
     validate_dataset,
 )
 from benchmark_manifest import extract_siesta_version_from_text, write_benchmark_manifests
+from g2m_deeph_dataset_size_minimum import diagnose_dataset_temporal_metadata
 
 BOHR_TO_ANG = 0.529177210903
 JOINT_GRAPH2MAT_DEEPH_STORE_FILES = "*fdf *TSHS *TSDE *XV *HSX *STRUCT_OUT *ORB_INDX *out"
@@ -1338,6 +1345,86 @@ def write_split_summary(
     )
 
 
+def build_md_temporal_evidence(config: dict, diagnostics: dict) -> dict:
+    protocol = dict((config.get("md") or {}).get("scientific_protocol") or {})
+    equilibration = dict(protocol.get("equilibration") or {})
+    production = dict(protocol.get("production") or {})
+    stability = dict(protocol.get("stability") or {})
+    sampling = dict(protocol.get("temporal_sampling") or {})
+    blockers: list[str] = []
+    equilibration_steps = int(equilibration.get("steps") or 0)
+    discarded_steps = int(equilibration.get("discarded_steps") or 0)
+    execution = dict(diagnostics.get("phase_execution") or {})
+    equilibration_execution = dict(execution.get("equilibration") or {})
+    production_execution = dict(execution.get("production") or {})
+    if equilibration_steps <= 0:
+        blockers.append("equilibration_not_executed")
+    if discarded_steps < equilibration_steps:
+        blockers.append("equilibration_not_fully_discarded")
+    if int(equilibration_execution.get("executed_steps") or 0) < equilibration_steps:
+        blockers.append("equilibration_execution_evidence_incomplete")
+    if int(equilibration_execution.get("discarded_steps") or 0) < discarded_steps:
+        blockers.append("equilibration_discard_evidence_incomplete")
+    if equilibration_execution.get("siesta_status") != "valid":
+        blockers.append("equilibration_siesta_execution_not_valid")
+    production_steps = int(production.get("steps") or 0)
+    if production_steps <= 0:
+        blockers.append("production_steps_not_declared")
+    if int(production_execution.get("executed_steps") or 0) < production_steps:
+        blockers.append("production_execution_evidence_incomplete")
+    if production_execution.get("siesta_status") != "valid":
+        blockers.append("production_siesta_execution_not_valid")
+    if diagnostics.get("stability_checks_passed") is not True:
+        blockers.append("equilibrium_stability_not_demonstrated")
+    if not stability.get("observables"):
+        blockers.append("stability_observables_not_declared")
+    if stability.get("max_relative_energy_drift_per_ps") is None:
+        blockers.append("energy_drift_threshold_not_declared")
+    if diagnostics.get("autocorrelation_available") is not True:
+        blockers.append("autocorrelation_unavailable")
+    if diagnostics.get("estimated_n_eff_train") is None:
+        blockers.append("n_eff_unavailable")
+    if diagnostics.get("blocked_split") is not True:
+        blockers.append("split_not_blocked_by_time")
+
+    tau_values = [
+        float(row["statistical_inefficiency"])
+        for row in ((diagnostics.get("autocorrelation") or {}).get("by_block") or {}).values()
+        if row.get("statistical_inefficiency") is not None
+    ]
+    gap_factor = float(sampling.get("gap_factor") or 0.0)
+    derived_gap = math.ceil(max(tau_values) * gap_factor) if tau_values and gap_factor > 0 else None
+    actual_gap = diagnostics.get("temporal_gap")
+    if derived_gap is None:
+        blockers.append("temporal_gap_not_derivable_from_acf")
+    elif actual_gap is None or int(actual_gap) < derived_gap:
+        blockers.append("temporal_gap_below_predeclared_acf_rule")
+
+    paper_ready = str(protocol.get("claim_mode") or "diagnostic") == "paper_candidate" and not blockers
+    return {
+        "schema": "md_temporal_scientific_evidence_v1",
+        "paper_ready": paper_ready,
+        "scientific_status": "paper_ready" if paper_ready else "insufficient_temporal_evidence",
+        "protocol": protocol,
+        "phase_execution": execution,
+        "initial_temperature_semantics": "velocity_initialization_only_not_equilibrium_evidence",
+        "derived_minimum_gap_frames": derived_gap,
+        "actual_temporal_gap_frames": actual_gap,
+        "blockers": sorted(set(blockers)),
+        "diagnostics": diagnostics,
+    }
+
+
+def write_md_temporal_evidence(config: dict) -> dict:
+    dataset_dir = paths(config)["dataset_dir"]
+    evidence = build_md_temporal_evidence(
+        config,
+        diagnose_dataset_temporal_metadata(dataset_dir),
+    )
+    write_json(dataset_dir / "md_temporal_diagnostics.json", evidence)
+    return evidence
+
+
 def prepare_dataset_splits(config: dict) -> None:
     split_config = config.get("splits", {})
     if not bool(split_config.get("enabled", False)):
@@ -1424,6 +1511,7 @@ def prepare_dataset_splits(config: dict) -> None:
         temporal_gap=temporal_gap,
         warnings=warnings,
     )
+    temporal_evidence = write_md_temporal_evidence(config)
     print(
         "[OK] Split MD preparado: "
         f"{train_count} train, {test_count} test, {validation_count} validation "
@@ -1436,10 +1524,13 @@ def prepare_dataset_splits(config: dict) -> None:
             split_root=split_root,
             generation_mode="clean_one_pass",
             strict_paper_ready_provenance=True,
+            scientific_gate=temporal_evidence,
+            raise_on_invalid=False,
         )
         print(
-            "[OK] Benchmark dataset congelado: "
-            f"{dataset_manifest['benchmark_dataset_id']} split_hash={frozen_split['split_hash']}"
+            "[OK] Dataset manifest escrito: "
+            f"{dataset_manifest['benchmark_dataset_id']} split_hash={frozen_split['split_hash']} "
+            f"benchmark_ready={dataset_manifest['benchmark_ready']}"
         )
     else:
         print(

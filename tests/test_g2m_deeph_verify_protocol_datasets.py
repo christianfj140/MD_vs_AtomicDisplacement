@@ -41,7 +41,10 @@ def write_snapshot(path: Path, *, label: str = "graphene") -> None:
         ),
         encoding="utf-8",
     )
-    (path / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+    (path / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     (path / "metadata.json").write_text(json.dumps({"system_label": label}) + "\n", encoding="utf-8")
     for suffix in (".TSHS", ".TSDE", ".HSX", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
         (path / f"{label}{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
@@ -152,11 +155,15 @@ class Graph2MatDeepHVerifyProtocolDatasetsTests(unittest.TestCase):
 
     def create_dataset(self, *, write_manifests: bool = True) -> list[Path]:
         self.dataset.mkdir(parents=True, exist_ok=True)
-        (self.dataset / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+        (self.dataset / "RUN.out").write_text(
+            "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+            encoding="utf-8",
+        )
         write_json(
             self.dataset / "material_provenance.json",
             {
                 "label": "graphene",
+                "profile": "production",
                 "fdf_sha256": "fdfhash",
                 "basis_file_sha256": {"C.ion.xml": "basis"},
                 "pseudopotential_sha256": {"C": "pseudo"},

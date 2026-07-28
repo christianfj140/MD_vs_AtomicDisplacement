@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from run_hamiltonian_derivative_siesta_references import (  # noqa: E402
     geometry_mismatch_message,
     run_derivative_siesta_references,
 )
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 
 
 def synthetic_base_fdf(*, include_ghost: bool = False) -> str:
@@ -120,6 +122,39 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
     def selected_sample_ids(self, manifest: dict, limit: int) -> list[str]:
         return sorted(record["sample_id"] for record in manifest["samples"])[:limit]
 
+    def write_proven_reference(self, reference_dir: Path, text: bytes = b"existing") -> None:
+        reference_dir.mkdir(parents=True, exist_ok=True)
+        files = {
+            "siesta.TSHS": text,
+            "RUN.fdf": (
+                b"SystemLabel siesta\nNumberOfAtoms 1\nNumberOfSpecies 1\n"
+                b"%block ChemicalSpeciesLabel\n1 6 C\n%endblock ChemicalSpeciesLabel\n"
+                b"%block LatticeVectors\n8 0 0\n0 8 0\n0 0 8\n%endblock LatticeVectors\n"
+                b"%block AtomicCoordinatesAndAtomicSpecies\n0 0 0 1\n"
+                b"%endblock AtomicCoordinatesAndAtomicSpecies\n"
+            ),
+            "RUN.out": b"iscf     Eharris\nSCF cycle converged\nJob completed\n",
+            "siesta.ORB_INDX": b"orb\n",
+        }
+        for name, content in files.items():
+            (reference_dir / name).write_bytes(content)
+        (reference_dir / "siesta_reference_provenance.json").write_text(
+            json.dumps(
+                build_positive_reference_provenance(
+                    reference_dir,
+                    reference_dir / "siesta.TSHS",
+                    frozen_sample_id=reference_dir.name,
+                    split="test",
+                    frozen_split_hash="fixture-split-hash",
+                    basis_hashes={"C.ion.xml": "basis-hash"},
+                    pseudopotential_hashes={"C": "pseudo-hash"},
+                    siesta_version="SIESTA 5.4.2-test",
+                    siesta_command="siesta < RUN.fdf",
+                )
+            ),
+            encoding="utf-8",
+        )
+
     def test_argument_parser_accepts_workers(self) -> None:
         args = build_argument_parser().parse_args(["--stencil-root", str(self.root / "stencils"), "--workers", "2"])
 
@@ -130,8 +165,7 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         self.write_pseudo("C")
         sample_ids = self.selected_sample_ids(manifest, 2)
         reference_dir = stencil_root / "siesta_hamiltonians" / sample_ids[0]
-        reference_dir.mkdir(parents=True)
-        (reference_dir / "siesta.TSHS").write_bytes(b"existing")
+        self.write_proven_reference(reference_dir)
         calls: list[str] = []
 
         def fake_run(command, **kwargs):
@@ -468,8 +502,10 @@ class DerivativeSiestaReferenceStageTests(unittest.TestCase):
         existing_root = self.root / "existing_references"
         for record in manifest["samples"]:
             ref_dir = existing_root / record["sample_id"]
-            ref_dir.mkdir(parents=True)
-            (ref_dir / "siesta.TSHS").write_bytes(f"reference {record['sample_id']}".encode("utf-8"))
+            self.write_proven_reference(
+                ref_dir,
+                f"reference {record['sample_id']}".encode("utf-8"),
+            )
 
         result = run_derivative_siesta_references(
             stencil_root=stencil_root,

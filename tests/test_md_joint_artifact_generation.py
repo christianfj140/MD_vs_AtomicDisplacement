@@ -103,6 +103,85 @@ class MDJointArtifactGenerationTests(unittest.TestCase):
         )
         return config
 
+    def test_default_md_protocol_is_explicitly_not_paper_ready(self) -> None:
+        evidence = self.generate.build_md_temporal_evidence(
+            self.config(),
+            {
+                "autocorrelation_available": False,
+                "estimated_n_eff_train": None,
+                "blocked_split": True,
+                "temporal_gap": 30,
+                "autocorrelation": {"by_block": {}},
+            },
+        )
+
+        self.assertFalse(evidence["paper_ready"])
+        self.assertEqual(evidence["scientific_status"], "insufficient_temporal_evidence")
+        self.assertIn("equilibration_not_executed", evidence["blockers"])
+        self.assertIn("autocorrelation_unavailable", evidence["blockers"])
+
+    def test_complete_predeclared_temporal_protocol_can_pass(self) -> None:
+        config = self.config()
+        protocol = config["md"]["scientific_protocol"]
+        protocol["claim_mode"] = "paper_candidate"
+        protocol["equilibration"]["steps"] = 10
+        protocol["equilibration"]["discarded_steps"] = 10
+        protocol["stability"]["max_relative_energy_drift_per_ps"] = 0.01
+        evidence = self.generate.build_md_temporal_evidence(
+            config,
+            {
+                "autocorrelation_available": True,
+                "estimated_n_eff_train": 20.0,
+                "blocked_split": True,
+                "temporal_gap": 4,
+                "stability_checks_passed": True,
+                "phase_execution": {
+                    "equilibration": {
+                        "executed_steps": 10,
+                        "discarded_steps": 10,
+                        "siesta_status": "valid",
+                    },
+                    "production": {
+                        "executed_steps": 70,
+                        "siesta_status": "valid",
+                    },
+                },
+                "autocorrelation": {
+                    "by_block": {
+                        "trajectory_1": {"statistical_inefficiency": 2.0},
+                    }
+                },
+            },
+        )
+
+        self.assertTrue(evidence["paper_ready"])
+        self.assertEqual(evidence["derived_minimum_gap_frames"], 4)
+
+    def test_declared_but_unexecuted_equilibration_cannot_pass(self) -> None:
+        config = self.config()
+        protocol = config["md"]["scientific_protocol"]
+        protocol["claim_mode"] = "paper_candidate"
+        protocol["equilibration"].update({"steps": 10, "discarded_steps": 10})
+        protocol["stability"]["max_relative_energy_drift_per_ps"] = 0.01
+
+        evidence = self.generate.build_md_temporal_evidence(
+            config,
+            {
+                "autocorrelation_available": True,
+                "estimated_n_eff_train": 20.0,
+                "blocked_split": True,
+                "temporal_gap": 4,
+                "stability_checks_passed": True,
+                "autocorrelation": {
+                    "by_block": {"trajectory_1": {"statistical_inefficiency": 2.0}}
+                },
+            },
+        )
+
+        self.assertFalse(evidence["paper_ready"])
+        self.assertIn("equilibration_execution_evidence_incomplete", evidence["blockers"])
+        self.assertIn("production_execution_evidence_incomplete", evidence["blockers"])
+
     def temperature_block_config(self, *, workers: int | None = None, blocks: list[dict] | None = None) -> dict:
         config = self.config()
         config["md"]["temperature_blocks"] = blocks or [

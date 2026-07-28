@@ -20,6 +20,7 @@ RESULTS_ROOT = REPO_ROOT / "Comparison" / "results"
 RESULTS_MD = RESULTS_ROOT / "results_md"
 OUTPUT_ROOT = RESULTS_ROOT / "h2o_md1000_phase6_architecture_benchmark"
 REPORT_PATH = OUTPUT_ROOT / "final_decision_report.md"
+PHASE6_PAYLOAD = REPO_ROOT / "Comparison" / "config" / "h2o_phase6_hamiltonian_architecture_benchmark_payload.json"
 
 BASELINE_RUNS = [
     {
@@ -440,7 +441,7 @@ def report(rows: list[dict[str, Any]], missing: dict[str, Any], run_id: str | No
     commands = [
         "python3 -m py_compile Comparison/scripts/pipeline_ui.py MD/scripts/md_pipeline_config.py MD/scripts/run_md_training.py Comparison/scripts/analyze_md1000_phase6_benchmark.py",
         "git diff --check",
-        "curl -sS -X POST http://127.0.0.1:8770/api/experiment -H 'Content-Type: application/json' --data-binary @Comparison/config/h2o_md1000_phase6_architecture_benchmark_seed0_payload.json",
+        "curl -sS -X POST http://127.0.0.1:8770/api/experiment -H 'Content-Type: application/json' --data-binary @Comparison/config/h2o_phase6_hamiltonian_architecture_benchmark_payload.json",
         f"python3 Comparison/scripts/analyze_md1000_phase6_benchmark.py --run-id {run_id}" if run_id else "python3 Comparison/scripts/analyze_md1000_phase6_benchmark.py",
     ]
     return "\n".join(
@@ -534,6 +535,55 @@ def main() -> int:
         "incomplete_run_dirs": incomplete,
         "run_id_filter": args.run_id,
     }
+    phase6_payload = read_json(PHASE6_PAYLOAD)
+    requested_runs = list(phase6_payload.get("training_plan") or [])
+    requested_seeds = sorted(
+        {
+            int((row.get("training_settings") or {}).get("seed_everything"))
+            for row in requested_runs
+            if (row.get("training_settings") or {}).get("seed_everything") is not None
+        }
+    )
+    reusable_ids = sorted(
+        {
+            str(item)
+            for item in phase6_payload.get("reusable_dataset_ids") or []
+            if str(item)
+        }
+    )
+    campaign_blockers: list[str] = []
+    if len(aggregate) < len(requested_runs):
+        campaign_blockers.append(
+            f"physical_runs_incomplete:{len(aggregate)}/{len(requested_runs)}"
+        )
+    if len(requested_seeds) < 5:
+        campaign_blockers.append(
+            "fewer_than_five_independent_seeds_without_power_justification"
+        )
+    if reusable_ids:
+        campaign_blockers.append(
+            "reusable_dataset_ids_not_resolved_to_current_strict_benchmark_manifests:"
+            + ",".join(reusable_ids)
+        )
+    campaign_status = {
+        "schema": "phase6_campaign_status_v1",
+        "status": "BLOCKED_FAIL_CLOSED" if campaign_blockers else "PASS",
+        "claim_allowed": not campaign_blockers,
+        "payload": str(PHASE6_PAYLOAD),
+        "requested_run_count": len(requested_runs),
+        "completed_metric_run_count": len(aggregate),
+        "configured_seeds": requested_seeds,
+        "minimum_independent_seeds": 5,
+        "reusable_dataset_ids": reusable_ids,
+        "physical_execution_verified": len(aggregate) == len(requested_runs),
+        "paper_level_blockers": campaign_blockers,
+        "resume_requirements": [
+            "generate or identify a strict benchmark_ready H2O dataset with valid SCF and MD temporal evidence",
+            "replace reusable_dataset_ids with its frozen manifest identity",
+            "predeclare at least five independent seeds or a power justification",
+            "execute the payload and rerun this analyzer",
+        ],
+    }
 
     aggregate_fields = [
         "method",
@@ -615,6 +665,10 @@ def main() -> int:
     write_rows(OUTPUT_ROOT / "orbital_pair_worst.csv", orbital_rows, orbital_fields)
     (OUTPUT_ROOT / "missing_and_incomplete.json").write_text(
         json.dumps(missing, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (OUTPUT_ROOT / "phase6_campaign_status.json").write_text(
+        json.dumps(campaign_status, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     REPORT_PATH.write_text(report(aggregate, missing, args.run_id), encoding="utf-8")

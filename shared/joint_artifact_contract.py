@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from siesta_output_status import parse_siesta_output
+
 
 CONTRACT_NAME = "joint_graph2mat_deeph_artifact_contract_v1"
 G2M_DEEPH_BENCHMARK_PROFILE = "g2m_deeph_benchmark"
@@ -46,6 +48,7 @@ class SnapshotValidationResult:
     system_label: str | None = None
     missing_required: list[str] = field(default_factory=list)
     present_artifacts: dict[str, str] = field(default_factory=dict)
+    siesta_run_status: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -256,9 +259,106 @@ def validate_snapshot(
         elif requirement.required:
             result.missing_required.append(requirement.key)
 
+    if require_run_output and "run_output" in result.present_artifacts:
+        result.siesta_run_status = parse_siesta_output(
+            Path(result.present_artifacts["run_output"]),
+            Path(result.present_artifacts["run_fdf"]) if "run_fdf" in result.present_artifacts else None,
+        )
+        if not result.siesta_run_status["valid"]:
+            result.errors.append(
+                "invalid SIESTA execution evidence: "
+                + str(result.siesta_run_status["parser_status"])
+            )
+
     result.valid = not result.errors and not result.missing_required
     result.repair_required = not result.valid
     return result
+
+
+def validate_recorded_snapshots(
+    artifact_validation: dict[str, Any],
+    *,
+    base_dir: Path,
+    cache: dict[Path, SnapshotValidationResult] | None = None,
+) -> tuple[list[SnapshotValidationResult], list[str]]:
+    """Revalidate snapshot paths recorded in a manifest instead of trusting it."""
+
+    results: list[SnapshotValidationResult] = []
+    errors: list[str] = []
+    seen: set[Path] = set()
+    snapshots = artifact_validation.get("snapshots")
+    if not isinstance(snapshots, list) or not snapshots:
+        return results, ["artifact validation contains no snapshot records"]
+    for index, snapshot in enumerate(snapshots):
+        if not isinstance(snapshot, dict) or not snapshot.get("snapshot_dir"):
+            errors.append(f"snapshots[{index}] has no snapshot_dir")
+            continue
+        path = Path(str(snapshot["snapshot_dir"]))
+        if not path.is_absolute():
+            cwd_path = Path.cwd() / path
+            path = cwd_path if cwd_path.exists() else Path(base_dir) / path
+        path = path.resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        result = cache.get(path) if cache is not None else None
+        if result is None:
+            result = validate_snapshot(path)
+            if cache is not None:
+                cache[path] = result
+        results.append(result)
+        if not result.valid:
+            errors.append(
+                f"{path}: "
+                + "; ".join(result.missing_required + result.errors)
+            )
+    return results, errors
+
+
+def md_temporal_evidence_errors(dataset_root: Path) -> list[str]:
+    """Return publication blockers for MD datasets; non-MD datasets are N/A."""
+
+    dataset_root = Path(dataset_root)
+    if not (dataset_root / "MD_steps").exists():
+        return []
+    path = dataset_root / "md_temporal_diagnostics.json"
+    if not path.exists():
+        return ["MD dataset has no md_temporal_diagnostics.json"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"invalid md_temporal_diagnostics.json: {exc}"]
+    if not isinstance(payload, dict):
+        return ["md_temporal_diagnostics.json root is not an object"]
+    if payload.get("paper_ready") is True and not payload.get("blockers"):
+        return []
+    blockers = [str(item) for item in payload.get("blockers") or []]
+    return blockers or ["MD temporal evidence is not paper_ready"]
+
+
+def material_profile_errors(
+    dataset_root: Path,
+    benchmark_manifest: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return publication blockers for missing or non-production profiles."""
+
+    dataset_root = Path(dataset_root)
+    manifest = benchmark_manifest or {}
+    material = manifest.get("material_source")
+    if not isinstance(material, dict) or not material:
+        payloads = _json_objects([dataset_root / "material_provenance.json"])
+        material = payloads[0] if payloads else {}
+    profile = str(
+        manifest.get("material_profile")
+        or material.get("profile")
+        or ""
+    ).strip().lower()
+    if profile == "production":
+        return []
+    return [
+        "material profile is not publication eligible: "
+        f"{profile or 'missing'}"
+    ]
 
 
 def discover_snapshot_dirs(dataset_root: Path) -> list[Path]:

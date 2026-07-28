@@ -9,7 +9,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from joint_artifact_contract import CONTRACT_NAME, validate_snapshot
+from electronic_convergence import convergence_status
+from joint_artifact_contract import CONTRACT_NAME, validate_recorded_snapshots, validate_snapshot
+from reference_provenance import build_positive_reference_provenance
 
 
 MANIFEST_SCHEMA = "joint_graph2mat_deeph_benchmark_manifest_v1"
@@ -217,12 +219,50 @@ def build_frozen_split_manifest(dataset_root: Path, split_root: Path) -> dict[st
     }
 
 
-def _dataset_sample_rows_from_validation(artifact_validation: dict[str, Any]) -> list[dict[str, Any]]:
+def _dataset_sample_rows_from_validation(
+    artifact_validation: dict[str, Any],
+    *,
+    material: dict[str, Any],
+    frozen_split_manifest: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    frozen_rows = [
+        row
+        for row in (frozen_split_manifest or {}).get("rows") or []
+        if isinstance(row, dict)
+    ]
     for snapshot in artifact_validation.get("snapshots") or []:
         if not isinstance(snapshot, dict):
             continue
         artifacts = dict(snapshot.get("present_artifacts") or {})
+        hashes = _artifact_hashes(artifacts)
+        reference_key = "tshs" if artifacts.get("tshs") else "hsx" if artifacts.get("hsx") else ""
+        run_status = snapshot.get("siesta_run_status") if isinstance(snapshot.get("siesta_run_status"), dict) else {}
+        snapshot_dir = Path(str(snapshot.get("snapshot_dir") or ""))
+        frozen = next(
+            (
+                row
+                for row in frozen_rows
+                if Path(str(row.get("sample_dir") or "")).name == snapshot_dir.name
+            ),
+            {},
+        )
+        reference_path = Path(str(artifacts.get(reference_key) or ""))
+        reference_provenance = (
+            build_positive_reference_provenance(
+                snapshot_dir,
+                reference_path,
+                frozen_sample_id=str(frozen.get("sample_id") or ""),
+                split=str(frozen.get("split") or ""),
+                frozen_split_hash=str((frozen_split_manifest or {}).get("split_hash") or ""),
+                basis_hashes=material.get("basis_file_sha256") or {},
+                pseudopotential_hashes=material.get("pseudopotential_sha256") or {},
+                siesta_version=str(material.get("siesta_version") or ""),
+                siesta_command=material.get("siesta_command_line") or "",
+            )
+            if reference_key
+            else {"status": "invalid"}
+        )
         rows.append(
             {
                 "sample_dir": snapshot.get("snapshot_dir"),
@@ -233,7 +273,8 @@ def _dataset_sample_rows_from_validation(artifact_validation: dict[str, Any]) ->
                 "errors": list(snapshot.get("errors") or []),
                 "warnings": list(snapshot.get("warnings") or []),
                 "artifact_paths": artifacts,
-                "artifact_sha256": _artifact_hashes(artifacts),
+                "artifact_sha256": hashes,
+                "reference_provenance": reference_provenance,
             }
         )
     return sorted(rows, key=lambda row: str(row.get("sample_dir") or ""))
@@ -435,15 +476,33 @@ def build_benchmark_dataset_manifest(
     material_provenance: dict[str, Any] | None = None,
     generation_mode: str = "clean_one_pass",
     strict_paper_ready_provenance: bool = False,
+    scientific_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dataset_root = Path(dataset_root)
     material = material_provenance or {}
-    samples = _dataset_sample_rows_from_validation(artifact_validation)
+    material_profile = str(material.get("profile") or "").strip().lower()
+    electronic_convergence = convergence_status(
+        dataset_root,
+        material_label=str(material.get("label") or "") or None,
+    )
+    live_results, live_errors = validate_recorded_snapshots(
+        artifact_validation,
+        base_dir=dataset_root,
+    )
+    live_validation = {
+        "snapshots": [result.to_dict() for result in live_results],
+    }
+    samples = _dataset_sample_rows_from_validation(
+        live_validation,
+        material=material,
+        frozen_split_manifest=frozen_split_manifest,
+    )
     labels = sorted(
         {str(row.get("system_label")) for row in samples if row.get("system_label")}
     )
     system_label = labels[0] if len(labels) == 1 else None
     warnings = list(artifact_validation.get("warnings") or [])
+    warnings.extend(f"live artifact revalidation failed: {error}" for error in live_errors)
     if len(labels) > 1:
         warnings.append(f"ambiguous dataset SystemLabel values: {labels}")
 
@@ -455,6 +514,11 @@ def build_benchmark_dataset_manifest(
     )
     for missing_key in provenance["missing"]:
         warnings.append(f"missing dataset-level {missing_key}")
+    if material_profile != "production":
+        warnings.append(
+            "material profile is not publication eligible: "
+            f"{material_profile or 'missing'}"
+        )
     split_hash = (frozen_split_manifest or {}).get("split_hash")
     identity_payload = {
         "artifact_contract_version": CONTRACT_NAME,
@@ -472,11 +536,16 @@ def build_benchmark_dataset_manifest(
     benchmark_dataset_id = f"joint_graph2mat_deeph_{canonical_sha256(identity_payload)[:16]}"
     valid = (
         bool(artifact_validation.get("valid"))
+        and bool(samples)
+        and not live_errors
         and not any(not row.get("valid") for row in samples)
         and bool(provenance["valid"])
+        and material_profile == "production"
     )
     if frozen_split_manifest is not None:
         valid = valid and bool(frozen_split_manifest.get("valid"))
+    if scientific_gate is not None:
+        valid = valid and scientific_gate.get("paper_ready") is True
     return {
         "schema": MANIFEST_SCHEMA,
         "benchmark_dataset_id": benchmark_dataset_id,
@@ -487,7 +556,9 @@ def build_benchmark_dataset_manifest(
         "benchmark_ready": valid,
         "warnings": warnings,
         "material_label": material.get("label"),
+        "material_profile": material_profile or "missing",
         "material_source": material,
+        "electronic_convergence": electronic_convergence,
         "system_label": system_label,
         "siesta_input_path": str(run_fdf_path) if run_fdf_path.exists() else "",
         "siesta_input_sha256": file_sha256(run_fdf_path) if run_fdf_path.exists() else "",
@@ -508,6 +579,12 @@ def build_benchmark_dataset_manifest(
         "pseudopotential_hashes": material.get("pseudopotential_sha256") or {},
         "provenance_status": provenance,
         "artifact_validation": artifact_validation,
+        "live_artifact_validation": {
+            "valid": bool(samples) and not live_errors,
+            "errors": live_errors,
+            "snapshots": [result.to_dict() for result in live_results],
+        },
+        "scientific_gate": scientific_gate or {},
         "samples": samples,
         "frozen_split_manifest": {
             "path": str(dataset_root / "frozen_split_manifest.json"),
@@ -526,6 +603,8 @@ def write_benchmark_manifests(
     artifact_validation_path: Path | None = None,
     material_provenance_path: Path | None = None,
     strict_paper_ready_provenance: bool = False,
+    scientific_gate: dict[str, Any] | None = None,
+    raise_on_invalid: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     dataset_root = Path(dataset_root)
     artifact_validation = read_json(artifact_validation_path or dataset_root / "artifact_validation.json")
@@ -538,10 +617,11 @@ def write_benchmark_manifests(
         material_provenance=material_provenance,
         generation_mode=generation_mode,
         strict_paper_ready_provenance=strict_paper_ready_provenance,
+        scientific_gate=scientific_gate,
     )
     write_json(dataset_root / "frozen_split_manifest.json", frozen_split)
     write_json(dataset_root / "benchmark_dataset_manifest.json", dataset_manifest)
-    if not dataset_manifest["benchmark_ready"]:
+    if raise_on_invalid and not dataset_manifest["benchmark_ready"]:
         raise RuntimeError(
             "Benchmark dataset manifest is not valid; refusing to freeze dataset for training. "
             f"See {dataset_root / 'benchmark_dataset_manifest.json'}"

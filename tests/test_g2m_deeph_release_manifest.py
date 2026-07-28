@@ -12,10 +12,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+for directory in (SCRIPTS_DIR, REPO_ROOT / "shared"):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 from g2m_deeph_release_manifest import build_release_manifest, main  # noqa: E402
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -42,6 +44,7 @@ class ReleaseManifestTests(unittest.TestCase):
         self.dataset_root.mkdir(parents=True)
         self.run_root.mkdir(parents=True)
         self.workflow_root.mkdir(parents=True)
+        self.run_inventory = {"schema": "run_inventory_v1", "reproducibility_status": "pinned_clean"}
         self.sample_hsx = self.dataset_root / "MD_steps" / "0" / "graphene.HSX"
         self._write_dataset()
         self._write_run()
@@ -63,9 +66,15 @@ class ReleaseManifestTests(unittest.TestCase):
             "orb_indx": sample_dir / "graphene.ORB_INDX",
         }
         contents = {
-            "RUN.fdf": "SystemLabel graphene\nSave.HS T\n",
-            "RUN.out": "Job completed\n",
-            "metadata.json": '{"sample_id": "md_0"}\n',
+            "RUN.fdf": (
+                "SystemLabel graphene\nNumberOfAtoms 1\nNumberOfSpecies 1\n"
+                "%block ChemicalSpeciesLabel\n1 6 C\n%endblock ChemicalSpeciesLabel\n"
+                "%block LatticeVectors\n8 0 0\n0 8 0\n0 0 8\n%endblock LatticeVectors\n"
+                "%block AtomicCoordinatesAndAtomicSpecies\n0 0 0 1\n"
+                "%endblock AtomicCoordinatesAndAtomicSpecies\nSave.HS T\n"
+            ),
+            "RUN.out": "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+            "metadata.json": '{"sample_id": "md_0", "system_label": "graphene"}\n',
             "graphene.HSX": "hsx\n",
             "graphene.TSHS": "tshs\n",
             "graphene.TSDE": "tsde\n",
@@ -75,15 +84,42 @@ class ReleaseManifestTests(unittest.TestCase):
         }
         for name, text in contents.items():
             write_text(sample_dir / name, text)
+        write_json(
+            sample_dir / "siesta_reference_provenance.json",
+            build_positive_reference_provenance(
+                sample_dir,
+                sample_dir / "graphene.TSHS",
+                frozen_sample_id=f"md_{sample_dir.name}",
+                split="test",
+                frozen_split_hash="split-a",
+                basis_hashes={"C.ion.xml": "basis-hash"},
+                pseudopotential_hashes={"C": "pseudo-hash"},
+                siesta_version="SIESTA 5.4.2-test",
+                siesta_command="siesta < RUN.fdf",
+            ),
+        )
         return {key: str(path) for key, path in files.items()}
 
     def _write_dataset(self) -> None:
-        write_json(self.dataset_root / "material_provenance.json", {"label": "graphene"})
-        write_json(self.dataset_root / "artifact_validation.json", {"valid": True, "snapshots": []})
+        write_json(
+            self.dataset_root / "material_provenance.json",
+            {"label": "graphene", "profile": "production"},
+        )
         rows = []
+        snapshots = []
         for index, split in enumerate(("train", "validation", "test")):
             sample_dir = self.dataset_root / "MD_steps" / str(index)
             artifacts = self._snapshot_artifacts(sample_dir)
+            snapshots.append(
+                {
+                    "snapshot_dir": str(sample_dir),
+                    "valid": True,
+                    "present_artifacts": {
+                        key.removeprefix("reference_"): value
+                        for key, value in artifacts.items()
+                    },
+                }
+            )
             rows.append(
                 {
                     "sample_id": f"md_{index}",
@@ -91,6 +127,10 @@ class ReleaseManifestTests(unittest.TestCase):
                     "artifact_paths": artifacts,
                 }
             )
+        write_json(
+            self.dataset_root / "artifact_validation.json",
+            {"valid": True, "snapshots": snapshots},
+        )
         write_json(
             self.dataset_root / "frozen_split_manifest.json",
             {
@@ -109,8 +149,13 @@ class ReleaseManifestTests(unittest.TestCase):
                 "benchmark_dataset_id": "unit_dataset",
                 "artifact_contract_version": "joint_graph2mat_deeph_v1",
                 "benchmark_ready": True,
+                "material_profile": "production",
                 "frozen_split_manifest": {"split_hash": "split123"},
             },
+        )
+        write_json(
+            self.dataset_root / "md_temporal_diagnostics.json",
+            {"paper_ready": True, "blockers": []},
         )
 
     def _write_run(self) -> None:
@@ -145,6 +190,7 @@ class ReleaseManifestTests(unittest.TestCase):
             run_root=self.run_root,
             workflow_root=self.workflow_root,
             strict=True,
+            run_inventory=self.run_inventory,
         )
 
         self.assertEqual(manifest["status"], "complete")
@@ -165,12 +211,13 @@ class ReleaseManifestTests(unittest.TestCase):
             run_root=self.run_root,
             workflow_root=self.workflow_root,
             strict=True,
+            run_inventory=self.run_inventory,
         )
 
         self.assertEqual(manifest["status"], "invalid")
         self.assertTrue(any("siesta_reference_hsx" in item for item in manifest["missing_required"]))
 
-    def test_non_strict_missing_required_file_is_partial(self) -> None:
+    def test_non_strict_missing_scientific_artifact_is_invalid(self) -> None:
         self.sample_hsx.unlink()
 
         manifest = build_release_manifest(
@@ -178,10 +225,12 @@ class ReleaseManifestTests(unittest.TestCase):
             run_root=self.run_root,
             workflow_root=self.workflow_root,
             strict=False,
+            run_inventory=self.run_inventory,
         )
 
-        self.assertEqual(manifest["status"], "partial")
+        self.assertEqual(manifest["status"], "invalid")
         self.assertTrue(manifest["missing_required"])
+        self.assertTrue(manifest["scientific_blockers"])
 
     def test_ml_prediction_as_reference_is_flagged(self) -> None:
         frozen = json.loads((self.dataset_root / "frozen_split_manifest.json").read_text(encoding="utf-8"))
@@ -193,10 +242,41 @@ class ReleaseManifestTests(unittest.TestCase):
             run_root=self.run_root,
             workflow_root=self.workflow_root,
             strict=False,
+            run_inventory=self.run_inventory,
         )
 
         self.assertEqual(manifest["status"], "invalid")
         self.assertTrue(manifest["forbidden_reference_findings"])
+
+    def test_truncated_siesta_output_blocks_release_even_when_manifest_says_ready(self) -> None:
+        write_text(self.dataset_root / "MD_steps" / "1" / "RUN.out", "startup only\n")
+
+        manifest = build_release_manifest(
+            dataset_root=self.dataset_root,
+            run_root=self.run_root,
+            workflow_root=self.workflow_root,
+            strict=True,
+            run_inventory=self.run_inventory,
+        )
+
+        self.assertEqual(manifest["status"], "invalid")
+        self.assertTrue(manifest["scientific_blockers"])
+
+    def test_missing_md_temporal_evidence_blocks_release(self) -> None:
+        (self.dataset_root / "md_temporal_diagnostics.json").unlink()
+
+        manifest = build_release_manifest(
+            dataset_root=self.dataset_root,
+            run_root=self.run_root,
+            workflow_root=self.workflow_root,
+            strict=True,
+            run_inventory=self.run_inventory,
+        )
+
+        self.assertEqual(manifest["status"], "invalid")
+        self.assertTrue(
+            any("md_temporal_diagnostics" in item for item in manifest["scientific_blockers"])
+        )
 
     def test_paths_are_relative_when_under_allowed_roots(self) -> None:
         manifest = build_release_manifest(
@@ -204,11 +284,24 @@ class ReleaseManifestTests(unittest.TestCase):
             run_root=self.run_root,
             workflow_root=self.workflow_root,
             strict=True,
+            run_inventory=self.run_inventory,
         )
 
         relative_paths = [row["relative_path"] for row in manifest["files"]]
         self.assertIn("artifact_validation.json", relative_paths)
         self.assertFalse(any(path.startswith("/") for path in relative_paths))
+
+    def test_dirty_repositories_block_release(self) -> None:
+        manifest = build_release_manifest(
+            dataset_root=self.dataset_root,
+            run_root=self.run_root,
+            workflow_root=self.workflow_root,
+            strict=True,
+            run_inventory={"schema": "run_inventory_v1", "reproducibility_status": "pinned_dirty"},
+        )
+
+        self.assertEqual(manifest["status"], "invalid")
+        self.assertTrue(any("pinned_dirty" in item for item in manifest["scientific_blockers"]))
 
     def test_symlink_outside_allowed_roots_is_not_hashed(self) -> None:
         outside = self.root / "outside_artifacts" / "graphene.HSX"
@@ -221,6 +314,7 @@ class ReleaseManifestTests(unittest.TestCase):
             run_root=self.run_root,
             workflow_root=self.workflow_root,
             strict=True,
+            run_inventory=self.run_inventory,
         )
 
         hsx_rows = [row for row in manifest["files"] if row["role"] == "siesta_reference_hsx"]
@@ -230,6 +324,8 @@ class ReleaseManifestTests(unittest.TestCase):
 
     def test_cli_writes_manifest(self) -> None:
         output = self.root / "release_manifest.json"
+        inventory = self.root / "run_inventory.json"
+        write_json(inventory, self.run_inventory)
 
         with redirect_stdout(io.StringIO()):
             exit_code = main(
@@ -242,6 +338,8 @@ class ReleaseManifestTests(unittest.TestCase):
                     str(self.workflow_root),
                     "--output",
                     str(output),
+                    "--run-inventory",
+                    str(inventory),
                     "--strict",
                 ]
             )

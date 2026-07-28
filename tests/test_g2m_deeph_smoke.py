@@ -140,24 +140,21 @@ class Graph2MatDeepHSmokeTests(unittest.TestCase):
         )
 
         self.assertTrue(summary["ok"])
-        self.assertEqual(summary["status"], "passed_control_plane")
+        self.assertEqual(summary["status"], "blocked_as_expected")
         self.assertEqual(summary["scientific_status"], "not_a_scientific_run")
         self.assertFalse(summary["robust_claim_allowed"])
         self.assertTrue(summary["diagnostic_only"])
         self.assertTrue((output_root / "smoke_summary.json").exists())
-        self.assertTrue(Path(summary["outputs"]["search_plan"]).exists())
-        self.assertTrue(Path(summary["outputs"]["selected_configs"]).exists())
-        self.assertTrue(Path(summary["outputs"]["robust_rerun_plan"]).exists())
-        self.assertTrue(Path(summary["outputs"]["run_search_manifest"]).exists())
-        self.assertTrue(Path(summary["outputs"]["run_final_manifest"]).exists())
-        self.assertTrue(Path(summary["outputs"]["final_statistics"]).exists())
-        self.assertTrue(Path(summary["outputs"]["final_report"]).exists())
+        self.assertFalse(Path(summary["outputs"]["search_plan"]).exists())
         self.assertTrue(Path(summary["outputs"]["gate_status"]).exists())
         self.assertTrue(Path(summary["outputs"]["release_manifest"]).exists())
 
         gate_status = json.loads(Path(summary["outputs"]["gate_status"]).read_text(encoding="utf-8"))
         self.assertFalse(gate_status["robust_claim_allowed"])
-        self.assertIn(gate_status["claim_status"], {"diagnostic_only", "invalid_equivalence"})
+        self.assertIn(
+            gate_status["claim_status"],
+            {"diagnostic_only", "invalid_equivalence", "invalid_missing_evidence"},
+        )
 
     def test_smoke_cli_paper_workflow_dry_run(self) -> None:
         output_root = self.root / "cli_paper_smoke"

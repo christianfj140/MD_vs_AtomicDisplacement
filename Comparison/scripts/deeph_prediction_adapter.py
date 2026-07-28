@@ -51,6 +51,8 @@ RAW_GLOBAL_EQUIVALENCE_REQUIRED_CHECKS = (
     "hk",
     "s_ref",
     "eigenvalues",
+    "overlap_conditioning",
+    "generalized_residuals",
 )
 
 
@@ -272,6 +274,55 @@ def validate_raw_global_equivalence_evidence(
             ),
             "payload": payload,
         }
+    diagnostics = payload.get("kpoint_diagnostics")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return {
+            "status": EQUIVALENCE_STATUS_FAILED,
+            "reason": (
+                f"{EQUIVALENCE_INVALID_EVIDENCE}: missing per-k-point overlap "
+                "conditioning/generalized residual diagnostics."
+            ),
+            "payload": payload,
+        }
+    for index, row in enumerate(diagnostics):
+        if not isinstance(row, dict):
+            return {
+                "status": EQUIVALENCE_STATUS_FAILED,
+                "reason": f"{EQUIVALENCE_INVALID_EVIDENCE}: kpoint_diagnostics[{index}] is invalid.",
+                "payload": payload,
+            }
+        for side in ("raw_reference", "deeph_processed"):
+            item = row.get(side)
+            required = (
+                "h_hermiticity_relative",
+                "s_hermiticity_relative",
+                "s_eigenvalue_min",
+                "s_eigenvalue_max",
+                "s_condition_number",
+                "s_positive_definite",
+                "max_normalized_residual",
+                "max_s_normalization_error",
+                "valid",
+                "regularization",
+            )
+            if not isinstance(item, dict) or any(key not in item for key in required):
+                return {
+                    "status": EQUIVALENCE_STATUS_FAILED,
+                    "reason": (
+                        f"{EQUIVALENCE_INVALID_EVIDENCE}: incomplete "
+                        f"kpoint_diagnostics[{index}].{side}."
+                    ),
+                    "payload": payload,
+                }
+            if item.get("valid") is not True or item.get("s_positive_definite") is not True:
+                return {
+                    "status": EQUIVALENCE_STATUS_FAILED,
+                    "reason": (
+                        f"{EQUIVALENCE_INVALID_EVIDENCE}: invalid generalized "
+                        f"eigenproblem at k-point {index} ({side})."
+                    ),
+                    "payload": payload,
+                }
     errors = payload.get("errors") or {}
     tolerances = payload.get("tolerances") or {}
     if isinstance(errors, dict) and isinstance(tolerances, dict):

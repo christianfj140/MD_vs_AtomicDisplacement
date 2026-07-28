@@ -779,10 +779,19 @@ def stage_run_final_test(args: argparse.Namespace) -> dict[str, Any]:
         "schema": WORKFLOW_SCHEMA,
         "stage": "run-final-test",
         "status": "completed",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "source_final_run_root": str(source_root),
         "final_test_run_root": str(output_root),
         "robust_rerun_plan": str(robust_plan_path),
         "final_test_row_count": len(normalized_rows),
+        "evaluated_runs": [
+            {
+                "model": row.get("model"),
+                "config_id": row.get("config_id"),
+                "metric_split": "test",
+            }
+            for row in normalized_rows
+        ],
     }
     write_json(output_root / "run_final_test_manifest.json", manifest)
     return stage_manifest(

@@ -10,8 +10,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHARED_DIR = REPO_ROOT / "shared"
+SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 from benchmark_manifest import (  # noqa: E402
     build_benchmark_dataset_manifest,
@@ -19,6 +22,7 @@ from benchmark_manifest import (  # noqa: E402
     write_benchmark_manifests,
 )
 from joint_artifact_contract import CONTRACT_NAME, validate_dataset  # noqa: E402
+from reference_selection import choose_reference_matrix  # noqa: E402
 
 
 def write_snapshot(path: Path, *, label: str = "graphene", hsx_text: str = "hsx\n") -> None:
@@ -27,6 +31,19 @@ def write_snapshot(path: Path, *, label: str = "graphene", hsx_text: str = "hsx\
         "\n".join(
             [
                 f"SystemLabel {label}",
+                "NumberOfAtoms 1",
+                "NumberOfSpecies 1",
+                "%block ChemicalSpeciesLabel",
+                "1 6 C",
+                "%endblock ChemicalSpeciesLabel",
+                "%block LatticeVectors",
+                "8 0 0",
+                "0 8 0",
+                "0 0 8",
+                "%endblock LatticeVectors",
+                "%block AtomicCoordinatesAndAtomicSpecies",
+                "0 0 0 1",
+                "%endblock AtomicCoordinatesAndAtomicSpecies",
                 "SaveHS true",
                 "Save.HS T",
                 "TS.HS.Save T",
@@ -74,6 +91,7 @@ class BenchmarkManifestTests(unittest.TestCase):
             json.dumps(
                 {
                     "label": "graphene",
+                    "profile": "production",
                     "fdf": "materials/graphene/RUN.fdf",
                     "fdf_sha256": "fdfhash",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
@@ -144,6 +162,7 @@ class BenchmarkManifestTests(unittest.TestCase):
 
         self.assertEqual(dataset_manifest["artifact_contract_version"], CONTRACT_NAME)
         self.assertEqual(dataset_manifest["material_label"], "graphene")
+        self.assertEqual(dataset_manifest["material_profile"], "production")
         self.assertEqual(dataset_manifest["system_label"], "graphene")
         self.assertEqual(dataset_manifest["generation_mode"], "clean_one_pass")
         self.assertEqual(dataset_manifest["validation_status"], "valid")
@@ -157,7 +176,35 @@ class BenchmarkManifestTests(unittest.TestCase):
         self.assertEqual(dataset_manifest["pseudopotential_hashes"], {"C": "pseudo"})
         self.assertTrue(dataset_manifest["provenance_status"]["valid"])
         self.assertEqual(len(dataset_manifest["samples"]), 3)
+        self.assertEqual(
+            dataset_manifest["samples"][0]["reference_provenance"]["status"],
+            "positive_siesta_provenance_valid",
+        )
+        selection = choose_reference_matrix(self.steps / "0")
+        self.assertTrue(selection.ok)
+        self.assertEqual(
+            selection.provenance_manifest,
+            str(self.dataset / "benchmark_dataset_manifest.json"),
+        )
         self.assertEqual(frozen_split["split_counts"], {"train": 1, "validation": 1, "test": 1})
+
+    def test_smoke_material_cannot_be_benchmark_ready(self) -> None:
+        artifact_validation = self.prepare_dataset()
+        frozen_split = build_frozen_split_manifest(self.dataset, self.split_root)
+        material = json.loads(
+            (self.dataset / "material_provenance.json").read_text(encoding="utf-8")
+        )
+        material["profile"] = "smoke"
+
+        manifest = build_benchmark_dataset_manifest(
+            self.dataset,
+            artifact_validation=artifact_validation,
+            frozen_split_manifest=frozen_split,
+            material_provenance=material,
+        )
+
+        self.assertFalse(manifest["benchmark_ready"])
+        self.assertEqual(manifest["material_profile"], "smoke")
 
     def test_split_hash_is_deterministic(self) -> None:
         self.prepare_dataset()

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import random
 import re
@@ -30,6 +31,39 @@ from pipeline_config_utils import render_single_point_fdf
 
 
 FC_STEPS_DIR_NAME = "FC_steps"
+
+
+def canonical_sha256(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
+def geometry_sha256(reference: Structure, positions_ang: list[list[float]]) -> str:
+    return canonical_sha256(
+        {
+            "lattice_vectors_ang": reference.lattice_vectors_ang,
+            "atom_species": reference.atom_species,
+            "species_labels": reference.species_labels,
+            "positions_ang": positions_ang,
+        }
+    )
+
+
+def subsampling_semantics(method: str, seed: int) -> dict[str, Any]:
+    random_method = method.lower() == "random"
+    return {
+        "method": method,
+        "seed": seed,
+        "seed_effective": random_method,
+        "seed_role": (
+            "algorithmic_subsampling"
+            if random_method
+            else "recorded_but_ineffective_for_deterministic_subsampling"
+        ),
+        "independent_replica_claim_allowed": False,
+        "experimental_unit": "fc_geometry_family",
+    }
 
 
 @dataclass(frozen=True)
@@ -366,6 +400,10 @@ def normalize_multi_fc_steps(args: argparse.Namespace, manifest: dict[str, Any])
                 "requested_structures": requested,
                 "available_structures": len(all_steps),
                 "selected_indices": [step.index for step in selected_steps],
+                "selected_geometry_sha256": [
+                    geometry_sha256(reference, step.positions_ang)
+                    for step in selected_steps
+                ],
             }
         )
 
@@ -406,12 +444,13 @@ def normalize_multi_fc_steps(args: argparse.Namespace, manifest: dict[str, Any])
                 "displacement_ang": step.displacement_ang,
                 "displacement_input": step.displacement_input,
                 "positions_ang": step.positions_ang,
+                "geometry_sha256": geometry_sha256(reference, step.positions_ang),
                 "matrix_file": str(copied_matrix) if copied_matrix else None,
                 "pseudopotentials": pseudos,
-                "subsampling": {
-                    "method": method,
-                    "seed": seed + int(run.get("index", 0)),
-                },
+                "subsampling": subsampling_semantics(
+                    method,
+                    seed + int(run.get("index", 0)),
+                ),
                 "geometry_metrics": compute_water_geometry_metrics(
                     Structure(
                         lattice_vectors_ang=reference.lattice_vectors_ang,
@@ -438,7 +477,7 @@ def normalize_multi_fc_steps(args: argparse.Namespace, manifest: dict[str, Any])
         "generation_mode": "siesta_fc_multi_normalized_steps",
         "output_dir": output_dir_repr,
         "include_reference": include_reference,
-        "subsampling": {"method": method, "seed": seed},
+        "subsampling": subsampling_semantics(method, seed),
         "displacements": displacement_summaries,
         "generated_steps": len(rows),
         "basis_files": basis_count,

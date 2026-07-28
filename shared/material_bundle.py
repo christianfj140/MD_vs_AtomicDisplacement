@@ -18,6 +18,7 @@ from typing import Any
 PSEUDOPOTENTIAL_EXTENSIONS = (".psf", ".psml")
 BASIS_EXTENSIONS = (".ion.xml", ".ion")
 LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+MATERIAL_PROFILES = {"production", "smoke", "diagnostic"}
 
 
 class MaterialBundleError(RuntimeError):
@@ -45,6 +46,7 @@ class MaterialBundle:
     pseudopotential_dir: Path
     basis_dir: Path | None = None
     structure_type: str | None = None
+    profile: str = "production"
     source_paths_absolute: bool = False
 
 
@@ -61,6 +63,7 @@ class ValidatedMaterialBundle:
     def to_manifest_dict(self) -> dict[str, Any]:
         return {
             "label": self.bundle.label,
+            "profile": self.bundle.profile,
             "structure_type": self.bundle.structure_type,
             "fdf": str(self.bundle.fdf),
             "fdf_sha256": self.fdf_sha256,
@@ -123,6 +126,15 @@ def _validate_label(label: Any) -> str:
     return text
 
 
+def _validate_profile(profile: Any) -> str:
+    value = str(profile or "production").strip().lower()
+    if value not in MATERIAL_PROFILES:
+        raise MaterialBundleError(
+            "material.profile must be one of: diagnostic, production, smoke."
+        )
+    return value
+
+
 def material_bundle_from_config(
     config: dict[str, Any],
     *,
@@ -167,12 +179,14 @@ def material_bundle_from_config(
 
     structure_type = raw_material.get("structure_type")
     structure_type = str(structure_type).strip() if structure_type not in (None, "") else None
+    profile = _validate_profile(raw_material.get("profile"))
     return MaterialBundle(
         label=label,
         fdf=fdf,
         pseudopotential_dir=pseudo_dir,
         basis_dir=basis_dir,
         structure_type=structure_type,
+        profile=profile,
         source_paths_absolute=source_paths_absolute,
     )
 
@@ -311,6 +325,15 @@ def validate_material_bundle(bundle: MaterialBundle) -> ValidatedMaterialBundle:
         )
     if bundle.basis_dir is not None and not bundle.basis_dir.is_dir():
         raise MaterialBundleError(f"Material basis directory does not exist: {bundle.basis_dir}")
+    lower_name = bundle.fdf.name.lower()
+    if ".smoke." in lower_name and bundle.profile != "smoke":
+        raise MaterialBundleError(
+            f"Smoke FDF {bundle.fdf} requires material.profile: smoke."
+        )
+    if ".diagnostic." in lower_name and bundle.profile != "diagnostic":
+        raise MaterialBundleError(
+            f"Diagnostic FDF {bundle.fdf} requires material.profile: diagnostic."
+        )
 
     species = extract_chemical_species(bundle.fdf)
     validate_fdf_species_consistency(bundle.fdf, species)

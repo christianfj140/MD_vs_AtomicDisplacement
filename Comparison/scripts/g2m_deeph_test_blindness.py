@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,96 @@ FINAL_TEST_STAGE = "final_test"
 EXPLORATORY_STAGE = "exploratory"
 VALIDATION_SPLITS = {"validation", "val"}
 TEST_SPLITS = {"test"}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def checkpoint_selection_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Normalize and validate checkpoint selection evidence without using test data."""
+
+    checkpoint = record.get("checkpoint_manifest")
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    early = record.get("early_stopping")
+    early = early if isinstance(early, dict) else {}
+    path_text = str(
+        checkpoint.get("checkpoint_path")
+        or checkpoint.get("path")
+        or checkpoint.get("source_checkpoint_path")
+        or ""
+    )
+    path = Path(path_text) if path_text else None
+    if path is not None and not path.is_absolute():
+        base = Path(str(checkpoint.get("training_dir") or record.get("run_root") or "."))
+        path = base / path
+    expected_hash = str(checkpoint.get("checkpoint_sha256") or checkpoint.get("sha256") or "")
+    actual_hash = _file_sha256(path) if path is not None and path.is_file() else ""
+    metric = str(
+        checkpoint.get("selection_metric")
+        or early.get("selection_metric")
+        or early.get("validation_metric_name")
+        or early.get("metric")
+        or ""
+    )
+    split = str(
+        checkpoint.get("selection_split")
+        or checkpoint.get("metric_split")
+        or record.get("checkpoint_selection_split")
+        or ("validation" if metric.lower().startswith("val") else "")
+    ).lower()
+    epoch = checkpoint.get("epoch")
+    if epoch is None:
+        epoch = checkpoint.get("best_epoch", early.get("best_epoch"))
+    timestamp = str(checkpoint.get("created_at") or checkpoint.get("timestamp") or "")
+    if not timestamp and path is not None and path.is_file():
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(path.stat().st_mtime))
+    configuration = str(
+        record.get("config_hash")
+        or checkpoint.get("config_hash")
+        or checkpoint.get("graph2mat_config_sha256")
+        or ""
+    )
+    reason = str(checkpoint.get("selection_reason") or checkpoint.get("selection") or "")
+    blockers: list[str] = []
+    if split not in VALIDATION_SPLITS:
+        blockers.append(
+            "checkpoint_selected_by_test"
+            if split in TEST_SPLITS
+            else "checkpoint_selection_split_missing_or_not_validation"
+        )
+    for key, value in (
+        ("checkpoint_path", path_text),
+        ("checkpoint_hash", expected_hash),
+        ("checkpoint_epoch", epoch),
+        ("checkpoint_metric", metric),
+        ("checkpoint_timestamp", timestamp),
+        ("checkpoint_configuration", configuration),
+        ("checkpoint_selection_reason", reason),
+    ):
+        if value in (None, ""):
+            blockers.append(f"missing_{key}")
+    if expected_hash and actual_hash and expected_hash != actual_hash:
+        blockers.append("checkpoint_hash_mismatch")
+    if path_text and not actual_hash:
+        blockers.append("checkpoint_file_missing")
+    return {
+        "status": "valid" if not blockers else "invalid",
+        "checkpoint": path_text,
+        "epoch": epoch,
+        "metric": metric,
+        "split": split,
+        "timestamp": timestamp,
+        "sha256": expected_hash,
+        "actual_sha256": actual_hash,
+        "configuration": configuration,
+        "selection_reason": reason,
+        "paper_level_blockers": blockers,
+    }
 
 
 def _parse_bool(value: Any, default: bool = False) -> bool:

@@ -410,6 +410,16 @@ def build_derivative_stencils(
     structures_root = output_stencil_root / "structures"
     structures_root.mkdir(parents=True, exist_ok=True)
 
+    effective_frozen_split = frozen_split
+    if effective_frozen_split is None:
+        candidate = source_dataset_root / "frozen_split_manifest.json"
+        effective_frozen_split = candidate if candidate.exists() else None
+    frozen_split_payload = (
+        read_json(effective_frozen_split)
+        if effective_frozen_split is not None
+        else {}
+    )
+    frozen_split_hash = str(frozen_split_payload.get("split_hash") or "")
     rows = load_base_rows(source_dataset_root=source_dataset_root, frozen_split=frozen_split, split=split)
     rows, base_selection = selected_base_rows(
         rows,
@@ -482,6 +492,8 @@ def build_derivative_stencils(
                 "delta_ang": 0.0,
                 "displacement_ang": [0.0, 0.0, 0.0],
                 "split": split,
+                "frozen_split_hash": frozen_split_hash,
+                "frozen_source_sample_id": base_id,
                 "claim_status": "diagnostic_only",
                 "hamiltonian_units": "eV",
                 "displacement_units": "Ang",
@@ -540,6 +552,8 @@ def build_derivative_stencils(
                             "delta_ang": delta_ang,
                             "displacement_ang": displacement,
                             "split": split,
+                            "frozen_split_hash": frozen_split_hash,
+                            "frozen_source_sample_id": base_id,
                             "split_group_id": split_group_id,
                             "claim_status": "diagnostic_only",
                             "hamiltonian_units": "eV",
@@ -576,7 +590,8 @@ def build_derivative_stencils(
     manifest = {
         "schema": "hamiltonian_derivative_stencil_structures_v1",
         "source_dataset_root": str(source_dataset_root),
-        "frozen_split": str(frozen_split) if frozen_split else "",
+        "frozen_split": str(effective_frozen_split) if effective_frozen_split else "",
+        "frozen_split_hash": frozen_split_hash,
         "output_stencil_root": str(output_stencil_root),
         "structures_root": str(structures_root),
         "finite_difference_method": method,

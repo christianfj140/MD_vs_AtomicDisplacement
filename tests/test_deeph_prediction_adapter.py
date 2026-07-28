@@ -230,6 +230,37 @@ class DeepHPredictionAdapterTests(unittest.TestCase):
             "checks": {key: True for key in RAW_GLOBAL_EQUIVALENCE_REQUIRED_CHECKS},
             "errors": {"max_abs_hk_error_eV": 0.0, "max_abs_eigenvalue_error_eV": 0.0},
             "tolerances": {"max_abs_hk_error_eV": 1e-8, "max_abs_eigenvalue_error_eV": 1e-8},
+            "kpoint_diagnostics": [
+                {
+                    "kx": 0.0,
+                    "ky": 0.0,
+                    "kz": 0.0,
+                    "raw_reference": {
+                        "h_hermiticity_relative": 0.0,
+                        "s_hermiticity_relative": 0.0,
+                        "s_eigenvalue_min": 1.0,
+                        "s_eigenvalue_max": 1.0,
+                        "s_condition_number": 1.0,
+                        "s_positive_definite": True,
+                        "max_normalized_residual": 0.0,
+                        "max_s_normalization_error": 0.0,
+                        "regularization": {"applied": False, "method": "none"},
+                        "valid": True,
+                    },
+                    "deeph_processed": {
+                        "h_hermiticity_relative": 0.0,
+                        "s_hermiticity_relative": 0.0,
+                        "s_eigenvalue_min": 1.0,
+                        "s_eigenvalue_max": 1.0,
+                        "s_condition_number": 1.0,
+                        "s_positive_definite": True,
+                        "max_normalized_residual": 0.0,
+                        "max_s_normalization_error": 0.0,
+                        "regularization": {"applied": False, "method": "none"},
+                        "valid": True,
+                    },
+                }
+            ],
         }
         if checks:
             payload["checks"].update(checks)

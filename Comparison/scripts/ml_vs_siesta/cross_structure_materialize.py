@@ -269,6 +269,11 @@ def _write_cross_material_provenance(
     label = f"cross_structure({source.get('label') or source_root.name}->{target.get('label') or target_root.name})"
     payload = {
         "schema": "ml_vs_siesta_cross_structure_material_provenance_v1",
+        "profile": (
+            "production"
+            if source.get("profile") == target.get("profile") == "production"
+            else "diagnostic"
+        ),
         "material_source": "cross_structure_dataset",
         "heterogeneous_material_pool": True,
         "label": label,
@@ -455,6 +460,18 @@ def _artifact_hashes_from_paths(paths: dict[str, str], path_map: dict[str, str])
     return hashes
 
 
+def _replace_path_root(value: Any, old_root: Path, new_root: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: _replace_path_root(item, old_root, new_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_path_root(item, old_root, new_root) for item in value]
+    if isinstance(value, str):
+        old = str(old_root)
+        if value == old or value.startswith(old + "/"):
+            return str(new_root) + value[len(old) :]
+    return value
+
+
 def _write_cross_benchmark_manifests(
     *,
     dataset_root: Path,
@@ -524,14 +541,17 @@ def _write_cross_benchmark_manifests(
         "warnings": warnings,
         "rows": frozen_rows,
     }
+    live_root = split_root.parent
+    live_validation = _replace_path_root(artifact_validation, dataset_root, live_root)
     benchmark = build_benchmark_dataset_manifest(
-        dataset_root,
-        artifact_validation=artifact_validation,
+        live_root,
+        artifact_validation=live_validation,
         frozen_split_manifest=frozen,
         material_provenance=material_provenance,
         generation_mode="cross_structure",
         strict_paper_ready_provenance=False,
     )
+    benchmark = _replace_path_root(benchmark, live_root, dataset_root)
     if not benchmark["benchmark_ready"]:
         raise RuntimeError("Benchmark dataset manifest is not valid; refusing to freeze dataset for training.")
     (split_root.parent / "frozen_split_manifest.json").write_text(

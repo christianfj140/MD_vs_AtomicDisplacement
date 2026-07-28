@@ -74,7 +74,10 @@ class MaterialAgnosticSmokeTests(unittest.TestCase):
         self.assertEqual(case["material"]["atom_count"], 2)
         self.assertEqual([item["label"] for item in case["material"]["species"]], ["Si", "C"])
         self.assertEqual(case["generic_cartesian"]["generated_structures"], 12)
-        self.assertEqual(case["generic_random_cartesian"]["split_strategy"], "grouped_family_round_robin")
+        self.assertEqual(
+            case["generic_random_cartesian"]["split_strategy"],
+            "grouped_family_ratio_greedy_v2",
+        )
         self.assertIn("material_basis/*.ion.xml", case["graph2mat_config"]["basis_files"])
         self.assertEqual(case["graph2mat_config"]["matrix_component_policy"], "h_only")
         self.assertEqual(case["material_provenance"]["material_label"], "sic")

@@ -63,7 +63,10 @@ def fake_numpy_for_split_audit():
 def write_snapshot(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "RUN.fdf").write_text("SystemLabel graphene\n", encoding="utf-8")
-    (path / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+    (path / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     (path / "metadata.json").write_text(json.dumps({"system_label": "graphene"}) + "\n", encoding="utf-8")
     for suffix in (".TSHS", ".TSDE", ".HSX", ".XV"):
         (path / f"graphene{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
@@ -138,11 +141,15 @@ class DeepHRunnerIntegrationTests(unittest.TestCase):
         self.output_root = self.root / "results"
         self.dataset.mkdir(parents=True)
         (self.dataset / "RUN.fdf").write_text("SystemLabel graphene\nSave.HS T\n", encoding="utf-8")
-        (self.dataset / "RUN.out").write_text("Siesta version: test-siesta\nJob completed\n", encoding="utf-8")
+        (self.dataset / "RUN.out").write_text(
+            "Siesta version: test-siesta\niscf     Eharris\nSCF cycle converged\nJob completed\n",
+            encoding="utf-8",
+        )
         (self.dataset / "material_provenance.json").write_text(
             json.dumps(
                 {
                     "label": "graphene",
+                    "profile": "production",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
                     "siesta_version": "test-siesta",

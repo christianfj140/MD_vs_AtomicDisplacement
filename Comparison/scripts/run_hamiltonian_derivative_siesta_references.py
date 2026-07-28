@@ -24,6 +24,9 @@ if str(REPO_ROOT / "shared") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "shared"))
 
 from reference_selection import choose_reference_matrix, file_sha256  # noqa: E402
+from joint_artifact_contract import read_system_label_from_fdf  # noqa: E402
+from siesta_output_status import parse_siesta_output  # noqa: E402
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 
 
 FORBIDDEN_REFERENCE_NAMES = {"ML_prediction.HSX"}
@@ -115,8 +118,22 @@ def copy_existing_reference(sample_id: str, reference_dir: Path, existing_refere
     if not selection.ok or selection.path is None:
         return None
     reference_dir.mkdir(parents=True, exist_ok=True)
+    label = read_system_label_from_fdf(source_dir / "RUN.fdf")
+    names = [
+        selection.path.name,
+        "RUN.fdf",
+        "RUN.out",
+        "metadata.json",
+        f"{label}.XV" if label else "",
+        f"{label}.STRUCT_OUT" if label else "",
+        f"{label}.ORB_INDX" if label else "",
+        "siesta_reference_provenance.json",
+    ]
+    for name in names:
+        source = source_dir / name
+        if name and source.exists():
+            shutil.copy(source, reference_dir / name)
     target = reference_dir / selection.path.name
-    shutil.copy2(selection.path, target)
     return target
 
 
@@ -238,9 +255,65 @@ def sample_row(
     started_at: float | None = None,
     finished_at: float | None = None,
     error: str = "",
+    source_dataset_root: Path | None = None,
 ) -> dict[str, Any]:
-    selection = choose_reference_matrix(reference_dir)
+    selection = choose_reference_matrix(reference_dir, require_positive_provenance=False)
     reference_matrix = selection.path if selection.ok else None
+    label = read_system_label_from_fdf(reference_dir / "RUN.fdf")
+    run_status = parse_siesta_output(reference_dir / "RUN.out", reference_dir / "RUN.fdf")
+    existing_provenance = (
+        read_json(reference_dir / "siesta_reference_provenance.json")
+        if (reference_dir / "siesta_reference_provenance.json").is_file()
+        else {}
+    )
+    metadata = {}
+    if (reference_dir / "metadata.json").is_file():
+        metadata.update(read_json(reference_dir / "metadata.json"))
+    if (structure_dir / "metadata.json").is_file():
+        metadata.update(read_json(structure_dir / "metadata.json"))
+    material = (
+        read_json(source_dataset_root / "material_provenance.json")
+        if source_dataset_root is not None
+        and (source_dataset_root / "material_provenance.json").is_file()
+        else {}
+    )
+    provenance = (
+        build_positive_reference_provenance(
+            reference_dir,
+            reference_matrix,
+            frozen_sample_id=str(
+                metadata.get("frozen_source_sample_id")
+                or metadata.get("source_base_sample_id")
+                or existing_provenance.get("frozen_sample_id")
+                or sample_id
+            ),
+            split=str(metadata.get("split") or existing_provenance.get("split") or ""),
+            frozen_split_hash=str(
+                metadata.get("frozen_split_hash")
+                or existing_provenance.get("frozen_split_hash")
+                or ""
+            ),
+            basis_hashes=material.get("basis_file_sha256")
+            or existing_provenance.get("basis_hashes")
+            or {},
+            pseudopotential_hashes=material.get("pseudopotential_sha256")
+            or existing_provenance.get("pseudopotential_hashes")
+            or {},
+            siesta_version=str(
+                material.get("siesta_version")
+                or existing_provenance.get("siesta_version")
+                or ""
+            ),
+            siesta_command=command
+            or material.get("siesta_command_line")
+            or existing_provenance.get("siesta_command")
+            or "",
+        )
+        if reference_matrix is not None
+        else {"status": "invalid"}
+    )
+    if reference_matrix is not None:
+        write_json(reference_dir / "siesta_reference_provenance.json", provenance)
     return {
         "sample_id": sample_id,
         "status": status,
@@ -258,6 +331,7 @@ def sample_row(
             "reason": selection.reason,
             "candidates": list(selection.candidates),
         },
+        "reference_provenance": provenance,
     }
 
 
@@ -364,6 +438,7 @@ def _process_siesta_reference_sample(
                 started_at=started_at,
                 finished_at=time.time(),
                 error="missing_structure_run_fdf",
+                source_dataset_root=resolved_source_dataset_root,
             )
         existing_selection = choose_reference_matrix(reference_dir)
         if existing_selection.ok and skip_if_exists and not overwrite:
@@ -381,6 +456,7 @@ def _process_siesta_reference_sample(
                     started_at=started_at,
                     finished_at=time.time(),
                     error=f"existing_{geometry_error}",
+                    source_dataset_root=resolved_source_dataset_root,
                 )
             return sample_row(
                 sample_id=sample_id,
@@ -389,13 +465,18 @@ def _process_siesta_reference_sample(
                 reference_dir=reference_dir,
                 started_at=started_at,
                 finished_at=time.time(),
+                source_dataset_root=resolved_source_dataset_root,
             )
         clean_reference_dir(reference_dir, overwrite=overwrite)
         copy_structure_inputs(structure_dir, reference_dir)
         staged = copy_existing_reference(sample_id, reference_dir, existing_reference_root)
         if staged is not None:
-            staged_selection = choose_reference_matrix(reference_dir)
-            geometry_error = reference_output_geometry_error(reference_dir, staged_selection.path)
+            staged_selection = choose_reference_matrix(reference_dir, require_positive_provenance=False)
+            geometry_error = reference_output_geometry_error(
+                reference_dir,
+                staged_selection.path,
+                fdf_path=structure_dir / "RUN.fdf",
+            )
             if geometry_error:
                 return sample_row(
                     sample_id=sample_id,
@@ -405,6 +486,7 @@ def _process_siesta_reference_sample(
                     started_at=started_at,
                     finished_at=time.time(),
                     error=f"staged_{geometry_error}",
+                    source_dataset_root=resolved_source_dataset_root,
                 )
             return sample_row(
                 sample_id=sample_id,
@@ -413,6 +495,7 @@ def _process_siesta_reference_sample(
                 reference_dir=reference_dir,
                 started_at=started_at,
                 finished_at=time.time(),
+                source_dataset_root=resolved_source_dataset_root,
             )
         if resolved_source_dataset_root is None:
             raise DerivativeSiestaReferenceError(
@@ -425,7 +508,7 @@ def _process_siesta_reference_sample(
             source_dataset_root=resolved_source_dataset_root,
         )
         run_record = run_siesta(reference_dir, command=siesta_command, use_shell=siesta_shell)
-        selection = choose_reference_matrix(reference_dir)
+        selection = choose_reference_matrix(reference_dir, require_positive_provenance=False)
         status = "ok" if run_record["returncode"] == 0 and selection.ok else "error"
         error = "" if status == "ok" else selection.reason if run_record["returncode"] == 0 else "siesta_returncode_nonzero"
         if status == "ok":
@@ -442,6 +525,7 @@ def _process_siesta_reference_sample(
             started_at=started_at,
             finished_at=time.time(),
             error=error,
+            source_dataset_root=resolved_source_dataset_root,
         )
     except Exception as exc:
         return sample_row(
@@ -453,6 +537,7 @@ def _process_siesta_reference_sample(
             started_at=started_at,
             finished_at=time.time(),
             error=str(exc),
+            source_dataset_root=resolved_source_dataset_root,
         )
 
 

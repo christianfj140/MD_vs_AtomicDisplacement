@@ -19,5 +19,18 @@
     10.0,
     12.0
   ],
+  "fit_model_selection_policy": {
+    "policy": "predeclared_leave_one_N_out_minimum_RMSE",
+    "candidate_models": [
+      "linear",
+      "quadratic",
+      "inverse",
+      "inverse_square",
+      "power_law_floor"
+    ],
+    "selection_metric": "leave_one_N_out_rmse_mev",
+    "selection_uses_N_min": false,
+    "tie_break": "lexicographic_model_id"
+  },
   "sensitivity_recommendation": "Audit the lower, main, and upper Hamiltonian MAE thresholds before treating nominal N_min as a paper-level claim."
 }

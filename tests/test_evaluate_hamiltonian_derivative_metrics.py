@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -13,6 +14,10 @@ from scipy import sparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT / "shared") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "shared"))
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
+
 SCRIPT = REPO_ROOT / "Comparison" / "scripts" / "evaluate_hamiltonian_derivative_metrics.py"
 SPEC = importlib.util.spec_from_file_location("evaluate_hamiltonian_derivative_metrics", SCRIPT)
 metrics_module = importlib.util.module_from_spec(SPEC)
@@ -118,9 +123,36 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
                 metadata["base_sample_id"] = base_sample_id
             (structure_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         if reference is not None:
+            reference_dir = self.result_dir / "siesta_hamiltonians" / sample_id
+            reference_path = reference_dir / "fixture.TSHS"
             self.write_sparse_payload(
-                self.result_dir / "siesta_hamiltonians" / sample_id / "siesta.TSHS",
+                reference_path,
                 reference,
+            )
+            (reference_dir / "RUN.fdf").write_text(
+                (structure_dir / "RUN.fdf").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (reference_dir / "RUN.out").write_text(
+                "iscf Eharris\nSCF cycle converged\nJob completed\n",
+                encoding="utf-8",
+            )
+            (reference_dir / "fixture.ORB_INDX").write_text("orb\n", encoding="utf-8")
+            (reference_dir / "siesta_reference_provenance.json").write_text(
+                json.dumps(
+                    build_positive_reference_provenance(
+                        reference_dir,
+                        reference_path,
+                        frozen_sample_id=sample_id,
+                        split="test",
+                        frozen_split_hash="fixture-split-hash",
+                        basis_hashes={"C.ion.xml": "basis-hash"},
+                        pseudopotential_hashes={"C": "pseudo-hash"},
+                        siesta_version="SIESTA 5.4.2-test",
+                        siesta_command="siesta < RUN.fdf",
+                    )
+                ),
+                encoding="utf-8",
             )
         if prediction is not None:
             self.write_sparse_payload(
@@ -617,6 +649,50 @@ class EvaluateHamiltonianDerivativeMetricsCliTests(unittest.TestCase):
         self.assertTrue(convergence["delta_sensitivity_study_passed"])
         self.assertIsNone(convergence["delta_stability_converged"])
         self.assertEqual(convergence["delta_stability_convergence_status"], "not_evaluated_without_thresholds")
+
+    def test_predeclared_three_delta_stable_window_converges(self) -> None:
+        rows = [
+            {
+                "source_model": "graph2mat",
+                "base_sample_id": "base_0",
+                "atom_index_zero_based": 0,
+                "axis": "x",
+                "finite_difference_method": "central",
+                "delta_ang": delta,
+                "dh_mae_union_eV_per_Ang": value,
+                "dh_rmse_union_eV_per_Ang": 2 * value,
+                "dh_relative_frobenius_ref": value,
+                "dh_cosine_similarity_union": 0.99,
+                "dh_support_f1": 1.0,
+                "dh_support_changed": False,
+            }
+            for delta, value in ((0.0025, 0.101), (0.005, 0.1), (0.01, 0.102))
+        ]
+        summary = metrics_module._delta_stability_summary(rows)
+        thresholds = {
+            "predeclared": True,
+            "material_label": "graphene",
+            "model": "graph2mat",
+            "dtype": "float32",
+            "delta_ang": [0.0025, 0.005, 0.01],
+            "max_relative_change": {
+                "dh_mae_union_eV_per_Ang": 0.1,
+                "dh_rmse_union_eV_per_Ang": 0.1,
+                "dh_relative_frobenius_ref": 0.1,
+            },
+            "max_cosine_change": 0.02,
+            "max_support_f1_change": 0.05,
+            "allow_support_discontinuity": False,
+        }
+
+        convergence = metrics_module._delta_stability_convergence_summary(
+            summary,
+            convergence_thresholds=thresholds,
+        )
+
+        self.assertTrue(convergence["delta_stability_converged"])
+        self.assertEqual(convergence["delta_stability_convergence_status"], "converged")
+        self.assertEqual(convergence["delta_convergence_blockers"], [])
 
     def test_cli_infers_matrix_shape_from_sparse_files_when_metadata_omits_shape(self) -> None:
         self.write_central_fixture_without_matrix_shape()

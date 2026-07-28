@@ -23,6 +23,30 @@ md:
   ensemble: nve
   thermostat: none
   write_md_history: true
+  scientific_protocol:
+    claim_mode: diagnostic
+    initialization:
+      velocity_distribution: siesta_initial_temperature
+      initial_temperature_is_equilibrated: false
+    equilibration:
+      ensemble: nvt
+      thermostat: nose
+      steps: 0
+      discarded_steps: 0
+    production:
+      ensemble: nve
+      steps: 70
+    stability:
+      observables:
+      - instantaneous_temperature_K
+      - total_energy_eV
+      max_relative_energy_drift_per_ps: null
+      max_temperature_deviation_fraction: null
+    temporal_sampling:
+      acf_method: sokal_positive_lag_inefficiency_v1
+      gap_rule: ceil_gap_factor_times_tau_int
+      gap_factor: 2.0
+      split_unit: trajectory_block
   temperature_blocks: []
   basis_size: SZP
   basis_type: split

@@ -7,10 +7,16 @@ import argparse
 import csv
 import json
 import math
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
 
 from analyze_winners import (
     mean,
@@ -27,6 +33,13 @@ from deeph_prediction_adapter import (
     EQUIVALENCE_STATUS_UNPROVEN,
 )
 from g2m_deeph_metrics import summarize_method
+from g2m_deeph_test_blindness import assert_no_test_metrics_for_search
+from joint_artifact_contract import (
+    material_profile_errors,
+    md_temporal_evidence_errors,
+    validate_recorded_snapshots,
+)
+from reference_selection import choose_reference_matrix
 
 
 SCHEMA = "graph2mat_deeph_run_ranking_v1"
@@ -316,16 +329,41 @@ def dataset_metadata(dataset_root: Path | None) -> dict[str, Any]:
     )
     provenance = manifest.get("provenance_status") or {}
     provenance_valid = bool(provenance.get("valid")) if isinstance(provenance, dict) and provenance else bool(manifest.get("benchmark_ready"))
+    artifact_validation = read_json(dataset_root / "artifact_validation.json")
+    live_results, live_errors = validate_recorded_snapshots(
+        artifact_validation,
+        base_dir=dataset_root,
+    )
+    reference_errors = [
+        f"{result.snapshot_dir}: {selection.reason}"
+        for result in live_results
+        if not (selection := choose_reference_matrix(result.snapshot_dir)).ok
+    ]
+    temporal_errors = md_temporal_evidence_errors(dataset_root)
+    profile_errors = material_profile_errors(dataset_root, manifest)
+    artifacts_valid = (
+        manifest.get("benchmark_ready") is True
+        and artifact_validation.get("valid") is True
+        and bool(live_results)
+        and not live_errors
+        and not reference_errors
+        and not temporal_errors
+        and not profile_errors
+    )
     return {
         "dataset_id": manifest.get("benchmark_dataset_id") or dataset_root.name,
         "dataset_label": manifest.get("material_label") or dataset_root.name,
         "dataset_recipe_id": manifest.get("dataset_recipe_id") or "",
         "dataset_compatibility_hash": compatibility_hash,
         "frozen_split_hash": split.get("split_hash") or (manifest.get("frozen_split_manifest") or {}).get("split_hash") or "",
-        "artifact_contract_status": "valid" if manifest.get("benchmark_ready") else "unknown",
+        "artifact_contract_status": "valid" if artifacts_valid else "invalid",
         "provenance_status": "valid" if provenance_valid else "invalid",
         "required_provenance_present": provenance_valid,
-        "dataset_scientific_status": "valid" if manifest.get("benchmark_ready") else "unknown",
+        "dataset_scientific_status": "valid" if artifacts_valid else "invalid",
+        "material_profile": manifest.get("material_profile") or "missing",
+        "live_artifact_validation_errors": (
+            live_errors + reference_errors + temporal_errors + profile_errors
+        ),
     }
 
 
@@ -946,7 +984,7 @@ def build_recommendation(
     best_rows: list[dict[str, Any]],
     pairs: list[dict[str, Any]],
     primary_metric: str | None,
-    minimum_robust_seeds: int = 3,
+    minimum_robust_seeds: int = 5,
 ) -> dict[str, Any]:
     models_seen = sorted({str(row.get("model")) for row in rows if row.get("model")})
     gates_failed: list[str] = []
@@ -1060,6 +1098,114 @@ def build_recommendation(
     }
 
 
+def seed_robustness_analysis(
+    rows: list[dict[str, Any]],
+    best_rows: list[dict[str, Any]],
+    primary_metric: str | None,
+    *,
+    minimum_robust_seeds: int = 5,
+) -> dict[str, Any]:
+    """Paired seed comparison with leave-one-seed-out stability."""
+
+    best = {
+        str(row.get("model")): str(row.get("config_id"))
+        for row in best_rows
+        if row.get("scope") == "global" and row.get("metric") == primary_metric
+    }
+    grouped: dict[str, dict[str, list[float]]] = {
+        model: defaultdict(list) for model in MODELS
+    }
+    if primary_metric:
+        for row in rows:
+            model = str(row.get("model") or "")
+            seed = row.get("seed")
+            value = finite_metric(row, primary_metric)
+            if (
+                model in MODELS
+                and str(row.get("config_id") or "") == best.get(model)
+                and seed not in (None, "", "unknown")
+                and value is not None
+            ):
+                grouped[model][str(seed)].append(value)
+    seed_means = {
+        model: {seed: mean(values) for seed, values in values_by_seed.items()}
+        for model, values_by_seed in grouped.items()
+    }
+    common_seeds = sorted(set(seed_means["graph2mat"]) & set(seed_means["deeph"]))
+    differences = [
+        number(seed_means["graph2mat"][seed]) - number(seed_means["deeph"][seed])
+        for seed in common_seeds
+    ]
+    difference_mean = mean(differences) if differences else None
+    difference_std = stddev(differences) if differences else None
+    margin = (
+        1.96 * number(difference_std) / math.sqrt(len(differences))
+        if len(differences) >= 2
+        else None
+    )
+    interval = (
+        [number(difference_mean) - margin, number(difference_mean) + margin]
+        if difference_mean is not None and margin is not None
+        else None
+    )
+    lower_is_better = metric_lower_is_better(primary_metric or "")
+
+    def winner(values: list[float]) -> str | None:
+        value = mean(values)
+        if value is None or value == 0:
+            return None
+        graph2mat_better = value < 0 if lower_is_better else value > 0
+        return "graph2mat" if graph2mat_better else "deeph"
+
+    full_winner = winner(differences)
+    leave_one_out = [
+        {
+            "left_out_seed": seed,
+            "winner": winner(
+                [value for index, value in enumerate(differences) if index != offset]
+            ),
+        }
+        for offset, seed in enumerate(common_seeds)
+    ]
+    loo_stable = bool(leave_one_out) and all(
+        row["winner"] == full_winner and row["winner"] is not None
+        for row in leave_one_out
+    )
+    interval_excludes_zero = bool(interval) and (
+        interval[1] < 0 or interval[0] > 0
+    )
+    blockers: list[str] = []
+    if len(common_seeds) < minimum_robust_seeds:
+        blockers.append("insufficient_paired_seeds")
+    if not loo_stable:
+        blockers.append("leave_one_seed_out_unstable")
+    if not interval_excludes_zero:
+        blockers.append("paired_difference_indistinguishable_from_noise")
+    return {
+        "status": "robust" if not blockers else "no_robust_winner",
+        "metric": primary_metric,
+        "selected_configs": best,
+        "minimum_robust_seeds": minimum_robust_seeds,
+        "common_seeds": common_seeds,
+        "paired_seed_count": len(common_seeds),
+        "paired_differences_graph2mat_minus_deeph": differences,
+        "paired_difference_mean": difference_mean,
+        "paired_difference_std": difference_std,
+        "paired_difference_95pct_normal_interval": interval,
+        "interval_excludes_zero": interval_excludes_zero,
+        "winner": full_winner if not blockers else None,
+        "leave_one_seed_out": leave_one_out,
+        "leave_one_seed_out_stable": loo_stable,
+        "multiplicity": {
+            "method": "Holm",
+            "family": "predeclared_primary_metric_model_comparison",
+            "comparisons": 1,
+            "adjusted_alpha": 0.05,
+        },
+        "paper_level_blockers": blockers,
+    }
+
+
 def pareto_frontier(rows: list[dict[str, Any]], primary_metric: str | None) -> list[dict[str, Any]]:
     if not primary_metric:
         return []
@@ -1122,7 +1268,7 @@ def rank_graph2mat_deeph_runs(
     dataset_root: Path | None = None,
     frozen_split_manifest_path: Path | None = None,
     dataset_manifest_path: Path | None = None,
-    minimum_robust_seeds: int = 3,
+    minimum_robust_seeds: int = 5,
 ) -> dict[str, Any]:
     run_root = Path(run_root)
     output_dir = Path(output_dir or run_root / "summary" / "ranking")
@@ -1135,6 +1281,12 @@ def rank_graph2mat_deeph_runs(
         frozen_split_manifest_path=frozen_split_manifest_path,
         dataset_manifest_path=dataset_manifest_path,
     )
+    if any(
+        str(row.get("protocol_stage") or "").lower()
+        in {"search", "robust_validation"}
+        for row in rows
+    ):
+        assert_no_test_metrics_for_search(rows, stage="search")
     primary_metric = choose_primary_metric(rows)
     metric_rankings = build_metric_rankings(rows)
     best_rows = best_runs_by_model(rows, primary_metric)
@@ -1147,6 +1299,32 @@ def rank_graph2mat_deeph_runs(
         primary_metric=primary_metric,
         minimum_robust_seeds=minimum_robust_seeds,
     )
+    seed_analysis = seed_robustness_analysis(
+        rows,
+        best_rows,
+        primary_metric,
+        minimum_robust_seeds=minimum_robust_seeds,
+    )
+    if (
+        str(recommendation.get("status") or "").startswith("robust_")
+        and seed_analysis["status"] != "robust"
+    ):
+        blockers = set(recommendation.get("gates_failed") or [])
+        blockers.update(seed_analysis["paper_level_blockers"])
+        recommendation.update(
+            {
+                "status": "no_robust_winner",
+                "scientific_status": "not_scientifically_valid",
+                "winner": None,
+                "winning_model": None,
+                "reason": (
+                    "Paired seed uncertainty or leave-one-seed-out instability "
+                    "prevents a robust winner."
+                ),
+                "limitations": sorted(blockers),
+                "gates_failed": sorted(blockers),
+            }
+        )
     pareto = pareto_frontier(rows, primary_metric)
     manifest = {
         "schema": SCHEMA,
@@ -1163,11 +1341,13 @@ def rank_graph2mat_deeph_runs(
             "pareto_accuracy_cost": str(output_dir / "pareto_accuracy_cost.json"),
             "recommendation": str(output_dir / "recommendation.json"),
             "best_overall": str(output_dir / "best_overall.json"),
+            "seed_robustness": str(output_dir / "seed_robustness.json"),
         },
         "recommendation": recommendation,
         "best_runs_by_model": best_rows,
         "pairwise_graph2mat_vs_deeph": pairs,
         "pareto_accuracy_cost": pareto,
+        "seed_robustness": seed_analysis,
     }
     write_csv(output_dir / "normalized_run_metrics.csv", rows)
     write_json(output_dir / "normalized_run_metrics.json", {"rows": rows})
@@ -1182,6 +1362,7 @@ def rank_graph2mat_deeph_runs(
     write_csv(output_dir / "pareto_accuracy_cost.csv", pareto)
     write_json(output_dir / "pareto_accuracy_cost.json", {"rows": pareto})
     write_json(output_dir / "recommendation.json", recommendation)
+    write_json(output_dir / "seed_robustness.json", seed_analysis)
     write_json(output_dir / "best_overall.json", {"recommendation": recommendation, "best_runs_by_model": best_rows})
     write_json(output_dir / "ranking_summary.json", manifest)
     return manifest
@@ -1196,7 +1377,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", type=Path, default=None)
     parser.add_argument("--frozen-split-manifest", type=Path, default=None)
     parser.add_argument("--dataset-manifest", type=Path, default=None)
-    parser.add_argument("--minimum-robust-seeds", type=int, default=3)
+    parser.add_argument("--minimum-robust-seeds", type=int, default=5)
     return parser.parse_args()
 
 

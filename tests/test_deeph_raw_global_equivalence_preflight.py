@@ -197,6 +197,66 @@ class DeepHRawGlobalEquivalencePreflightNumericTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "proven")
         self.assertFalse(result.diagnostic_only)
         self.assertTrue(result.metric_fields()["deeph_raw_global_equivalence_proven"])
+        evidence = json.loads(
+            (self.predictions / "raw_global_equivalence_evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        diagnostics = evidence["kpoint_diagnostics"][0]["raw_reference"]
+        self.assertTrue(diagnostics["s_positive_definite"])
+        self.assertAlmostEqual(diagnostics["s_condition_number"], 1.0)
+        self.assertLessEqual(diagnostics["max_normalized_residual"], 1e-8)
+        self.assertFalse(diagnostics["regularization"]["applied"])
+
+    def test_audit_only_preflight_does_not_mutate_prediction_directory(self) -> None:
+        self.write_processed()
+
+        manifest = preflight.build_preflight_manifest(
+            frozen_split_manifest=self.frozen,
+            graph2mat_result_dir=self.root / "g2m",
+            deeph_processed_dir=self.root / "processed",
+            deeph_predictions_dir=self.root / "predictions",
+            output_dir=self.output,
+            sample_limit=5,
+            command=["unit"],
+            install_adapter_evidence=False,
+        )
+
+        self.assertEqual(manifest["status"], "proven")
+        self.assertFalse(manifest["install_adapter_evidence"])
+        self.assertFalse((self.predictions / "raw_global_equivalence_evidence.json").exists())
+
+    def test_indefinite_overlap_cannot_be_proven(self) -> None:
+        assert np is not None
+        diagnostics = preflight.generalized_eigenproblem_diagnostics(
+            np.eye(2),
+            np.diag([1.0, -0.1]),
+            hermiticity_tolerance=1e-10,
+            min_overlap_eigenvalue=1e-10,
+            max_overlap_condition=1e12,
+            residual_tolerance=1e-8,
+            normalization_tolerance=1e-8,
+        )
+
+        self.assertFalse(diagnostics["valid"])
+        self.assertFalse(diagnostics["s_positive_definite"])
+        self.assertFalse(diagnostics["regularization"]["applied"])
+
+    def test_excessively_ill_conditioned_overlap_cannot_be_proven(self) -> None:
+        assert np is not None
+        diagnostics = preflight.generalized_eigenproblem_diagnostics(
+            np.eye(2),
+            np.diag([1.0, 1e-13]),
+            hermiticity_tolerance=1e-10,
+            min_overlap_eigenvalue=1e-15,
+            max_overlap_condition=1e10,
+            residual_tolerance=1e-8,
+            normalization_tolerance=1e-8,
+        )
+
+        self.assertFalse(diagnostics["valid"])
+        self.assertTrue(diagnostics["s_positive_definite"])
+        self.assertFalse(diagnostics["s_condition_acceptable"])
 
     def test_siesta_orbital_mapping_signs_and_energy_shift_pass(self) -> None:
         assert np is not None

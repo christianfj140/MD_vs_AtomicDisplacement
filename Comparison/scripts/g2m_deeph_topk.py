@@ -10,7 +10,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from g2m_deeph_test_blindness import ROBUST_VALIDATION_STAGE, SEARCH_STAGE
+from g2m_deeph_test_blindness import (
+    ROBUST_VALIDATION_STAGE,
+    SEARCH_STAGE,
+    checkpoint_selection_record,
+)
 from g2m_deeph_training_sweep import json_safe, stable_hash
 
 
@@ -228,6 +232,11 @@ def _selection_row(
     value = value_override if value_override is not None else validation_metric_value(record, metric)
     if value is None:
         raise RuntimeError(f"Selected record has no validation metric {metric}: {record.get('config_id')}")
+    checkpoint_selection = checkpoint_selection_record(record)
+    if "checkpoint_selected_by_test" in checkpoint_selection["paper_level_blockers"]:
+        raise RuntimeError(
+            f"Checkpoint for {record.get('config_id')} was selected using the test split."
+        )
     row = {
         "rank": rank,
         "index": record.get("index"),
@@ -251,6 +260,7 @@ def _selection_row(
         "protocol_hash": str(record.get("protocol_hash") or ""),
         "protocol_stage": SEARCH_STAGE,
         "source_status": str(record.get("status") or ""),
+        "checkpoint_selection": checkpoint_selection,
     }
     if composite_details:
         row["validation_composite"] = json_safe(composite_details)
@@ -316,6 +326,13 @@ def select_top_configs(
                     composite_details=composite_scores.get(id(record)) if metric == VAL_SPECTRAL_COMPOSITE else None,
                 )
             )
+    checkpoint_blockers = sorted(
+        {
+            blocker
+            for row in rows
+            for blocker in (row.get("checkpoint_selection") or {}).get("paper_level_blockers") or []
+        }
+    )
     return {
         "schema": SELECTED_CONFIGS_SCHEMA,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -326,6 +343,8 @@ def select_top_configs(
         "grouping": grouping,
         "uses_test_metrics": False,
         "selection_source": "validation_only",
+        "checkpoint_selection_complete": not checkpoint_blockers,
+        "paper_level_blockers": checkpoint_blockers,
         "selected_count": len(rows),
         "selected_configs": rows,
     }
@@ -405,6 +424,11 @@ def generate_robust_rerun_plan(
                     "source_selected_config": json_safe(selected),
                 }
             )
+    seed_blockers = (
+        []
+        if len(clean_seeds) >= 5
+        else ["paper_blocked_if_fewer_than_five_independent_seeds_without_power_justification"]
+    )
     return {
         "schema": ROBUST_RERUN_PLAN_SCHEMA,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -416,6 +440,15 @@ def generate_robust_rerun_plan(
         "selection_metric": selected_manifest.get("metric"),
         "selection_mode": selected_manifest.get("mode"),
         "uses_test_metrics": False,
+        "seed_stability_policy": {
+            "minimum_independent_seeds": 5,
+            "configured_independent_seeds": len(clean_seeds),
+            "leave_one_seed_out_required": True,
+            "paired_comparison_required": True,
+            "multiplicity_policy": "Holm",
+            "tie_rule": "no_robust_winner_if_uncertainty_includes_zero_or_loo_winner_changes",
+        },
+        "paper_level_blockers": seed_blockers,
     }
 
 

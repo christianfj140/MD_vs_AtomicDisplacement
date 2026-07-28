@@ -7,9 +7,23 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from joint_artifact_contract import (
+    material_profile_errors,
+    md_temporal_evidence_errors,
+    validate_recorded_snapshots,
+)
+from reference_selection import choose_reference_matrix
+from run_inventory import collect_run_inventory
 
 
 RELEASE_MANIFEST_SCHEMA = "graph2mat_deeph_artifact_release_manifest_v1"
@@ -354,6 +368,7 @@ def build_release_manifest(
     run_root: Path | None = None,
     workflow_root: Path | None = None,
     strict: bool = False,
+    run_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dataset_root = Path(dataset_root)
     run_root = Path(run_root) if run_root is not None else None
@@ -405,7 +420,37 @@ def build_release_manifest(
             seen=seen,
         )
 
+    run_inventory = run_inventory or collect_run_inventory(
+        deeph_python=REPO_ROOT.parent / "DeepH-pack" / ".venv" / "bin" / "python",
+    )
     missing = missing_required(entries, strict=strict)
+    scientific_blockers: list[str] = []
+    reproducibility = str(run_inventory.get("reproducibility_status") or "unavailable")
+    if reproducibility != "pinned_clean":
+        scientific_blockers.append(f"reproducibility_status={reproducibility}; paper_ready requires pinned_clean")
+    artifact_validation = read_json(dataset_root / "artifact_validation.json")
+    live_results, live_errors = validate_recorded_snapshots(
+        artifact_validation,
+        base_dir=dataset_root,
+    )
+    if benchmark_manifest.get("benchmark_ready") is not True:
+        scientific_blockers.append("benchmark_dataset_manifest is not benchmark_ready")
+    if artifact_validation.get("valid") is not True:
+        scientific_blockers.append("artifact_validation.valid is not true")
+    if live_errors or not live_results:
+        scientific_blockers.extend(live_errors or ["no snapshots passed live revalidation"])
+    for result in live_results:
+        selection = choose_reference_matrix(result.snapshot_dir)
+        if not selection.ok:
+            scientific_blockers.append(
+                f"{result.snapshot_dir}: {selection.reason}"
+            )
+    scientific_blockers.extend(md_temporal_evidence_errors(dataset_root))
+    scientific_blockers.extend(material_profile_errors(dataset_root, benchmark_manifest))
+    if workflow_root is not None:
+        gate_status_path = workflow_root / "gate_status.json"
+        if gate_status_path.exists() and read_json(gate_status_path).get("robust_claim_allowed") is not True:
+            scientific_blockers.append("workflow gate_status does not allow a robust claim")
     if run_root is not None and required_role_missing(entries, "telemetry"):
         missing.append("telemetry:any")
     if run_root is not None and required_role_missing(entries, "deeph_equivalence"):
@@ -416,7 +461,7 @@ def build_release_manifest(
         missing.append("workflow_final_report:any")
     forbidden = forbidden_reference_findings(entries)
     status = "complete"
-    if forbidden:
+    if forbidden or scientific_blockers:
         status = "invalid"
     elif missing:
         status = "invalid" if strict else "partial"
@@ -424,6 +469,7 @@ def build_release_manifest(
         "schema": RELEASE_MANIFEST_SCHEMA,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "repo_commit": repo_commit(),
+        "run_inventory": run_inventory,
         "dataset_root": str(dataset_root),
         "run_root": str(run_root) if run_root is not None else "",
         "workflow_root": str(workflow_root) if workflow_root is not None else "",
@@ -436,6 +482,12 @@ def build_release_manifest(
         ),
         "files": entries,
         "missing_required": sorted(set(missing)),
+        "scientific_blockers": sorted(set(scientific_blockers)),
+        "live_artifact_validation": {
+            "valid": bool(live_results) and not live_errors,
+            "snapshot_count": len(live_results),
+            "invalid_snapshot_count": sum(not result.valid for result in live_results),
+        },
         "forbidden_reference_findings": forbidden,
         "status": status,
         "external_storage_url": "",
@@ -452,6 +504,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-root", type=Path, default=None)
     parser.add_argument("--workflow-root", type=Path, default=None)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--run-inventory", type=Path, default=None)
     parser.add_argument("--strict", action="store_true")
     return parser.parse_args(argv)
 
@@ -463,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         run_root=args.run_root,
         workflow_root=args.workflow_root,
         strict=bool(args.strict),
+        run_inventory=read_json(args.run_inventory) if args.run_inventory else None,
     )
     write_json(args.output, manifest)
     print(json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False))

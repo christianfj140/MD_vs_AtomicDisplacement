@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -14,10 +15,12 @@ from scipy import sparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+for directory in (SCRIPTS_DIR, REPO_ROOT / "shared"):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 import build_hamiltonian_derivative_stencils as stencil_builder  # noqa: E402
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 from hamiltonian_derivative_stencil import (  # noqa: E402
     DERIVATIVE_MATRIX_METRIC_TARGET_SPACE,
     DerivativeMatrixInput,
@@ -121,6 +124,36 @@ class HamiltonianDerivativeStencilTests(unittest.TestCase):
             ref_dir.mkdir(parents=True, exist_ok=True)
             filename = "ML_prediction.HSX" if forbidden_reference else "siesta.TSHS"
             (ref_dir / filename).write_bytes(b"reference\n")
+            if not forbidden_reference:
+                (ref_dir / "RUN.fdf").write_text(
+                    "SystemLabel siesta\nNumberOfAtoms 1\nNumberOfSpecies 1\n"
+                    "%block ChemicalSpeciesLabel\n1 6 C\n%endblock ChemicalSpeciesLabel\n"
+                    "%block LatticeVectors\n8 0 0\n0 8 0\n0 0 8\n%endblock LatticeVectors\n"
+                    "%block AtomicCoordinatesAndAtomicSpecies\n0 0 0 1\n"
+                    "%endblock AtomicCoordinatesAndAtomicSpecies\n",
+                    encoding="utf-8",
+                )
+                (ref_dir / "RUN.out").write_text(
+                    "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+                    encoding="utf-8",
+                )
+                (ref_dir / "siesta.ORB_INDX").write_bytes(b"orb\n")
+                (ref_dir / "siesta_reference_provenance.json").write_text(
+                    json.dumps(
+                        build_positive_reference_provenance(
+                            ref_dir,
+                            ref_dir / filename,
+                            frozen_sample_id=sample_id,
+                            split=metadata_split or "test",
+                            frozen_split_hash="fixture-split-hash",
+                            basis_hashes={"C.ion.xml": "basis-hash"},
+                            pseudopotential_hashes={"C": "pseudo-hash"},
+                            siesta_version="SIESTA 5.4.2-test",
+                            siesta_command="siesta < RUN.fdf",
+                        )
+                    ),
+                    encoding="utf-8",
+                )
         if include_prediction:
             pred_dir = self.root / "result" / "predicted_hamiltonians" / sample_id
             pred_dir.mkdir(parents=True, exist_ok=True)

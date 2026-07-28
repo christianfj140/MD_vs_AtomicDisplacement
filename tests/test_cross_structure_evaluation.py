@@ -99,7 +99,10 @@ def _make_snapshot(
         encoding="utf-8",
     )
     (root / "metadata.json").write_text(json.dumps({"system_label": label, "n_atoms": n_atoms}), encoding="utf-8")
-    (root / "RUN.out").write_text(f"run out {tag}\n", encoding="utf-8")
+    (root / "RUN.out").write_text(
+        f"run out {tag}\niscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     for suffix in _SUFFIXES:
         name = f"{label}{suffix}"
         content = f"{suffix} {tag}\n"
@@ -135,6 +138,7 @@ def _make_dataset(
     if ghost_active:
         (basis_dir / "Ghost-H.ion.xml").write_text("ghost-basis", encoding="utf-8")
     provenance = {
+        "profile": "production",
         "label": label,
         "species": [
             {"index": 1, "atomic_number": 6, "label": species},

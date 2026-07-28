@@ -76,7 +76,10 @@ def _write_snapshot(root: Path, sample_id: str, *, complete: bool) -> Path:
     snapshot = root / "MD_steps" / sample_id
     snapshot.mkdir(parents=True, exist_ok=True)
     (snapshot / "RUN.fdf").write_text("SystemLabel graphene\n", encoding="utf-8")
-    (snapshot / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+    (snapshot / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     (snapshot / "metadata.json").write_text('{"system_label": "graphene"}\n', encoding="utf-8")
     for suffix in (".TSHS", ".TSDE", ".XV"):
         (snapshot / f"graphene{suffix}").write_text("artifact\n", encoding="utf-8")
@@ -104,6 +107,7 @@ def _write_dataset_provenance(dataset: Path) -> None:
         json.dumps(
             {
                 "label": "graphene",
+                "profile": "production",
                 "basis_file_sha256": {"C.ion.xml": "basis"},
                 "pseudopotential_sha256": {"C": "pseudo"},
                 "fdf_sha256": "fdfhash",

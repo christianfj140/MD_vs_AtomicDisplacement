@@ -171,6 +171,21 @@ class MaterialBundleValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(MaterialBundleError, "material.label"):
             validate_material_config(config, base_dir=self.root)
 
+    def test_smoke_named_fdf_cannot_implicitly_use_production_profile(self) -> None:
+        config = self.write_valid_bundle()
+        source = self.root / "materials" / "sic" / "RUN.fdf"
+        smoke = source.with_name("RUN.smoke.fdf")
+        source.rename(smoke)
+        config["material"]["fdf"] = "materials/sic/RUN.smoke.fdf"
+
+        with self.assertRaisesRegex(MaterialBundleError, "requires material.profile: smoke"):
+            validate_material_config(config, base_dir=self.root)
+        config["material"]["profile"] = "smoke"
+        self.assertEqual(
+            validate_material_config(config, base_dir=self.root).to_manifest_dict()["profile"],
+            "smoke",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

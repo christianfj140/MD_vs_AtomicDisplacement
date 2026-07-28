@@ -9,7 +9,12 @@ La parte 1 es fácil. La parte 2 es la delicada.
 
 ## 1. Qué está pasando ahora en vuestro código
 
-Según el resumen de tu agente, el flujo actual es:
+El flujo inspeccionado calcula diferencias finitas centrales de matrices
+Hamiltonianas. La implementación y sus límites se verifican mediante
+`tests/test_hamiltonian_derivative_stencil.py`,
+`tests/test_graph2mat_autograd_derivatives.py`,
+`tests/test_deeph_autograd_derivatives.py` y los manifests producidos por
+`Comparison/scripts/evaluate_hamiltonian_derivative_metrics.py`.
 
 [
 D_{i\alpha}H
@@ -36,7 +41,13 @@ N_{\text{runs}}
 6N.
 ]
 
-Esto ya está bien implementado físicamente: mover un átomo en un eje y leer el Hamiltoniano completo te da una derivada completa del Hamiltoniano respecto a ese grado de libertad. El coste viene de repetirlo para todos los átomos y ejes, aunque muchos sean equivalentes por simetría.
+Dentro de ese alcance, mover un átomo en un eje y comparar el Hamiltoniano
+completo permite estimar \(dH/dR\). Esto no valida por sí solo derivadas
+espectrales \(dE/dR\): para un problema generalizado también se necesita
+\(dS/dR\), que este flujo no implementa ni reclama. La validez científica
+queda además condicionada por convergencia SCF, estabilidad con \(\delta\),
+continuidad del soporte, ordering/gauge y procedencia positiva de las
+referencias.
 
 ---
 

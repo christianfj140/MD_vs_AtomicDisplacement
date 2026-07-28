@@ -305,20 +305,20 @@ def central_only(dataset: dict[str, Any]) -> bool:
     return bool(methods) and all(method.strip().lower() == "central" for method in methods)
 
 
-def delta_sensitivity_has_two_deltas(dataset: dict[str, Any]) -> bool:
+def delta_sensitivity_has_three_deltas(dataset: dict[str, Any]) -> bool:
     delta_stability = dataset.get("delta_stability") if isinstance(dataset.get("delta_stability"), dict) else {}
     unique_deltas = [
         value
         for value in (delta_stability.get("unique_delta_ang") or [])
         if number(value) is not None
     ]
-    if len(set(float(value) for value in unique_deltas)) >= 2:
+    if len(set(float(value) for value in unique_deltas)) >= 3:
         return True
     for row in delta_stability.get("rows") or []:
-        if int_or_none(row.get("delta_count")) and int(row.get("delta_count")) >= 2:
+        if int_or_none(row.get("delta_count")) and int(row.get("delta_count")) >= 3:
             return True
     metric_deltas = [number(row.get("delta_ang")) for row in central_metric_rows(dataset)]
-    return len({float(value) for value in metric_deltas if value is not None}) >= 2
+    return len({float(value) for value in metric_deltas if value is not None}) >= 3
 
 
 def split_consistency_proven(dataset: dict[str, Any]) -> bool:
@@ -394,7 +394,7 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
         "orbital_ordering_verified": truthy(manifest.get("orbital_ordering_verified")) or truthy(manifest.get("orbital_ordering_evidence")),
         "delta_sensitivity_study_available": delta_available,
         "delta_sensitivity_study_passed": delta_passed,
-        "delta_sensitivity_has_two_deltas": delta_sensitivity_has_two_deltas(dataset),
+        "delta_sensitivity_has_three_deltas": delta_sensitivity_has_three_deltas(dataset),
         "delta_stability_converged": delta_converged,
         "delta_stability_convergence_status": convergence_status or "not_evaluated_without_thresholds",
         "reference_noise_evidence": truthy(manifest.get("reference_noise_verified"))
@@ -413,6 +413,27 @@ def dataset_paper_evidence(dataset: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def spectral_derivative_requested(manifest: dict[str, Any]) -> bool:
+    target = str(
+        manifest.get("derivative_target")
+        or manifest.get("claim_scope")
+        or ""
+    ).strip().lower()
+    return (
+        truthy(manifest.get("spectral_derivative_claimed"))
+        or truthy(manifest.get("band_derivative_claimed"))
+        or target in {"de/dr", "spectral", "band_derivative", "eigenvalue_derivative"}
+    )
+
+
+def validated_overlap_derivative_available(manifest: dict[str, Any]) -> bool:
+    return (
+        truthy(manifest.get("overlap_derivative_available"))
+        and truthy(manifest.get("overlap_derivative_validated"))
+        and bool(manifest.get("overlap_derivative_evidence"))
+    )
+
+
 def evaluate_dataset(
     dataset: dict[str, Any],
     *,
@@ -426,6 +447,23 @@ def evaluate_dataset(
     warnings: list[dict[str, Any]] = []
     central_stencils = central_stencil_rows(dataset)
     central_metrics = central_metric_rows(dataset)
+
+    if spectral_derivative_requested(manifest) and not validated_overlap_derivative_available(manifest):
+        blockers.append(
+            gate_row(
+                "spectral_derivative_blocked_without_dS_dR",
+                model=model,
+                severity="blocker",
+                status="fail",
+                blocks_status="blocked",
+                claim_scope="all",
+                message=(
+                    "dE/dR or band-derivative promotion requires independently "
+                    "validated dS/dR; this workflow currently validates dH/dR only."
+                ),
+                evidence_paths=evidence_paths,
+            )
+        )
 
     if truthy(manifest.get("force_constants_used")):
         blockers.append(
@@ -670,7 +708,7 @@ def overall_status(
         or not info["required_hashes_present_and_consistent"]
         or not info["basis_gauge_verified"]
         or not info["orbital_ordering_verified"]
-        or not info["delta_sensitivity_has_two_deltas"]
+        or not info["delta_sensitivity_has_three_deltas"]
         or not info["delta_sensitivity_study_passed"]
         or not info["delta_stability_converged"]
         or not info["reference_noise_evidence"]
@@ -710,6 +748,7 @@ def blocked_claims_for_status(status: str, *, multiple_models: bool, paper_evide
     claims = [
         "Do not state or imply that SIESTA force constants, dynamical matrices, or phonons were used as the dH/dR reference.",
         "Do not declare a derivative winner by default.",
+        "Do not claim dE/dR, band derivatives, or spectral derivatives: validated dS/dR is outside this workflow.",
     ]
     if status in {"blocked", "internal_diagnostic", "technical_presentation"}:
         claims.append("Do not claim paper-level validation of Hamiltonian derivatives.")
@@ -903,20 +942,20 @@ def build_derivative_gate_report(
                     evidence_paths=[dataset["paths"]["delta_stability"], manifest_path],
                 )
             )
-        elif not info["delta_sensitivity_has_two_deltas"]:
+        if not info["delta_sensitivity_has_three_deltas"]:
             blockers.append(
                 gate_row(
-                    "paper_level_delta_sweep_needs_two_deltas",
+                    "paper_level_delta_sweep_needs_three_deltas",
                     model=model,
                     severity="blocker",
                     status="fail",
                     blocks_status="paper_level_candidate",
                     claim_scope="paper_level_only",
-                    message="Paper-level derivative candidate status requires a delta sensitivity study with at least two delta values.",
+                    message="Paper-level derivative candidate status requires a predeclared delta sensitivity study with at least three delta values.",
                     evidence_paths=[dataset["paths"]["delta_stability"], manifest_path],
                 )
             )
-        elif not info["delta_stability_converged"]:
+        if not info["delta_stability_converged"]:
             blockers.append(
                 gate_row(
                     "paper_level_delta_stability_not_converged",
@@ -998,6 +1037,11 @@ def build_derivative_gate_report(
     report = {
         "schema_version": SCHEMA_VERSION,
         "scientific_status": status,
+        "derivative_scope": {
+            "implemented": "dH/dR",
+            "spectral_derivatives_allowed": False,
+            "reason": "No validated dS/dR path is part of the current workflow.",
+        },
         "allowed_claims": allowed_claims_for_status(status),
         "blocked_claims": blocked_claims_for_status(status, multiple_models=len(datasets) > 1, paper_evidence=paper_evidence),
         "blockers": blockers,

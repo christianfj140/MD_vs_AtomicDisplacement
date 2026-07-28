@@ -106,6 +106,62 @@ class JointArtifactContractTests(unittest.TestCase):
         self.assertEqual(result.system_label, "graphene")
         self.assertEqual(result.missing_required, [])
         self.assertIn("hsx", result.present_artifacts)
+        self.assertEqual(result.siesta_run_status["parser_status"], "valid")
+
+    def test_nonconverged_aborted_snapshot_is_invalid(self) -> None:
+        sample = self.root / "sample_0001"
+        write_snapshot(sample)
+        (sample / "RUN.out").write_text(
+            "SCF cycle NOT converged\nJob aborted\n",
+            encoding="utf-8",
+        )
+
+        result = validate_snapshot(sample)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.siesta_run_status["parser_status"], "explicit_scf_nonconvergence")
+        self.assertTrue(result.siesta_run_status["explicit_nonconvergence"])
+        self.assertTrue(result.siesta_run_status["aborted"])
+
+    def test_truncated_before_scf_snapshot_is_invalid(self) -> None:
+        sample = self.root / "sample_0001"
+        write_snapshot(sample)
+        (sample / "RUN.out").write_text("SIESTA input accepted\n", encoding="utf-8")
+
+        result = validate_snapshot(sample)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.siesta_run_status["parser_status"], "scf_not_started")
+
+    def test_converged_but_incomplete_snapshot_is_invalid(self) -> None:
+        sample = self.root / "sample_0001"
+        write_snapshot(sample)
+        (sample / "RUN.out").write_text("SCF cycle converged\n", encoding="utf-8")
+
+        result = validate_snapshot(sample)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.siesta_run_status["parser_status"], "job_not_completed")
+
+    def test_stale_output_snapshot_is_invalid(self) -> None:
+        sample = self.root / "sample_0001"
+        write_snapshot(sample)
+        run_out = sample / "RUN.out"
+        run_fdf = sample / "RUN.fdf"
+        run_out.touch()
+        run_fdf.touch()
+        run_out.touch()
+        run_fdf.touch()
+        run_out_stat = run_out.stat()
+        run_fdf_stat = run_fdf.stat()
+        import os
+
+        os.utime(run_out, (run_out_stat.st_atime, run_fdf_stat.st_mtime - 10))
+
+        result = validate_snapshot(sample)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.siesta_run_status["parser_status"], "stale_output")
 
     def test_missing_hsx_is_invalid_and_repair_required(self) -> None:
         sample = self.root / "sample_0001"

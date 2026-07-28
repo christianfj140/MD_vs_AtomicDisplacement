@@ -41,6 +41,7 @@ if str(SHARED_DIR) not in sys.path:
 from torch_safe_globals import env_with_torch_compat
 from fdf_materialization import DEFAULT_REQUIRED_OUTPUT_FLAGS
 from material_presets import resolve_material_bundle
+from siesta_output_status import parse_siesta_output
 
 BASE_DIR = PIPELINE_PATHS["base_dir"]
 RELAXED_DIR = PIPELINE_PATHS["relaxed_dir"]
@@ -600,31 +601,8 @@ def parse_total_energy_ev(sample_dir: Path) -> float | None:
 
 def sample_run_status(sample_dir: Path) -> dict[str, Any]:
     run_out = sample_dir / "RUN.out"
-    if not run_out.exists():
-        return {
-            "output_exists": False,
-            "job_completed": False,
-            "scf_converged": False,
-            "stale_output": False,
-        }
     run_fdf = sample_dir / PIPELINE_CONFIG["paths"]["run_fdf_name"]
-    stale_output = False
-    if run_fdf.exists() and run_out.stat().st_mtime < run_fdf.stat().st_mtime:
-        stale_output = True
-
-    text = run_out.read_text(encoding="utf-8", errors="ignore")
-    scf_markers = (
-        "SCF cycle converged",
-        "PostSCF",
-        "FINAL_HF",
-    )
-    scf_converged = (not stale_output) and any(marker in text for marker in scf_markers)
-    return {
-        "output_exists": True,
-        "job_completed": (not stale_output) and "Job completed" in text,
-        "scf_converged": scf_converged,
-        "stale_output": stale_output,
-    }
+    return parse_siesta_output(run_out, run_fdf)
 
 
 def matrix_sort_key(path: Path) -> tuple[int, str]:

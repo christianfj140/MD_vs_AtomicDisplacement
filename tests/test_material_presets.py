@@ -86,6 +86,15 @@ class MaterialPresetTests(unittest.TestCase):
         self.assertIn("fdf_sha256", manifest)
         self.assertIn("pseudopotential_sha256", manifest)
 
+    def test_si_vacancy_is_explicitly_smoke(self) -> None:
+        manifest = resolve_material_bundle(
+            {"material": {"preset": "si_vacancy"}},
+            base_dir=REPO_ROOT,
+        ).to_manifest_dict()
+
+        self.assertEqual(manifest["profile"], "smoke")
+        self.assertTrue(manifest["fdf"].endswith("RUN.smoke.fdf"))
+
     def test_generic_material_validator_does_not_hardcode_h2o(self) -> None:
         text = (REPO_ROOT / "shared" / "material_bundle.py").read_text(encoding="utf-8").lower()
         self.assertNotIn("h2o", text)

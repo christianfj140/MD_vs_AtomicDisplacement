@@ -141,10 +141,27 @@ def vacancy_fdf(source_fdf: Path, atom_index: int) -> tuple[str, dict[str, Any]]
 def _selected_samples(source_dataset: Path, source_split: str, limit: int) -> list[Any]:
     if limit < 1:
         raise RuntimeError("--limit must be a positive integer.")
-    samples = [sample for sample in read_dataset_samples(source_dataset) if sample.split == source_split]
+    samples = list(read_dataset_samples(source_dataset))
+    if source_split != "all":
+        samples = [sample for sample in samples if sample.split == source_split]
+        if not samples:
+            raise RuntimeError(f"No {source_split!r} samples in {source_dataset}.")
+        return samples[:limit]
+    # "all" keeps each sample in its own split, so a vacancy dataset can serve as a
+    # training *source* (train/validation) instead of a test-only target. The split
+    # assignment must be preserved: deriving a train-split vacancy from a snapshot that
+    # the pristine target uses for test would leak the same MD frame across the split.
     if not samples:
-        raise RuntimeError(f"No {source_split!r} samples in {source_dataset}.")
-    return samples[:limit]
+        raise RuntimeError(f"No samples in {source_dataset}.")
+    kept: list[Any] = []
+    per_split: dict[str, int] = {}
+    for sample in samples:
+        split = str(sample.split)
+        if per_split.get(split, 0) >= limit:
+            continue
+        per_split[split] = per_split.get(split, 0) + 1
+        kept.append(sample)
+    return kept
 
 
 def _copy_basis(source_dataset: Path, sample_dir: Path, output_root: Path) -> None:
@@ -161,16 +178,21 @@ def _copy_basis(source_dataset: Path, sample_dir: Path, output_root: Path) -> No
 
 
 def _write_test_manifest(output_root: Path, rows: list[dict[str, Any]]) -> None:
-    path = output_root / "splits" / "test_manifest.csv"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """One manifest per split present in ``rows`` (``split`` defaults to test)."""
     fields = [
         "sample_id", "method", "source_run", "source_sample_id", "structure_path",
         "hamiltonian_path", "run_out_path", "metadata_path", "valid", "status", "sample_dir",
     ]
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+    by_split: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_split.setdefault(str(row.get("split") or "test"), []).append(row)
+    for split, split_rows in by_split.items():
+        path = output_root / "splits" / f"{split}_manifest.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(split_rows)
 
 
 def _material_provenance(
@@ -277,9 +299,15 @@ def build_target(
     rows: list[dict[str, Any]] = []
     sample_dirs: list[Path] = []
     try:
-        for index, sample in enumerate(samples):
+        per_split_index: dict[str, int] = {}
+        for sample in samples:
             sample_id = f"vacancy_{sample.sample_id}"
-            destination = output_root / "splits" / "test" / str(index)
+            # source_split="all" preserves each sample's split; otherwise everything is
+            # a test-only target, which is the historical behaviour.
+            split = str(sample.split) if source_split == "all" else "test"
+            index = per_split_index.get(split, 0)
+            per_split_index[split] = index + 1
+            destination = output_root / "splits" / split / str(index)
             _prepare_geometry(sample, destination, atom_index)
             _copy_basis(source_dataset, sample.sample_dir, output_root)
             stage_required_pseudopotentials(reference_dir=destination, source_dataset_root=source_dataset)
@@ -297,6 +325,7 @@ def build_target(
                     "method": "md_vacancy",
                     "source_run": str(source_dataset),
                     "source_sample_id": sample.sample_id,
+                    "split": split,
                     "structure_path": str(destination / "RUN.fdf"),
                     "hamiltonian_path": validation.present_artifacts.get("tshs") or validation.present_artifacts["hsx"],
                     "run_out_path": str(destination / "RUN.out"),
@@ -349,7 +378,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dataset", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--source-split", default="test")
+    parser.add_argument("--source-split", default="test",
+                        help="Split to derive, or \"all\" to derive every split preserving its assignment.")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--atom-index", type=int, default=DEFAULT_ATOM_INDEX)
     parser.add_argument("--siesta-command", default="siesta")

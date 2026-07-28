@@ -30,7 +30,10 @@ from joint_artifact_contract import validate_dataset  # noqa: E402
 def write_snapshot(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "RUN.fdf").write_text("SystemLabel graphene\n", encoding="utf-8")
-    (path / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+    (path / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     (path / "metadata.json").write_text('{"system_label": "graphene"}\n', encoding="utf-8")
     for suffix in (".TSHS", ".TSDE", ".HSX", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
         if suffix == ".STRUCT_OUT":
@@ -69,6 +72,7 @@ class Graph2MatBenchmarkIntegrationTests(unittest.TestCase):
             json.dumps(
                 {
                     "label": "graphene",
+                    "profile": "production",
                     "basis_file_sha256": {"C.ion.xml": "basis"},
                     "pseudopotential_sha256": {"C": "pseudo"},
                     "siesta_version": "SIESTA test-version",

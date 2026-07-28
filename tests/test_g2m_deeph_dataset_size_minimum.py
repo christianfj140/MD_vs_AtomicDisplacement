@@ -408,6 +408,14 @@ class DatasetMinimumThresholdProtocolTests(unittest.TestCase):
                     "fit_model": "power_law_floor",
                     "status": "ok",
                     "enough_points_for_paper_candidate": True,
+                    "parameter_covariance_status": "available",
+                }
+            },
+            replicate_bootstrap={
+                "by_method": {
+                    "graph2mat": {
+                        "N_min_abs": {"lower": 20, "upper": 20},
+                    }
                 }
             },
             fallback_used=False,
@@ -4428,6 +4436,14 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     "fit_model": "power_law_floor",
                     "status": "ok",
                     "enough_points_for_paper_candidate": True,
+                    "parameter_covariance_status": "available",
+                }
+            },
+            replicate_bootstrap={
+                "by_method": {
+                    "graph2mat": {
+                        "N_min_abs": {"lower": 20, "upper": 20},
+                    }
                 }
             },
             fallback_used=False,
@@ -4758,6 +4774,14 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     "fit_model": "power_law_floor",
                     "status": "ok",
                     "enough_points_for_paper_candidate": True,
+                    "parameter_covariance_status": "available",
+                }
+            },
+            replicate_bootstrap={
+                "by_method": {
+                    "graph2mat": {
+                        "N_min_abs": {"lower": 20, "upper": 20},
+                    }
                 }
             },
             fallback_used=False,
@@ -4873,6 +4897,7 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                     "status": "ok",
                     "minimum_fit_points_for_paper_candidate": minimum.MIN_FIT_POINTS_FOR_PAPER_CANDIDATE,
                     "enough_points_for_paper_candidate": True,
+                    "parameter_covariance_status": "available",
                 }
             },
             fit_predictive_stability_by_left_out_N={
@@ -4883,6 +4908,13 @@ class DatasetSizeMinimumUiApiTests(unittest.TestCase):
                 "status": "paper_ready_supporting_uncertainty_available",
                 "paper_ready": True,
                 "paper_level_blockers": [],
+            },
+            replicate_bootstrap={
+                "by_method": {
+                    "graph2mat": {
+                        "N_min_abs": {"lower": 20, "upper": 20},
+                    }
+                }
             },
             fallback_used=False,
             fallback_reason=None,

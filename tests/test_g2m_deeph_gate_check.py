@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -7,16 +8,56 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+for directory in (SCRIPTS_DIR, REPO_ROOT / "shared"):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 from deeph_prediction_adapter import EQUIVALENCE_PROVEN_RAW_GLOBAL  # noqa: E402
 from g2m_deeph_gate_check import build_gate_status, main  # noqa: E402
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_snapshot(path: Path, label: str) -> dict:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "RUN.fdf").write_text(
+        f"SystemLabel {label}\nNumberOfAtoms 1\nNumberOfSpecies 1\n"
+        "%block ChemicalSpeciesLabel\n1 6 C\n%endblock ChemicalSpeciesLabel\n"
+        "%block LatticeVectors\n8 0 0\n0 8 0\n0 0 8\n%endblock LatticeVectors\n"
+        "%block AtomicCoordinatesAndAtomicSpecies\n0 0 0 1\n"
+        "%endblock AtomicCoordinatesAndAtomicSpecies\n",
+        encoding="utf-8",
+    )
+    write_json(path / "metadata.json", {"system_label": label})
+    for suffix in (".TSHS", ".TSDE", ".HSX", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
+        (path / f"{label}{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    (path / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
+    write_json(
+        path / "siesta_reference_provenance.json",
+        build_positive_reference_provenance(
+            path,
+            path / f"{label}.TSHS",
+            frozen_sample_id=path.name,
+            split="test",
+            frozen_split_hash="split-a",
+            basis_hashes={"C.ion.xml": "basis-hash"},
+            pseudopotential_hashes={"C": "pseudo-hash"},
+            siesta_version="SIESTA 5.4.2-test",
+            siesta_command="siesta < RUN.fdf",
+        ),
+    )
+    return {
+        "snapshot_dir": str(path),
+        "valid": True,
+        "present_artifacts": {"hsx": str(path / f"{label}.HSX")},
+    }
 
 
 def protocol_payload(dataset_root: Path) -> dict:
@@ -86,7 +127,7 @@ def protocol_payload(dataset_root: Path) -> dict:
         },
         "search_policy": {"strategy": "random", "n_trials_per_model": 2, "random_seed": 1},
         "budget_policy": {"mode": "equal_n_trials", "n_trials_per_model": 2},
-        "final_seeds": [0, 1, 2],
+        "final_seeds": [0, 1, 2, 3, 4],
         "top_k_selection": {
             "k_per_model": 1,
             "split": "validation",
@@ -138,12 +179,55 @@ class Graph2MatDeepHGateCheckTests(unittest.TestCase):
 
     def write_complete_fixture(self) -> None:
         write_json(self.protocol_path, protocol_payload(self.dataset_root))
+        planned = [
+            {"model": model, "config_id": f"{model}_frozen_seed{seed}", "seed": seed}
+            for model in ("graph2mat", "deeph")
+            for seed in range(5)
+        ]
+        write_json(
+            self.workflow_root / "selection" / "selected_configs.json",
+            {
+                "protocol_stage": "search",
+                "uses_test_metrics": False,
+                "checkpoint_selection_complete": True,
+                "paper_level_blockers": [],
+                "selected_configs": [
+                    {
+                        "model": model,
+                        "config_id": f"{model}_frozen",
+                        "checkpoint_selection": {"status": "valid"},
+                    }
+                    for model in ("graph2mat", "deeph")
+                ],
+            },
+        )
+        write_json(
+            self.workflow_root / "selection" / "robust_rerun_plan.json",
+            {
+                "protocol_stage": "robust_validation",
+                "uses_test_metrics": False,
+                "paper_level_blockers": [],
+                "planned_runs": planned,
+            },
+        )
+        write_json(
+            self.workflow_root / "final_test" / "run_final_test_manifest.json",
+            {
+                "status": "completed",
+                "evaluated_runs": planned,
+            },
+        )
+        snapshots = [
+            write_snapshot(self.dataset_root / f"s{index}", f"s{index}")
+            for index in range(3)
+        ]
         write_json(
             self.dataset_root / "benchmark_dataset_manifest.json",
             {
                 "schema": "joint_graph2mat_deeph_benchmark_manifest_v1",
                 "benchmark_ready": True,
                 "validation_status": "valid",
+                "material_profile": "production",
                 "frozen_split_manifest": {
                     "path": str(self.dataset_root / "frozen_split_manifest.json"),
                     "split_counts": {"train": 1, "validation": 1, "test": 1},
@@ -159,9 +243,24 @@ class Graph2MatDeepHGateCheckTests(unittest.TestCase):
                 "split_hash": "split-hash",
                 "split_counts": {"train": 1, "validation": 1, "test": 1},
                 "rows": [
-                    {"sample_id": "s0", "split": "train", "artifact_paths": {"reference_hsx": "s0.HSX"}},
-                    {"sample_id": "s1", "split": "validation", "artifact_paths": {"reference_hsx": "s1.HSX"}},
-                    {"sample_id": "s2", "split": "test", "artifact_paths": {"reference_hsx": "s2.HSX"}},
+                    {
+                        "sample_id": "s0",
+                        "sample_dir": str(self.dataset_root / "s0"),
+                        "split": "train",
+                        "artifact_paths": {"reference_hsx": str(self.dataset_root / "s0" / "s0.HSX")},
+                    },
+                    {
+                        "sample_id": "s1",
+                        "sample_dir": str(self.dataset_root / "s1"),
+                        "split": "validation",
+                        "artifact_paths": {"reference_hsx": str(self.dataset_root / "s1" / "s1.HSX")},
+                    },
+                    {
+                        "sample_id": "s2",
+                        "sample_dir": str(self.dataset_root / "s2"),
+                        "split": "test",
+                        "artifact_paths": {"reference_hsx": str(self.dataset_root / "s2" / "s2.HSX")},
+                    },
                 ],
             },
         )
@@ -169,30 +268,26 @@ class Graph2MatDeepHGateCheckTests(unittest.TestCase):
             self.dataset_root / "artifact_validation.json",
             {
                 "valid": True,
-                "snapshots": [
-                    {"valid": True, "present_artifacts": {"hsx": "s0.HSX"}},
-                    {"valid": True, "present_artifacts": {"hsx": "s1.HSX"}},
-                    {"valid": True, "present_artifacts": {"hsx": "s2.HSX"}},
-                ],
+                "snapshots": snapshots,
             },
         )
         write_json(
             self.workflow_root / "final_test" / "final_statistics.json",
             {
                 "schema": "graph2mat_deeph_final_statistics_v1",
-                "expected_seeds": [0, 1, 2],
+                "expected_seeds": [0, 1, 2, 3, 4],
                 "final_seed_summary": [
                     {
                         "model": "graph2mat",
                         "dataset_id": "joint_a",
-                        "n_seeds_completed": 3,
+                        "n_seeds_completed": 5,
                         "gpu_hours_mean": 1.0,
                         "peak_gpu_memory_mb_mean": 1000.0,
                     },
                     {
                         "model": "deeph",
                         "dataset_id": "joint_a",
-                        "n_seeds_completed": 3,
+                        "n_seeds_completed": 5,
                         "gpu_hours_mean": 1.2,
                         "peak_gpu_memory_mb_mean": 1200.0,
                         "robust_claim_allowed_by_comparability": True,
@@ -247,6 +342,7 @@ class Graph2MatDeepHGateCheckTests(unittest.TestCase):
             protocol_path=self.protocol_path,
             workflow_root=self.workflow_root,
             run_root=self.run_root,
+            run_inventory={"schema": "run_inventory_v1", "reproducibility_status": "pinned_clean"},
         )
 
     def test_all_pass_synthetic_fixture_allows_robust_claim(self) -> None:
@@ -255,6 +351,21 @@ class Graph2MatDeepHGateCheckTests(unittest.TestCase):
         self.assertTrue(status["robust_claim_allowed"])
         self.assertEqual(status["claim_status"], "robust_allowed")
         self.assertFalse([gate for gate in status["gates"] if gate["status"] == "fail"])
+
+    def test_dirty_repositories_cap_claim_at_diagnostic(self) -> None:
+        status = build_gate_status(
+            protocol_path=self.protocol_path,
+            workflow_root=self.workflow_root,
+            run_root=self.run_root,
+            run_inventory={"schema": "run_inventory_v1", "reproducibility_status": "pinned_dirty"},
+        )
+
+        self.assertFalse(status["robust_claim_allowed"])
+        self.assertEqual(status["claim_status"], "diagnostic_only")
+        self.assertIn(
+            "reproducibility_pinned_clean",
+            {gate["id"] for gate in status["gates"] if gate["status"] == "fail"},
+        )
 
     def test_missing_frozen_split_manifest_blocks_robust_claim(self) -> None:
         (self.dataset_root / "frozen_split_manifest.json").unlink()
@@ -319,6 +430,18 @@ class Graph2MatDeepHGateCheckTests(unittest.TestCase):
         self.assertFalse(status["robust_claim_allowed"])
         self.assertEqual(status["claim_status"], "invalid_dataset")
         self.assertIn("forbidden_reference_absent", {gate["id"] for gate in status["gates"] if gate["status"] == "fail"})
+
+    def test_truncated_run_out_blocks_dataset_gate_even_when_manifest_says_valid(self) -> None:
+        (self.dataset_root / "s1" / "RUN.out").write_text("SIESTA startup only\n", encoding="utf-8")
+
+        status = self.gate_status()
+
+        self.assertFalse(status["robust_claim_allowed"])
+        self.assertEqual(status["claim_status"], "invalid_dataset")
+        self.assertIn(
+            "dataset_siesta_execution_valid",
+            {gate["id"] for gate in status["gates"] if gate["status"] == "fail"},
+        )
 
     def test_malformed_json_returns_nonzero_cli_exit(self) -> None:
         self.protocol_path.write_text("{\n", encoding="utf-8")

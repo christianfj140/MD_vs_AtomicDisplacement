@@ -13685,7 +13685,7 @@ function ctSetMetricsPayload(payload, extraPayloads = []) {
     payloads: ctMergePayloadLists(payload?.payloads || [], extraPayloads),
   };
   ctRenderPayloadSelector(ctMetricsPayload);
-  return ctRenderChart(ctMetricsPayload);
+  return ctRenderCharts(ctMetricsPayload);
 }
 
 function ctPayloadGroups(payload, payloads) {
@@ -14342,8 +14342,9 @@ async function ctVacancyShowMatrixError() {
   }
 }
 
-async function ctRenderChart(payload) {
-  const host = document.getElementById("ct-mae-chart");
+async function ctRenderChart(payload, metric = "mae") {
+  const isFrobenius = metric === "relative_frobenius";
+  const host = document.getElementById(isFrobenius ? "ct-frobenius-chart" : "ct-mae-chart");
   if (!host) return;
   await ensurePlotlyLoaded();
   const markerSymbol = (point) =>
@@ -14355,6 +14356,9 @@ async function ctRenderChart(payload) {
   (payload.curves || []).forEach((curve) => {
     (curve.points || [])
       .filter((point) => ctSelectedPayloadIds.has(point.payload_id))
+      // Frobenius is backfilled from each run's common metrics CSV, so pairs whose run
+      // artifacts are gone have MAE but no Frobenius: drop them instead of plotting zeros.
+      .filter((point) => !isFrobenius || point.relative_frobenius != null)
       .forEach((point) => {
         const direction = directionLabel(point);
         const key = `${curve.model}::${direction}`;
@@ -14366,7 +14370,9 @@ async function ctRenderChart(payload) {
     points.sort((a, b) => (a.x ?? a.total_size ?? 0) - (b.x ?? b.total_size ?? 0));
     return {
       x: points.map((p) => (p.x != null ? p.x : p.total_size)),
-      y: points.map((p) => Number(p.mae) * 1000),
+      y: points.map((p) => (isFrobenius
+        ? Number(p.relative_frobenius) * 100
+        : Number(p.mae) * 1000)),
       mode: "lines+markers",
       name: `${curve.model} · ${direction}`,
       marker: {
@@ -14381,16 +14387,20 @@ async function ctRenderChart(payload) {
         `model: ${curve.model}`,
         `seeds: ${p.n_seeds != null ? p.n_seeds : "?"}${p.exploratory ? " (EXPLORATORY)" : ""}`,
       ].filter(Boolean).join("<br>")),
-      hovertemplate: "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
+      hovertemplate: isFrobenius
+        ? "Frobenius %{y:.3f} %<br>%{text}<extra>%{fullData.name}</extra>"
+        : "MAE %{y:.3f} meV<br>%{text}<extra>%{fullData.name}</extra>",
     };
   });
   if (!traces.length) {
     window.Plotly.purge(host);
     host.innerHTML = `<p class="field-help">${
       !(payload.curves || []).length
-        ? "Sin datos de MAE todavía (entrena el sweep o carga la demo)."
+        ? `Sin datos de ${isFrobenius ? "Frobenius" : "MAE"} todavía (entrena el sweep o carga la demo).`
         : ctSelectedPayloadIds.size
-          ? "Los payloads seleccionados no tienen metricas disponibles todavia."
+          ? isFrobenius
+            ? "Los payloads seleccionados no tienen relative_frobenius (sus artefactos de run ya no existen)."
+            : "Los payloads seleccionados no tienen metricas disponibles todavia."
           : "Selecciona al menos un payload para ver sus metricas en el plot."
     }</p>`;
     return;
@@ -14399,14 +14409,24 @@ async function ctRenderChart(payload) {
     host,
     traces,
     {
-      title: "MAE vs dataset de entrenamiento (cross testing)",
+      title: isFrobenius
+        ? "Relative Frobenius vs dataset de entrenamiento (cross testing)"
+        : "MAE vs dataset de entrenamiento (cross testing)",
       xaxis: { title: "Snapshots de entrenamiento (source)" },
-      yaxis: { title: "Hamiltonian MAE (meV)" },
+      yaxis: { title: isFrobenius ? "Relative Frobenius (%)" : "Hamiltonian MAE (meV)" },
       margin: { l: 60, r: 20, t: 40, b: 50 },
       height: 460,
     },
     { displayModeBar: false, responsive: true }
   );
+}
+
+// Both cross-testing charts share one selector, so they always redraw together.
+function ctRenderCharts(payload) {
+  return Promise.all([
+    ctRenderChart(payload, "mae"),
+    ctRenderChart(payload, "relative_frobenius"),
+  ]);
 }
 
 async function ctLoadMetrics(demo, { silent = false } = {}) {
@@ -14433,7 +14453,7 @@ function ctSetAllPayloads(selected) {
   ctPayloadSelectionInitialized = true;
   ctSelectedPayloadIds = new Set(selected ? payloads.map((item) => String(item.id)) : []);
   ctRenderPayloadSelector(ctMetricsPayload);
-  ctRenderChart(ctMetricsPayload || {}).catch((error) => showToast(error.message));
+  ctRenderCharts(ctMetricsPayload || {}).catch((error) => showToast(error.message));
 }
 
 function setupCrossTesting() {
@@ -14478,7 +14498,7 @@ function setupCrossTesting() {
       return;
     }
     ctUpdatePayloadSelectionUi(ctMetricsPayload, groups);
-    ctRenderChart(ctMetricsPayload || {}).catch((error) => showToast(error.message));
+    ctRenderCharts(ctMetricsPayload || {}).catch((error) => showToast(error.message));
   });
   document.getElementById("ct-payload-list")?.addEventListener("toggle", (event) => {
     const target = event.target;

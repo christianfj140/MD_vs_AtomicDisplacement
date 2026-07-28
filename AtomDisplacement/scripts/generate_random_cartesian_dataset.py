@@ -63,6 +63,8 @@ DEFAULT_RANDOM_CARTESIAN_CONFIG: dict[str, Any] = {
     "max_attempts_per_structure": 100,
     "remove_center_of_mass_translation": True,
     "variants_per_family": 1,
+    "claim_mode": "scientific",
+    "split_ratios": [0.8, 0.1, 0.1],
     "validation": {},
 }
 
@@ -72,7 +74,7 @@ GENERIC_RANDOM_CARTESIAN_RECIPE = "generic_cartesian_noise"
 LEGACY_RANDOM_CARTESIAN_RECIPE = "legacy_components"
 COMPONENT_NAMES = ("atom_displacement", "bond_displacement", "angle_displacement")
 SPLIT_NAMES = ("train", "validation", "test")
-RANDOM_CARTESIAN_SPLIT_STRATEGY = "grouped_family_round_robin"
+RANDOM_CARTESIAN_SPLIT_STRATEGY = "grouped_family_ratio_greedy_v2"
 RANDOM_CARTESIAN_FAMILY_FIELDS = (
     "base_geometry_hash",
     "distribution",
@@ -1035,7 +1037,12 @@ def random_cartesian_split_group(sample: dict[str, Any]) -> tuple[str, str, str 
     )
 
 
-def grouped_split_assignment(samples: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+def grouped_split_assignment(
+    samples: list[dict[str, Any]],
+    *,
+    scientific: bool = True,
+    split_ratios: list[float] | tuple[float, float, float] | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     for order, sample in enumerate(samples):
@@ -1054,10 +1061,40 @@ def grouped_split_assignment(samples: list[dict[str, Any]]) -> tuple[dict[str, l
             warnings.append(warning)
 
     ordered_groups = sorted(groups.values(), key=lambda item: (int(item["first_index"]), str(item["group_id"])))
+    fallback_groups = [group for group in ordered_groups if group["group_key"] == "sample_id_fallback"]
+    if scientific and fallback_groups:
+        raise RuntimeError(
+            "random_cartesian scientific splits require explicit or derivable family metadata; "
+            "sample_id fallback is diagnostic-only"
+        )
+    if scientific and len(ordered_groups) < len(SPLIT_NAMES):
+        raise RuntimeError(
+            "random_cartesian scientific splits require at least three independent groups "
+            f"for train/validation/test; found {len(ordered_groups)}"
+        )
+    ratios = [float(value) for value in (split_ratios or (0.8, 0.1, 0.1))]
+    if len(ratios) != len(SPLIT_NAMES) or any(value <= 0 for value in ratios):
+        raise RuntimeError("random_cartesian split_ratios must contain three positive values")
+    ratio_total = sum(ratios)
+    ratios = [value / ratio_total for value in ratios]
+    total_samples = sum(len(group["samples"]) for group in ordered_groups)
+    targets = {
+        split: total_samples * ratios[index]
+        for index, split in enumerate(SPLIT_NAMES)
+    }
     split_samples: dict[str, list[dict[str, Any]]] = {split: [] for split in SPLIT_NAMES}
     group_assignments: list[dict[str, Any]] = []
     for group_index, group in enumerate(ordered_groups):
-        split = SPLIT_NAMES[group_index % len(SPLIT_NAMES)]
+        if group_index < len(SPLIT_NAMES):
+            split = SPLIT_NAMES[group_index]
+        else:
+            split = max(
+                SPLIT_NAMES,
+                key=lambda name: (
+                    targets[name] - len(split_samples[name]),
+                    -SPLIT_NAMES.index(name),
+                ),
+            )
         rows = group["samples"]
         split_samples[split].extend(rows)
         group_assignments.append(
@@ -1071,15 +1108,34 @@ def grouped_split_assignment(samples: list[dict[str, Any]]) -> tuple[dict[str, l
         )
 
     unique_warnings = sorted(dict.fromkeys(warnings))
+    counts = {split: len(rows) for split, rows in split_samples.items()}
+    if scientific and any(count <= 0 for count in counts.values()):
+        raise RuntimeError(f"random_cartesian scientific split is empty: {counts}")
     summary = {
         "split_strategy": RANDOM_CARTESIAN_SPLIT_STRATEGY,
         "group_aware": True,
         "split_group_keys_used": sorted({assignment["group_key"] for assignment in group_assignments}),
         "groups": group_assignments,
         "group_count": len(group_assignments),
-        "counts": {split: len(rows) for split, rows in split_samples.items()},
+        "requested_split_ratios": dict(zip(SPLIT_NAMES, ratios)),
+        "observed_split_ratios": {
+            split: (counts[split] / total_samples if total_samples else 0.0)
+            for split in SPLIT_NAMES
+        },
+        "split_ratio_deviation": {
+            split: (counts[split] / total_samples if total_samples else 0.0)
+            - ratios[index]
+            for index, split in enumerate(SPLIT_NAMES)
+        },
+        "counts": counts,
         "warnings": unique_warnings,
-        "scientific_status": "grouped_family_splits" if not unique_warnings else "grouped_family_splits_with_fallback",
+        "scientific_status": (
+            "valid_grouped_family_splits"
+            if scientific
+            else "diagnostic_only_grouped_family_splits"
+            if not unique_warnings
+            else "diagnostic_only_grouped_family_splits_with_fallback"
+        ),
     }
     return split_samples, summary
 
@@ -1098,8 +1154,18 @@ def assert_group_isolation(split_samples: dict[str, list[dict[str, Any]]]) -> No
             seen[group_id] = split
 
 
-def write_split_manifests(dataset_root: Path, samples: list[dict[str, Any]]) -> dict[str, Any]:
-    split_samples, summary = grouped_split_assignment(samples)
+def write_split_manifests(
+    dataset_root: Path,
+    samples: list[dict[str, Any]],
+    *,
+    scientific: bool = True,
+    split_ratios: list[float] | tuple[float, float, float] | None = None,
+) -> dict[str, Any]:
+    split_samples, summary = grouped_split_assignment(
+        samples,
+        scientific=scientific,
+        split_ratios=split_ratios,
+    )
     assert_group_isolation(split_samples)
     for split, rows in split_samples.items():
         write_json(
@@ -1426,7 +1492,12 @@ def generate_generic_random_cartesian_dataset(
             }
         )
 
-    split_summary = write_split_manifests(dataset_root, samples)
+    split_summary = write_split_manifests(
+        dataset_root,
+        samples,
+        scientific=str(rc_config.get("claim_mode") or "scientific") != "diagnostic",
+        split_ratios=rc_config.get("split_ratios"),
+    )
     manifest = {
         "method_id": "random_cartesian",
         "generation_method": "random_cartesian",
@@ -1652,7 +1723,12 @@ def generate_dataset(
             )
             sample_index += 1
 
-    split_summary = write_split_manifests(dataset_root, samples)
+    split_summary = write_split_manifests(
+        dataset_root,
+        samples,
+        scientific=str(rc_config.get("claim_mode") or "scientific") != "diagnostic",
+        split_ratios=rc_config.get("split_ratios"),
+    )
     manifest = {
         "method_id": "random_cartesian",
         "generation_method": "random_cartesian",

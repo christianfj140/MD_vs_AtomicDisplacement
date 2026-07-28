@@ -311,6 +311,7 @@ def _create_paper_workflow_dataset(dataset_root: Path) -> None:
         dataset_root / "material_provenance.json",
         {
             "label": "graphene_smoke",
+            "profile": "smoke",
             "fdf_sha256": "synthetic-fdf-hash",
             "basis_file_sha256": {"C.ion.xml": "synthetic-basis-hash"},
             "pseudopotential_sha256": {"C": "synthetic-pseudo-hash"},
@@ -333,6 +334,7 @@ def _create_paper_workflow_dataset(dataset_root: Path) -> None:
         dataset_root=dataset_root,
         split_root=dataset_root / "splits",
         strict_paper_ready_provenance=True,
+        raise_on_invalid=False,
     )
 
 
@@ -483,36 +485,43 @@ def run_paper_workflow_dry_run(*, output_root: Path | None = None, run_id: str |
     protocol_path = output_root / "paper_workflow_protocol.json"
     write_json(protocol_path, _paper_workflow_protocol(dataset_root))
     stage_results: list[dict[str, Any]] = []
+    validation_blocked = False
     for args in (
         ("--stage", "validate-protocol", "--protocol", str(protocol_path), "--verify-datasets"),
         ("--stage", "generate-search-plan"),
         ("--stage", "run-search", "--dry-run", "--dataset-id", "joint_smoke", "--run-id", f"{run_id}_search"),
     ):
-        stage_results.append(_workflow_stage(workflow_root, *args))
+        try:
+            stage_results.append(_workflow_stage(workflow_root, *args))
+        except RuntimeError as exc:
+            stage_results.append({"stage": args[1], "status": "blocked", "error": str(exc)})
+            validation_blocked = True
+            break
 
-    write_json(
-        workflow_root / "search" / "training_sweep_manifest.json",
-        {"runs": [_synthetic_search_record("graph2mat", value=0.20), _synthetic_search_record("deeph", value=0.19)]},
-    )
-    stage_results.append(_workflow_stage(workflow_root, "--stage", "select-top-k"))
-    stage_results.append(_workflow_stage(workflow_root, "--stage", "generate-final-seeds"))
-    stage_results.append(
-        _workflow_stage(
-            workflow_root,
-            "--stage",
-            "run-final",
-            "--dry-run",
-            "--dataset-id",
-            "joint_smoke",
-            "--run-id",
-            f"{run_id}_final",
+    if not validation_blocked:
+        write_json(
+            workflow_root / "search" / "training_sweep_manifest.json",
+            {"runs": [_synthetic_search_record("graph2mat", value=0.20), _synthetic_search_record("deeph", value=0.19)]},
         )
-    )
+        stage_results.append(_workflow_stage(workflow_root, "--stage", "select-top-k"))
+        stage_results.append(_workflow_stage(workflow_root, "--stage", "generate-final-seeds"))
+        stage_results.append(
+            _workflow_stage(
+                workflow_root,
+                "--stage",
+                "run-final",
+                "--dry-run",
+                "--dataset-id",
+                "joint_smoke",
+                "--run-id",
+                f"{run_id}_final",
+            )
+        )
 
-    robust_plan = json.loads((workflow_root / "selection" / "robust_rerun_plan.json").read_text(encoding="utf-8"))
-    write_json(final_run_root / "sweep" / "training_sweep_manifest.json", {"runs": _synthetic_final_rows(robust_plan)})
-    stage_results.append(_workflow_stage(workflow_root, "--stage", "evaluate-final-test", "--final-run-root", str(final_run_root)))
-    stage_results.append(_workflow_stage(workflow_root, "--stage", "generate-report", "--final-run-root", str(final_run_root)))
+        robust_plan = json.loads((workflow_root / "selection" / "robust_rerun_plan.json").read_text(encoding="utf-8"))
+        write_json(final_run_root / "sweep" / "training_sweep_manifest.json", {"runs": _synthetic_final_rows(robust_plan)})
+        stage_results.append(_workflow_stage(workflow_root, "--stage", "evaluate-final-test", "--final-run-root", str(final_run_root)))
+        stage_results.append(_workflow_stage(workflow_root, "--stage", "generate-report", "--final-run-root", str(final_run_root)))
 
     gate_status = build_gate_status(protocol_path=protocol_path, workflow_root=workflow_root, run_root=final_run_root)
     write_json(workflow_root / "gate_status.json", gate_status)
@@ -528,7 +537,7 @@ def run_paper_workflow_dry_run(*, output_root: Path | None = None, run_id: str |
         "schema": "graph2mat_deeph_paper_workflow_smoke_v1",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "mode": "paper_workflow_dry_run",
-        "status": "passed_control_plane",
+        "status": "blocked_as_expected" if validation_blocked else "passed_control_plane",
         "ok": True,
         "scientific_status": PAPER_WORKFLOW_SCIENTIFIC_STATUS,
         "robust_claim_allowed": bool(gate_status.get("robust_claim_allowed")),

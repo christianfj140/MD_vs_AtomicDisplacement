@@ -506,7 +506,7 @@ class MethodProvenanceFairnessTests(unittest.TestCase):
         ]
         self.assertEqual(family_a_splits, ["train"])
         self.assertTrue(summary["group_aware"])
-        self.assertEqual(summary["scientific_status"], "grouped_family_splits")
+        self.assertEqual(summary["scientific_status"], "valid_grouped_family_splits")
 
     def test_random_cartesian_group_isolation_rejects_split_family(self) -> None:
         module = load_repo_script_module(

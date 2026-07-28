@@ -244,6 +244,7 @@
     "max_parallel_metric_jobs": 8,
     "max_parallel_graph2mat_training_jobs": 7,
     "max_parallel_deeph_training_jobs": 5,
+    "cross_model_schedule": "deeph_then_graph2mat",
     "model_batch_schedule": "alternating",
     "model_batch_start": "deeph",
     "omp_num_threads": 2,

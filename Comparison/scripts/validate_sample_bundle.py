@@ -23,10 +23,16 @@ import argparse
 import csv
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+SHARED_DIR = Path(__file__).resolve().parents[2] / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from siesta_output_status import input_rewritten_from_xv, parse_siesta_output
 from reference_selection import (
     choose_reference_matrix as strict_choose_reference_matrix,
     reference_candidates,
@@ -35,13 +41,6 @@ from reference_selection import (
 MATRIX_SUFFIXES = (".TSHS", ".HSX")
 STRUCTURE_NAMES = ("RUN.fdf",)
 XV_NAMES = ("siesta.XV",)
-JOB_COMPLETION_MARKERS = ("Job completed",)
-SCF_CONVERGENCE_MARKERS = (
-    "SCF cycle converged",
-    "PostSCF",
-    "FINAL_HF",
-)
-MD_RUN_FDF_XV_MARKER = "Graph2Mat MD geometry materialized from siesta.XV"
 
 
 @dataclass
@@ -96,7 +95,7 @@ def find_matrices(sample_dir: Path) -> list[Path]:
 
 def choose_reference_matrix(sample_dir: Path) -> tuple[Path | None, bool, int]:
     """Choose TSHS over HSX; reject only multiple competing preferred files."""
-    selection = strict_choose_reference_matrix(sample_dir)
+    selection = strict_choose_reference_matrix(sample_dir, require_positive_provenance=False)
     return selection.path, selection.ambiguous, selection.candidate_count
 
 
@@ -121,48 +120,18 @@ def has_atomic_coordinates(path: Path) -> bool:
 
 
 def md_run_fdf_geometry_materialized(path: Path | None) -> bool:
-    if path is None or not path.exists():
-        return False
-    metadata_path = path.parent / "metadata.json"
-    if metadata_path.exists():
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            metadata = {}
-        if isinstance(metadata, dict) and (
-            metadata.get("run_fdf_rewritten_from_xv") is True
-            or str(metadata.get("run_fdf_geometry_source") or "").lower() == "siesta.xv"
-        ):
-            return True
-    try:
-        return MD_RUN_FDF_XV_MARKER in path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
+    return input_rewritten_from_xv(path)
 
 
 def parse_run_out_status(path: Path | None, structure_path: Path | None = None) -> tuple[bool, bool, str, list[str]]:
-    if path is None or not path.exists():
-        return False, False, "missing_run_out", []
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        return False, False, f"parser_error:{exc}", []
-    warnings: list[str] = []
-    if structure_path is not None and structure_path.exists() and path.stat().st_mtime < structure_path.stat().st_mtime:
-        if md_run_fdf_geometry_materialized(structure_path):
-            warnings.append("md_post_siesta_run_fdf_mtime")
-        else:
-            return False, False, "stale_output", warnings
-    completed = any(marker in text for marker in JOB_COMPLETION_MARKERS)
-    converged = any(marker in text for marker in SCF_CONVERGENCE_MARKERS)
-    if completed and converged:
-        return True, True, "ok", warnings
-    missing = []
-    if not completed:
-        missing.append("job_completed")
-    if not converged:
-        missing.append("scf_converged")
-    return completed, converged, "missing_" + "_and_".join(missing), warnings
+    status = parse_siesta_output(path, structure_path)
+    legacy_status = "ok" if status["valid"] else str(status["parser_status"])
+    return (
+        bool(status["job_completed"]),
+        bool(status["scf_converged"]),
+        legacy_status,
+        list(status["warnings"]),
+    )
 
 
 def spectral_ready(matrix_path: Path | None, require_spectral: bool) -> tuple[bool, str]:
@@ -244,7 +213,10 @@ def validate_sample(
         if hamiltonian_path is None:
             hamiltonian_path, ambiguous_matrix, matrix_count = choose_reference_matrix(sample.sample_dir)
         else:
-            selection = strict_choose_reference_matrix(sample.sample_dir)
+            selection = strict_choose_reference_matrix(
+                sample.sample_dir,
+                require_positive_provenance=False,
+            )
             ambiguous_matrix = selection.ambiguous
             matrix_count = selection.candidate_count
             if selection.ok and hamiltonian_path.exists():

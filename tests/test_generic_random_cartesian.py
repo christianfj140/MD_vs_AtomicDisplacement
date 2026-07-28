@@ -94,6 +94,7 @@ class GenericRandomCartesianTests(unittest.TestCase):
             "seed": 12345,
             "variants_per_family": 1,
             "max_attempts_per_structure": 20,
+            "claim_mode": "diagnostic",
         }
         random_config.update(random_overrides)
         return {
@@ -194,6 +195,15 @@ class GenericRandomCartesianTests(unittest.TestCase):
             for sample in split_payload["samples"]:
                 previous = group_to_split.setdefault(sample["split_group_id"], split_name)
                 self.assertEqual(previous, split_name)
+
+    def test_two_groups_fail_for_scientific_three_way_split(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "at least three independent groups"):
+            self.module.grouped_split_assignment(
+                [
+                    {"sample_id": "a", "split_group_id": "family_a"},
+                    {"sample_id": "b", "split_group_id": "family_b"},
+                ]
+            )
 
     def test_legacy_h2o_components_remain_separate(self) -> None:
         config = self.module.random_cartesian_config(

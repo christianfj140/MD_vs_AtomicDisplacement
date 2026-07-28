@@ -10,6 +10,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
 from deeph_prediction_adapter import (
     EQUIVALENCE_PROVEN_RAW_GLOBAL,
     EQUIVALENCE_SCOPE_RAW_GLOBAL,
@@ -17,6 +22,14 @@ from deeph_prediction_adapter import (
 )
 from g2m_deeph_protocol import protocol_hash, validate_protocol
 from g2m_deeph_training_sweep import json_safe
+from electronic_convergence import pooling_errors
+from joint_artifact_contract import (
+    material_profile_errors,
+    md_temporal_evidence_errors,
+    validate_recorded_snapshots,
+)
+from reference_selection import choose_reference_matrix
+from run_inventory import collect_run_inventory
 
 
 GATE_STATUS_SCHEMA = "graph2mat_deeph_gate_status_v1"
@@ -188,8 +201,11 @@ def validate_dataset_gates(protocol: dict[str, Any], *, protocol_dir: Path) -> l
     gates: list[dict[str, Any]] = []
     present_paths: list[Path] = []
     ready_failures: list[str] = []
+    execution_failures: list[str] = []
+    reference_failures: list[str] = []
     split_failures: list[str] = []
     forbidden_findings: list[str] = []
+    pooling_datasets: list[tuple[Path, str | None]] = []
     for index, dataset in enumerate(protocol.get("datasets") or []):
         if not isinstance(dataset, dict):
             ready_failures.append(f"datasets[{index}] is not an object")
@@ -216,12 +232,37 @@ def validate_dataset_gates(protocol: dict[str, Any], *, protocol_dir: Path) -> l
             continue
         present_paths.extend(required_paths)
         benchmark = read_json_strict(benchmark_path)
+        pooling_datasets.append(
+            (dataset_root, str(benchmark.get("material_label") or "") or None)
+        )
         split = read_json_strict(split_path)
         artifact = read_json_strict(artifact_path)
         if benchmark.get("benchmark_ready") is not True or str(benchmark.get("validation_status") or "valid") == "invalid":
             ready_failures.append(f"{dataset_id}: benchmark_dataset_manifest is not benchmark_ready")
         if artifact.get("valid") is not True:
             ready_failures.append(f"{dataset_id}: artifact_validation.valid is not true")
+        live_results, live_errors = validate_recorded_snapshots(
+            artifact,
+            base_dir=dataset_root,
+        )
+        if live_errors or not live_results:
+            execution_failures.extend(
+                f"{dataset_id}: {error}" for error in (live_errors or ["no snapshots revalidated"])
+            )
+        for result in live_results:
+            selection = choose_reference_matrix(result.snapshot_dir)
+            if not selection.ok:
+                reference_failures.append(
+                    f"{dataset_id}: {result.snapshot_dir}: {selection.reason}"
+                )
+        execution_failures.extend(
+            f"{dataset_id}: {error}"
+            for error in md_temporal_evidence_errors(dataset_root)
+        )
+        execution_failures.extend(
+            f"{dataset_id}: {error}"
+            for error in material_profile_errors(dataset_root, benchmark)
+        )
         if split.get("valid") is False:
             split_failures.append(f"{dataset_id}: frozen_split_manifest.valid is false")
         counts = split_counts(split)
@@ -248,6 +289,40 @@ def validate_dataset_gates(protocol: dict[str, Any], *, protocol_dir: Path) -> l
         )
     elif present_paths:
         gates.append(pass_gate("dataset_benchmark_ready", "Dataset manifests are benchmark_ready.", present_paths))
+    if execution_failures:
+        gates.append(
+            fail_gate(
+                "dataset_siesta_execution_valid",
+                "; ".join(execution_failures),
+                claim_status="invalid_dataset",
+                evidence_paths=present_paths,
+            )
+        )
+    if reference_failures:
+        gates.append(
+            fail_gate(
+                "dataset_positive_reference_provenance",
+                "; ".join(reference_failures),
+                claim_status="invalid_dataset",
+                evidence_paths=present_paths,
+            )
+        )
+    elif present_paths:
+        gates.append(
+            pass_gate(
+                "dataset_positive_reference_provenance",
+                "Every selected SIESTA reference has matching positive hash provenance.",
+                present_paths,
+            )
+        )
+    elif present_paths:
+        gates.append(
+            pass_gate(
+                "dataset_siesta_execution_valid",
+                "Recorded snapshots pass live fail-closed SIESTA execution validation.",
+                present_paths,
+            )
+        )
     if split_failures:
         gates.append(
             fail_gate(
@@ -270,6 +345,24 @@ def validate_dataset_gates(protocol: dict[str, Any], *, protocol_dir: Path) -> l
         )
     elif present_paths:
         gates.append(pass_gate("forbidden_reference_absent", "No ML_prediction.HSX reference paths found.", present_paths))
+    pooling_failures = pooling_errors(pooling_datasets)
+    if pooling_failures:
+        gates.append(
+            fail_gate(
+                "electronic_convergence_for_pooling",
+                "; ".join(pooling_failures),
+                claim_status="invalid_dataset",
+                evidence_paths=present_paths,
+            )
+        )
+    elif len(pooling_datasets) > 1:
+        gates.append(
+            pass_gate(
+                "electronic_convergence_for_pooling",
+                "Cross-dataset pooling has matching material-specific convergence evidence.",
+                present_paths,
+            )
+        )
     return gates
 
 
@@ -288,6 +381,81 @@ def validate_selection_gate(protocol: dict[str, Any]) -> dict[str, Any]:
         "Selection/top-k policy is not validation-only.",
         claim_status="invalid_protocol",
     )
+
+
+def validate_blindness_artifact_gates(workflow_root: Path | None) -> list[dict[str, Any]]:
+    if workflow_root is None:
+        return [
+            fail_gate(
+                "test_blindness_artifacts",
+                "workflow_root is required to verify validation → freeze → final_test chronology.",
+                claim_status="invalid_missing_evidence",
+            )
+        ]
+    selected_path = workflow_root / "selection" / "selected_configs.json"
+    plan_path = workflow_root / "selection" / "robust_rerun_plan.json"
+    final_path = workflow_root / "final_test" / "run_final_test_manifest.json"
+    paths = [selected_path, plan_path, final_path]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        return [
+            fail_gate(
+                "test_blindness_artifacts",
+                "Missing test-blind chronology artifacts: " + ", ".join(missing),
+                claim_status="invalid_missing_evidence",
+                evidence_paths=paths,
+            )
+        ]
+    selected = read_json_strict(selected_path)
+    plan = read_json_strict(plan_path)
+    final = read_json_strict(final_path)
+    blockers: list[str] = []
+    if selected.get("protocol_stage") != "search" or selected.get("uses_test_metrics") is not False:
+        blockers.append("selection_not_validation_only")
+    selected_configs = [
+        row for row in selected.get("selected_configs") or [] if isinstance(row, dict)
+    ]
+    if not selected_configs:
+        blockers.append("selected_frozen_candidates_missing")
+    if selected.get("checkpoint_selection_complete") is not True or any(
+        (row.get("checkpoint_selection") or {}).get("status") != "valid"
+        for row in selected_configs
+    ):
+        blockers.extend(str(item) for item in selected.get("paper_level_blockers") or ["checkpoint_selection_incomplete"])
+    if plan.get("protocol_stage") != "robust_validation" or plan.get("uses_test_metrics") is not False:
+        blockers.append("candidate_freeze_not_test_blind")
+    blockers.extend(str(item) for item in plan.get("paper_level_blockers") or [])
+    if final.get("status") != "completed":
+        blockers.append("final_test_not_completed_after_candidate_freeze")
+    planned = {
+        (str(row.get("model") or ""), str(row.get("config_id") or ""))
+        for row in plan.get("planned_runs") or []
+        if isinstance(row, dict)
+    }
+    final_rows = final.get("evaluated_runs") or []
+    evaluated = {
+        (str(row.get("model") or ""), str(row.get("config_id") or ""))
+        for row in final_rows
+        if isinstance(row, dict)
+    }
+    if not planned or not evaluated or not evaluated.issubset(planned):
+        blockers.append("final_test_contains_non_frozen_or_unverifiable_candidates")
+    if blockers:
+        return [
+            fail_gate(
+                "test_blindness_artifacts",
+                "; ".join(sorted(set(blockers))),
+                claim_status="invalid_final_statistics",
+                evidence_paths=paths,
+            )
+        ]
+    return [
+        pass_gate(
+            "test_blindness_artifacts",
+            "Validation-only selection, frozen candidates and final-test chronology are verified.",
+            paths,
+        )
+    ]
 
 
 def load_final_statistics(path: Path | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -510,6 +678,7 @@ def build_gate_status(
     protocol_path: Path,
     workflow_root: Path | None = None,
     run_root: Path | None = None,
+    run_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workflow_root = Path(workflow_root) if workflow_root is not None else None
     run_root = Path(run_root) if run_root is not None else None
@@ -517,12 +686,13 @@ def build_gate_status(
     protocol_dir = protocol_path.parent
     if protocol.get("protocol_id"):
         gates.append(validate_selection_gate(protocol))
+    gates.extend(validate_blindness_artifact_gates(workflow_root))
     gates.extend(validate_dataset_gates(protocol, protocol_dir=protocol_dir))
 
     final_stats_path = find_existing(candidate_final_statistics_paths(workflow_root, run_root))
     final_stats, final_stats_gates = load_final_statistics(final_stats_path)
     gates.extend(final_stats_gates)
-    expected_seed_count = max(3, len(protocol.get("final_seeds") or []))
+    expected_seed_count = max(5, len(protocol.get("final_seeds") or []))
     gates.extend(
         validate_final_statistics_gates(
             final_stats,
@@ -536,6 +706,19 @@ def build_gate_status(
     evidence_bundle, evidence_gates = validate_evidence_bundle_gate(evidence_bundle_path_from_args(workflow_root))
     gates.extend(evidence_gates)
     gates.append(validate_deeph_equivalence_gate(protocol, run_root=run_root, evidence_bundle=evidence_bundle))
+    run_inventory = run_inventory or collect_run_inventory(
+        deeph_python=REPO_ROOT.parent / "DeepH-pack" / ".venv" / "bin" / "python",
+    )
+    reproducibility = str(run_inventory.get("reproducibility_status") or "unavailable")
+    gates.append(
+        pass_gate("reproducibility_pinned_clean", "All source repositories are pinned and clean.")
+        if reproducibility == "pinned_clean"
+        else fail_gate(
+            "reproducibility_pinned_clean",
+            f"reproducibility_status={reproducibility}; robust claims require pinned_clean repositories",
+            claim_status="diagnostic_only",
+        )
+    )
 
     status = claim_status_from_gates(gates)
     blockers = [str(item.get("message") or "") for item in gates if item.get("status") == "fail"]
@@ -548,6 +731,7 @@ def build_gate_status(
         "protocol_path": str(protocol_path),
         "workflow_root": str(workflow_root) if workflow_root is not None else "",
         "run_root": str(run_root) if run_root is not None else "",
+        "run_inventory": run_inventory,
         "robust_claim_allowed": status == "robust_allowed",
         "diagnostic_only": status != "robust_allowed",
         "claim_status": status,

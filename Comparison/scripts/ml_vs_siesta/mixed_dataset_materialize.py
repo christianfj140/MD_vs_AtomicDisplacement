@@ -692,6 +692,11 @@ def _write_merged_material_provenance(
     large_label = str(large.get("label") or large_root.name)
     merged: dict[str, Any] = {
         "schema": "ml_vs_siesta_mixed_material_provenance_v1",
+        "profile": (
+            "production"
+            if small.get("profile") == large.get("profile") == "production"
+            else "diagnostic"
+        ),
         "material_source": "mixed_dataset",
         "heterogeneous_material_pool": True,
         "provenance_source_of_truth": "mixed_dataset_provenance.json",

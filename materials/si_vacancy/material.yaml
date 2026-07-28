@@ -1,5 +1,6 @@
 material:
   label: si_vacancy
+  profile: smoke
   fdf: materials/si_vacancy/RUN.smoke.fdf
   pseudopotential_dir: materials/si_vacancy/pseudos
   basis_dir: materials/si_vacancy/basis

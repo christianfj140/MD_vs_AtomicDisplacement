@@ -1,0 +1,676 @@
+paths:
+  dataset_dir: ''
+  training_dir: ''
+  run_fdf_name: RUN.fdf
+  run_out_name: RUN.out
+  training_config_name: config.yaml
+  venv_activate: /home/christian/repositorios/MD_vs_AtomicDisplacement/.venv/bin/activate
+material:
+  preset: graphene_5x5_vacancy
+commands:
+  graph2mat: graph2mat
+  siesta: siesta
+  shell: bash
+md:
+  system_name: Graphene 5x5 monovacancy MD dataset
+  system_label: graphene_5x5_vacancy
+  run_fdf_template: ${REPO_ROOT}/materials/graphene_5x5_vacancy/RUN.fdf
+  type_of_run: verlet
+  steps: 600
+  temperature_K: 300.0
+  timestep_fs: 1.0
+  ensemble: nve
+  thermostat: none
+  write_md_history: true
+  temperature_blocks: []
+  basis_size: SZP
+  basis_type: split
+  energy_shift: 0.275 eV
+  mesh_cutoff: 250 Ry
+  xc_functional: LDA
+  xc_authors: PZ
+  max_scf_iterations: 200
+  solution_method: diagon
+  dm_mixing_weight: 0.02
+  dm_number_pulay: 3
+  dm_tolerance: 1.d-5
+  dm_require_energy_convergence: T
+  dm_energy_tolerance: 1.e-5 eV
+  spin_polarized: F
+  fix_spin: F
+  non_collinear_spin: F
+  xml_write: true
+  save_hs_file: true
+  save_hs: true
+  save_de: true
+  lua_script: md_store.lua
+  force_aux_cell: true
+  lattice_constant:
+    value: 1.0
+    unit: Ang
+  lattice_vectors:
+  - - 11.002500000000001
+    - -6.3522963368730005
+    - 0.0
+  - - 11.002500000000001
+    - 6.3522963368730005
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 29.340000000000003
+  species:
+  - index: 1
+    atomic_number: 6
+    symbol: C
+  coordinates_format: Ang
+  kgrid_monkhorst_pack:
+  - - 4
+    - 0
+    - 0
+    - 0.0
+  - - 0
+    - 4
+    - 0
+    - 0.0
+  - - 0
+    - 0
+    - 1
+    - 0.0
+  atoms:
+  - label: C
+    species_index: 1
+    position:
+    - 2.2005
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 3.6675000007
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 4.401
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 5.8680000007
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 6.6015
+    - 2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.0685000007
+    - 2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.802
+    - 3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 10.2690000007
+    - 3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 11.0025
+    - 5.0818370695
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 12.4695000007
+    - 5.0818370695
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 4.401
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 5.8680000007
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 6.6015
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.0685000007
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.802
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 10.2690000007
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 11.0025
+    - 2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 12.4695000007
+    - 2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 13.203
+    - 3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 14.6700000007
+    - 3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 6.6015
+    - -2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.0685000007
+    - -2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.802
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 10.2690000007
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 12.4695000007
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 13.203
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 14.6700000007
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 15.4035
+    - 2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 16.8705000007
+    - 2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 8.802
+    - -3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 10.2690000007
+    - -3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 11.0025
+    - -2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 12.4695000007
+    - -2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 13.203
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 14.6700000007
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 15.4035
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 16.8705000007
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 17.604
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 19.0710000007
+    - 1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 11.0025
+    - -5.0818370695
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 12.4695000007
+    - -5.0818370695
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 13.203
+    - -3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 14.6700000007
+    - -3.8113778021
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 15.4035
+    - -2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 16.8705000007
+    - -2.5409185347
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 17.604
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 19.0710000007
+    - -1.2704592674
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 19.8045
+    - 0.0
+    - 0.0
+  - label: C
+    species_index: 1
+    position:
+    - 21.2715000007
+    - 0.0
+    - 0.0
+training:
+  torch_float32_matmul_precision: high
+  data:
+    out_matrix: hamiltonian
+    symmetric_matrix: true
+    sub_point_matrix: false
+    matrix_component_policy: h_only
+    n_matrix_components: 1
+    basis_files: ../dataset/MD_steps/basis/*.ion.xml
+    train_runs: ../dataset/splits/train/*/RUN.fdf
+    val_runs: ../dataset/splits/validation/*/RUN.fdf
+    batch_size: 64
+    store_in_memory: true
+    loader_threads: 4
+  model:
+    num_interactions: 3
+    correlation: 2
+    max_ell: 3
+    hidden_irreps: 32x0e + 32x1o + 32x2e + 32x3o
+    loss: graph2mat.core.data.metrics.block_type_huber
+    optim_lr: 0.005
+    loss_kwargs:
+      beta: 0.01
+  trainer:
+    accelerator: gpu
+    logger:
+      class_path: TensorBoardLogger
+      init_args:
+        name: my_first_model
+        save_dir: lightning_logs
+    max_epochs: 1200
+  seed_everything: 0
+  benchmark_metadata:
+    benchmark_method_id: graphene_5x5_default_huber_0p01_honly_real_ghost_pseudo
+    architecture: default_mace_graph2mat
+    readout: default
+    diagnostic_only: false
+    seed: 0
+    loss: graph2mat.core.data.metrics.block_type_huber
+    loss_kwargs: &id001
+      beta: 0.01
+    dataset_reference_policy: real_siesta_tshs_or_hsx_only_no_ml_prediction
+    fdf_template: materials/graphene_5x5/RUN.fdf
+    fdf_template_note: SIESTA graphene 5x5 50-carbon supercell template.
+    ghost_pseudopotential: materials/graphene/pseudos/Ghost-H.psf
+    ghost_pseudopotential_source: /home/christian/repositorios/prueba_amaro/Ghost-H.psf
+    ghost_pseudopotential_sha256: 50878f06f8171e9a243eeaaedd49461a1e72d9d015f66f66a8158f14116aefdb
+    kpoint_mesh: 4x4x1
+  ui_training_settings:
+    max_epochs: 1200
+    batch_size: 64
+    loader_threads: 4
+    num_interactions: 3
+    correlation: 2
+    seed_everything: 0
+    max_ell: 3
+    optim_lr: 0.005
+    loss: graph2mat.core.data.metrics.block_type_huber
+    hidden_irreps: 32x0e + 32x1o + 32x2e + 32x3o
+    loss_kwargs:
+      beta: 0.01
+    benchmark_metadata:
+      benchmark_method_id: graphene_5x5_default_huber_0p01_honly_real_ghost_pseudo
+      architecture: default_mace_graph2mat
+      readout: default
+      diagnostic_only: false
+      seed: 0
+      loss: graph2mat.core.data.metrics.block_type_huber
+      loss_kwargs: *id001
+      dataset_reference_policy: real_siesta_tshs_or_hsx_only_no_ml_prediction
+      fdf_template: materials/graphene_5x5/RUN.fdf
+      fdf_template_note: SIESTA graphene 5x5 50-carbon supercell template.
+      ghost_pseudopotential: materials/graphene/pseudos/Ghost-H.psf
+      ghost_pseudopotential_source: /home/christian/repositorios/prueba_amaro/Ghost-H.psf
+      ghost_pseudopotential_sha256: 50878f06f8171e9a243eeaaedd49461a1e72d9d015f66f66a8158f14116aefdb
+      kpoint_mesh: 4x4x1
+    data:
+      out_matrix: hamiltonian
+      matrix_component_policy: h_only
+      n_matrix_components: 1
+      symmetric_matrix: true
+checkpoint:
+  path: null
+  auto_best: true
+  search_glob: lightning_logs/**/checkpoints/best-*.ckpt
+  selection: latest_version
+testing:
+  test_runs: ../dataset/splits/test/*/RUN.fdf
+  callbacks:
+    plot_matrix_error: false
+    show_plot: false
+    samplewise_metrics_logger: false
+  data:
+    store_in_memory: true
+prediction:
+  predict_structs: ../dataset/splits/test/*/RUN.fdf
+  output_file: ML_prediction.HSX
+  callbacks:
+    matrix_writer: true
+  data:
+    store_in_memory: true
+pipeline:
+  skip_model_test: false
+  steps:
+  - run_md_training
+  - run_md_testing
+  - run_md_prediction
+performance:
+  max_parallel_siesta_jobs: 1
+  max_parallel_dataset_jobs: 1
+  max_parallel_prediction_jobs: 1
+  max_parallel_evaluation_jobs: 4
+  max_parallel_metric_jobs: 12
+  omp_num_threads: 2
+  mkl_num_threads: 2
+  openblas_num_threads: 2
+  numexpr_num_threads: 12
+  torch_num_threads: 8
+  compute_accelerator: gpu
+  batch_size: 64
+  store_in_memory: true
+  reuse_validated_siesta_outputs: false
+  enable_experiment_cache: false
+  error_policy: fail_fast
+  preset: aggressive
+  torch_float32_matmul_precision: high
+  warnings: []
+splits:
+  enabled: true
+  strategy: blocked_with_gap
+  temporal_gap: 1
+  block_order: train,validation,test
+  train: 6
+  validation: 1
+  test: 1
+single_points:
+  workers: 1
+  rerun: true
+dataset_recipe:
+  method: md
+  recipe_id: graphene_md600_4temp
+  recipe_label: Graphene MD600 4-temperature H-only benchmark
+  block_id: graphene_T100_150__graphene_T300_150__graphene_T600_150__graphene_T1000_150
+  block_label: 150 snapshots @ 100 K__150 snapshots @ 300 K__150 snapshots @ 600 K__150
+    snapshots @ 1000 K
+  dataset_size: 600
+  blocks:
+  - method: md
+    recipe_id: graphene_md600_4temp
+    recipe_label: Graphene MD600 4-temperature H-only benchmark
+    block_id: graphene_T100_150
+    block_label: 150 snapshots @ 100 K
+    dataset_size: 150
+    recipe_index: 0
+    block_index: 0
+    generation_parameters:
+      n_snapshots: 150
+      temperature_K: 100
+      seed: 100
+    generation_parameters_json: '{"n_snapshots": 150, "seed": 100, "temperature_K":
+      100}'
+    seed: 100
+  - method: md
+    recipe_id: graphene_md600_4temp
+    recipe_label: Graphene MD600 4-temperature H-only benchmark
+    block_id: graphene_T300_150
+    block_label: 150 snapshots @ 300 K
+    dataset_size: 150
+    recipe_index: 0
+    block_index: 1
+    generation_parameters:
+      n_snapshots: 150
+      temperature_K: 300
+      seed: 300
+    generation_parameters_json: '{"n_snapshots": 150, "seed": 300, "temperature_K":
+      300}'
+    seed: 300
+  - method: md
+    recipe_id: graphene_md600_4temp
+    recipe_label: Graphene MD600 4-temperature H-only benchmark
+    block_id: graphene_T600_150
+    block_label: 150 snapshots @ 600 K
+    dataset_size: 150
+    recipe_index: 0
+    block_index: 2
+    generation_parameters:
+      n_snapshots: 150
+      temperature_K: 600
+      seed: 600
+    generation_parameters_json: '{"n_snapshots": 150, "seed": 600, "temperature_K":
+      600}'
+    seed: 600
+  - method: md
+    recipe_id: graphene_md600_4temp
+    recipe_label: Graphene MD600 4-temperature H-only benchmark
+    block_id: graphene_T1000_150
+    block_label: 150 snapshots @ 1000 K
+    dataset_size: 150
+    recipe_index: 0
+    block_index: 3
+    generation_parameters:
+      n_snapshots: 150
+      temperature_K: 1000
+      seed: 1000
+    generation_parameters_json: '{"n_snapshots": 150, "seed": 1000, "temperature_K":
+      1000}'
+    seed: 1000
+  md_temperature_blocks: &id002
+  - block_id: graphene_T100_150
+    label: 150 snapshots @ 100 K
+    n_snapshots: 150
+    temperature_K: 100.0
+    seed: 100
+  - block_id: graphene_T300_150
+    label: 150 snapshots @ 300 K
+    n_snapshots: 150
+    temperature_K: 300.0
+    seed: 300
+  - block_id: graphene_T600_150
+    label: 150 snapshots @ 600 K
+    n_snapshots: 150
+    temperature_K: 600.0
+    seed: 600
+  - block_id: graphene_T1000_150
+    label: 150 snapshots @ 1000 K
+    n_snapshots: 150
+    temperature_K: 1000.0
+    seed: 1000
+  generation_parameters:
+    temperature_blocks: *id002
+  generation_parameters_json: '{"temperature_blocks": [{"block_id": "graphene_T100_150",
+    "label": "150 snapshots @ 100 K", "n_snapshots": 150, "seed": 100, "temperature_K":
+    100.0}, {"block_id": "graphene_T300_150", "label": "150 snapshots @ 300 K", "n_snapshots":
+    150, "seed": 300, "temperature_K": 300.0}, {"block_id": "graphene_T600_150", "label":
+    "150 snapshots @ 600 K", "n_snapshots": 150, "seed": 600, "temperature_K": 600.0},
+    {"block_id": "graphene_T1000_150", "label": "150 snapshots @ 1000 K", "n_snapshots":
+    150, "seed": 1000, "temperature_K": 1000.0}]}'
+  seed: null
+  dataset_short_id: AZRT5n
+  dataset_label: MD_dataset1_AZRT5n
+  dataset_label_policy: short_random_alnum6_v1
+  training_plan_index: 1
+  training_plan_label: graphene_w90_default_huber_b0p01_real_d26e8feb74
+  training_plan_display_label: Graphene W90 template default readout H-only Huber
+    beta 0.01 real Ghost-H pseudo
+  training_plan_settings:
+    max_epochs: 1200
+    batch_size: 64
+    loader_threads: 4
+    num_interactions: 3
+    correlation: 2
+    seed_everything: 0
+    max_ell: 3
+    optim_lr: 0.005
+    loss: graph2mat.core.data.metrics.block_type_huber
+    hidden_irreps: 32x0e + 32x1o + 32x2e + 32x3o
+    loss_kwargs:
+      beta: 0.01
+    benchmark_metadata:
+      benchmark_method_id: graphene_w90_default_huber_0p01_honly_real_ghost_pseudo
+      architecture: default_mace_graph2mat
+      readout: default
+      diagnostic_only: false
+      seed: 0
+      loss: graph2mat.core.data.metrics.block_type_huber
+      loss_kwargs: *id001
+      dataset_reference_policy: real_siesta_tshs_or_hsx_only_no_ml_prediction
+      fdf_template: materials/graphene/RUN.fdf
+      fdf_template_note: SIESTA graphene_w90-style template with ghost coordinate
+        rows removed.
+      ghost_pseudopotential: materials/graphene/pseudos/Ghost-H.psf
+      ghost_pseudopotential_source: /home/christian/repositorios/prueba_amaro/Ghost-H.psf
+      ghost_pseudopotential_sha256: 50878f06f8171e9a243eeaaedd49461a1e72d9d015f66f66a8158f14116aefdb
+      kpoint_mesh: 20x20x1
+    data:
+      out_matrix: hamiltonian
+      matrix_component_policy: h_only
+      n_matrix_components: 1
+      symmetric_matrix: true
+  training_plan_reusable_dataset_ids: []
+  training_plan_dataset_targets:
+  - target_id: md:graphene_md600_4temp
+    method_id: md
+    recipe_id: graphene_md600_4temp
+    dataset_label: null
+  training_plan_source_dataset_label: MD_dataset1_AZRT5n
+  sweep_index: null
+  sweep_label: null
+  sweep_parameters: {}
+  hidden_irreps_dimension: null
+_provenance:
+  derived_from: Comparison/config/graphene_5x5_snapshot_scaling_20_50_pipeline_config.yaml
+  change: 'monovacante: eliminado el atomo indice 24 (fraccional 0.5,0.5,0.0, el mismo
+    sitio que usa build_graphene_5x5_vacancy_target.py) y reapuntado material/system_label/run_fdf_template
+    a graphene_5x5_vacancy. Todo lo demas (MD, base, malla, XC, k-grid) identico al
+    pristino.'
+  removed_atom:
+    label: C
+    species_index: 1
+    position:
+    - 11.0025
+    - 0.0
+    - 0.0

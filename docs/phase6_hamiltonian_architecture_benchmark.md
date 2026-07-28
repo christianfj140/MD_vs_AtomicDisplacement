@@ -33,7 +33,7 @@ dataset. The benchmark should not regenerate references and must not use
 
 ## Matrix
 
-The implemented matrix has three seeds for each candidate:
+The current payload has three seeds for each candidate:
 
 - `baseline_default_mae`
 - `baseline_default_huber_b0p01`
@@ -45,6 +45,10 @@ The implemented matrix has three seeds for each candidate:
 
 The dense readout entry is diagnostic only and must not be ranked as a
 production result.
+
+Three seeds are insufficient for a paper-level architecture claim under the
+current gate. Before the final campaign, predeclare at least five independent
+seeds or archive a power justification.
 
 ## Scientific Guardrails
 

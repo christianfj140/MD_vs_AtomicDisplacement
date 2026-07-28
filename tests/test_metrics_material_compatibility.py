@@ -12,6 +12,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
+SHARED_DIR = REPO_ROOT / "shared"
+if str(SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(SHARED_DIR))
+
+from reference_provenance import build_positive_reference_provenance
 
 
 def load_metrics_module(name: str = "evaluate_hamiltonian_metrics_material_compat"):
@@ -167,7 +172,36 @@ class MetricsMaterialCompatibilityTests(unittest.TestCase):
             encoding="utf-8",
         )
         prediction_dir.joinpath("ML_prediction.HSX").write_bytes(b"prediction")
-        reference_dir.joinpath("siesta.TSHS").write_bytes(b"reference")
+        reference_dir.joinpath("RUN.fdf").write_text(
+            "SystemLabel siesta\nNumberOfAtoms 1\nNumberOfSpecies 1\n"
+            "%block ChemicalSpeciesLabel\n1 6 C\n%endblock ChemicalSpeciesLabel\n"
+            "%block LatticeVectors\n8 0 0\n0 8 0\n0 0 8\n%endblock LatticeVectors\n"
+            "%block AtomicCoordinatesAndAtomicSpecies\n0 0 0 1\n"
+            "%endblock AtomicCoordinatesAndAtomicSpecies\n",
+            encoding="utf-8",
+        )
+        reference_dir.joinpath("RUN.out").write_text(
+            "iscf Eharris\nSCF cycle converged\nJob completed\n",
+            encoding="utf-8",
+        )
+        reference = reference_dir / "siesta.TSHS"
+        reference.write_bytes(b"reference")
+        reference_dir.joinpath("siesta.ORB_INDX").write_bytes(b"orb")
+        provenance = build_positive_reference_provenance(
+            reference_dir,
+            reference,
+            frozen_sample_id="001",
+            split="test",
+            frozen_split_hash="fixture-split",
+            basis_hashes={"C.ion.xml": "fixture-basis"},
+            pseudopotential_hashes={"C": "fixture-pseudo"},
+            siesta_version="SIESTA fixture",
+            siesta_command="siesta < RUN.fdf",
+        )
+        reference_dir.joinpath("siesta_reference_provenance.json").write_text(
+            json.dumps(provenance),
+            encoding="utf-8",
+        )
 
     def test_non_h2o_structural_metrics_pass_with_matching_basis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

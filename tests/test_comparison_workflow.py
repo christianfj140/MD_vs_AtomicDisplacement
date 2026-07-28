@@ -4,6 +4,7 @@ import csv
 import contextlib
 import copy
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_TMP_ROOT = REPO_ROOT / ".test_tmp"
+if str(REPO_ROOT / "shared") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "shared"))
+
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -92,6 +97,53 @@ def kpoint_run_fdf(path: Path, *, mesh: tuple[int, int, int] = (6, 6, 1)) -> Non
                 "XML.Write T",
                 "",
             ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_positive_reference_provenance(sample_dir: Path, *, label: str = "siesta") -> None:
+    reference = sample_dir / f"{label}.TSHS"
+    (sample_dir / "RUN.fdf").write_text(
+        "\n".join(
+            [
+                f"SystemLabel {label}",
+                "NumberOfAtoms 1",
+                "NumberOfSpecies 1",
+                "%block ChemicalSpeciesLabel",
+                "1 1 H",
+                "%endblock ChemicalSpeciesLabel",
+                "%block LatticeVectors",
+                "8 0 0",
+                "0 8 0",
+                "0 0 8",
+                "%endblock LatticeVectors",
+                "%block AtomicCoordinatesAndAtomicSpecies",
+                "0 0 0 1",
+                "%endblock AtomicCoordinatesAndAtomicSpecies",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (sample_dir / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
+    (sample_dir / f"{label}.ORB_INDX").write_bytes(b"orb\n")
+    (sample_dir / "siesta_reference_provenance.json").write_text(
+        json.dumps(
+            build_positive_reference_provenance(
+                sample_dir,
+                reference,
+                frozen_sample_id=sample_dir.name,
+                split="test",
+                frozen_split_hash="fixture-split-hash",
+                basis_hashes={"H.ion.xml": "fixture-basis-hash"},
+                pseudopotential_hashes={"H": "fixture-pseudo-hash"},
+                siesta_version="SIESTA 5.4.2-test",
+                siesta_command="siesta < RUN.fdf",
+            )
         ),
         encoding="utf-8",
     )
@@ -5076,6 +5128,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
                 "single_point_overrides": {},
                 "random_cartesian": {
                     "enabled": True,
+                    "claim_mode": "diagnostic",
                     "n_structures": n_structures,
                     "seed": seed,
                     "distribution": "gaussian",
@@ -5184,8 +5237,10 @@ class ComparisonWorkflowTests(unittest.TestCase):
             self.configure_random_cartesian_module(module, root, n_structures=5, seed=13)
             module.PIPELINE_CONFIG["structure"]["random_cartesian"]["blocks"] = [
                 {"block_id": "rc_small", "n_structures": 2, "max_displacement": "0.02 Ang", "seed": 21},
-                {"block_id": "rc_large", "n_structures": 3, "max_displacement": "0.05 Ang", "seed": 22},
+                {"block_id": "rc_medium", "n_structures": 2, "max_displacement": "0.04 Ang", "seed": 22},
+                {"block_id": "rc_large", "n_structures": 1, "max_displacement": "0.05 Ang", "seed": 23},
             ]
+            module.PIPELINE_CONFIG["structure"]["random_cartesian"]["claim_mode"] = "scientific"
             manifest = module.generate_dataset(module.PIPELINE_CONFIG)
             dataset_root = root / "dataset" / "RandomCartesian_steps"
             split_rows = {
@@ -5194,16 +5249,16 @@ class ComparisonWorkflowTests(unittest.TestCase):
             }
             group_to_split: dict[str, str] = {}
             for split, payload in split_rows.items():
-                self.assertEqual(payload["split_strategy"], "grouped_family_round_robin")
+                self.assertEqual(payload["split_strategy"], "grouped_family_ratio_greedy_v2")
                 self.assertTrue(payload["group_aware"])
                 for sample in payload["samples"]:
                     group_id = sample["split_group_id"]
                     previous = group_to_split.setdefault(group_id, split)
                     self.assertEqual(previous, split)
 
-            self.assertEqual(len(group_to_split), 2)
-            self.assertEqual(manifest["split_strategy"], "grouped_family_round_robin")
-            self.assertEqual(manifest["split_summary"]["counts"], {"train": 2, "validation": 3, "test": 0})
+            self.assertEqual(len(group_to_split), 3)
+            self.assertEqual(manifest["split_strategy"], "grouped_family_ratio_greedy_v2")
+            self.assertEqual(manifest["split_summary"]["counts"], {"train": 2, "validation": 2, "test": 1})
             self.assertEqual(manifest["split_summary"]["split_group_keys_used"], ["split_group_id"])
             self.assertTrue((dataset_root / "split_manifest_summary.json").exists())
             self.assertTrue((dataset_root / "dataset_manifest.json").exists())
@@ -5261,8 +5316,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
             ]
             split_root = root / "splits"
             split_root.mkdir()
-            summary = module.write_split_manifests(split_root, samples)
-            self.assertEqual(summary["scientific_status"], "grouped_family_splits_with_fallback")
+            summary = module.write_split_manifests(split_root, samples, scientific=False)
+            self.assertEqual(
+                summary["scientific_status"],
+                "diagnostic_only_grouped_family_splits_with_fallback",
+            )
             self.assertIn("derived_random_cartesian_family", summary["split_group_keys_used"])
             self.assertIn("sample_id_fallback", summary["split_group_keys_used"])
             self.assertTrue(any("missing split_group_id" in warning for warning in summary["warnings"]))
@@ -5893,9 +5951,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
             one.mkdir()
             (one / "siesta.TSHS").write_bytes(b"tshs")
             (one / "siesta.HSX").write_bytes(b"hsx")
+            write_positive_reference_provenance(one)
             selection = module.choose_reference_matrix(one)
             self.assertTrue(selection.ok)
             self.assertEqual(selection.path.name, "siesta.TSHS")
+            self.assertEqual(selection.provenance_status, "positive_siesta_provenance_valid")
 
             many_tshs = root / "many_tshs"
             many_tshs.mkdir()
@@ -5916,6 +5976,11 @@ class ComparisonWorkflowTests(unittest.TestCase):
             (prediction_only / "ML_prediction.HSX").write_bytes(b"prediction")
             self.assertFalse(module.choose_reference_matrix(prediction_only).ok)
 
+            renamed_prediction = root / "renamed_prediction"
+            renamed_prediction.mkdir()
+            (renamed_prediction / "renamed_reference.HSX").write_bytes(b"prediction")
+            self.assertFalse(module.choose_reference_matrix(renamed_prediction).ok)
+
     def test_reference_archive_never_copies_ml_prediction_as_reference(self) -> None:
         module = self.load_pipeline_ui_module()
         with workspace_tempdir() as tmp:
@@ -5927,6 +5992,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             reference = source / "002"
             reference.mkdir(parents=True)
             (reference / "siesta.TSHS").write_bytes(b"reference")
+            write_positive_reference_provenance(reference)
 
             copied = module.copy_selected_reference_files(source, root / "archive")
             self.assertEqual(copied, 1)
@@ -10260,7 +10326,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             write_csv(manifest, [{"sample_id": "001", "structure_path": str(sample / "RUN.fdf")}])
             output_dir = root / "predictions"
 
-            def fake_run_prediction(args, _predict_glob):
+            def fake_run_prediction(args, _predict_glob, **_kwargs):
                 prediction = args.output_dir / "workspace" / "predict_structures" / "001" / "ML_prediction.HSX"
                 prediction.write_bytes(b"partial prediction")
                 raise module.incomplete_prediction_error(ValueError(module.EDGE_LABEL_CONSUMPTION_ERROR))
@@ -11368,6 +11434,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             ref_path = ref_dir / "siesta.TSHS"
             pred_path.write_bytes(b"prediction")
             ref_path.write_bytes(b"reference")
+            write_positive_reference_provenance(ref_dir)
 
             def fake_read_matrix(path: Path):
                 values = [0.0, 1.0]
@@ -11421,6 +11488,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             ref_dir.mkdir(parents=True)
             (pred_dir / "ML_prediction.HSX").write_bytes(b"prediction")
             (ref_dir / "siesta.TSHS").write_bytes(b"reference")
+            write_positive_reference_provenance(ref_dir)
 
             def fake_read_matrix(path: Path):
                 values = [0.0, 1.0, 2.0]
@@ -11473,6 +11541,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
             ref_dir.mkdir(parents=True)
             (pred_dir / "ML_prediction.HSX").write_bytes(b"prediction")
             (ref_dir / "siesta.TSHS").write_bytes(b"reference")
+            write_positive_reference_provenance(ref_dir)
 
             def fake_read_matrix(path: Path):
                 is_prediction = path.name == "ML_prediction.HSX"

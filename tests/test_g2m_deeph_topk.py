@@ -134,6 +134,23 @@ class Graph2MatDeepHTopKTests(unittest.TestCase):
 
         self.assertEqual(validation_metric_value(record, "val_loss"), 0.3)
 
+    def test_checkpoint_selected_by_test_fails(self) -> None:
+        record = _record("graph2mat", "g2m_test_checkpoint", 0.3)
+        record["checkpoint_manifest"] = {
+            "checkpoint_path": "/tmp/checkpoint.ckpt",
+            "checkpoint_sha256": "hash",
+            "selection_metric": "test_loss",
+            "selection_split": "test",
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "selected using the test split"):
+            select_top_configs(
+                [record],
+                metric="val_loss",
+                mode="min",
+                k_per_model=1,
+            )
+
     def test_validation_spectral_composite_selects_spectral_not_val_loss(self) -> None:
         selected = select_top_configs(
             [
@@ -216,6 +233,7 @@ class Graph2MatDeepHTopKTests(unittest.TestCase):
         self.assertEqual(graph2mat_row["overrides"]["seed_everything"], graph2mat_row["seed"])
         self.assertEqual(deeph_row["overrides"]["atom_fea_len"], 64)
         self.assertEqual(deeph_row["overrides"]["seed"], deeph_row["seed"])
+        self.assertTrue(plan["paper_level_blockers"])
 
     def test_insufficient_completed_configs_fail_clearly(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Insufficient completed configs"):

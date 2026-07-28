@@ -1774,6 +1774,9 @@ def thresholds_by_method_from_fit(
             for row in curve_rows
         ]
         clean_values = [value for value in values if value is not None]
+        absolute_n = n_min_abs(curve_rows, threshold_mev)
+        observed_min = min(int(row["dataset_size_x"]) for row in observed_rows)
+        observed_max = max(int(row["dataset_size_x"]) for row in observed_rows)
 
         out[method] = with_legacy_threshold_aliases({
             "available_sizes": [
@@ -1790,7 +1793,15 @@ def thresholds_by_method_from_fit(
                 if finite_number(row.get("primary_metric_mev_mean")) is not None
             ),
             "best_fit_mev": min(clean_values) if clean_values else None,
-            "N_min_abs": n_min_abs(curve_rows, threshold_mev),
+            "N_min_abs": absolute_n,
+            "N_min_abs_domain_status": (
+                "no_crossing"
+                if absolute_n is None
+                else "within_observed_range"
+                if observed_min <= absolute_n <= observed_max
+                else "extrapolated"
+            ),
+            "N_min_abs_observed_domain": [observed_min, observed_max],
             N_MIN_REL_TOL_KEY: n_min_rel_tol(curve_rows, relative_tolerance),
             "N_min_plateau": n_min_plateau(curve_rows, plateau_gain),
 
@@ -3126,12 +3137,44 @@ def fit_summary(
     ss_tot = sum((value - y_mean) ** 2 for value in y_values)
     ss_res = sum(value * value for value in residuals)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 1.0
+    covariance: list[list[float]] | None = None
+    if np is not None and len(n_values) > len(coefficients):
+        try:
+            base = np.asarray(predicted, dtype=float)
+            jacobian_columns = []
+            for index, coefficient in enumerate(coefficients):
+                step = max(abs(float(coefficient)) * 1e-6, 1e-8)
+                shifted = list(coefficients)
+                shifted[index] += step
+                shifted_prediction = np.asarray(
+                    predict_fit(model, shifted, n_values),
+                    dtype=float,
+                )
+                jacobian_columns.append((shifted_prediction - base) / step)
+            jacobian = np.column_stack(jacobian_columns)
+            sigma2 = ss_res / max(1, len(n_values) - len(coefficients))
+            covariance = (
+                sigma2 * np.linalg.pinv(jacobian.T @ jacobian)
+            ).tolist()
+        except Exception:
+            covariance = None
     return {
         "model": model,
         "fit_model": model,
         "status": "ok",
         "n_points": len(n_values),
         "coefficients": coefficients,
+        "parameter_covariance": covariance,
+        "parameter_covariance_status": "available" if covariance is not None else "unavailable",
+        "observed_n": n_values,
+        "observed_metric_mev": y_values,
+        "predicted_metric_mev": predicted,
+        "residuals_mev": residuals,
+        "observed_domain": {
+            "min_n": min(n_values) if n_values else None,
+            "max_n": max(n_values) if n_values else None,
+        },
+        "extrapolation_performed": False,
         "mae_mev": mae,
         "rmse_mev": rmse,
         "r2": r2,
@@ -3201,6 +3244,93 @@ def fit_models_for_method(
                 **fit_policy_metadata(model, status="failed", n_points=len(n_values)),
             }
     return out
+
+
+def predictive_fit_model_selection(
+    best_rows: list[dict[str, Any]],
+    fit_models: list[str],
+    *,
+    requested_fit_model: str,
+    moving_average_window: int = 3,
+) -> dict[str, Any]:
+    """Predeclared leave-one-N-out model selection; N_min values never choose the model."""
+
+    errors: dict[str, list[float]] = {
+        canonical_fit_model(model): []
+        for model in fit_models
+        if canonical_fit_model(model) != "none"
+    }
+    failures: dict[str, int] = defaultdict(int)
+    for method in sorted({str(row["method"]) for row in best_rows}):
+        method_rows = sorted(
+            [row for row in best_rows if str(row["method"]) == method],
+            key=lambda row: int(row["dataset_size_x"]),
+        )
+        for omitted in method_rows:
+            reduced = [row for row in method_rows if row is not omitted]
+            omitted_n = float(omitted["dataset_size_x"])
+            observed = finite_number(omitted.get("primary_metric_mev_mean"))
+            if observed is None:
+                continue
+            for model in list(errors):
+                fit = fit_models_for_method(
+                    reduced,
+                    [model],
+                    moving_average_window=moving_average_window,
+                ).get(model) or {}
+                prediction: float | None = None
+                if fit.get("status") == "ok" and fit.get("coefficients"):
+                    values = predict_fit(
+                        model,
+                        [float(value) for value in fit["coefficients"]],
+                        [omitted_n],
+                    )
+                    prediction = finite_number(values[0]) if values else None
+                if prediction is None or prediction < 0:
+                    failures[model] += 1
+                    continue
+                errors[model].append(prediction - observed)
+    scores = {
+        model: {
+            "leave_one_N_out_rmse_mev": (
+                math.sqrt(mean([error * error for error in values]) or 0.0)
+                if values
+                else None
+            ),
+            "leave_one_N_out_mae_mev": (
+                mean([abs(error) for error in values]) if values else None
+            ),
+            "successful_predictions": len(values),
+            "failed_predictions": failures.get(model, 0),
+        }
+        for model, values in errors.items()
+    }
+    eligible = [
+        (finite_number(score["leave_one_N_out_rmse_mev"]), model)
+        for model, score in scores.items()
+        if finite_number(score["leave_one_N_out_rmse_mev"]) is not None
+        and score["failed_predictions"] == 0
+    ]
+    selected = min(eligible)[1] if eligible else None
+    requested = canonical_fit_model(requested_fit_model)
+    blockers: list[str] = []
+    if selected is None:
+        blockers.append("paper_blocked_if_predictive_fit_model_selection_unavailable")
+    elif selected != requested:
+        blockers.append(
+            f"paper_blocked_if_locked_fit_model_not_predictive_winner:{requested}:{selected}"
+        )
+    return {
+        "status": "ok" if not blockers else "diagnostic_only",
+        "policy": "predeclared_leave_one_N_out_minimum_RMSE",
+        "selection_metric": "leave_one_N_out_rmse_mev",
+        "selection_uses_N_min": False,
+        "candidate_models": sorted(scores),
+        "requested_locked_model": requested,
+        "selected_predictive_model": selected,
+        "scores": scores,
+        "paper_level_blockers": blockers,
+    }
 
 
 def required_fit_points(model: str) -> int:
@@ -4632,6 +4762,7 @@ def scientific_claim_status_payload(
     actual_fit_model: str | None,
     fit_threshold_details: dict[str, dict[str, Any]],
     fit_predictive_stability_by_left_out_N: dict[str, Any] | None = None,
+    fit_model_selection: dict[str, Any] | None = None,
     hierarchical_uncertainty: dict[str, Any] | None = None,
     threshold_sensitivity: dict[str, Any] | None = None,
     replicate_bootstrap: dict[str, Any] | None = None,
@@ -4756,6 +4887,8 @@ def scientific_claim_status_payload(
                 or "unknown"
             )
             blockers.append(f"paper_blocked_if_n_min_fit_policy_diagnostic_only:{model_name}")
+        if fit_detail.get("parameter_covariance_status") != "available":
+            blockers.append(f"paper_blocked_if_fit_parameter_covariance_unavailable:{method}")
         if (
             canonical_fit_model(fit_detail.get("fit_model") or fit_detail.get("model")) == CANONICAL_POWER_LAW_MODEL
             and not bool(fit_detail.get("enough_points_for_paper_candidate"))
@@ -4766,6 +4899,23 @@ def scientific_claim_status_payload(
         method_stability = stability_by_method.get(method)
         if isinstance(method_stability, dict):
             blockers.extend(str(item) for item in (method_stability.get("paper_level_blockers") or []))
+        method_thresholds = thresholds.get(method) or {}
+        absolute_n = finite_number(method_thresholds.get("N_min_abs"))
+        if absolute_n is None:
+            blockers.append(f"paper_blocked_if_no_absolute_threshold_crossing:{method}")
+        elif method_thresholds.get("N_min_abs_domain_status") == "extrapolated":
+            warnings.append(f"N_min_abs_extrapolated:{method}")
+        bootstrap_interval = (
+            ((replicate_bootstrap or {}).get("by_method") or {})
+            .get(method, {})
+            .get("N_min_abs", {})
+        )
+        interval_values = [
+            finite_number(bootstrap_interval.get("lower")),
+            finite_number(bootstrap_interval.get("upper")),
+        ]
+        if absolute_n is not None and any(value is None for value in interval_values):
+            blockers.append(f"paper_blocked_if_absolute_n_min_interval_uninformative:{method}")
 
     if hierarchical_uncertainty:
         blockers.extend(str(item) for item in (hierarchical_uncertainty.get("paper_level_blockers") or []))
@@ -4773,6 +4923,8 @@ def scientific_claim_status_payload(
         blockers.extend(str(item) for item in (threshold_sensitivity.get("paper_level_blockers") or []))
     if replicate_bootstrap:
         blockers.extend(str(item) for item in (replicate_bootstrap.get("paper_level_blockers") or []))
+    if fit_model_selection:
+        blockers.extend(str(item) for item in (fit_model_selection.get("paper_level_blockers") or []))
 
     if claim_mode_requested == "paper_candidate":
         if dataset_size_axis.get("n_train_fallback_used"):
@@ -4823,6 +4975,12 @@ def scientific_claim_status_payload(
             "status": "not_applicable",
             "reason": "missing_diagnostic",
             "methods": {},
+        },
+        "fit_model_selection": fit_model_selection or {
+            "status": "not_available",
+            "paper_level_blockers": [
+                "paper_blocked_if_predictive_fit_model_selection_unavailable"
+            ],
         },
         "threshold_sensitivity": threshold_sensitivity or {
             "enabled": False,
@@ -5223,6 +5381,8 @@ def disabled_bootstrap_summary(*, replicates_requested: int = 0, ci_level: float
         "resampling_group_key": ["method", "dataset_size_x"],
         "paper_level_blockers": [],
         "replicates_requested": replicates_requested,
+        "replicates_executed": 0,
+        "requested_executed_match": replicates_requested == 0,
         "replicates_successful": 0,
         "replicates_failed": 0,
         "ci_level": ci_level if replicates_requested > 0 else None,
@@ -5541,7 +5701,13 @@ def compute_bootstrap_n_min(
             "bootstrap_type": "replicate_resampling",
             "display_label": REPLICATE_BOOTSTRAP_LABEL,
             **resampling_meta,
+            "paper_level_blockers": sorted(
+                set(resampling_meta.get("paper_level_blockers") or [])
+                | {"paper_blocked_if_bootstrap_requested_executed_mismatch"}
+            ),
             "replicates_requested": n_replicates,
+            "replicates_executed": 0,
+            "requested_executed_match": n_replicates == 0,
             "replicates_successful": 0,
             "replicates_failed": n_replicates,
             "ci_level": ci_level,
@@ -5648,6 +5814,8 @@ def compute_bootstrap_n_min(
         "display_label": REPLICATE_BOOTSTRAP_LABEL,
         **resampling_meta,
         "replicates_requested": n_replicates,
+        "replicates_executed": n_replicates,
+        "requested_executed_match": True,
         "replicates_successful": replicate_successes,
         "replicates_failed": replicate_failures,
         "ci_level": ci_level,
@@ -6179,6 +6347,12 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         )
         for method in sorted({str(row["method"]) for row in best_rows})
     }
+    fit_model_selection = predictive_fit_model_selection(
+        best_rows,
+        fit_models,
+        requested_fit_model=requested_fit_model,
+        moving_average_window=moving_average_window,
+    )
     fit_stability = fit_predictive_stability_by_left_out_N(
         best_rows,
         threshold_mev=float(args.threshold_mev),
@@ -6264,6 +6438,11 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         actual_n_min_source=actual_n_min_source,
         seed=bootstrap_seed,
         ci_level=ci_level,
+        n_replicates=(
+            bootstrap_replicates
+            if bootstrap_replicates > 0
+            else HIERARCHICAL_UNCERTAINTY_REPLICATES
+        ),
     )
     warnings.extend(hierarchical_uncertainty.get("warnings") or [])
     scientific_status = scientific_claim_status_payload(
@@ -6280,6 +6459,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         actual_fit_model=actual_fit_model,
         fit_threshold_details=fit_threshold_details,
         fit_predictive_stability_by_left_out_N=fit_stability,
+        fit_model_selection=fit_model_selection,
         threshold_sensitivity=threshold_sensitivity,
         hierarchical_uncertainty=hierarchical_uncertainty,
         replicate_bootstrap=replicate_bootstrap,
@@ -6363,6 +6543,7 @@ def analyze(args: argparse.Namespace) -> dict[str, Any]:
         "fit_thresholds": fit_thresholds,
         "fit_threshold_details": fit_threshold_details,
         "fit_predictive_stability_by_left_out_N": fit_stability,
+        "fit_model_selection": fit_model_selection,
         "threshold_sensitivity": threshold_sensitivity,
         "deprecated_threshold_aliases": dict(LEGACY_THRESHOLD_ALIASES),
         "moving_average_window": moving_average_window,

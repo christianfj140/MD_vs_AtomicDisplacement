@@ -281,6 +281,7 @@ def evaluate_derivative_metrics(
     source_model: str = "graph2mat",
     graph2mat_prediction_method: str = GRAPH2MAT_PREDICTION_METHOD_FINITE_DIFFERENCE,
     deeph_prediction_method: str = DEEPH_PREDICTION_METHOD_FINITE_DIFFERENCE,
+    delta_convergence_thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result_dir = Path(result_dir)
     output_dir = Path(output_dir) if output_dir is not None else result_dir / "derivative_metrics"
@@ -387,7 +388,10 @@ def evaluate_derivative_metrics(
         deeph_equivalence=deeph_equivalence,
     )
     delta_stability = _delta_stability_summary(metric_rows)
-    delta_stability_convergence = _delta_stability_convergence_summary(delta_stability)
+    delta_stability_convergence = _delta_stability_convergence_summary(
+        delta_stability,
+        convergence_thresholds=delta_convergence_thresholds,
+    )
     reference_noise = _reference_noise_summary(metric_rows)
     summary = _summary(metric_rows, stencil_rows, hermiticity_rows)
     group_metrics = _derivative_group_metrics(metric_rows, split=split)
@@ -453,6 +457,7 @@ def evaluate_derivative_metrics(
         "delta_sensitivity_study_passed": delta_stability_convergence["delta_sensitivity_study_passed"],
         "delta_stability_converged": delta_stability_convergence["delta_stability_converged"],
         "delta_stability_convergence_status": delta_stability_convergence["delta_stability_convergence_status"],
+        "delta_convergence_protocol": delta_convergence_thresholds or {},
         "reference_noise": reference_noise,
         "reference_noise_status": reference_noise["status"],
         "warnings": warnings,
@@ -1126,6 +1131,17 @@ def _delta_stability_summary(metric_rows: list[dict[str, Any]]) -> dict[str, Any
         row.update(_range_payload(group_rows, "dh_mae_union_eV_per_Ang", "dh_mae_union_eV_per_Ang"))
         row.update(_range_payload(group_rows, "dh_rmse_union_eV_per_Ang", "dh_rmse_union_eV_per_Ang"))
         row.update(_range_payload(group_rows, "dh_relative_frobenius_ref", "dh_relative_frobenius_ref"))
+        row.update(_range_payload(group_rows, "dh_cosine_similarity_union", "dh_cosine_similarity_union"))
+        row.update(_range_payload(group_rows, "dh_support_f1", "dh_support_f1"))
+        row["support_discontinuity_any"] = any(
+            truthy(item.get(field))
+            for item in group_rows
+            for field in (
+                "reference_plus_minus_support_changed",
+                "predicted_plus_minus_support_changed",
+                "dh_support_changed",
+            )
+        )
         rows.append(row)
 
     pairwise_metric_rows = _delta_stability_pairwise_metric_rows(metric_rows)
@@ -1202,7 +1218,13 @@ def _delta_stability_metric_names(first: dict[str, Any], second: dict[str, Any])
         if "dh_relative_frobenius_union_robust" in first or "dh_relative_frobenius_union_robust" in second
         else "dh_relative_frobenius_ref"
     )
-    metrics = [fro, "dh_mae_union_eV_per_Ang", "dh_rmse_union_eV_per_Ang"]
+    metrics = [
+        fro,
+        "dh_mae_union_eV_per_Ang",
+        "dh_rmse_union_eV_per_Ang",
+        "dh_cosine_similarity_union",
+        "dh_support_f1",
+    ]
     if "dh_relative_l1_union_robust" in first or "dh_relative_l1_union_robust" in second:
         metrics.append("dh_relative_l1_union_robust")
     return metrics
@@ -1222,17 +1244,142 @@ def _delta_stability_convergence_summary(
             "delta_stability_converged": None,
             "delta_stability_convergence_status": "not_evaluated_without_thresholds",
         }
-    converged = delta_stability.get("converged")
-    if converged is None:
-        converged = str(delta_stability.get("convergence_status") or "").strip().lower() == "converged"
-    convergence_status = str(delta_stability.get("convergence_status") or "").strip() or (
-        "converged" if bool(converged) else "not_converged"
+    required = (
+        "predeclared",
+        "material_label",
+        "model",
+        "dtype",
+        "delta_ang",
+        "max_relative_change",
+        "max_cosine_change",
+        "max_support_f1_change",
     )
+    missing = [key for key in required if convergence_thresholds.get(key) in (None, "", [])]
+    declared_deltas = sorted(
+        {
+            float(value)
+            for value in convergence_thresholds.get("delta_ang") or []
+            if isinstance(value, (int, float))
+        }
+    )
+    if convergence_thresholds.get("predeclared") is not True:
+        missing.append("predeclared=true")
+    if len(declared_deltas) < 3:
+        missing.append("at least three predeclared delta_ang values")
+    observed = {
+        float(value)
+        for value in delta_stability.get("unique_delta_ang") or []
+        if isinstance(value, (int, float))
+    }
+    missing_declared = [
+        value
+        for value in declared_deltas
+        if not any(math.isclose(value, item, rel_tol=0.0, abs_tol=1e-12) for item in observed)
+    ]
+    relative_thresholds = convergence_thresholds.get("max_relative_change")
+    if not isinstance(relative_thresholds, dict):
+        relative_thresholds = {}
+        missing.append("max_relative_change mapping")
+    rows = delta_stability.get("rows") or []
+    pairwise = delta_stability.get("pairwise_metric_rows") or []
+    group_results: list[dict[str, Any]] = []
+    group_fields = (
+        "source_model",
+        "base_sample_id",
+        "atom_index_zero_based",
+        "axis",
+        "finite_difference_method",
+    )
+    for row in rows:
+        key = tuple(str(row.get(field) or "") for field in group_fields)
+        group_pairs = [
+            item
+            for item in pairwise
+            if tuple(str(item.get(field) or "") for field in group_fields) == key
+        ]
+        by_window: dict[tuple[float, float], dict[str, dict[str, Any]]] = {}
+        for item in group_pairs:
+            window = (float(item["delta_1_ang"]), float(item["delta_2_ang"]))
+            by_window.setdefault(window, {})[str(item.get("metric_name") or "")] = item
+        window_results: list[dict[str, Any]] = []
+        for window, metrics in sorted(by_window.items()):
+            failures: list[str] = []
+            for metric, threshold in relative_thresholds.items():
+                metric_row = metrics.get(str(metric))
+                if metric_row is None or float(metric_row["relative_change"]) > float(threshold):
+                    failures.append(str(metric))
+            cosine = metrics.get("dh_cosine_similarity_union")
+            if cosine is None or float(cosine["abs_change"]) > float(
+                convergence_thresholds["max_cosine_change"]
+            ):
+                failures.append("dh_cosine_similarity_union")
+            support = metrics.get("dh_support_f1")
+            if support is None or float(support["abs_change"]) > float(
+                convergence_thresholds["max_support_f1_change"]
+            ):
+                failures.append("dh_support_f1")
+            window_results.append(
+                {
+                    "delta_1_ang": window[0],
+                    "delta_2_ang": window[1],
+                    "stable": not failures,
+                    "failed_metrics": failures,
+                }
+            )
+        errors_by_delta_map: dict[float, float] = {}
+        for item in group_pairs:
+            if "relative_frobenius" not in str(item.get("metric_name") or ""):
+                continue
+            errors_by_delta_map[float(item["delta_1_ang"])] = float(item["value_delta_1"])
+            errors_by_delta_map[float(item["delta_2_ang"])] = float(item["value_delta_2"])
+        errors_by_delta = sorted(errors_by_delta_map.items())
+        cancellation = (
+            len(errors_by_delta) >= 3
+            and errors_by_delta[0][1] > min(value for _, value in errors_by_delta[1:])
+        )
+        truncation = (
+            len(errors_by_delta) >= 3
+            and errors_by_delta[-1][1] > min(value for _, value in errors_by_delta[:-1])
+        )
+        stable_plateau = any(item["stable"] for item in window_results)
+        support_ok = (
+            convergence_thresholds.get("allow_support_discontinuity") is True
+            or not bool(row.get("support_discontinuity_any"))
+        )
+        group_results.append(
+            {
+                **{field: row.get(field) for field in group_fields},
+                "delta_count": row.get("delta_count"),
+                "stable_windows": window_results,
+                "cancellation_indicator": cancellation,
+                "truncation_indicator": truncation,
+                "stable_plateau": stable_plateau,
+                "support_continuous": support_ok,
+                "converged": bool(
+                    int(row.get("delta_count") or 0) >= 3
+                    and stable_plateau
+                    and support_ok
+                ),
+            }
+        )
+    blockers = [f"missing protocol field: {item}" for item in sorted(set(missing))]
+    blockers.extend(f"missing declared delta: {value}" for value in missing_declared)
+    if not available:
+        blockers.append("matched multi-delta study is unavailable")
+    if not group_results:
+        blockers.append("no matched delta groups were evaluated")
+    if any(not item["converged"] for item in group_results):
+        blockers.append("one or more matched delta groups did not converge")
+    converged = not blockers
+    convergence_status = "converged" if converged else "not_converged"
     return {
         "delta_sensitivity_study_available": available,
-        "delta_sensitivity_study_passed": available,
-        "delta_stability_converged": bool(converged) if converged is not None else None,
+        "delta_sensitivity_study_passed": converged,
+        "delta_stability_converged": converged,
         "delta_stability_convergence_status": convergence_status,
+        "delta_convergence_protocol": convergence_thresholds,
+        "delta_convergence_group_results": group_results,
+        "delta_convergence_blockers": blockers,
     }
 
 
@@ -1316,6 +1463,21 @@ def _metric_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
     return [key for key in preferred if key in keys] or sorted(keys)
 
 
+def load_delta_convergence_protocol(path: Path, *, source_model: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise DerivativeMetricEvaluationError("delta convergence protocol must be a JSON object")
+    profiles = payload.get("profiles")
+    if isinstance(profiles, dict):
+        selected = profiles.get(source_model)
+        if not isinstance(selected, dict):
+            raise DerivativeMetricEvaluationError(
+                f"delta convergence protocol has no profile for {source_model}"
+            )
+        return selected
+    return payload
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result_dir", type=Path)
@@ -1328,6 +1490,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-stencils", type=int, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--source-model", choices=["graph2mat", "deeph"], default="graph2mat")
+    parser.add_argument(
+        "--delta-convergence-protocol",
+        type=Path,
+        default=None,
+        help="Predeclared material/model/dtype-specific JSON thresholds; absent evidence stays non-paper.",
+    )
     parser.add_argument(
         "--graph2mat-prediction-method",
         choices=sorted(VALID_GRAPH2MAT_PREDICTION_METHODS),
@@ -1353,6 +1521,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    delta_protocol = (
+        load_delta_convergence_protocol(
+            args.delta_convergence_protocol,
+            source_model=args.source_model,
+        )
+        if args.delta_convergence_protocol
+        else None
+    )
     manifest = evaluate_derivative_metrics(
         args.result_dir,
         method=args.method,
@@ -1366,6 +1542,7 @@ def main() -> int:
         source_model=args.source_model,
         graph2mat_prediction_method=args.graph2mat_prediction_method,
         deeph_prediction_method=args.deeph_prediction_method,
+        delta_convergence_thresholds=delta_protocol,
     )
     print(json.dumps(json_safe(manifest), ensure_ascii=True, allow_nan=False))
     return 0 if not manifest["fatal_errors"] else 2

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -7,8 +8,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "Comparison" / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+for directory in (SCRIPTS_DIR, REPO_ROOT / "shared"):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 from g2m_deeph_rank_runs import (  # noqa: E402
     build_recommendation,
@@ -19,11 +21,13 @@ from g2m_deeph_rank_runs import (  # noqa: E402
     rank_graph2mat_deeph_runs,
     rank_metric_groups,
     row_from_training_record,
+    seed_robustness_analysis,
 )
 from deeph_prediction_adapter import (  # noqa: E402
     EQUIVALENCE_PROVEN_RAW_GLOBAL,
     EQUIVALENCE_STATUS_UNPROVEN,
 )
+from reference_provenance import build_positive_reference_provenance  # noqa: E402
 
 
 def valid_metric_row(model: str, *, value: float = 0.1, seed: int = 1, **overrides) -> dict:
@@ -54,7 +58,7 @@ def valid_metric_row(model: str, *, value: float = 0.1, seed: int = 1, **overrid
     return row
 
 
-def best_row(model: str, *, mean: float, seeds: int = 3, **overrides) -> dict:
+def best_row(model: str, *, mean: float, seeds: int = 5, **overrides) -> dict:
     row = {
         "scope": "global",
         "dataset_id": "all",
@@ -63,7 +67,7 @@ def best_row(model: str, *, mean: float, seeds: int = 3, **overrides) -> dict:
         "metric": "low_energy_rmse_eV",
         "mean": mean,
         "valid_seed_count": seeds,
-        "seed_stability_status": "robust_candidate" if seeds >= 3 else "exploratory_only",
+        "seed_stability_status": "robust_candidate" if seeds >= 5 else "exploratory_only",
     }
     row.update(overrides)
     return row
@@ -74,8 +78,48 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def write_dataset(root: Path, split_hash: str = "split-a", compatibility: str = "compat-a") -> None:
+def write_dataset(
+    root: Path,
+    split_hash: str = "split-a",
+    compatibility: str = "compat-a",
+    material_profile: str = "production",
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    sample = root / "sample"
+    sample.mkdir()
+    (sample / "RUN.fdf").write_text(
+        "SystemLabel graphene\nNumberOfAtoms 1\nNumberOfSpecies 1\n"
+        "%block ChemicalSpeciesLabel\n1 6 C\n%endblock ChemicalSpeciesLabel\n"
+        "%block LatticeVectors\n8 0 0\n0 8 0\n0 0 8\n%endblock LatticeVectors\n"
+        "%block AtomicCoordinatesAndAtomicSpecies\n0 0 0 1\n"
+        "%endblock AtomicCoordinatesAndAtomicSpecies\n",
+        encoding="utf-8",
+    )
+    write_json(sample / "metadata.json", {"system_label": "graphene"})
+    for suffix in (".TSHS", ".TSDE", ".HSX", ".STRUCT_OUT", ".XV", ".ORB_INDX"):
+        (sample / f"graphene{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
+    (sample / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
+    write_json(
+        sample / "siesta_reference_provenance.json",
+        build_positive_reference_provenance(
+            sample,
+            sample / "graphene.TSHS",
+            frozen_sample_id="sample",
+            split="test",
+            frozen_split_hash=split_hash,
+            basis_hashes={"C.ion.xml": "basis-hash"},
+            pseudopotential_hashes={"C": "pseudo-hash"},
+            siesta_version="SIESTA 5.4.2-test",
+            siesta_command="siesta < RUN.fdf",
+        ),
+    )
+    write_json(
+        root / "artifact_validation.json",
+        {"valid": True, "snapshots": [{"snapshot_dir": str(sample), "valid": True}]},
+    )
     write_json(root / "frozen_split_manifest.json", {"valid": True, "split_hash": split_hash, "rows": []})
     write_json(
         root / "benchmark_dataset_manifest.json",
@@ -83,6 +127,7 @@ def write_dataset(root: Path, split_hash: str = "split-a", compatibility: str = 
             "benchmark_ready": True,
             "benchmark_dataset_id": compatibility,
             "material_label": "graphene",
+            "material_profile": material_profile,
             "frozen_split_manifest": {"split_hash": split_hash},
         },
     )
@@ -189,6 +234,26 @@ class Graph2MatDeepHRankingTests(unittest.TestCase):
             self.assertEqual(rows[0]["model"], "graph2mat")
             self.assertEqual(rows[0]["config_id"], "g2m_a")
             self.assertAlmostEqual(float(rows[0]["low_energy_rmse_eV_mean"]), 0.3)
+
+    def test_loader_rejects_stale_manifest_when_live_siesta_output_is_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "dataset"
+            write_dataset(dataset)
+            (dataset / "sample" / "RUN.out").write_text("startup only\n", encoding="utf-8")
+            record = write_run(
+                root,
+                dataset,
+                model="graph2mat",
+                config_id="g2m_a",
+                seed=1,
+                h_mae=0.2,
+                low_energy=0.3,
+            )
+
+            row = row_from_training_record(record)
+
+            self.assertEqual(row["artifact_contract_status"], "invalid")
 
     def test_missing_config_id_fails_clearly(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "config_id"):
@@ -332,6 +397,55 @@ class Graph2MatDeepHRankingTests(unittest.TestCase):
         self.assertEqual(rec["status"], "robust_deeph_win")
         self.assertEqual(rec["winner"], "deeph")
 
+    def test_paired_seed_analysis_requires_stable_leave_one_out(self) -> None:
+        rows = []
+        for seed, graph_value, deeph_value in (
+            (0, 0.10, 0.20),
+            (1, 0.11, 0.21),
+            (2, 0.09, 0.19),
+            (3, 0.10, 0.22),
+            (4, 0.12, 0.20),
+        ):
+            rows.extend(
+                [
+                    valid_metric_row("graph2mat", value=graph_value, seed=seed),
+                    valid_metric_row("deeph", value=deeph_value, seed=seed),
+                ]
+            )
+        analysis = seed_robustness_analysis(
+            rows,
+            [best_row("graph2mat", mean=0.104), best_row("deeph", mean=0.204)],
+            "low_energy_rmse_eV",
+        )
+
+        self.assertEqual(analysis["status"], "robust")
+        self.assertEqual(analysis["winner"], "graph2mat")
+        self.assertTrue(analysis["leave_one_seed_out_stable"])
+
+    def test_paired_seed_noise_returns_no_robust_winner(self) -> None:
+        rows = []
+        for seed, graph_value, deeph_value in (
+            (0, 0.10, 0.11),
+            (1, 0.12, 0.11),
+            (2, 0.10, 0.11),
+            (3, 0.12, 0.11),
+            (4, 0.10, 0.11),
+        ):
+            rows.extend(
+                [
+                    valid_metric_row("graph2mat", value=graph_value, seed=seed),
+                    valid_metric_row("deeph", value=deeph_value, seed=seed),
+                ]
+            )
+        analysis = seed_robustness_analysis(
+            rows,
+            [best_row("graph2mat", mean=0.108), best_row("deeph", mean=0.11)],
+            "low_energy_rmse_eV",
+        )
+
+        self.assertEqual(analysis["status"], "no_robust_winner")
+        self.assertIsNone(analysis["winner"])
+
     def test_training_record_fail_open_metrics_are_diagnostic_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -432,6 +546,40 @@ class Graph2MatDeepHRankingTests(unittest.TestCase):
             self.assertEqual(manifest["recommendation"]["status"], "exploratory_deeph_win")
             self.assertTrue((root / "summary" / "ranking" / "recommendation.json").exists())
             self.assertTrue((root / "summary" / "ranking" / "pareto_accuracy_cost.csv").exists())
+
+    def test_artificially_best_smoke_material_is_not_ranked_as_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "dataset"
+            write_dataset(dataset, material_profile="smoke")
+            runs = [
+                write_run(
+                    root,
+                    dataset,
+                    model="graph2mat",
+                    config_id="smoke_other",
+                    seed=1,
+                    h_mae=1.0,
+                    low_energy=1.0,
+                ),
+                write_run(
+                    root,
+                    dataset,
+                    model="deeph",
+                    config_id="smoke_best",
+                    seed=1,
+                    h_mae=1e-12,
+                    low_energy=1e-12,
+                )
+            ]
+            write_json(root / "sweep" / "training_sweep_manifest.json", {"runs": runs})
+
+            manifest = rank_graph2mat_deeph_runs(run_root=root)
+
+            self.assertEqual(
+                manifest["recommendation"]["status"],
+                "invalid_incompatible_artifacts",
+            )
 
 
 if __name__ == "__main__":

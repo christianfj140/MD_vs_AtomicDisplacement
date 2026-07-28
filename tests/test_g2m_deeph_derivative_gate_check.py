@@ -656,7 +656,25 @@ class DerivativeGateCheckTests(unittest.TestCase):
 
         self.assertIn("paper_level_delta_sweep_failed", blocker_ids)
 
-    def test_paper_level_blocked_when_delta_sweep_has_fewer_than_two_deltas(self) -> None:
+    def test_spectral_derivative_claim_is_blocked_without_validated_dS_dR(self) -> None:
+        self.write_fixture(
+            manifest_overrides={
+                "spectral_derivative_claimed": True,
+                "derivative_target": "dE/dR",
+                "overlap_derivative_available": False,
+            }
+        )
+
+        report = self.build_report()
+
+        self.assertEqual(report["scientific_status"], "blocked")
+        self.assertIn(
+            "spectral_derivative_blocked_without_dS_dR",
+            {row["id"] for row in report["blockers"]},
+        )
+        self.assertFalse(report["derivative_scope"]["spectral_derivatives_allowed"])
+
+    def test_paper_level_blocked_when_delta_sweep_has_fewer_than_three_deltas(self) -> None:
         self.write_fixture(
             manifest_overrides={
                 "basis_gauge_verified": True,
@@ -672,7 +690,7 @@ class DerivativeGateCheckTests(unittest.TestCase):
 
         report = self.build_report()
 
-        self.assertIn("paper_level_delta_sweep_needs_two_deltas", {row["id"] for row in report["blockers"]})
+        self.assertIn("paper_level_delta_sweep_needs_three_deltas", {row["id"] for row in report["blockers"]})
 
     def test_paper_level_winner_claim_requires_paired_gate(self) -> None:
         self.write_fixture(
@@ -701,6 +719,27 @@ class DerivativeGateCheckTests(unittest.TestCase):
             },
             delta_stability={"status": "available", "rows": [{"delta_count": 2}]},
             metric_rows=[
+                {
+                    "sample": "sample_0",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.005,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
                 {
                     "sample": "sample_a",
                     "atom_index_zero_based": 0,
@@ -842,7 +881,7 @@ class DerivativeGateCheckTests(unittest.TestCase):
                 "paper_level_candidate_requested": True,
                 "delta_stability_converged": True,
             },
-            delta_stability={"status": "available", "delta_stability_converged": True, "rows": [{"delta_count": 2}]},
+            delta_stability={"status": "available", "delta_stability_converged": True, "rows": [{"delta_count": 3}]},
         )
 
         report = self.build_report()
@@ -989,6 +1028,27 @@ class DerivativeGateCheckTests(unittest.TestCase):
             },
             metric_rows=[
                 {
+                    "sample": "sample_0",
+                    "atom_index_zero_based": 0,
+                    "axis": "x",
+                    "axis_index": 0,
+                    "delta_ang": 0.005,
+                    "finite_difference_method": "central",
+                    "source_model": "graph2mat",
+                    "reference_source": "siesta",
+                    "derivative_units": "eV/Ang",
+                    "comparison_status": "presentation_ready",
+                    "dh_mae_union_eV_per_Ang": 0.1,
+                    "dh_rmse_union_eV_per_Ang": 0.2,
+                    "dh_relative_frobenius_ref": 0.05,
+                    "dh_false_zero_rate": 0.0,
+                    "dh_false_nonzero_rate": 0.0,
+                    "dh_support_changed": False,
+                    "dh_hermiticity_ref": 0.0,
+                    "dh_hermiticity_pred": 0.0,
+                    "dh_hermiticity_error_delta": 0.0,
+                },
+                {
                     "sample": "sample_a",
                     "atom_index_zero_based": 0,
                     "axis": "x",
@@ -1031,7 +1091,7 @@ class DerivativeGateCheckTests(unittest.TestCase):
                     "dh_hermiticity_error_delta": 0.0,
                 },
             ],
-            delta_stability={"status": "available", "delta_stability_converged": True, "rows": [{"delta_count": 2}]},
+            delta_stability={"status": "available", "delta_stability_converged": True, "rows": [{"delta_count": 3}]},
         )
 
         report = self.build_report()

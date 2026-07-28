@@ -28,7 +28,10 @@ from deeph_config import (  # noqa: E402
 def write_snapshot(path: Path, *, missing_suffix: str | None = None) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / "RUN.fdf").write_text("SystemLabel graphene\n", encoding="utf-8")
-    (path / "RUN.out").write_text("Job completed\n", encoding="utf-8")
+    (path / "RUN.out").write_text(
+        "iscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     (path / "metadata.json").write_text(json.dumps({"system_label": "graphene"}) + "\n", encoding="utf-8")
     for suffix in (".TSHS", ".TSDE", ".HSX", ".XV"):
         if suffix == missing_suffix:

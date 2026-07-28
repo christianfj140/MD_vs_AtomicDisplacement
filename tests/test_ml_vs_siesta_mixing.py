@@ -32,7 +32,10 @@ def _make_snapshot(dirpath: Path, *, label: str, n_atoms: int, tag: str) -> None
     (dirpath / "metadata.json").write_text(
         json.dumps({"system_label": label, "n_atoms": n_atoms}), encoding="utf-8"
     )
-    (dirpath / "RUN.out").write_text(f"fake run out {tag}\n", encoding="utf-8")
+    (dirpath / "RUN.out").write_text(
+        f"fake run out {tag}\niscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     for suffix in _REQUIRED_SUFFIXES:
         (dirpath / f"{label}{suffix}").write_text(f"fake {suffix} {tag}", encoding="utf-8")
 
@@ -47,13 +50,17 @@ def _make_dataset(
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "RUN.fdf").write_text(f"SystemLabel {label}\n", encoding="utf-8")
-    (root / "RUN.out").write_text("fake run out\n", encoding="utf-8")
+    (root / "RUN.out").write_text(
+        "fake run out\niscf     Eharris\nSCF cycle converged\nJob completed\n",
+        encoding="utf-8",
+    )
     (root / "C.psf").write_text("fake psf", encoding="utf-8")
     basis = root / "material_basis"
     basis.mkdir(exist_ok=True)
     (basis / "C.ion.xml").write_text(basis_content, encoding="utf-8")
     basis_hash = hashlib.sha256(basis_content.encode()).hexdigest()
     prov = {
+        "profile": "production",
         "label": label,
         "species": [
             {"index": 1, "atomic_number": 6, "label": "C"},

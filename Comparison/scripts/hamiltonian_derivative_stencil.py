@@ -1574,6 +1574,39 @@ def _discover_siesta_matrix(
 ) -> tuple[DerivativeMatrixInput | None, DerivativeValidationIssue | None]:
     forbidden = sorted(path.name for path in sample_dir.glob("ML_prediction.HSX")) if sample_dir.exists() else []
     selection = choose_reference_matrix(sample_dir)
+    claim_status = (
+        _metadata_text(metadata, "claim_status", "comparison_status") or "diagnostic_only"
+    ).strip().lower()
+    legacy_diagnostic = (
+        not selection.ok
+        and claim_status in DIAGNOSTIC_STATUSES
+        and (fallback := choose_reference_matrix(sample_dir, require_positive_provenance=False)).ok
+    )
+    if legacy_diagnostic:
+        matrix = _matrix_input_from_path(
+            sample_id=sample_id,
+            source="siesta",
+            path=fallback.path,
+            metadata=metadata,
+            matrix_shape=matrix_shape,
+            hash_values=hash_values,
+            atom_zero=atom_zero,
+            atom_one=atom_one,
+            axis=axis,
+            axis_index=axis_index,
+            delta_ang=delta_ang,
+        )
+        return matrix, DerivativeValidationIssue(
+            severity="warning",
+            code="legacy_reference_diagnostic_only",
+            message="Legacy SIESTA reference accepted only for a diagnostic derivative stencil.",
+            sample_id=sample_id,
+            matrix_role="siesta",
+            details={
+                "positive_provenance_status": selection.reason,
+                "reference_path": str(fallback.path),
+            },
+        )
     if not selection.ok:
         code = "forbidden_siesta_reference" if forbidden else selection.reason
         message = "ML_prediction.HSX cannot be used as a SIESTA derivative reference." if forbidden else selection.reason
