@@ -39,11 +39,16 @@ from joint_artifact_contract import (  # noqa: E402
     validate_dataset,
 )
 from ml_vs_siesta import read_dataset_samples  # noqa: E402
+from fdf_materialization import extract_fdf_structure  # noqa: E402
 
 
 SYSTEM_LABEL = "graphene_hBN_bilayer"
-STACKING_PRESETS = ("graphene_hBN_AA", "graphene_hBN_AB1", "graphene_hBN_AB2")
-MERGE_SPLITS = ("train", "validation")
+STACKING_PRESETS = (
+    "bilayer_graphene_hBN_AA",
+    "bilayer_graphene_hBN_AB1",
+    "bilayer_graphene_hBN_AB2",
+)
+MERGE_SPLITS = ("train", "validation", "test")
 
 
 def _json(path: Path) -> dict[str, Any]:
@@ -107,6 +112,20 @@ def _copy_dataset_material(source_dataset: Path, output_root: Path) -> None:
                 shutil.copy2(pseudo, target)
 
 
+def _assert_bilayer_sample(fdf_path: Path) -> None:
+    structure = extract_fdf_structure(fdf_path)
+    labels = {species.index: species.label for species in structure.species}
+    counts: dict[str, int] = {}
+    for atom in structure.atoms:
+        label = labels[atom.species_index]
+        counts[label] = counts.get(label, 0) + 1
+    if structure.atom_count != 6 or counts != {"C": 4, "B": 1, "N": 1}:
+        raise RuntimeError(
+            f"{fdf_path}: expected the six-atom C4BN bilayer training cell; "
+            f"found atom_count={structure.atom_count}, species={counts}."
+        )
+
+
 def _write_split_manifest(output_root: Path, split: str, rows: list[dict[str, Any]]) -> None:
     path = output_root / "splits" / f"{split}_manifest.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,8 +171,8 @@ def _material_provenance(
             "provenance_note": (
                 "Train+validation pool fuses AA/AB1/AB2 graphene-hBN stackings. "
                 "Basis and pseudopotentials are identical across all three (asserted "
-                "before merge). Test split is intentionally empty; cross testing uses "
-                "an independent moire target."
+                "before merge). The frozen small-cell test split is retained for model "
+                "diagnostics; it is never a magic-angle reference."
             ),
         }
     )
@@ -167,17 +186,25 @@ def _merge_source(
     split_rows: dict[str, list[dict[str, Any]]],
     sample_dirs: list[Path],
     split_counters: dict[str, int],
+    *,
+    train_quota: int | None = None,
 ) -> None:
     samples = read_dataset_samples(source_dataset)
+    selected_train = 0
     for sample in samples:
         split = sample.split
         if split not in MERGE_SPLITS:
             continue
+        if split == "train" and train_quota is not None:
+            if selected_train >= train_quota:
+                continue
+            selected_train += 1
         index = split_counters[split]
         split_counters[split] += 1
         destination = output_root / "splits" / split / str(index)
         if not sample.sample_dir.is_dir():
             raise RuntimeError(f"Missing source sample dir: {sample.sample_dir}")
+        _assert_bilayer_sample(sample.sample_dir / "RUN.fdf")
         shutil.copytree(sample.sample_dir, destination, dirs_exist_ok=True)
         sample_dirs.append(destination)
         merged_id = f"{stacking}__{sample.sample_id}"
@@ -205,8 +232,28 @@ def _merge_source(
         )
 
 
-def build_dataset(sources: list[Path], output_root: Path, *, overwrite: bool) -> dict[str, Any]:
+def build_dataset(
+    sources: list[Path],
+    output_root: Path,
+    *,
+    overwrite: bool,
+    train_size: int | None = None,
+    train_quotas: list[int] | None = None,
+) -> dict[str, Any]:
     sources = [source.resolve() for source in sources]
+    if train_quotas is not None and (
+        len(train_quotas) != len(sources)
+        or any(quota < 0 for quota in train_quotas)
+        or (train_size is not None and sum(train_quotas) != train_size)
+    ):
+        raise RuntimeError("train_quotas must match sources, be non-negative, and sum to train_size.")
+    if train_quotas is None and train_size is not None and (
+        train_size <= 0 or train_size % len(sources)
+    ):
+        raise RuntimeError(
+            f"train_size={train_size} must be positive and divisible by {len(sources)} stackings."
+        )
+    default_quota = train_size // len(sources) if train_size is not None else None
     for source in sources:
         if not (source / "frozen_split_manifest.json").is_file():
             raise RuntimeError(f"Not a materialized dataset (no frozen_split_manifest.json): {source}")
@@ -226,16 +273,32 @@ def build_dataset(sources: list[Path], output_root: Path, *, overwrite: bool) ->
     sample_dirs: list[Path] = []
     try:
         _copy_dataset_material(sources[0], output_root)
-        for source in sources:
-            _merge_source(source, source.name, output_root, split_rows, sample_dirs, split_counters)
+        for source_index, source in enumerate(sources):
+            _merge_source(
+                source,
+                source.name,
+                output_root,
+                split_rows,
+                sample_dirs,
+                split_counters,
+                train_quota=(
+                    train_quotas[source_index] if train_quotas is not None else default_quota
+                ),
+            )
+        if train_size is not None and len(split_rows["train"]) != train_size:
+            raise RuntimeError(
+                f"Requested {train_size} training snapshots, found {len(split_rows['train'])}; "
+                "one or more source trajectories do not satisfy their quota."
+            )
 
         merged_ids = [row["sample_id"] for rows in split_rows.values() for row in rows]
         if len(merged_ids) != len(set(merged_ids)):
             raise RuntimeError("Sample id collision after merge; ids must be unique across stackings.")
         for split in MERGE_SPLITS:
-            if not split_rows[split]:
+            if split in {"train", "validation"} and not split_rows[split]:
                 raise RuntimeError(f"Merged {split!r} split is empty; sources have no {split} samples.")
-            _write_split_manifest(output_root, split, split_rows[split])
+            if split_rows[split]:
+                _write_split_manifest(output_root, split, split_rows[split])
 
         provenance = _material_provenance(sources, basis_hashes, pseudo_hashes)
         _write_json(output_root / "material_provenance.json", provenance)
@@ -266,6 +329,8 @@ def build_dataset(sources: list[Path], output_root: Path, *, overwrite: bool) ->
             "benchmark_dataset_id": dataset_manifest["benchmark_dataset_id"],
             "benchmark_ready": dataset_manifest["benchmark_ready"],
             "sources": [str(source) for source in sources],
+            "requested_train_size": train_size,
+            "train_quotas": train_quotas,
         }
     except Exception:
         shutil.rmtree(output_root, ignore_errors=True)
@@ -289,11 +354,21 @@ def main() -> int:
         default=REPO_ROOT / "Comparison" / "datasets" / "graphene_hBN_bilayer_train",
     )
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--train-size",
+        type=int,
+        help="Balanced total train count; validation remains frozen and shared across sizes.",
+    )
     args = parser.parse_args()
 
     sources = [s if s.is_absolute() else REPO_ROOT / s for s in args.source_dataset]
     output_root = args.output_root if args.output_root.is_absolute() else REPO_ROOT / args.output_root
-    result = build_dataset(sources, output_root, overwrite=args.overwrite)
+    result = build_dataset(
+        sources,
+        output_root,
+        overwrite=args.overwrite,
+        train_size=args.train_size,
+    )
     print(json.dumps(result, indent=2))
     return 0
 

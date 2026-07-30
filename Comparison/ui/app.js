@@ -13536,6 +13536,7 @@ let ctVacancyOpenGroups = new Set();
 let ctVacancyStatusTimer = null;
 let ctVacancyLastStatusSignature = "";
 let ctBilayerStatusTimer = null;
+let ctSpectralStatusTimer = null;
 let ctBilayerLastStatusSignature = "";
 
 function ctParseRoots(text) {
@@ -14281,6 +14282,255 @@ async function ctBilayerLoadMetrics() {
   await ctBilayerRenderChart(payload);
 }
 
+// ---- Magic-angle spectral campaign (no target Hamiltonian reference) -------
+function ctSpectralLog(label, payload) {
+  const host = document.getElementById("ct-spectral-log");
+  if (!host) return;
+  host.textContent = `[${new Date().toLocaleTimeString()}] ${label}\n${JSON.stringify(payload, null, 2)}`;
+  host.scrollTop = host.scrollHeight;
+}
+
+function ctSpectralStatus(text) {
+  const host = document.getElementById("ct-spectral-status");
+  if (host) host.textContent = text;
+}
+
+function ctSpectralSelection() {
+  return {
+    action: "resume",
+    training_size: Number(document.getElementById("ct-spectral-size")?.value || 480),
+    seed: Number(document.getElementById("ct-spectral-seed")?.value || 0),
+    model: document.getElementById("ct-spectral-model")?.value || "all",
+    resolution: document.getElementById("ct-spectral-resolution")?.value || "coarse",
+    num_bands: Number(document.getElementById("ct-spectral-bands")?.value || 60),
+  };
+}
+
+async function ctSpectralPlot(id, traces, title, xTitle, yTitle, layout = {}) {
+  const host = document.getElementById(id);
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  if (!traces.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = `<p class="field-help">${title}: pendiente de artefactos reales.</p>`;
+    return;
+  }
+  window.Plotly.newPlot(host, traces, {
+    title,
+    ...layout,
+    xaxis: { title: xTitle, ...(layout.xaxis || {}) },
+    yaxis: { title: yTitle, ...(layout.yaxis || {}) },
+    margin: { l: 65, r: 20, t: 45, b: 55 },
+    height: 430,
+  }, { displayModeBar: true, responsive: true });
+}
+
+function ctSpectralBandPlot(spectra) {
+  const ticks = new Map();
+  const traces = spectra.flatMap((row) => {
+    const bands = new Map();
+    (row.bands || []).forEach((point) => {
+      const bandIndex = Number(point.band_index);
+      if (!bands.has(bandIndex)) bands.set(bandIndex, []);
+      bands.get(bandIndex).push(point);
+      if (point.k_label) ticks.set(Number(point.k_distance), point.k_label);
+    });
+    const model = String(row.model || "").toLowerCase();
+    return Array.from(bands.entries())
+      .sort(([left], [right]) => left - right)
+      .map(([bandIndex, points], index) => {
+        points.sort((left, right) => Number(left.k_index) - Number(right.k_index));
+        return {
+          x: points.map((point) => Number(point.k_distance)),
+          y: points.map((point) => Number(point.energy_aligned_eV ?? point.energy_eV)),
+          customdata: points.map(() => bandIndex),
+          mode: "lines",
+          name: `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`,
+          legendgroup: `${model}-${row.training_size}-${row.seed}`,
+          showlegend: index === 0,
+          line: {
+            color: model === "deeph" ? "#d62728" : "#1f77b4",
+            dash: model === "deeph" ? "dot" : "solid",
+            width: 1.35,
+          },
+          hovertemplate: "banda %{customdata}<br>k %{x:.4f}<br>E %{y:.6f} eV<extra>%{fullData.name}</extra>",
+        };
+      });
+  });
+  const tickRows = Array.from(ticks.entries()).sort(([left], [right]) => left - right);
+  return {
+    traces,
+    layout: {
+      xaxis: {
+        tickmode: "array",
+        tickvals: tickRows.map(([distance]) => distance),
+        ticktext: tickRows.map(([, label]) => label),
+        showgrid: false,
+      },
+      shapes: [
+        ...tickRows.map(([distance]) => ({
+          type: "line",
+          xref: "x",
+          x0: distance,
+          x1: distance,
+          yref: "paper",
+          y0: 0,
+          y1: 1,
+          line: { color: "#9ca3af", width: 1 },
+        })),
+        {
+          type: "line",
+          xref: "paper",
+          x0: 0,
+          x1: 1,
+          yref: "y",
+          y0: 0,
+          y1: 0,
+          line: { color: "#4b5563", width: 1 },
+        },
+      ],
+    },
+  };
+}
+
+async function ctSpectralRender(payload) {
+  const summary = payload.summary || {};
+  const artifactUrl = (path) =>
+    `/api/cross-testing/bilayer/spectral/artifact?path=${encodeURIComponent(path)}`;
+  const downloads = document.getElementById("ct-spectral-downloads");
+  if (downloads) {
+    downloads.innerHTML = [
+      ["Log de campaña", "campaign.log"],
+      ["Manifiesto de campaña", "campaign_manifest.json"],
+      ["Resumen espectral", "summary/spectral_results.json"],
+      ["Manifiesto de entrenamiento", "training/training_campaign_manifest.json"],
+    ].map(([label, path]) => `<a href="${artifactUrl(path)}" download>${label}</a>`).join(" · ");
+  }
+  const validation = payload.reference_validation || summary.reference_validation || {};
+  const validationHost = document.getElementById("ct-spectral-reference-validation");
+  if (validationHost) {
+    const overlap = validation.overlap_only_vs_full || {};
+    const physical = validation.physical_atoms6_sparse_dense || {};
+    const gpuPhysical = validation.physical_atoms6_cpu_gpu || {};
+    const synthetic = validation.synthetic_sparse_dense || {};
+    const scientificError = (value) => Number.isFinite(Number(value))
+      ? `${Number(value).toExponential(3)} eV`
+      : "—";
+    const overlapError = Math.max(...(overlap.comparisons || []).map((row) =>
+      Number(row.relative_frobenius || 0)), 0);
+    validationHost.innerHTML = `
+      <dl class="summary-grid">
+        <div><dt>Overlap-only vs SIESTA completo</dt><dd>${escapeHtml(overlap.status || "pendiente")} · Frobenius relativo máx. ${overlapError.toExponential(3)}</dd></div>
+        <div><dt>Solver físico C4BN (42 orbitales)</dt><dd>${escapeHtml(physical.status || "pendiente")} · error máx. ${scientificError(physical.max_abs_sparse_dense_error_eV)}</dd></div>
+        <div><dt>cuDSS vs CPU, C4BN</dt><dd>${escapeHtml(gpuPhysical.status || "pendiente")} · error máx. ${scientificError(gpuPhysical.max_abs_cpu_gpu_error_eV)}</dd></div>
+        <div><dt>Solver sintético no nulo</dt><dd>${escapeHtml(synthetic.status || "pendiente")} · error máx. ${scientificError(synthetic.max_abs_sparse_dense_error_eV)}</dd></div>
+      </dl>`;
+  }
+  const selection = ctSpectralSelection();
+  const spectra = (summary.spectra || []).filter((row) =>
+    (!row.training_size || Number(row.training_size) === selection.training_size) &&
+    (row.seed == null || Number(row.seed) === selection.seed) &&
+    (selection.model === "all" || String(row.model || "").toLowerCase() === selection.model)
+  );
+  const bandPlot = ctSpectralBandPlot(spectra);
+  const dosTraces = spectra.flatMap((row) => (row.low_energy_dos || []).length ? [{
+    x: row.low_energy_dos.map((point) => point.energy_aligned_eV),
+    y: row.low_energy_dos.map((point) => point.dos),
+    mode: "lines",
+    name: `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`,
+  }] : []);
+  const scalarTrace = (key, name) => {
+    const points = (summary.spectra || []).filter((row) => Number.isFinite(Number(row[key])));
+    return points.length ? [{
+      x: points.map((row) => row.training_size),
+      y: points.map((row) => Number(row[key])),
+      mode: "lines+markers",
+      name,
+      text: points.map((row) => `${row.model} · seed ${row.seed}`),
+    }] : [];
+  };
+  await Promise.all([
+    ctSpectralPlot("ct-spectral-bands-chart", bandPlot.traces, "Bandas cerca de neutralidad", "Camino de alta simetría", "E − neutralidad estimada (eV)", bandPlot.layout),
+    ctSpectralPlot("ct-spectral-dos-chart", dosTraces, "DOS parcial de baja energía", "E − neutralidad estimada (eV)", "DOS parcial"),
+    ctSpectralPlot("ct-spectral-width-chart", scalarTrace("flat_band_width_meV", "Ancho"), "Ancho del manifold de baja energía", "Snapshots", "Ancho (meV)"),
+    ctSpectralPlot("ct-spectral-gap-chart", scalarTrace("estimated_gap_meV", "Gap"), "Gap estimado", "Snapshots", "Gap (meV)"),
+    ctSpectralPlot("ct-spectral-consistency-chart", scalarTrace("g2m_deeph_consistency_meV", "Graph2Mat–DeepH"), "Consistencia entre modelos (no error)", "Snapshots", "Diferencia (meV)"),
+  ]);
+  const overlapRows = [...(summary.overlap_benchmarks || [])];
+  if (payload.overlap?.export) overlapRows.push(payload.overlap);
+  const resourcePoints = overlapRows.filter((row) => row.export?.n_atoms && row.resources?.max_rss_gib != null);
+  await ctSpectralPlot("ct-spectral-resources-chart", resourcePoints.length ? [{
+    x: resourcePoints.map((row) => row.export.n_atoms),
+    y: resourcePoints.map((row) => row.resources.max_rss_gib),
+    mode: "lines+markers",
+    name: "SIESTA overlap-only RSS",
+    text: resourcePoints.map((row) => `${row.export.n_orbitals} orbitales`),
+  }] : [], "Escalado de recursos", "Átomos", "Pico RSS (GiB)");
+
+  const tbody = document.getElementById("ct-spectral-runs");
+  if (tbody) {
+    tbody.innerHTML = spectra.length ? spectra.map((row) => `
+      <tr><td>${row.training_size ?? "—"}</td><td>${row.seed ?? "—"}</td>
+      <td>${methodDisplayLabel(row.model)}</td><td>${escapeHtml([
+        row.backend_effective || row.backend_requested || "cpu_mkl_pardiso",
+        row.gpu_hardware?.gpu_name,
+        row.cudss_timings ? `factor ${Number(row.cudss_timings.factorization_seconds || 0).toFixed(2)} s · solves ${Number(row.cudss_timings.solve_seconds || 0).toFixed(2)} s` : null,
+      ].filter(Boolean).join(" · "))}</td><td>${row.status || "—"}</td>
+      <td>${row.manifest_path ? `<a href="${artifactUrl(row.manifest_path)}" download><code>${escapeHtml(row.manifest_path)}</code></a>` : "—"}</td></tr>`).join("")
+      : '<tr><td colspan="6">Aún no hay espectros; el estado incompleto se conserva tras reiniciar la UI.</td></tr>';
+  }
+}
+
+async function ctSpectralPlan() {
+  const payload = await request("/api/cross-testing/bilayer/spectral/plan");
+  ctSpectralLog("Plan", payload);
+  ctSpectralStatus(payload.campaign?.scientific_status || "Plan cargado");
+}
+
+async function ctSpectralRefresh() {
+  const payload = await request("/api/cross-testing/bilayer/spectral/results");
+  ctSpectralLog("Resultados persistidos", payload);
+  const status = payload.status || {};
+  const coverage = payload.coverage?.status ? ` · cobertura ${payload.coverage.status}` : "";
+  const disk = Number.isFinite(Number(status.disk?.free_percent))
+    ? ` · disco libre ${Number(status.disk.free_percent).toFixed(1)}%`
+    : "";
+  const liveTraining = (payload.training?.live_controls || [])
+    .map((control) => control.status || control)
+    .find((control) => control.running);
+  const sweep = liveTraining?.training_sweep || {};
+  const trainingDetail = sweep.active_config_id
+    ? ` · ${sweep.active_config_id} (${sweep.completed || 0}/${sweep.total || 0})`
+    : "";
+  ctSpectralStatus(`${status.state || "unknown"} · etapa ${status.current_stage || "—"}${trainingDetail}${coverage}${disk}`);
+  await ctSpectralRender(payload);
+  if (!status.running && ctSpectralStatusTimer) {
+    clearInterval(ctSpectralStatusTimer);
+    ctSpectralStatusTimer = null;
+  }
+}
+
+async function ctSpectralLaunch() {
+  const body = ctSpectralSelection();
+  const payload = await request("/api/cross-testing/bilayer/spectral/launch", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  ctSpectralLog("Campaña aceptada", payload);
+  ctSpectralStatus(`En ejecución · pid ${payload.pid}`);
+  if (ctSpectralStatusTimer) clearInterval(ctSpectralStatusTimer);
+  ctSpectralStatusTimer = setInterval(() => ctSpectralRefresh().catch(() => {}), 3000);
+}
+
+async function ctSpectralStop() {
+  const payload = await request("/api/cross-testing/bilayer/spectral/stop", {
+    method: "POST",
+    body: "{}",
+  });
+  ctSpectralLog("Stop solicitado", payload);
+  ctSpectralStatus("Se detendrá después de la etapa actual");
+}
+
 async function ctVacancyLoadMatrixRuns() {
   const select = document.getElementById("ct-vacancy-matrix-run");
   const status = document.getElementById("ct-vacancy-matrix-status");
@@ -14473,6 +14723,13 @@ function setupCrossTesting() {
   mvsBind("ct-bilayer-preview", "click", ctBilayerPreview);
   mvsBind("ct-bilayer-evaluate", "click", ctBilayerEvaluate);
   mvsBind("ct-bilayer-metrics", "click", ctBilayerLoadMetrics);
+  mvsBind("ct-spectral-plan", "click", ctSpectralPlan);
+  mvsBind("ct-spectral-launch", "click", ctSpectralLaunch);
+  mvsBind("ct-spectral-stop", "click", ctSpectralStop);
+  mvsBind("ct-spectral-refresh", "click", ctSpectralRefresh);
+  ["ct-spectral-size", "ct-spectral-seed", "ct-spectral-model"].forEach((id) => {
+    mvsBind(id, "change", () => ctSpectralRefresh().catch(() => {}));
+  });
   mvsBind("ct-metrics-demo", "click", () => ctLoadMetrics(true));
   mvsBind("ct-metrics-real", "click", () => ctLoadMetrics(false));
   mvsBind("ct-payload-bottom", "click", ctScrollPayloadLogToBottom);
@@ -15015,6 +15272,7 @@ async function boot() {
   renderG2MDeepHMetricSummary(null);
 
   await pollOnce();
+  ctSpectralRefresh().catch(() => {});
   state.polling = setInterval(pollOnce, POLL_INTERVAL_MS);
 }
 

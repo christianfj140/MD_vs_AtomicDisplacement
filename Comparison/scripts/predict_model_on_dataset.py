@@ -24,6 +24,7 @@ import re
 import shutil
 import sys
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,178 @@ allow_graph2mat_checkpoint_globals()
 EDGE_LABEL_CONSUMPTION_ERROR = "Predicted edge labels were not fully consumed by yield_from_batch"
 EDGE_LABEL_CONSUMPTION_PATTERN = re.compile(r"consumed=(\d+), total=(\d+)")
 PREDICTION_OUTPUT_FILE = "ML_prediction.HSX"
+
+
+def cast_low_precision_tensors_to_float32(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: cast_low_precision_tensors_to_float32(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [cast_low_precision_tensors_to_float32(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(cast_low_precision_tensors_to_float32(item) for item in value)
+    if getattr(value, "is_floating_point", lambda: False)() and value.element_size() < 4:
+        return value.float()
+    return value
+
+
+def apply_mace_node_chunking(model: Any, chunk_size: int, torch: Any) -> None:
+    if chunk_size <= 0:
+        raise ValueError("mace_node_chunk_size must be positive")
+
+    class ChunkedContraction(torch.nn.Module):
+        def __init__(self, contraction: Any):
+            super().__init__()
+            self.contraction = contraction
+
+        def forward(self, x: Any, y: Any) -> Any:
+            return torch.cat(
+                [
+                    self.contraction(x[start : start + chunk_size], y[start : start + chunk_size])
+                    for start in range(0, x.shape[0], chunk_size)
+                ],
+                dim=0,
+            )
+
+    for product in model.model.mace.products:
+        product.symmetric_contractions = ChunkedContraction(product.symmetric_contractions)
+
+
+def apply_mace_edge_chunking(model: Any, chunk_size: int, torch: Any) -> None:
+    if chunk_size <= 0:
+        raise ValueError("mace_edge_chunk_size must be positive")
+
+    for interaction in model.model.mace.interactions:
+        if hasattr(interaction, "conv_fusion"):
+            raise RuntimeError("MACE edge chunking does not support fused convolutions")
+
+        def forward(
+            self,
+            node_attrs,
+            node_feats,
+            edge_attrs,
+            edge_feats,
+            edge_index,
+            cutoff=None,
+            lammps_class=None,
+            lammps_natoms=(0, 0),
+            first_layer=False,
+        ):
+            n_real = lammps_natoms[0] if lammps_class is not None else None
+            sc = self.skip_tp(node_feats, node_attrs)
+            node_feats = self.linear_up(node_feats)
+            node_feats = self.handle_lammps(
+                node_feats,
+                lammps_class=lammps_class,
+                lammps_natoms=lammps_natoms,
+                first_layer=first_layer,
+            )
+            message = None
+            for start in range(0, edge_index.shape[1], chunk_size):
+                stop = start + chunk_size
+                chunk_index = edge_index[:, start:stop]
+                tp_weights = self.conv_tp_weights(edge_feats[start:stop])
+                if cutoff is not None:
+                    tp_weights = tp_weights * cutoff[start:stop]
+                mji = self.conv_tp(
+                    node_feats[chunk_index[0]],
+                    edge_attrs[start:stop],
+                    tp_weights,
+                )
+                if message is None:
+                    message = mji.new_zeros((node_feats.shape[0], mji.shape[1]))
+                message.index_add_(0, chunk_index[1], mji)
+            if message is None:
+                raise RuntimeError("MACE edge chunking received an empty graph")
+            message = self.truncate_ghosts(message, n_real)
+            node_attrs = self.truncate_ghosts(node_attrs, n_real)
+            sc = self.truncate_ghosts(sc, n_real)
+            message = self.linear(message) / self.avg_num_neighbors
+            return self.reshape(message), sc
+
+        interaction.forward = types.MethodType(forward, interaction)
+
+
+def apply_graph2mat_edge_chunking(model: Any, chunk_size: int, torch: Any) -> None:
+    if chunk_size <= 0:
+        raise ValueError("graph2mat_edge_chunk_size must be positive")
+
+    readout = model.model.matrix_readouts
+    preprocessor = readout.preprocessing_edges
+
+    def preprocessing_forward(self, data, node_feats):
+        sender = data["edge_index"][0]
+        edge_attrs = data["edge_attrs"]
+        edge_feats = data["edge_feats"]
+        node_feats = self.linear_up(node_feats)
+        messages = []
+        for start in range(0, sender.shape[0], chunk_size):
+            stop = start + chunk_size
+            weights = self.conv_tp_weights(edge_feats[start:stop])
+            messages.append(
+                self.linear(
+                    self.conv_tp(
+                        node_feats[sender[start:stop]],
+                        edge_attrs[start:stop],
+                        weights,
+                    )
+                )
+            )
+        return None, torch.cat(messages, dim=0)
+
+    preprocessor.forward = types.MethodType(preprocessing_forward, preprocessor)
+
+    for block in readout.interactions.values():
+        operation = block.operation
+
+        def operation_forward(self, edge_feats, edge_messages, node_feats):
+            outputs = []
+            for start in range(0, edge_feats[0].shape[0], chunk_size):
+                stop = start + chunk_size
+                scalar_feats = torch.concatenate(
+                    (
+                        self.nodes_linear(node_feats[0][start:stop]),
+                        self.nodes_linear(node_feats[1][start:stop]),
+                        edge_feats[0][start:stop],
+                    ),
+                    dim=1,
+                )
+                weights = self.edge_tp_weights(scalar_feats)
+                outputs.append(
+                    self.output_linear(
+                        self.edges_tp(
+                            edge_messages[0][start:stop],
+                            edge_messages[1][start:stop],
+                            weights,
+                        )
+                    )
+                )
+            return torch.cat(outputs, dim=0)
+
+        operation.forward = types.MethodType(operation_forward, operation)
+
+
+def apply_graph2mat_node_chunking(model: Any, chunk_size: int, torch: Any) -> None:
+    if chunk_size <= 0:
+        raise ValueError("graph2mat_node_chunk_size must be positive")
+
+    for block in model.model.matrix_readouts.self_interactions:
+        operation = block.operation
+
+        def operation_forward(self, **node_kwargs):
+            node_feats = None
+            for value in node_kwargs.values():
+                node_feats = value if node_feats is None else node_feats + value
+            if node_feats is None:
+                raise RuntimeError("Graph2Mat node chunking received no node features")
+            return torch.cat(
+                [
+                    self.tsq(node_feats[start : start + chunk_size])
+                    for start in range(0, node_feats.shape[0], chunk_size)
+                ],
+                dim=0,
+            )
+
+        operation.forward = types.MethodType(operation_forward, operation)
 
 
 def incomplete_prediction_error(exc: ValueError) -> RuntimeError:
@@ -121,6 +294,7 @@ def strict_matrix_writer_class(matrix_writer_cls: type) -> type:
             self._warned_edge_label_consumption = False
 
         def _on_batch_end(self, split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx):
+            prediction = cast_low_precision_tensors_to_float32(prediction)
             try:
                 return super()._on_batch_end(split, trainer, pl_module, prediction, batch, batch_idx, dataloader_idx)
             except ValueError as exc:
@@ -302,6 +476,7 @@ def validate_prediction_outputs(
 def run_prediction(args: argparse.Namespace, predict_glob: str, *, basis_files_absolute: str) -> None:
     import inspect
     import pytorch_lightning as pl
+    import torch
     from graph2mat.core.data.processing import MatrixDataProcessor
     from graph2mat.tools.lightning import MatrixDataModule, MatrixWriter
     from graph2mat.tools.lightning.models.mace import LitMACEMatrixModel
@@ -331,6 +506,14 @@ def run_prediction(args: argparse.Namespace, predict_glob: str, *, basis_files_a
     model = LitMACEMatrixModel.load_from_checkpoint(
         str(args.checkpoint), weights_only=False, basis_table=basis_table
     )
+    if args.mace_node_chunk_size is not None:
+        apply_mace_node_chunking(model, args.mace_node_chunk_size, torch)
+    if args.mace_edge_chunk_size is not None:
+        apply_mace_edge_chunking(model, args.mace_edge_chunk_size, torch)
+    if args.graph2mat_edge_chunk_size is not None:
+        apply_graph2mat_edge_chunking(model, args.graph2mat_edge_chunk_size, torch)
+    if args.graph2mat_node_chunk_size is not None:
+        apply_graph2mat_node_chunking(model, args.graph2mat_node_chunk_size, torch)
     datamodule_kwargs: dict[str, Any] = {
         "out_matrix": args.out_matrix,
         "symmetric_matrix": bool(args.symmetric_matrix),
@@ -366,7 +549,12 @@ def run_prediction(args: argparse.Namespace, predict_glob: str, *, basis_files_a
     datamodule = MatrixDataModule(**datamodule_kwargs)
     StrictMatrixWriter = strict_matrix_writer_class(MatrixWriter)
     callbacks = [StrictMatrixWriter(output_file=PREDICTION_OUTPUT_FILE, splits=["predict"])]
-    trainer = pl.Trainer(accelerator=args.accelerator, logger=False, callbacks=callbacks)
+    trainer = pl.Trainer(
+        accelerator=args.accelerator,
+        precision=args.precision,
+        logger=False,
+        callbacks=callbacks,
+    )
     try:
         trainer.predict(model, datamodule=datamodule, ckpt_path=None)
     except ValueError as exc:
@@ -442,6 +630,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sub-point-matrix", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--store-in-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--accelerator", default="cpu")
+    parser.add_argument(
+        "--precision",
+        choices=["32-true", "16-mixed", "bf16-mixed"],
+        default="32-true",
+    )
+    parser.add_argument("--mace-node-chunk-size", type=int)
+    parser.add_argument("--mace-edge-chunk-size", type=int)
+    parser.add_argument("--graph2mat-edge-chunk-size", type=int)
+    parser.add_argument("--graph2mat-node-chunk-size", type=int)
     parser.add_argument("--n-matrix-components", type=int, default=None)
     parser.add_argument(
         "--matrix-component-policy",

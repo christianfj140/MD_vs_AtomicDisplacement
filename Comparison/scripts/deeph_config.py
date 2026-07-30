@@ -458,6 +458,7 @@ def render_inference_config(
     with_grad: bool = False,
     grad_atom_indices: list[int] | None = None,
     grad_axis_indices: list[int] | None = None,
+    create_from_dft: bool = True,
 ) -> Path:
     task = task or [3, 4]
     config = configparser.ConfigParser()
@@ -487,7 +488,7 @@ def render_inference_config(
     }
     config["graph"] = {
         "radius": str(float(radius)),
-        "create_from_DFT": "True",
+        "create_from_DFT": str(bool(create_from_dft)),
     }
     _write_ini(path, config)
     return path

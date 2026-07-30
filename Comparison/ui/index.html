@@ -1911,12 +1911,16 @@
                 <p class="eyebrow">Checkpoints existentes · bicapa→moiré</p>
                 <h3 id="ct-bilayer-heading">Cross testing bicapa grafeno/hBN → moiré rotado</h3>
                 <p class="field-help">
-                  Flujo independiente: evalúa el modelo bicapa (entrenado sobre la
-                  mezcla AA/AB1/AB2) sobre una supercelda moiré rotada. Requiere
-                  referencias SIESTA del moiré ya generadas.
+                  Dos contratos separados: validación con referencia SIESTA en celdas
+                  pequeñas e inferencia espectral ML-only para el ángulo mágico.
                 </p>
               </div>
             </div>
+            <h4>A. Smoke legacy aislado (no válido físicamente)</h4>
+            <p class="field-help">
+              Archivo histórico 4→16 con geometría de cuatro átomos y giro de hBN.
+              Se conserva para auditoría, pero está excluido de la campaña C4BN y de sus curvas físicas.
+            </p>
             <label class="field"><span>Payload JSON de campaña</span>
               <input id="ct-bilayer-payload" type="text"
                 value="Comparison/config/graphene_hbn_bilayer_to_moire_predict_metrics_payload.json" />
@@ -1933,6 +1937,78 @@
               <pre id="ct-bilayer-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando acciones del cross testing bicapa→moiré.</pre>
             </div>
             <div id="ct-bilayer-mae-chart" class="plot-card full"></div>
+            <h4>A2. Validación física C4BN de 6 átomos</h4>
+            <div id="ct-spectral-reference-validation" class="plot-card full">
+              <p class="field-help">Pendiente de cargar los gates overlap-only y disperso–denso.</p>
+            </div>
+
+            <hr />
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Ángulo mágico · contrato sin H de referencia</p>
+                <h4>B. Predicción espectral ML-only</h4>
+                <p class="field-help">
+                  Bandas y DOS parcial cerca de neutralidad para (31,30), sin presentar
+                  MAE ni Frobenius del target. La estructura es rígida y no relajada.
+                </p>
+              </div>
+            </div>
+            <div id="ct-spectral-badges" class="status-badge-row" aria-label="Contrato científico">
+              <span class="badge">No target H reference</span>
+              <span class="badge">Prediction only</span>
+              <span class="badge">Exact PAO overlap</span>
+              <span class="badge">Sparse partial eigensolver</span>
+              <span class="badge">Estimated neutrality energy</span>
+              <span class="badge">Rigid/unrelaxed structure</span>
+              <span class="badge">hBN strain recorded</span>
+              <span class="badge">AA/AB/BA registries included</span>
+              <span class="badge">Residual extrapolation disclosed</span>
+            </div>
+            <div class="form-grid compact-grid">
+              <label class="field"><span>Snapshots de entrenamiento</span>
+                <select id="ct-spectral-size">
+                  <option value="30" selected>30</option><option value="60">60</option>
+                  <option value="120">120</option><option value="240">240</option>
+                  <option value="480">480</option>
+                </select>
+              </label>
+              <label class="field"><span>Seed</span>
+                <select id="ct-spectral-seed"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select>
+              </label>
+              <label class="field"><span>Modelo</span>
+                <select id="ct-spectral-model"><option value="all">Graph2Mat + DeepH</option><option value="graph2mat">Graph2Mat</option><option value="deeph">DeepH</option></select>
+              </label>
+              <label class="field"><span>Resolución</span>
+                <select id="ct-spectral-resolution"><option value="coarse">Coarse</option><option value="full">Full</option></select>
+              </label>
+              <label class="field"><span>Número de bandas</span>
+                <input id="ct-spectral-bands" type="number" min="4" max="200" value="60" />
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="ct-spectral-plan" class="button secondary" type="button">Plan</button>
+              <button id="ct-spectral-launch" class="button primary" type="button">Ejecutar/reanudar</button>
+              <button id="ct-spectral-stop" class="button secondary" type="button">Detener después de la etapa actual</button>
+              <button id="ct-spectral-refresh" class="button secondary" type="button">Actualizar resultados</button>
+              <span id="ct-spectral-status" class="muted-text" aria-live="polite">Idle</span>
+            </div>
+            <div id="ct-spectral-downloads" class="field-help"></div>
+            <div class="terminal-frame">
+              <div class="terminal-navbar"><span>Magic-angle spectral campaign</span></div>
+              <pre id="ct-spectral-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando el plan persistente.</pre>
+            </div>
+            <div id="ct-spectral-bands-chart" class="plot-card full"></div>
+            <div id="ct-spectral-dos-chart" class="plot-card full"></div>
+            <div id="ct-spectral-width-chart" class="plot-card full"></div>
+            <div id="ct-spectral-gap-chart" class="plot-card full"></div>
+            <div id="ct-spectral-consistency-chart" class="plot-card full"></div>
+            <div id="ct-spectral-resources-chart" class="plot-card full"></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Snapshots</th><th>Seed</th><th>Modelo</th><th>Solver</th><th>Estado</th><th>Artefactos</th></tr></thead>
+                <tbody id="ct-spectral-runs"><tr><td colspan="6">Sin resultados todavía.</td></tr></tbody>
+              </table>
+            </div>
           </section>
         </section>
 

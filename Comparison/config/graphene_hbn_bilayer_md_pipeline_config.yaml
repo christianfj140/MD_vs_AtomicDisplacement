@@ -6,15 +6,15 @@ paths:
   training_config_name: config.yaml
   venv_activate: ${REPO_ROOT}/.venv/bin/activate
 material:
-  preset: graphene_hBN_AA
+  preset: bilayer_graphene_hBN_AA
 commands:
   graph2mat: graph2mat
   siesta: siesta
   shell: bash
 md:
-  system_name: Graphene/hBN bilayer MD dataset
-  system_label: graphene_hBN_AA
-  run_fdf_template: ${REPO_ROOT}/materials/graphene_hBN_AA/RUN.fdf
+  system_name: Bilayer graphene/hBN MD dataset
+  system_label: bilayer_graphene_hBN_AA
+  run_fdf_template: ${REPO_ROOT}/materials/bilayer_graphene_hBN_AA/RUN.fdf
   type_of_run: verlet
   steps: 70
   temperature_K: 300.0
@@ -70,22 +70,30 @@ md:
     symbol: N
   coordinates_format: Ang
   atoms:
-  - label: C
-    x: 0.0
-    y: 0.0
-    z: 8.0
-  - label: C
-    x: -1.0e-10
-    y: 1.4318286667
-    z: 8.0
   - label: B
     x: 0.0
     y: 0.0
-    z: 11.35
+    z: 6.0
   - label: N
-    x: -1.0e-10
+    x: 0.0
     y: 1.4318286667
-    z: 11.35
+    z: 6.0
+  - label: C
+    x: 0.0
+    y: 0.0
+    z: 9.35
+  - label: C
+    x: 0.0
+    y: 1.4318286667
+    z: 9.35
+  - label: C
+    x: 0.0
+    y: 1.4318286667
+    z: 12.7
+  - label: C
+    x: 1.24
+    y: 0.7159143333
+    z: 12.7
   kgrid_monkhorst_pack:
   - - 20
     - 0

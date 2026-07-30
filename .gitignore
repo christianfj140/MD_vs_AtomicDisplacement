@@ -85,6 +85,7 @@ AtomDisplacement/training/lightning_logs/
 # Comparison experiment outputs
 Comparison/results/
 Comparison/workspaces/
+Comparison/.tools/
 Comparison/generated_dataset_cleanup_manifest.json
 Comparison/results_archived/**/*.csv
 Comparison/results_archived/**/*.json

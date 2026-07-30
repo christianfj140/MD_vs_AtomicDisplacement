@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import csv
@@ -17,6 +18,7 @@ import threading
 import time
 import math
 import concurrent.futures
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -98,11 +100,13 @@ from dataset_recipe_helpers import (  # noqa: E402
     validate_split_sizes,
 )
 from plot_hamiltonian_derivative_metrics import write_derivative_plot_outputs  # noqa: E402
+from material_presets import resolve_material_bundle  # noqa: E402
 
 
 DEFAULT_LOG_RESPONSE_LIMIT = 2000
 MAX_LOG_RESPONSE_LIMIT = 20000
 LOG_HEARTBEAT_SECONDS = 30.0
+GPU_TRAINING_LOCK_PATH = Path("/tmp/md_vs_atomic_displacement_gpu_training.lock")
 DETACHED_SEARCH_ROOT_ENV = "G2M_DEEPH_DETACHED_SEARCH_ROOT"
 EXTERNAL_FINAL_LOG_ROOT = REPO_ROOT / "Comparison" / "results" / "paper_ready_final_70_logs"
 EXTERNAL_FINAL_RUN_GLOB = "paper_ready_final70_*"
@@ -612,6 +616,10 @@ def _performance_settings_from_payload(payload: dict[str, Any]) -> dict[str, Any
         "max_parallel_deeph_training_jobs",
         "max_parallel_derivative_workflows",
         "max_parallel_derivative_reference_jobs",
+        "graph2mat_min_free_gpu_memory_mb",
+        "deeph_min_free_gpu_memory_mb",
+        "gpu_memory_wait_timeout_seconds",
+        "gpu_memory_poll_seconds",
         "torch_num_threads",
         "omp_num_threads",
         "mkl_num_threads",
@@ -643,6 +651,64 @@ def _performance_settings_from_payload(payload: dict[str, Any]) -> dict[str, Any
             False,
         )
     return settings
+
+
+def _wait_for_free_gpu_memory(payload: dict[str, Any], model: str) -> dict[str, Any] | None:
+    settings = _performance_settings_from_payload(payload)
+    required = settings.get(f"{model}_min_free_gpu_memory_mb")
+    if required is None:
+        return None
+    timeout = int(settings.get("gpu_memory_wait_timeout_seconds") or 3600)
+    poll = int(settings.get("gpu_memory_poll_seconds") or 15)
+    started = time.time()
+    while True:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        free_values = [
+            int(value.strip())
+            for value in completed.stdout.splitlines()
+            if value.strip().isdigit()
+        ]
+        if completed.returncode != 0 or not free_values:
+            raise RuntimeError(f"{model} VRAM guard could not query nvidia-smi.")
+        free_mb = min(free_values)
+        if free_mb >= int(required):
+            return {
+                "required_free_mb": int(required),
+                "observed_free_mb": free_mb,
+                "waited_seconds": time.time() - started,
+            }
+        if time.time() - started >= timeout:
+            raise RuntimeError(
+                f"{model} VRAM guard timed out: {free_mb} MiB free, "
+                f"{required} MiB required."
+            )
+        time.sleep(poll)
+
+
+@contextmanager
+def _exclusive_gpu_training(payload: dict[str, Any]):
+    if _performance_settings_from_payload(payload)["compute_accelerator"] == "cpu":
+        yield None
+        return
+    started = time.time()
+    with GPU_TRAINING_LOCK_PATH.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield {
+                "path": str(GPU_TRAINING_LOCK_PATH),
+                "waited_seconds": time.time() - started,
+            }
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _graph2mat_checkpoint_callbacks(every_n_epochs: int) -> list[dict[str, Any]]:
@@ -3635,6 +3701,21 @@ class Graph2MatDeepHBenchmarkRunner:
             DEFAULT_MD_PIPELINE_CONFIG,
         )
         config = _load_yaml(template_path)
+        material = payload.get("material")
+        preset = payload.get("material_preset")
+        if isinstance(material, dict) and material.get("preset"):
+            preset = material["preset"]
+        if preset:
+            resolved_material = resolve_material_bundle(
+                {"material": {"preset": str(preset)}},
+                allow_legacy_default=False,
+            )
+            config["material"] = {"preset": resolved_material.preset}
+            config.setdefault("md", {})
+            config["md"]["run_fdf_template"] = str(resolved_material.validated.bundle.fdf)
+            config["md"]["system_label"] = str(
+                payload.get("system_label") or resolved_material.validated.bundle.label
+            )
         workspace = run_root / "workspaces" / "datasets" / str(spec["dataset_slug"])
         training_dir = workspace / "training"
         config_path = workspace / "pipeline_config.yaml"
@@ -4559,13 +4640,16 @@ class Graph2MatDeepHBenchmarkRunner:
         if context.dry_run:
             result["status"] = "dry_run"
             return result
-        train_run = self._run_command(
-            [self._graph2mat_python(child), str(DEFAULT_MD_TRAINING_SCRIPT)],
-            cwd=REPO_ROOT,
-            env=self._graph2mat_command_env(context, child),
-            label=f"Graph2Mat sweep train {record['config_id']}",
-            progress_provider=lambda: _lightning_training_progress(context.training_dir),
-        )
+        with _exclusive_gpu_training(child) as lock:
+            result["gpu_training_lock"] = lock
+            result["gpu_memory_guard"] = _wait_for_free_gpu_memory(child, "graph2mat")
+            train_run = self._run_command(
+                [self._graph2mat_python(child), str(DEFAULT_MD_TRAINING_SCRIPT)],
+                cwd=REPO_ROOT,
+                env=self._graph2mat_command_env(context, child),
+                label=f"Graph2Mat sweep train {record['config_id']}",
+                progress_provider=lambda: _lightning_training_progress(context.training_dir),
+            )
         early_stopping_policy = parse_early_stopping_policy(child)
         early_stopping_metadata = (
             tensorboard_policy_metadata(context.training_dir, early_stopping_policy)
@@ -4756,13 +4840,16 @@ class Graph2MatDeepHBenchmarkRunner:
         )
         early_stopping_policy = parse_early_stopping_policy(child)
         deeph_early_stopping = DeepHEarlyStoppingObserver(early_stopping_policy) if early_stopping_policy else None
-        train_run = self._run_command(
-            [self._deeph_command(child, "deeph-train"), "--config", str(deeph_context.train_config)],
-            cwd=deeph_context.root,
-            env=self._deeph_command_env(child),
-            label=f"DeepH sweep train {record['config_id']}",
-            line_observer=deeph_early_stopping,
-        )
+        with _exclusive_gpu_training(child) as lock:
+            result["gpu_training_lock"] = lock
+            result["gpu_memory_guard"] = _wait_for_free_gpu_memory(child, "deeph")
+            train_run = self._run_command(
+                [self._deeph_command(child, "deeph-train"), "--config", str(deeph_context.train_config)],
+                cwd=deeph_context.root,
+                env=self._deeph_command_env(child),
+                label=f"DeepH sweep train {record['config_id']}",
+                line_observer=deeph_early_stopping,
+            )
         early_stopping_metadata = deeph_early_stopping.metadata() if deeph_early_stopping is not None else None
         training_outputs = self._validate_deeph_training_outputs(deeph_context)
         self._write_deeph_manifest(

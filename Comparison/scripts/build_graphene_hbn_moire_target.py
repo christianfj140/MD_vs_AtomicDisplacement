@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Build a test-only twisted-bilayer graphene/hBN moire target with SIESTA refs.
+"""Build reference-scale or geometry-only twisted-bilayer graphene/hBN targets.
 
-Geometry: start from a single graphene/hBN stacking cell (4 atoms: 2 C graphene
-layer + B + N hBN layer, both layers on the same in-plane hexagonal lattice),
-then build the standard periodic commensurate supercell: layer 1 uses the
-``(m,n)`` basis and layer 2 the ``(n,m)`` basis. Species, PAO basis and
-pseudopotentials are byte-for-byte identical to the flat stackings, so the
-cross-sweep planner accepts the bilayer->moire pair.
+Geometry: start from a six-atom hBN/bilayer-graphene stacking cell. The hBN
+substrate and bottom graphene use the ``(m,n)`` supercell without relative
+rotation; only the top graphene uses the rotated ``(n,m)`` supercell. Species,
+PAO basis and pseudopotentials are byte-for-byte identical to the flat
+stackings.
 
-PHYSICS CAVEAT (documented, not hidden): graphene and hBN are incommensurate
-(~1.8% for native 2.46-A graphene). This builder does NOT resolve the true incommensurate
-moire; it applies a rigid commensurate-angle twist of the hBN layer on the
-*shared* graphene lattice, which imposes an effective in-plane strain on hBN.
-The applied angle and the implied strain are recorded in
-``material_provenance.json`` under ``moire``. This is a smoke-scale surrogate
-target for transfer testing, not a paper-ready incommensurate moire.
+PHYSICS CAVEAT (documented, not hidden): graphene and hBN are incommensurate.
+This builder does NOT resolve the true incommensurate moire; it keeps hBN and
+the bottom graphene aligned on the shared graphene lattice and rigidly twists
+only the top graphene, which imposes an effective in-plane strain on hBN. The
+applied angle and strain are recorded in the geometry metadata. The result is
+rigid and unrelaxed, not a relaxed-moire prediction.
 """
 
 from __future__ import annotations
@@ -32,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -55,13 +54,11 @@ from run_hamiltonian_derivative_siesta_references import (  # noqa: E402
 )
 
 
-SYSTEM_LABEL = "graphene_hBN_moire"
-DEFAULT_STACKING = "graphene_hBN_AA"
+SYSTEM_LABEL = "bilayer_graphene_hBN_moire"
+DEFAULT_STACKING = "bilayer_graphene_hBN_AA"
 COMMON_MATERIAL_ROOT = REPO_ROOT / "materials" / "graphene_hBN_common"
 STATIC_DROP_PREFIXES = ("md.",)
 STATIC_DROP_KEYS = {"writemdhistory", "lua.script"}
-# hBN layer is the fractional-z upper sublayer in the stacking fdf (~0.5675 > 0.5).
-HBN_Z_THRESHOLD = 0.5
 HBN_NATIVE_LATTICE_ANG = 2.504
 HBN_NATIVE_LATTICE_REFERENCE = "https://doi.org/10.1038/s42005-020-0335-1"
 DEFAULT_MIN_ATOM_DISTANCE_ANG = 1.2
@@ -74,7 +71,11 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _safe_output_root(path: Path) -> Path:
     resolved = path.expanduser().resolve(strict=False)
-    allowed = ((REPO_ROOT / "Comparison" / "datasets").resolve(), Path(tempfile.gettempdir()).resolve())
+    allowed = (
+        (REPO_ROOT / "Comparison" / "datasets").resolve(),
+        (REPO_ROOT / "Comparison" / "results" / "graphene_hbn_magic_angle_spectral").resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    )
     if not any(root in resolved.parents for root in allowed):
         raise RuntimeError(
             f"Refusing output root {resolved}; use a child of Comparison/datasets or {tempfile.gettempdir()}."
@@ -133,12 +134,20 @@ def _rescale_inplane_kgrid(text: str, linear_scale: float) -> str:
 
 def minimum_periodic_distance(positions: np.ndarray, lattice: np.ndarray) -> float:
     """Return the minimum pair distance over 3x3 in-plane periodic images."""
-    best = math.inf
     shifts = [i * lattice[0] + j * lattice[1] for i in (-1, 0, 1) for j in (-1, 0, 1)]
-    for left in range(len(positions)):
-        for right in range(left + 1, len(positions)):
-            delta = positions[right] - positions[left]
-            best = min(best, *(float(np.linalg.norm(delta + shift)) for shift in shifts))
+    tiled = np.concatenate([positions + shift for shift in shifts])
+    source_indices = np.tile(np.arange(len(positions)), len(shifts))
+    distances, neighbors = cKDTree(tiled).query(
+        positions, k=min(16, len(tiled))
+    )
+    distances = np.atleast_2d(distances)
+    neighbors = np.atleast_2d(neighbors)
+    best = math.inf
+    for atom_index, (row_distances, row_neighbors) in enumerate(zip(distances, neighbors)):
+        for distance, neighbor in zip(row_distances, row_neighbors):
+            if source_indices[int(neighbor)] != atom_index:
+                best = min(best, float(distance))
+                break
     return best
 
 
@@ -168,11 +177,22 @@ def _layer_positions(
 ) -> tuple[list[list[float]], list[int]]:
     """Materialize one periodic layer inside a common commensurate cell."""
     inverse = np.linalg.inv(super_lattice)
-    bound = expected + 1
+    rotated_primitive_xy = primitive_lattice[:2, :2] @ rotation
+    supercell_coefficients = super_lattice[:2, :2] @ np.linalg.inv(rotated_primitive_xy)
+    corners = np.array(
+        [
+            [0.0, 0.0],
+            supercell_coefficients[0],
+            supercell_coefficients[1],
+            supercell_coefficients[0] + supercell_coefficients[1],
+        ]
+    )
+    lower = np.floor(corners.min(axis=0)).astype(int) - 2
+    upper = np.ceil(corners.max(axis=0)).astype(int) + 2
     positions: list[list[float]] = []
     species: list[int] = []
-    for i in range(-bound, bound + 1):
-        for j in range(-bound, bound + 1):
+    for i in range(lower[0], upper[0] + 1):
+        for j in range(lower[1], upper[1] + 1):
             shift = i * primitive_lattice[0] + j * primitive_lattice[1]
             for atom in atoms:
                 cart = np.asarray(atom.position_ang, dtype=float) + shift
@@ -182,9 +202,37 @@ def _layer_positions(
                     frac[:2] %= 1.0
                     positions.append((frac @ super_lattice).tolist())
                     species.append(atom.species_index)
-    if len(positions) != 2 * expected:
-        raise RuntimeError(f"Commensurate layer produced {len(positions)} atoms, expected {2 * expected}.")
+    expected_atoms = len(atoms) * expected
+    if len(positions) != expected_atoms:
+        raise RuntimeError(
+            f"Commensurate layer produced {len(positions)} atoms, expected {expected_atoms}."
+        )
     return positions, species
+
+
+def _physical_layers(structure: Any) -> tuple[list[Any], list[Any], list[Any]]:
+    """Return hBN, bottom graphene and top graphene from a C4BN primitive."""
+    species_by_index = {species.index: species.label for species in structure.species}
+    by_label: dict[str, list[Any]] = {}
+    for atom in structure.atoms:
+        by_label.setdefault(species_by_index[atom.species_index], []).append(atom)
+    counts = {label: len(atoms) for label, atoms in by_label.items()}
+    if counts != {"C": 4, "B": 1, "N": 1}:
+        raise RuntimeError(
+            "Expected a six-atom C4BN hBN/bilayer-graphene stacking cell; "
+            f"found species counts {counts} in {structure.fdf_path}."
+        )
+
+    carbons = sorted(by_label["C"], key=lambda atom: atom.position_ang[2])
+    bottom_graphene, top_graphene = carbons[:2], carbons[2:]
+    bottom_z = np.mean([atom.position_ang[2] for atom in bottom_graphene])
+    top_z = np.mean([atom.position_ang[2] for atom in top_graphene])
+    if top_z - bottom_z < 1.0:
+        raise RuntimeError(
+            "Could not separate bottom and top graphene layers by z; "
+            f"mean z values are {bottom_z:.6f} and {top_z:.6f} Ang."
+        )
+    return [*by_label["B"], *by_label["N"]], bottom_graphene, top_graphene
 
 
 def moire_geometry(
@@ -197,32 +245,38 @@ def moire_geometry(
 ) -> tuple[str, dict[str, Any]]:
     """Return a static moire FDF plus geometry metadata."""
     structure = extract_fdf_structure(stacking_fdf, structure_type="crystal")
-    if structure.atom_count != 4:
-        raise RuntimeError(f"Expected a 4-atom stacking cell in {stacking_fdf}, found {structure.atom_count}.")
+    if structure.atom_count != 6:
+        raise RuntimeError(
+            f"Expected a 6-atom hBN/bilayer-graphene stacking cell in "
+            f"{stacking_fdf}, found {structure.atom_count}."
+        )
     if approximant != 2:
         raise RuntimeError("--approximant is retained for CLI compatibility and must be 2; cell size comes from (m,n).")
 
     lattice = np.asarray(structure.lattice_vectors_ang, dtype=float)
     a1, a2, a3 = lattice
-    inv_lattice = np.linalg.inv(lattice)
     twist_deg = commensurate_angle_degrees(m, n)
     theta = math.radians(twist_deg)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     rotation = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=float)
     index = m * m + m * n + n * n
-    layer1_matrix = np.array([[m + n, n], [m, m + n]], dtype=int)
-    layer2_matrix = np.array([[m + n, m], [n, m + n]], dtype=int)
+    small, large = sorted((m, n))
+    layer1_matrix = np.array([[m + n, large], [small, m + n]], dtype=int)
+    layer2_matrix = np.array([[m + n, small], [large, m + n]], dtype=int)
     super_lattice = np.array([*(layer1_matrix @ lattice[:2]), a3], dtype=float)
     if not np.allclose((layer2_matrix @ lattice[:2])[:, :2] @ rotation, super_lattice[:2, :2]):
         raise RuntimeError(f"({m},{n}) does not materialize the requested commensurate rotation.")
 
-    graphene = [atom for atom in structure.atoms if float((np.asarray(atom.position_ang) @ inv_lattice)[2]) <= HBN_Z_THRESHOLD]
-    hbn = [atom for atom in structure.atoms if float((np.asarray(atom.position_ang) @ inv_lattice)[2]) > HBN_Z_THRESHOLD]
-    positions, species = _layer_positions(graphene, lattice, super_lattice, np.eye(2), index)
-    hbn_positions, hbn_species = _layer_positions(hbn, lattice, super_lattice, rotation, index)
-    positions += hbn_positions
-    species += hbn_species
-    expected = 4 * index
+    hbn, bottom_graphene, top_graphene = _physical_layers(structure)
+    positions, species = _layer_positions(
+        [*hbn, *bottom_graphene], lattice, super_lattice, np.eye(2), index
+    )
+    top_positions, top_species = _layer_positions(
+        top_graphene, lattice, super_lattice, rotation, index
+    )
+    positions += top_positions
+    species += top_species
+    expected = 6 * index
     if len(positions) != expected:
         raise RuntimeError(f"Moire geometry produced {len(positions)} atoms, expected {expected}.")
     dist_min = validate_minimum_atom_distance(np.asarray(positions), super_lattice, min_atom_distance)
@@ -249,13 +303,18 @@ def moire_geometry(
         "source_stacking": stacking_fdf.parent.name,
         "approximant": approximant,
         "commensurate_index": [m, n],
+        "commensurate_orientation": "positive_rotation_canonicalized",
         "commensurate_cell_index": index,
         "layer1_supercell_matrix": layer1_matrix.tolist(),
         "layer2_supercell_matrix": layer2_matrix.tolist(),
         "twist_angle_deg": twist_deg,
         "materialized_twist_angle_deg": math.degrees(math.atan2(rotation[0, 1], rotation[0, 0])),
         "num_atoms": len(positions),
-        "twisted_sublayer": "hBN",
+        "expected_orbitals": 7 * len(positions),
+        "species_counts": {"C": 4 * index, "B": index, "N": index},
+        "twisted_sublayer": "top_graphene",
+        "aligned_sublayers": ["hBN", "bottom_graphene"],
+        "reference_hamiltonian_available": False,
         "geometry_inplane_lattice_ang": actual_lattice_ang,
         "native_hBN_lattice_ang": HBN_NATIVE_LATTICE_ANG,
         "native_hBN_lattice_reference": HBN_NATIVE_LATTICE_REFERENCE,
@@ -264,10 +323,12 @@ def moire_geometry(
         "minimum_periodic_atom_distance_ang": dist_min,
         "minimum_atom_distance_threshold_ang": min_atom_distance,
         "approximation": (
-            "standard periodic (m,n)/(n,m) commensurate twist; both layers use the shared graphene lattice, "
+            "standard periodic (m,n)/(n,m) commensurate top-graphene twist; "
+            "hBN and bottom graphene remain aligned on the shared graphene lattice, "
             "so hBN is biaxially compressed relative to its native 2.504-A lattice; "
-            "true incommensurate moire is NOT resolved"
+            "the structure is rigid and unrelaxed"
         ),
+        "scientific_scope": "rigid strained commensurate geometry",
         "system_label": SYSTEM_LABEL,
         "relaxed": False,
         "spin_polarized": False,
@@ -322,7 +383,7 @@ def _material_provenance(
     return {
         "label": SYSTEM_LABEL,
         "preset": SYSTEM_LABEL,
-        "material_source": "twisted_bilayer_graphene_hBN_static_siesta",
+        "material_source": "hBN_supported_twisted_bilayer_graphene_static_siesta",
         "fdf": str(stacking_fdf),
         "fdf_sha256": file_sha256(stacking_fdf),
         "structure_type": "crystal",

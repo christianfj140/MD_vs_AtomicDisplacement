@@ -17877,7 +17877,11 @@ class CrossStructureSweepRunner:
         separate result file with its own seed stamped on every record, so this
         surfaces all seeds at once instead of only the most recent file."""
         merged: dict[tuple[str, str, Any], dict[str, Any]] = {}
-        for path in sorted(self._output_root.glob("*result.json")):
+        paths = list(self._output_root.glob("*result.json"))
+        summary_path = self._output_root / "cross_structure_sweep_summary.json"
+        if summary_path.is_file():
+            paths.append(summary_path)
+        for path in sorted(paths):
             if not path.is_file():
                 continue
             try:
@@ -18068,6 +18072,171 @@ CROSS_TESTING_VACANCY_RUNNER = CrossStructureSweepRunner(
 CROSS_TESTING_BILAYER_RUNNER = CrossStructureSweepRunner(CROSS_TESTING_BILAYER_OUTPUT_ROOT)
 
 
+class MoireSpectralCampaignRunner:
+    def __init__(self) -> None:
+        self.root = RESULTS_ROOT / "graphene_hbn_magic_angle_spectral"
+        self.script = COMPARISON_ROOT / "scripts/run_graphene_hbn_moire_spectral_campaign.py"
+        self.config = COMPARISON_ROOT / "config/graphene_hbn_magic_angle_spectral_campaign.json"
+
+    def _read(self, path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _pid_running(self, pid: Any) -> bool:
+        try:
+            os.kill(int(pid), 0)
+        except (OSError, TypeError, ValueError):
+            return False
+        return True
+
+    def plan(self) -> dict[str, Any]:
+        manifest = self._read(self.root / "campaign_manifest.json")
+        return {
+            "campaign": manifest,
+            "stages": [
+                self._read(path)
+                for path in sorted((self.root / "stages").glob("*.json"))
+            ],
+        }
+
+    def status(self) -> dict[str, Any]:
+        status = self._read(self.root / "status.json")
+        disk = shutil.disk_usage(self.root if self.root.exists() else RESULTS_ROOT)
+        status["process_alive"] = self._pid_running(status.get("pid"))
+        status["persistent"] = True
+        status["log_path"] = str(self.root / "campaign.log")
+        status["disk"] = {
+            "free_bytes": disk.free,
+            "free_percent": 100.0 * disk.free / disk.total,
+            "minimum_free_percent": 10.0,
+        }
+        return status
+
+    def results(self) -> dict[str, Any]:
+        status = self.status()
+        training = self._read(self.root / "training/training_campaign_manifest.json")
+        if status.get("running") and status.get("current_stage") == "train":
+            controls = [
+                self._read(path)
+                for path in sorted((self.root / "training").glob("n*/control/status.json"))
+            ]
+            training = {
+                **training,
+                "previous_status": training.get("status"),
+                "status": "running",
+                "live_controls": controls,
+            }
+        return {
+            **self.plan(),
+            "status": status,
+            "summary": self._read(self.root / "summary/spectral_results.json"),
+            "target": self._read(self.root / "target/moire_geometry.json"),
+            "overlap": self._read(self.root / "overlap/overlap_manifest.json"),
+            "coverage": self._read(self.root / "local_environment_coverage.json"),
+            "solver_environment": self._read(self.root / "solver/environment.json"),
+            "solver_environment_gpu_cudss": self._read(
+                self.root / "solver/environment_gpu_cudss.json"
+            ),
+            "reference_validation": {
+                "overlap_only_vs_full": self._read(
+                    self.root / "reference_validation/overlap_only_vs_full.json"
+                ),
+                "synthetic_sparse_dense": self._read(
+                    self.root / "solver/synthetic_validation/validation.json"
+                ),
+                "physical_atoms6_sparse_dense": self._read(
+                    self.root / "solver/physical_validation_atoms6/validation.json"
+                ),
+                "physical_atoms6_cpu_gpu": self._read(
+                    self.root / "solver/physical_validation_atoms6/gpu_validation.json"
+                ),
+            },
+            "nested_datasets": self._read(self.root / "training_data/nested_dataset_manifest.json"),
+            "training": training,
+            "ui_request": self._read(self.root / "ui_request.json"),
+            "legacy": self._read(self.root / "legacy_results_inventory.json"),
+        }
+
+    def artifact_path(self, value: str) -> Path:
+        requested = Path(value).expanduser()
+        requested = requested.resolve() if requested.is_absolute() else (self.root / requested).resolve()
+        root = self.root.resolve()
+        if root != requested and root not in requested.parents:
+            raise RuntimeError("Artefacto espectral fuera de la campaña no permitido.")
+        if requested.suffix.lower() not in {".json", ".csv", ".log", ".txt", ".fdf", ".ini"}:
+            raise RuntimeError("Tipo de artefacto espectral no permitido.")
+        return requested
+
+    def start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        current = self.status()
+        if current.get("process_alive"):
+            raise RuntimeError(f"Spectral campaign already running with pid={current.get('pid')}")
+        action = str(payload.get("action") or "resume")
+        if action not in {"run", "resume", "generate-training-data", "build-target", "build-overlap", "train", "predict", "solve-bands", "solve-dos", "aggregate"}:
+            raise RuntimeError(f"Unsupported spectral campaign action: {action}")
+        self.root.mkdir(parents=True, exist_ok=True)
+        selection = {
+            "training_size": int(payload.get("training_size") or 480),
+            "seed": int(payload.get("seed") or 0),
+            "model": str(payload.get("model") or "all"),
+            "resolution": str(payload.get("resolution") or "coarse"),
+            "num_bands": int(payload.get("num_bands") or 60),
+        }
+        if selection["training_size"] not in {30, 60, 120, 240, 480}:
+            raise RuntimeError("Unsupported spectral training_size")
+        if selection["seed"] not in {0, 1, 2} or selection["model"] not in {"all", "graph2mat", "deeph"}:
+            raise RuntimeError("Unsupported spectral seed/model selection")
+        if selection["resolution"] not in {"coarse", "full"} or not 4 <= selection["num_bands"] <= 200:
+            raise RuntimeError("Unsupported spectral resolution/num_bands")
+        (self.root / "ui_request.json").write_text(
+            json.dumps(selection, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        command = [
+            postprocess_python_executable(),
+            str(self.script),
+            action,
+            "--config",
+            str(self.config),
+        ]
+        with (self.root / "campaign.log").open("ab") as log:
+            process = subprocess.Popen(
+                command,
+                cwd=REPO_ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        return {
+            "accepted": True,
+            "pid": process.pid,
+            "action": action,
+            "selection": selection,
+            "command": command,
+        }
+
+    def stop(self) -> dict[str, Any]:
+        completed = subprocess.run(
+            [postprocess_python_executable(), str(self.script), "stop", "--config", str(self.config)],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return {
+            "accepted": completed.returncode == 0,
+            "policy": "stop_after_current_stage",
+            "returncode": completed.returncode,
+            "status": self.status(),
+        }
+
+
+MOIRE_SPECTRAL_RUNNER = MoireSpectralCampaignRunner()
+
+
 class ComparisonUIHandler(BaseHTTPRequestHandler):
     server_version = "ComparisonPipelineUI/1.0"
 
@@ -18246,6 +18415,18 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, CROSS_TESTING_BILAYER_RUNNER.status())
             elif path == "/api/cross-testing/bilayer/metrics":
                 json_response(self, CROSS_TESTING_BILAYER_RUNNER.metrics())
+            elif path == "/api/cross-testing/bilayer/spectral/plan":
+                json_response(self, MOIRE_SPECTRAL_RUNNER.plan())
+            elif path == "/api/cross-testing/bilayer/spectral/status":
+                json_response(self, MOIRE_SPECTRAL_RUNNER.status())
+            elif path == "/api/cross-testing/bilayer/spectral/results":
+                json_response(self, MOIRE_SPECTRAL_RUNNER.results())
+            elif path == "/api/cross-testing/bilayer/spectral/artifact":
+                query = parse_qs(parsed_url.query)
+                artifact = str((query.get("path") or [""])[0] or "").strip()
+                if not artifact:
+                    raise RuntimeError("path es obligatorio.")
+                self._serve_file(MOIRE_SPECTRAL_RUNNER.artifact_path(artifact))
             elif path == "/api/cross-testing/vacancy/matrix-errors":
                 json_response(self, vacancy_matrix_error_runs_payload())
             elif path == "/api/cross-testing/vacancy/matrix-error/artifact":
@@ -18385,6 +18566,19 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(
                     self,
                     CROSS_TESTING_BILAYER_RUNNER.start(payload),
+                    status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/cross-testing/bilayer/spectral/launch":
+                payload = read_json_body(self)
+                json_response(
+                    self,
+                    MOIRE_SPECTRAL_RUNNER.start(payload),
+                    status=HTTPStatus.ACCEPTED,
+                )
+            elif path == "/api/cross-testing/bilayer/spectral/stop":
+                json_response(
+                    self,
+                    MOIRE_SPECTRAL_RUNNER.stop(),
                     status=HTTPStatus.ACCEPTED,
                 )
             elif path == "/api/cross-testing/vacancy/matrix-error":

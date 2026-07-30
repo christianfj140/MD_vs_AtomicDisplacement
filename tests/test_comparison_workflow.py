@@ -10210,6 +10210,99 @@ class ComparisonWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(args.train_method, method)
 
+    def test_mace_node_chunking_preserves_contraction_output(self) -> None:
+        from types import SimpleNamespace
+
+        import torch
+
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_chunking",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        class Contraction(torch.nn.Module):
+            def forward(self, x, y):
+                return x.square() + y
+
+        product = SimpleNamespace(symmetric_contractions=Contraction())
+        model = SimpleNamespace(
+            model=SimpleNamespace(mace=SimpleNamespace(products=[product]))
+        )
+        x = torch.arange(21, dtype=torch.float32).reshape(7, 3)
+        y = torch.ones_like(x)
+        expected = product.symmetric_contractions(x, y)
+
+        module.apply_mace_node_chunking(model, 2, torch)
+
+        torch.testing.assert_close(product.symmetric_contractions(x, y), expected)
+
+    def test_prediction_export_casts_only_low_precision_tensors(self) -> None:
+        import torch
+
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_precision_export",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+        converted = module.cast_low_precision_tensors_to_float32(
+            {
+                "bf16": torch.ones(2, dtype=torch.bfloat16),
+                "fp16": [torch.ones(2, dtype=torch.float16)],
+                "fp64": torch.ones(2, dtype=torch.float64),
+            }
+        )
+
+        self.assertEqual(converted["bf16"].dtype, torch.float32)
+        self.assertEqual(converted["fp16"][0].dtype, torch.float32)
+        self.assertEqual(converted["fp64"].dtype, torch.float64)
+
+    def test_mace_edge_chunking_preserves_message_sum(self) -> None:
+        from types import SimpleNamespace
+
+        import torch
+
+        module = self.load_module_from_path(
+            "predict_model_on_dataset_edge_chunking",
+            REPO_ROOT / "Comparison" / "scripts" / "predict_model_on_dataset.py",
+        )
+
+        class Interaction(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.skip_tp = lambda node_feats, node_attrs: node_feats
+                self.linear_up = torch.nn.Identity()
+                self.conv_tp_weights = torch.nn.Identity()
+                self.conv_tp = lambda source, edge_attrs, weights: source + edge_attrs + weights
+                self.linear = torch.nn.Identity()
+                self.avg_num_neighbors = 1.0
+
+            def handle_lammps(self, node_feats, **_):
+                return node_feats
+
+            def truncate_ghosts(self, value, _):
+                return value
+
+            def reshape(self, value):
+                return value
+
+        interaction = Interaction()
+        model = SimpleNamespace(
+            model=SimpleNamespace(mace=SimpleNamespace(interactions=[interaction]))
+        )
+        node_feats = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        node_attrs = torch.ones_like(node_feats)
+        edge_attrs = torch.ones((5, 2))
+        edge_feats = torch.full((5, 2), 2.0)
+        edge_index = torch.tensor([[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]])
+        messages = node_feats[edge_index[0]] + edge_attrs + edge_feats
+        expected = torch.zeros_like(node_feats).index_add_(0, edge_index[1], messages)
+
+        module.apply_mace_edge_chunking(model, 2, torch)
+        actual, _ = interaction(
+            node_attrs, node_feats, edge_attrs, edge_feats, edge_index
+        )
+
+        torch.testing.assert_close(actual, expected)
+
     def test_cross_prediction_requires_explicit_component_policy(self) -> None:
         module = self.load_module_from_path(
             "predict_model_on_dataset_policy",

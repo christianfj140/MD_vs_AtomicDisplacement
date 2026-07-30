@@ -42,6 +42,7 @@ from joint_artifact_contract import (
     validate_dataset,
 )
 from benchmark_manifest import extract_siesta_version_from_text, write_benchmark_manifests
+from reference_provenance import build_positive_reference_provenance
 from g2m_deeph_dataset_size_minimum import diagnose_dataset_temporal_metadata
 
 BOHR_TO_ANG = 0.529177210903
@@ -1256,6 +1257,64 @@ def write_excluded_gap_manifest(
     _write_manifest(split_root / "excluded_gap_manifest.csv", rows)
 
 
+def write_reference_provenance(
+    config: dict,
+    split_root: Path,
+    split_ranges: dict[str, list[Path]],
+    *,
+    frozen_split_hash: str,
+) -> dict[str, int]:
+    """Sign each snapshot's SIESTA reference matrix at generation time.
+
+    ``choose_reference_matrix`` refuses any reference without a
+    ``positive_siesta_reference_provenance_v3`` record, which binds the matrix, RUN.fdf,
+    RUN.out, ORB_INDX and geometry hashes together. Its purpose is adversarial (see
+    tests/test_reference_provenance.py): it detects a mutated or swapped Hamiltonian.
+
+    Only the derivative-reference path wrote these records, so MD datasets produced no
+    signature and every downstream consumer -- metrics, eigenvalues, ranking, release
+    manifests -- rejected their references. The signature has to be emitted *here*, while
+    the files are the ones SIESTA just wrote; a later backfill can only attest to whatever
+    is on disk at that point, not to the original run.
+    """
+    def _load(path: Path) -> dict:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    pipeline_paths = paths(config)
+    dataset_dir = pipeline_paths["dataset_dir"]
+    material = _load(dataset_dir / "material_provenance.json")
+    manifest = _load(dataset_dir / "benchmark_dataset_manifest.json")
+    counts = {"written": 0, "skipped": 0}
+
+    for split_name, source_samples in split_ranges.items():
+        for source_sample in source_samples:
+            sample_dir = split_root / split_name / source_sample.name
+            reference = _find_hamiltonian(sample_dir)
+            if reference is None:
+                counts["skipped"] += 1
+                continue
+            provenance = build_positive_reference_provenance(
+                sample_dir,
+                Path(reference),
+                frozen_sample_id=f"md_{source_sample.name}",
+                split=split_name,
+                frozen_split_hash=frozen_split_hash,
+                basis_hashes=manifest.get("basis_hashes") or material.get("basis_file_sha256") or {},
+                pseudopotential_hashes=(
+                    manifest.get("pseudopotential_hashes") or material.get("pseudopotential_sha256") or {}
+                ),
+                siesta_version=str(material.get("siesta_version") or ""),
+                siesta_command=material.get("siesta_command_line") or "",
+            )
+            write_json(sample_dir / "siesta_reference_provenance.json", provenance)
+            counts["written"] += 1
+    return counts
+
+
 def write_split_manifests(
     config: dict,
     split_root: Path,
@@ -1531,6 +1590,17 @@ def prepare_dataset_splits(config: dict) -> None:
             "[OK] Dataset manifest escrito: "
             f"{dataset_manifest['benchmark_dataset_id']} split_hash={frozen_split['split_hash']} "
             f"benchmark_ready={dataset_manifest['benchmark_ready']}"
+        )
+        # Después del manifest: la firma necesita el frozen_split_hash definitivo.
+        signed = write_reference_provenance(
+            config,
+            split_root,
+            split_ranges,
+            frozen_split_hash=str(frozen_split.get("split_hash") or ""),
+        )
+        print(
+            "[OK] Reference provenance firmada: "
+            f"{signed['written']} snapshots, {signed['skipped']} sin matriz de referencia"
         )
     else:
         print(

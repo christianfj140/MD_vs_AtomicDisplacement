@@ -2,6 +2,7 @@ import json
 import csv
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -44,6 +45,8 @@ from g2m_deeph_runner import (  # noqa: E402
     _metric_evaluation_split,
     _metric_fail_policy,
     _normalized_modular_workflow_payload,
+    _exclusive_gpu_training,
+    _wait_for_free_gpu_memory,
     _write_csv,
     main as _g2m_deeph_runner_main,
 )
@@ -2461,6 +2464,34 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             self.assertEqual(row["dataset_size"], 6)
             self.assertEqual(row["status"], "dry_run")
 
+    def test_dataset_sweep_binds_payload_bilayer_material_to_md_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = Graph2MatDeepHBenchmarkRunner()
+            _, config, _ = runner._prepare_md_dataset_sweep_config(
+                {
+                    "pipeline_config": "Comparison/config/graphene_hbn_bilayer_md_pipeline_config.yaml",
+                    "material_preset": "bilayer_graphene_hBN_AB2",
+                    "system_label": "bilayer_graphene_hBN_AB2",
+                    "split_mode": "block",
+                },
+                {
+                    "size": 6,
+                    "recipe_id": "md6",
+                    "dataset_slug": "md6",
+                    "temperature_blocks": [],
+                    "recipe_metadata": {},
+                },
+                run_root=root / "run",
+                dataset_root=root / "dataset",
+            )
+            self.assertEqual(config["material"]["preset"], "bilayer_graphene_hBN_AB2")
+            self.assertEqual(config["md"]["system_label"], "bilayer_graphene_hBN_AB2")
+            self.assertEqual(
+                Path(config["md"]["run_fdf_template"]),
+                REPO_ROOT / "materials" / "bilayer_graphene_hBN_AB2" / "RUN.fdf",
+            )
+
     def test_dataset_sweep_dry_run_plans_multiple_md_datasets(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = Graph2MatDeepHBenchmarkRunner()
@@ -3043,6 +3074,27 @@ class Graph2MatDeepHRunnerTests(unittest.TestCase):
             _deeph_training_parallelism({"performance": {"max_parallel_deeph_training_jobs": "2"}}),
             2,
         )
+
+    @mock.patch("g2m_deeph_runner.subprocess.run")
+    def test_gpu_memory_guard_accepts_sufficient_free_vram(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="25000\n", stderr="")
+        result = _wait_for_free_gpu_memory(
+            {"performance": {"deeph_min_free_gpu_memory_mb": 24000}},
+            "deeph",
+        )
+        self.assertEqual(result["observed_free_mb"], 25000)
+        self.assertEqual(result["required_free_mb"], 24000)
+
+    def test_gpu_training_lock_is_skipped_for_cpu_and_recorded_for_gpu(self):
+        with _exclusive_gpu_training({"performance": {"compute_accelerator": "cpu"}}) as record:
+            self.assertIsNone(record)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "g2m_deeph_runner.GPU_TRAINING_LOCK_PATH",
+            Path(tmp) / "gpu.lock",
+        ):
+            with _exclusive_gpu_training({"performance": {"compute_accelerator": "gpu"}}) as record:
+                self.assertEqual(Path(record["path"]).name, "gpu.lock")
+                self.assertGreaterEqual(record["waited_seconds"], 0)
 
     def test_deeph_uses_gpu_when_performance_requests_gpu(self):
         disable_cuda, device = _deeph_device_settings(

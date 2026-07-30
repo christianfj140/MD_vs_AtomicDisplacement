@@ -20,6 +20,33 @@ import build_graphene_hbn_bilayer_train_dataset as bilayer  # noqa: E402
 from material_presets import resolve_material_bundle  # noqa: E402
 
 
+def _bilayer_fdf(stacking: str) -> str:
+    return f"""SystemLabel {stacking}
+NumberOfAtoms 6
+NumberOfSpecies 3
+%block ChemicalSpeciesLabel
+1 6 C
+2 5 B
+3 7 N
+%endblock ChemicalSpeciesLabel
+LatticeConstant 1.0 Ang
+%block LatticeVectors
+2.48 0 0
+-1.24 2.147743 0
+0 0 20
+%endblock LatticeVectors
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+0 0 6 2
+0 1.4318286667 6 3
+0 0 9.35 1
+0 1.4318286667 9.35 1
+0 1.4318286667 12.7 1
+1.24 0.7159143333 12.7 1
+%endblock AtomicCoordinatesAndAtomicSpecies
+"""
+
+
 def _fake_source(root: Path, stacking: str, *, basis_hash: str, n_train: int, n_val: int) -> Path:
     """Minimal materialized dataset: provenance + frozen manifest + sample dirs."""
     dataset = root / stacking
@@ -39,7 +66,7 @@ def _fake_source(root: Path, stacking: str, *, basis_hash: str, n_train: int, n_
         for i in range(count):
             sample_dir = dataset / "splits" / split / str(i)
             sample_dir.mkdir(parents=True)
-            (sample_dir / "RUN.fdf").write_text(f"SystemLabel {stacking}\n", encoding="utf-8")
+            (sample_dir / "RUN.fdf").write_text(_bilayer_fdf(stacking), encoding="utf-8")
             (sample_dir / "RUN.out").write_text("ok\n", encoding="utf-8")
             (sample_dir / f"{stacking}.TSHS").write_bytes(b"tshs")
             rows.append({"sample_id": f"md_{split}_{i}", "split": split, "sample_dir": str(sample_dir)})
@@ -92,9 +119,9 @@ def test_committed_bilayer_presets_share_basis_and_have_three_species() -> None:
 def test_merge_sums_samples_without_id_collision(tmp_path: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _patch_finalizers(monkeypatch)
     sources = [
-        _fake_source(tmp_path, "graphene_hBN_AA", basis_hash="h", n_train=3, n_val=1),
-        _fake_source(tmp_path, "graphene_hBN_AB1", basis_hash="h", n_train=2, n_val=2),
-        _fake_source(tmp_path, "graphene_hBN_AB2", basis_hash="h", n_train=4, n_val=1),
+        _fake_source(tmp_path, "bilayer_graphene_hBN_AA", basis_hash="h", n_train=3, n_val=1),
+        _fake_source(tmp_path, "bilayer_graphene_hBN_AB1", basis_hash="h", n_train=2, n_val=2),
+        _fake_source(tmp_path, "bilayer_graphene_hBN_AB2", basis_hash="h", n_train=4, n_val=1),
     ]
     output = tmp_path / "merged"
     result = bilayer.build_dataset(sources, output, overwrite=False)
@@ -146,6 +173,24 @@ def test_bilayer_ui_subsection_is_additive_and_last() -> None:
     assert 'request("/api/cross-testing/bilayer/metrics")' in app
     assert 'request("/api/cross-testing/bilayer/status")' in app
     assert '"ct-bilayer-mae-chart"' in app
+    assert "B. Predicción espectral ML-only" in panel
+    assert "No target H reference" in panel
+    assert "ct-spectral-bands-chart" in panel
+    assert "ct-spectral-dos-chart" in panel
+    assert "ct-spectral-reference-validation" in panel
+    assert "ct-spectral-downloads" in panel
+    assert "Smoke legacy aislado" in panel
+    spectral_plot = app[app.index("function ctSpectralBandPlot"):app.index("async function ctSpectralRender")]
+    assert "point.band_index" in spectral_plot
+    assert "showlegend: index === 0" in spectral_plot
+    assert 'tickmode: "array"' in spectral_plot
+    assert 'yref: "y"' in spectral_plot
+    for route in ("plan", "launch", "results", "stop", "artifact"):
+        assert f"/api/cross-testing/bilayer/spectral/{route}" in app
+    for route in ("plan", "launch", "status", "results", "stop"):
+        assert f"/api/cross-testing/bilayer/spectral/{route}" in (
+            REPO_ROOT / "Comparison/scripts/pipeline_ui.py"
+        ).read_text(encoding="utf-8")
 
 
 def test_bilayer_runner_is_independent() -> None:
@@ -157,13 +202,121 @@ def test_bilayer_runner_is_independent() -> None:
     assert ui.CROSS_TESTING_BILAYER_RUNNER._output_root != ui.CROSS_TESTING_RUNNER._output_root
 
 
+def test_spectral_artifact_download_is_confined_to_campaign(tmp_path: Path) -> None:
+    import pipeline_ui as ui
+
+    runner = ui.MoireSpectralCampaignRunner()
+    runner.root = tmp_path / "campaign"
+    assert runner.status()["disk"]["free_percent"] > 0
+    artifact = runner.root / "summary" / "result.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("{}\n", encoding="utf-8")
+
+    assert runner.artifact_path("summary/result.json") == artifact
+    with pytest.raises(RuntimeError, match="fuera de la campaña"):
+        runner.artifact_path("../secret.json")
+    with pytest.raises(RuntimeError, match="Tipo de artefacto"):
+        runner.artifact_path("overlaps.h5")
+
+
+def test_spectral_results_prioritizes_live_training_over_stale_manifest(tmp_path: Path) -> None:
+    import pipeline_ui as ui
+
+    runner = ui.MoireSpectralCampaignRunner()
+    runner.root = tmp_path / "campaign"
+    (runner.root / "training/n30/control").mkdir(parents=True)
+    (runner.root / "status.json").write_text(
+        '{"running": true, "current_stage": "train"}\n',
+        encoding="utf-8",
+    )
+    (runner.root / "training/training_campaign_manifest.json").write_text(
+        '{"status": "failed"}\n',
+        encoding="utf-8",
+    )
+    (runner.root / "training/n30/control/status.json").write_text(
+        '{"status": {"running": true, "stage": "training_sweep"}}\n',
+        encoding="utf-8",
+    )
+
+    training = runner.results()["training"]
+    assert training["status"] == "running"
+    assert training["previous_status"] == "failed"
+    assert training["live_controls"][0]["status"]["stage"] == "training_sweep"
+
+
 def test_merge_fails_closed_on_basis_hash_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_finalizers(monkeypatch)
     sources = [
-        _fake_source(tmp_path, "graphene_hBN_AA", basis_hash="h", n_train=2, n_val=1),
-        _fake_source(tmp_path, "graphene_hBN_AB1", basis_hash="DIFFERENT", n_train=2, n_val=1),
-        _fake_source(tmp_path, "graphene_hBN_AB2", basis_hash="h", n_train=2, n_val=1),
+        _fake_source(tmp_path, "bilayer_graphene_hBN_AA", basis_hash="h", n_train=2, n_val=1),
+        _fake_source(tmp_path, "bilayer_graphene_hBN_AB1", basis_hash="DIFFERENT", n_train=2, n_val=1),
+        _fake_source(tmp_path, "bilayer_graphene_hBN_AB2", basis_hash="h", n_train=2, n_val=1),
     ]
     with pytest.raises(RuntimeError, match="Basis hashes differ"):
         bilayer.build_dataset(sources, tmp_path / "merged", overwrite=False)
     assert not (tmp_path / "merged").exists()
+
+
+def test_merge_rejects_legacy_four_atom_cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_finalizers(monkeypatch)
+    sources = [
+        _fake_source(tmp_path, preset, basis_hash="h", n_train=2, n_val=1)
+        for preset in bilayer.STACKING_PRESETS
+    ]
+    bad_fdf = sources[0] / "splits" / "train" / "0" / "RUN.fdf"
+    bad_fdf.write_text(
+        _bilayer_fdf(sources[0].name).replace("NumberOfAtoms 6", "NumberOfAtoms 4").replace(
+            "0 1.4318286667 12.7 1\n1.24 0.7159143333 12.7 1\n", ""
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="six-atom C4BN"):
+        bilayer.build_dataset(sources, tmp_path / "merged", overwrite=False)
+
+
+def test_balanced_train_limit_is_a_nested_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_finalizers(monkeypatch)
+    sources = [
+        _fake_source(tmp_path, preset, basis_hash="h", n_train=4, n_val=1)
+        for preset in bilayer.STACKING_PRESETS
+    ]
+    small = tmp_path / "small"
+    large = tmp_path / "large"
+    bilayer.build_dataset(sources, small, overwrite=False, train_size=6)
+    bilayer.build_dataset(sources, large, overwrite=False, train_size=9)
+
+    def ids(dataset: Path) -> set[str]:
+        rows = (dataset / "splits/train_manifest.csv").read_text(encoding="utf-8").splitlines()[1:]
+        return {row.split(",", 1)[0] for row in rows}
+
+    assert len(ids(small)) == 6
+    assert len(ids(large)) == 9
+    assert ids(small) <= ids(large)
+
+
+def test_train_limit_must_balance_across_stackings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_finalizers(monkeypatch)
+    sources = [
+        _fake_source(tmp_path, preset, basis_hash="h", n_train=2, n_val=1)
+        for preset in bilayer.STACKING_PRESETS
+    ]
+    with pytest.raises(RuntimeError, match="divisible by 3"):
+        bilayer.build_dataset(sources, tmp_path / "merged", overwrite=False, train_size=5)
+
+
+def test_explicit_train_quotas_support_weighted_nested_campaign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_finalizers(monkeypatch)
+    sources = [
+        _fake_source(tmp_path, f"source_{index}", basis_hash="h", n_train=4, n_val=1)
+        for index in range(3)
+    ]
+    result = bilayer.build_dataset(
+        sources,
+        tmp_path / "merged",
+        overwrite=False,
+        train_size=6,
+        train_quotas=[1, 3, 2],
+    )
+    assert result["requested_train_size"] == 6
+    assert result["train_quotas"] == [1, 3, 2]
