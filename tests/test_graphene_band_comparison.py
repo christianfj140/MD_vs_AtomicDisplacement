@@ -66,8 +66,8 @@ class GrapheneBandComparisonTests(unittest.TestCase):
 
         self.assertIn("BandLinesScale ReciprocalLatticeVectors", block)
         self.assertIn("%block BandLines", block)
-        self.assertIn("0.3333333333    0.3333333333    0.0000000000    K", block)
-        self.assertIn("0.5000000000    0.0000000000    0.0000000000    M", block)
+        self.assertIn("0.3333333333    0.6666666667    0.0000000000    K", block)
+        self.assertIn("0.5000000000    0.5000000000    0.0000000000    M", block)
         self.assertIn("%endblock BandLines", block)
 
     def test_parse_fdf_bandlines_and_temperature(self) -> None:

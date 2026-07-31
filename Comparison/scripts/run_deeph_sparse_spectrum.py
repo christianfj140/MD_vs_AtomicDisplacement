@@ -27,8 +27,8 @@ DEFAULT_GPU_ENVIRONMENT = (
 )
 K_PATH = [
     ("Γ", (0.0, 0.0, 0.0)),
-    ("K", (1.0 / 3.0, 1.0 / 3.0, 0.0)),
-    ("M", (0.5, 0.0, 0.0)),
+    ("K", (1.0 / 3.0, 2.0 / 3.0, 0.0)),
+    ("M", (0.5, 0.5, 0.0)),
     ("Γ", (0.0, 0.0, 0.0)),
 ]
 GIB = 1024**3
@@ -39,7 +39,7 @@ MIN_AVAILABLE_MEMORY_BYTES = 20 * GIB
 PARDISO_OOC_MAX_CORE_MB = 8192
 SOLVER_THREADS = 8
 DISK_POLL_SECONDS = 5.0
-MAX_CPU_TEMPERATURE_C = 80.0
+MAX_CPU_TEMPERATURE_C = 85.0
 MAX_GPU_TEMPERATURE_C = 80.0
 DEFAULT_GPU_MEMORY_LIMIT_GIB = 28.0
 
@@ -218,6 +218,45 @@ def band_points(
     ]
 
 
+def sort_bands_by_energy(energies: np.ndarray) -> np.ndarray:
+    """Return the conventional ascending-energy band rank at every k-point."""
+    if energies.ndim != 2 or not np.isfinite(energies).all():
+        raise ValueError("Band energies must be a finite 2-D array")
+    return np.sort(energies, axis=1)
+
+
+def track_bands_by_overlap(output_dir: Path, energies: np.ndarray) -> tuple[np.ndarray, dict]:
+    from scipy.optimize import linear_sum_assignment
+
+    steps = [
+        json.loads((output_dir / f"band_tracking_{k_index:03d}.json").read_text(encoding="utf-8"))
+        for k_index in range(len(energies))
+    ]
+    if any(int(step["k_index"]) != index for index, step in enumerate(steps)):
+        raise RuntimeError("Band-tracking k-point sequence is incomplete")
+    orders = [np.argsort(energies[0])]
+    assigned_overlaps = []
+    for step in steps[1:]:
+        overlap = np.asarray(step["overlap_from_previous"], dtype=float)
+        if overlap.shape != (energies.shape[1], energies.shape[1]) or not np.isfinite(overlap).all():
+            raise RuntimeError("Invalid adjacent-k eigenvector overlap matrix")
+        rows, columns = linear_sum_assignment(-overlap)
+        mapping = np.empty(energies.shape[1], dtype=int)
+        mapping[rows] = columns
+        orders.append(mapping[orders[-1]])
+        assigned_overlaps.extend(overlap[rows, columns].tolist())
+    tracked = np.asarray([row[order] for row, order in zip(energies, orders, strict=True)])
+    return tracked, {
+        "method": "maximum_adjacent_eigenvector_overlap_hungarian",
+        "status": "completed",
+        "minimum_assigned_overlap": min(assigned_overlaps) if assigned_overlaps else 1.0,
+        "mean_assigned_overlap": float(np.mean(assigned_overlaps)) if assigned_overlaps else 1.0,
+        "raw_eigenvalues_preserved_in": str(output_dir / "openmx.Band"),
+        "eigenvectors_persisted": False,
+        "working_storage": "previous_and_current_k_only",
+    }
+
+
 def run(
     input_dir: Path,
     output_dir: Path,
@@ -233,9 +272,12 @@ def run(
     gpu_memory_limit_gib: float = DEFAULT_GPU_MEMORY_LIMIT_GIB,
     validate_gpu_residual: bool = False,
     gamma_only: bool = False,
+    track_bands: bool = False,
 ) -> dict:
     if backend not in {"cpu_mkl_pardiso", "gpu_cudss"}:
         raise ValueError(f"Unsupported sparse solver backend: {backend}")
+    if track_bands and backend != "cpu_mkl_pardiso":
+        raise ValueError("Eigenvector-overlap tracking currently requires cpu_mkl_pardiso")
     environment = json.loads(environment_path.read_text(encoding="utf-8"))
     if environment.get("status") != "valid":
         raise RuntimeError(f"Invalid sparse solver environment: {environment_path}")
@@ -283,6 +325,7 @@ def run(
             "identity_overlap_used": False,
             "backend_requested": backend,
             "backend_effective": None,
+            "band_tracking_requested": track_bands,
         }
         write_json(output_dir / "solver_manifest.json", manifest)
         return manifest
@@ -293,6 +336,7 @@ def run(
         "num_band": num_bands,
         "pardiso_out_of_core": backend == "cpu_mkl_pardiso",
         "solver_backend": backend,
+        "track_bands_by_eigenvector_overlap": track_bands,
     }
     if job == "band":
         config.update({"which_k": 0, "k_data": band_k_data(points_per_segment, gamma_only)})
@@ -309,6 +353,8 @@ def run(
     solver_script = (
         REPO_ROOT / "Comparison/scripts/deeph_sparse_calc_gpu.jl"
         if backend == "gpu_cudss"
+        else REPO_ROOT / "Comparison/scripts/deeph_sparse_calc_tracked.jl"
+        if track_bands
         else REPO_ROOT.parent / "DeepH-pack/deeph/inference/sparse_calc.jl"
     )
     command = [
@@ -409,6 +455,7 @@ def run(
         "error_summary": stderr_text[-2000:] if returncode != 0 else None,
         "backend_requested": backend,
         "backend_effective": backend if returncode == 0 else None,
+        "band_tracking_requested": track_bands,
         "fermi_level_eV": fermi_level,
         "num_bands": num_bands,
         "resources": parse_time_v(output_dir / "time-v.txt"),
@@ -452,8 +499,28 @@ def run(
         "command": command,
     }
     if returncode == 0 and job == "band":
-        energies = parse_openmx_band(output_dir / "openmx.Band")
+        raw_energies = parse_openmx_band(output_dir / "openmx.Band")
+        energies = sort_bands_by_energy(raw_energies)
+        manifest["band_ordering"] = {
+            "method": "ascending_energy_rank_per_k",
+            "band_character_continuity_claimed": False,
+            "raw_solver_order_preserved_in": str(output_dir / "openmx.Band"),
+        }
+        if track_bands:
+            _tracked, manifest["band_tracking"] = track_bands_by_overlap(output_dir, raw_energies)
+            manifest["band_tracking"]["used_for_plot"] = False
+            manifest["band_tracking"]["reason"] = (
+                "diagnostic only: low-confidence coefficient overlaps must not replace "
+                "the conventional ascending-energy spectrum"
+            )
         reciprocal = np.loadtxt(input_dir / "rlat.dat").T
+        manifest["k_path"] = {
+            "name": "moire_Gamma-K-M-Gamma",
+            "coordinates": [{"label": label, "k": list(point)} for label, point in K_PATH],
+            "coordinate_system": "reciprocal_lattice_vectors",
+            "points_per_segment": points_per_segment,
+            "sample_count": len(band_kpoints(points_per_segment, gamma_only)),
+        }
         manifest["bands"] = band_points(
             energies,
             points_per_segment,
@@ -490,6 +557,7 @@ def main() -> int:
     parser.add_argument("--no-gpu-hybrid-memory", action="store_true")
     parser.add_argument("--validate-gpu-residual", action="store_true")
     parser.add_argument("--gamma-only", action="store_true")
+    parser.add_argument("--track-bands", action="store_true")
     args = parser.parse_args()
     environment = (
         DEFAULT_GPU_ENVIRONMENT
@@ -510,6 +578,7 @@ def main() -> int:
         gpu_memory_limit_gib=args.gpu_memory_limit_gib,
         validate_gpu_residual=args.validate_gpu_residual,
         gamma_only=args.gamma_only,
+        track_bands=args.track_bands,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["status"] == "completed" else 2 if result["status"] == "resource_blocked" else 1

@@ -18140,6 +18140,9 @@ class MoireSpectralCampaignRunner:
             "solver_environment_gpu_cudss": self._read(
                 self.root / "solver/environment_gpu_cudss.json"
             ),
+            "tracked_band_sweep": self._read(
+                self.root / "spectra/tracked_band_sweep_status.json"
+            ),
             "reference_validation": {
                 "overlap_only_vs_full": self._read(
                     self.root / "reference_validation/overlap_only_vs_full.json"

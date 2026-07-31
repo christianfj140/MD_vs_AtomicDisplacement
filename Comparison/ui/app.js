@@ -14302,7 +14302,7 @@ function ctSpectralSelection() {
     seed: Number(document.getElementById("ct-spectral-seed")?.value || 0),
     model: document.getElementById("ct-spectral-model")?.value || "all",
     resolution: document.getElementById("ct-spectral-resolution")?.value || "coarse",
-    num_bands: Number(document.getElementById("ct-spectral-bands")?.value || 60),
+    num_bands: Number(document.getElementById("ct-spectral-bands")?.value || 16),
   };
 }
 
@@ -14360,6 +14360,9 @@ function ctSpectralBandPlot(spectra) {
   const tickRows = Array.from(ticks.entries()).sort(([left], [right]) => left - right);
   return {
     traces,
+    title: spectra.some((row) => row.band_ordering?.method === "ascending_energy_rank_per_k")
+      ? "Espectro moiré cerca de neutralidad · rango energético por k"
+      : "Bandas cerca de neutralidad",
     layout: {
       xaxis: {
         tickmode: "array",
@@ -14433,6 +14436,31 @@ async function ctSpectralRender(payload) {
     (selection.model === "all" || String(row.model || "").toLowerCase() === selection.model)
   );
   const bandPlot = ctSpectralBandPlot(spectra);
+  const unfoldedTicks = new Map();
+  const unfoldedTraces = spectra.flatMap((row) =>
+    Object.entries(row.unfolding?.layers || {}).flatMap(([layer, result]) => {
+      const points = result.unfolded_bands || [];
+      points.forEach((point) => {
+        if (point.k_label) unfoldedTicks.set(Number(point.k_distance), point.k_label);
+      });
+      return points.length ? [{
+        x: points.map((point) => Number(point.k_distance)),
+        y: points.map((point) => Number(point.energy_aligned_eV)),
+        customdata: points.map((point) => Number(point.spectral_weight)),
+        mode: "markers",
+        name: `${layer === "bottom" ? "Grafeno inferior" : "Grafeno superior"} · N${row.training_size}`,
+        marker: {
+          color: points.map((point) => Number(point.spectral_weight)),
+          colorscale: layer === "bottom" ? "Blues" : "Reds",
+          cmin: 0,
+          size: 5,
+          showscale: false,
+        },
+        hovertemplate: "peso %{customdata:.3e}<br>E %{y:.6f} eV<extra>%{fullData.name}</extra>",
+      }] : [];
+    })
+  );
+  const unfoldedTickRows = Array.from(unfoldedTicks.entries()).sort(([left], [right]) => left - right);
   const dosTraces = spectra.flatMap((row) => (row.low_energy_dos || []).length ? [{
     x: row.low_energy_dos.map((point) => point.energy_aligned_eV),
     y: row.low_energy_dos.map((point) => point.dos),
@@ -14450,7 +14478,21 @@ async function ctSpectralRender(payload) {
     }] : [];
   };
   await Promise.all([
-    ctSpectralPlot("ct-spectral-bands-chart", bandPlot.traces, "Bandas cerca de neutralidad", "Camino de alta simetría", "E − neutralidad estimada (eV)", bandPlot.layout),
+    ctSpectralPlot("ct-spectral-bands-chart", bandPlot.traces, bandPlot.title, "Camino de alta simetría", "E − neutralidad estimada (eV)", bandPlot.layout),
+    ctSpectralPlot(
+      "ct-spectral-unfolded-chart",
+      unfoldedTraces,
+      "Peso espectral desplegado por capa · aproximación LCAO",
+      "Γ–K–M–Γ de cada capa de grafeno",
+      "E − neutralidad estimada (eV)",
+      {
+        xaxis: {
+          tickmode: "array",
+          tickvals: unfoldedTickRows.map(([distance]) => distance),
+          ticktext: unfoldedTickRows.map(([, label]) => label),
+        },
+      },
+    ),
     ctSpectralPlot("ct-spectral-dos-chart", dosTraces, "DOS parcial de baja energía", "E − neutralidad estimada (eV)", "DOS parcial"),
     ctSpectralPlot("ct-spectral-width-chart", scalarTrace("flat_band_width_meV", "Ancho"), "Ancho del manifold de baja energía", "Snapshots", "Ancho (meV)"),
     ctSpectralPlot("ct-spectral-gap-chart", scalarTrace("estimated_gap_meV", "Gap"), "Gap estimado", "Snapshots", "Gap (meV)"),
@@ -14499,9 +14541,12 @@ async function ctSpectralRefresh() {
     .map((control) => control.status || control)
     .find((control) => control.running);
   const sweep = liveTraining?.training_sweep || {};
+  const trackedSweep = payload.tracked_band_sweep || {};
   const trainingDetail = sweep.active_config_id
     ? ` · ${sweep.active_config_id} (${sweep.completed || 0}/${sweep.total || 0})`
-    : "";
+    : trackedSweep.status === "running"
+      ? ` · espectro moiré N${trackedSweep.current_training_size} (${(trackedSweep.completed_training_sizes || []).length}/5)`
+      : "";
   ctSpectralStatus(`${status.state || "unknown"} · etapa ${status.current_stage || "—"}${trainingDetail}${coverage}${disk}`);
   await ctSpectralRender(payload);
   if (!status.running && ctSpectralStatusTimer) {

@@ -17,8 +17,8 @@ from run_deeph_sparse_spectrum import band_k_data  # noqa: E402
 def test_band_k_data_supports_single_high_symmetry_points() -> None:
     assert band_k_data(1) == [
         "1 0.0 0.0 0.0 0.0 0.0 0.0",
-        "1 0.3333333333333333 0.3333333333333333 0.0 0.3333333333333333 0.3333333333333333 0.0",
-        "1 0.5 0.0 0.0 0.5 0.0 0.0",
+        "1 0.3333333333333333 0.6666666666666666 0.0 0.3333333333333333 0.6666666666666666 0.0",
+        "1 0.5 0.5 0.0 0.5 0.5 0.0",
     ]
     assert len(band_k_data(2)) == 4
     detailed = band_k_data(8)
@@ -26,9 +26,9 @@ def test_band_k_data_supports_single_high_symmetry_points() -> None:
     assert len(set(detailed)) == 21
     assert detailed[0] == detailed[-1]
     assert detailed.count(
-        "1 0.3333333333333333 0.3333333333333333 0.0 0.3333333333333333 0.3333333333333333 0.0"
+        "1 0.3333333333333333 0.6666666666666666 0.0 0.3333333333333333 0.6666666666666666 0.0"
     ) == 1
-    assert detailed.count("1 0.5 0.0 0.0 0.5 0.0 0.0") == 1
+    assert detailed.count("1 0.5 0.5 0.0 0.5 0.5 0.0") == 1
     with pytest.raises(ValueError, match="positive"):
         band_k_data(0)
     assert band_k_data(8, gamma_only=True) == ["1 0.0 0.0 0.0 0.0 0.0 0.0"]
@@ -149,3 +149,32 @@ def test_requested_gpu_backend_is_recorded_without_cpu_fallback(tmp_path, monkey
     assert result["status"] == "resource_blocked"
     assert result["backend_requested"] == "gpu_cudss"
     assert result["backend_effective"] is None
+
+
+def test_band_tracking_uses_adjacent_eigenvector_overlap(tmp_path) -> None:
+    energies = sparse_spectrum.np.asarray([[0.0, 1.0, 2.0], [1.1, 2.1, 0.1]])
+    sparse_spectrum.write_json(
+        tmp_path / "band_tracking_000.json",
+        {"k_index": 0, "energies_eV": energies[0].tolist(), "overlap_from_previous": None},
+    )
+    sparse_spectrum.write_json(
+        tmp_path / "band_tracking_001.json",
+        {
+            "k_index": 1,
+            "energies_eV": energies[1].tolist(),
+            "overlap_from_previous": [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+        },
+    )
+
+    tracked, metadata = sparse_spectrum.track_bands_by_overlap(tmp_path, energies)
+
+    assert tracked.tolist() == [[0.0, 1.0, 2.0], [0.1, 1.1, 2.1]]
+    assert metadata["minimum_assigned_overlap"] == 1.0
+
+
+def test_band_energies_are_sorted_at_each_k() -> None:
+    energies = sparse_spectrum.np.asarray([[2.0, 0.0, 1.0], [-1.0, 3.0, 2.0]])
+    assert sparse_spectrum.sort_bands_by_energy(energies).tolist() == [
+        [0.0, 1.0, 2.0],
+        [-1.0, 2.0, 3.0],
+    ]
