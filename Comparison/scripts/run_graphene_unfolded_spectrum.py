@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 from pathlib import Path
@@ -12,15 +11,21 @@ from pathlib import Path
 import numpy as np
 
 from run_deeph_sparse_spectrum import (
+    DEFAULT_GPU_ENVIRONMENT,
+    DEFAULT_GPU_MEMORY_LIMIT_GIB,
+    GIB,
     MIN_FREE_DISK_PERCENT,
     PARDISO_OOC_MAX_CORE_MB,
     REPO_ROOT,
     SOLVER_THREADS,
+    available_memory_bytes,
     band_kpoints,
+    cpu_package_temperature_c,
     file_sha256,
     free_disk_percent,
     run_with_disk_guard,
     sort_bands_by_energy,
+    validated_hexagonal_k_path,
     write_json,
 )
 from run_graphene_hbn_moire_spectral_campaign import (
@@ -35,25 +40,17 @@ from validate_deeph_sparse_solver import parse_openmx_band
 
 PRIMITIVE_PATH = [
     ("Γ", (0.0, 0.0, 0.0)),
-    ("K", (1.0 / 3.0, 2.0 / 3.0, 0.0)),
-    ("M", (0.5, 0.5, 0.0)),
+    ("K", (1.0 / 3.0, 1.0 / 3.0, 0.0)),
+    ("M", (0.5, 0.0, 0.0)),
     ("Γ", (0.0, 0.0, 0.0)),
 ]
 
 
 def primitive_samples(points_per_segment: int) -> list[tuple[str, np.ndarray]]:
-    # Reuse the repository interpolation contract while temporarily supplying its path.
-    import run_deeph_sparse_spectrum as sparse
-
-    original = sparse.K_PATH
-    try:
-        sparse.K_PATH = PRIMITIVE_PATH
-        return band_kpoints(points_per_segment)
-    finally:
-        sparse.K_PATH = original
+    return band_kpoints(points_per_segment, k_path=PRIMITIVE_PATH)
 
 
-def orbital_map(input_dir: Path, layer: str, geometry: dict, destination: Path) -> None:
+def orbital_map(input_dir: Path, layer: str, geometry: dict, destination: Path) -> dict:
     positions = np.loadtxt(input_dir / "site_positions.dat").T
     shells = [
         [int(value) for value in line.split()]
@@ -69,6 +66,10 @@ def orbital_map(input_dir: Path, layer: str, geometry: dict, destination: Path) 
     expected = 2 * int(geometry["commensurate_cell_index"])
     if len(atom_indices) != expected:
         raise RuntimeError(f"{layer}: expected {expected} carbon atoms, found {len(atom_indices)}")
+    orbital_counts = np.diff(offsets)[atom_indices]
+    if len(set(orbital_counts.tolist())) != 1:
+        raise RuntimeError(f"{layer}: inconsistent carbon orbital counts")
+    orbitals_per_carbon = int(orbital_counts[0])
 
     a = float(geometry["geometry_inplane_lattice_ang"])
     primitive = np.asarray([[a, 0.0], [-a / 2.0, math.sqrt(3.0) * a / 2.0]])
@@ -92,14 +93,50 @@ def orbital_map(input_dir: Path, layer: str, geometry: dict, destination: Path) 
             raise RuntimeError(f"{layer}: atom {atom} does not map to a primitive graphene site")
         r1, r2 = translations[sublattice].astype(int)
         for local_orbital, orbital in enumerate(range(offsets[atom], offsets[atom + 1])):
-            rows.append((orbital + 1, sublattice * 4 + local_orbital + 1, r1, r2))
+            channel = sublattice * orbitals_per_carbon + local_orbital + 1
+            rows.append((orbital + 1, channel, r1, r2))
     np.savetxt(destination, np.asarray(rows, dtype=int), fmt="%d")
+    return {
+        "carbon_atoms": int(len(atom_indices)),
+        "orbitals_per_carbon": orbitals_per_carbon,
+        "channels": 2 * orbitals_per_carbon,
+        "mapping_rows": len(rows),
+    }
 
 
 def folded_kpoints(samples: list[tuple[str, np.ndarray]], matrix: np.ndarray) -> np.ndarray:
     primitive = np.asarray([point for _label, point in samples])
     folded = primitive[:, :2] @ matrix.T
     return np.column_stack((folded % 1.0, np.zeros(len(folded))))
+
+
+def validate_folding(
+    samples: list[tuple[str, np.ndarray]], matrix: np.ndarray, primitive_lattice: np.ndarray
+) -> dict:
+    primitive_reciprocal = 2 * np.pi * np.linalg.inv(primitive_lattice).T
+    super_reciprocal = 2 * np.pi * np.linalg.inv(matrix @ primitive_lattice).T
+    primitive_k = np.asarray([point[:2] for _label, point in samples])
+    super_k_unwrapped = primitive_k @ matrix.T
+    errors = np.linalg.norm(
+        super_k_unwrapped @ super_reciprocal - primitive_k @ primitive_reciprocal,
+        axis=1,
+    )
+    maximum_error = float(errors.max())
+    if maximum_error > 1e-10:
+        raise RuntimeError(f"Reciprocal folding convention failed: {maximum_error:.3e} 1/Ang")
+    return {
+        "relation": "k_supercell_unwrapped = k_primitive @ supercell_matrix.T",
+        "maximum_cartesian_error_inv_ang": maximum_error,
+        "status": "valid",
+    }
+
+
+def k_distances(samples: list[tuple[str, np.ndarray]], reciprocal: np.ndarray) -> list[float]:
+    distances = [0.0]
+    for (_left_label, left), (_right_label, right) in zip(samples, samples[1:]):
+        step = (right[:2] - left[:2]) @ reciprocal
+        distances.append(distances[-1] + float(np.linalg.norm(step)))
+    return distances
 
 
 def run_layer(
@@ -110,19 +147,39 @@ def run_layer(
     layer: str,
     num_bands: int,
     points_per_segment: int,
+    backend: str = "cpu_mkl_pardiso",
+    gpu_memory_limit_gib: float = DEFAULT_GPU_MEMORY_LIMIT_GIB,
 ) -> dict:
+    if backend not in {"cpu_mkl_pardiso", "gpu_cudss"}:
+        raise ValueError(f"Unsupported sparse solver backend: {backend}")
     geometry = read_json(root / "target/moire_geometry.json")
     neutrality = read_json(root / "neutrality_estimate.json")
-    environment = read_json(root / "solver/environment.json")
+    environment = read_json(
+        DEFAULT_GPU_ENVIRONMENT if backend == "gpu_cudss" else root / "solver/environment.json"
+    )
+    if environment.get("status") != "valid":
+        raise RuntimeError(f"Invalid sparse solver environment for {backend}")
     output_dir.mkdir(parents=True, exist_ok=True)
     mapping_path = output_dir / "unfolding_map.dat"
     primitive_path = output_dir / "primitive_kpoints.dat"
-    orbital_map(input_dir, layer, geometry, mapping_path)
+    orbital_mapping = orbital_map(input_dir, layer, geometry, mapping_path)
     samples = primitive_samples(points_per_segment)
     matrix = np.asarray(
         geometry["layer1_supercell_matrix" if layer == "bottom" else "layer2_supercell_matrix"],
         dtype=int,
     )
+    a = float(geometry["geometry_inplane_lattice_ang"])
+    primitive_lattice = np.asarray([[a, 0.0], [-a / 2.0, math.sqrt(3.0) * a / 2.0]])
+    if layer == "top":
+        theta = math.radians(float(geometry["materialized_twist_angle_deg"]))
+        primitive_lattice = primitive_lattice @ np.asarray(
+            [[math.cos(theta), math.sin(theta)], [-math.sin(theta), math.cos(theta)]]
+        )
+    primitive_reciprocal = 2 * np.pi * np.linalg.inv(primitive_lattice).T
+    validated_path, primitive_path_validation = validated_hexagonal_k_path(primitive_reciprocal)
+    if validated_path != PRIMITIVE_PATH:
+        raise RuntimeError("Primitive graphene path disagrees with its reciprocal metric")
+    folding_validation = validate_folding(samples, matrix, primitive_lattice)
     folded = folded_kpoints(samples, matrix)
     np.savetxt(primitive_path, np.asarray([point for _label, point in samples]), fmt="%.18e")
     config = {
@@ -130,8 +187,8 @@ def run_layer(
         "fermi_level": float(neutrality["energy_eV"]),
         "max_iter": 1000,
         "num_band": num_bands,
-        "pardiso_out_of_core": True,
-        "solver_backend": "cpu_mkl_pardiso",
+        "pardiso_out_of_core": backend == "cpu_mkl_pardiso",
+        "solver_backend": backend,
         "which_k": 0,
         "k_data": [
             f"1 {' '.join(map(str, point))} {' '.join(map(str, point))}" for point in folded
@@ -142,7 +199,10 @@ def run_layer(
     command = [
         "/usr/bin/time", "-v", "-o", str(output_dir / "time-v.txt"),
         environment["julia"], "--startup-file=no", f"--project={environment['project']}",
-        str(REPO_ROOT / "Comparison/scripts/deeph_sparse_calc_unfolded.jl"),
+        str(REPO_ROOT / "Comparison/scripts" / (
+            "deeph_sparse_calc_gpu.jl" if backend == "gpu_cudss"
+            else "deeph_sparse_calc_unfolded.jl"
+        )),
         "--input_dir", str(input_dir), "--output_dir", str(output_dir), "--config", str(config_path),
     ]
     env = os.environ.copy()
@@ -152,20 +212,57 @@ def run_layer(
             "DEEPH_SPARSE_CALC": str(REPO_ROOT.parent / "DeepH-pack/deeph/inference/sparse_calc.jl"),
             "DEEPH_UNFOLD_MAP": str(mapping_path),
             "DEEPH_UNFOLD_KPOINTS": str(primitive_path),
-            "OMP_NUM_THREADS": str(SOLVER_THREADS),
-            "MKL_NUM_THREADS": str(SOLVER_THREADS),
+            "OMP_NUM_THREADS": str(1 if backend == "gpu_cudss" else SOLVER_THREADS),
+            "MKL_NUM_THREADS": str(1 if backend == "gpu_cudss" else SOLVER_THREADS),
             "MKL_PARDISO_OOC_MAX_CORE_SIZE": str(PARDISO_OOC_MAX_CORE_MB),
             "MKL_PARDISO_OOC_MAX_SWAP_SIZE": "0",
             "MKL_PARDISO_OOC_KEEP_FILE": "0",
         }
     )
-    returncode, reason, minimum_disk, maximum_temp, minimum_memory = run_with_disk_guard(
-        command, cwd=output_dir, env=env, output_dir=output_dir
+    gpu_memory_limit_bytes = int(gpu_memory_limit_gib * GIB) if backend == "gpu_cudss" else None
+    if backend == "gpu_cudss":
+        env.update({
+            "CUDSS_HYBRID_MEMORY": "1",
+            "CUDSS_DEVICE_MEMORY_LIMIT_BYTES": str(gpu_memory_limit_bytes),
+            "CUDSS_HOST_THREADS": "1",
+            "CUDSS_VALIDATE_RESIDUAL": "0",
+        })
+    gpu_observations = {}
+    artifacts_reused = (output_dir / "openmx.Band").is_file() and all(
+        (output_dir / f"unfolding_{index:03d}.json").is_file()
+        for index in range(len(samples))
     )
+    if artifacts_reused:
+        returncode, reason = 0, None
+        minimum_disk = free_disk_percent(output_dir)
+        maximum_temp = cpu_package_temperature_c()
+        minimum_memory = available_memory_bytes()
+    else:
+        returncode, reason, minimum_disk, maximum_temp, minimum_memory = run_with_disk_guard(
+            command,
+            cwd=output_dir,
+            env=env,
+            output_dir=output_dir,
+            gpu_memory_limit_bytes=gpu_memory_limit_bytes,
+            gpu_observations=gpu_observations,
+        )
+    stderr = (
+        "" if artifacts_reused else (output_dir / "stderr.log").read_text(encoding="utf-8").lower()
+    )
+    if backend == "gpu_cudss" and any(marker in stderr for marker in (
+        "out of memory", "failed to allocate", "cudss_status_alloc_failed",
+        "cuda_error_out_of_memory",
+    )):
+        reason = reason or "gpu_out_of_memory"
     result = {
         "status": "completed" if returncode == 0 else "resource_blocked" if reason else "failed",
         "returncode": returncode,
         "reason": reason,
+        "backend_requested": backend,
+        "backend_effective": backend if returncode == 0 else None,
+        "gpu_memory_limit_bytes": gpu_memory_limit_bytes,
+        "gpu_observations": gpu_observations if backend == "gpu_cudss" else None,
+        "solver_artifacts_reused": artifacts_reused,
         "layer": layer,
         "method": "primitive_graphene_LCAO_coefficient_unfolding",
         "scientific_status": "diagnostic_nonorthogonal_basis_approximation",
@@ -179,18 +276,15 @@ def run_layer(
         "minimum_free_disk_percent": MIN_FREE_DISK_PERCENT,
         "hamiltonian_sha256": file_sha256(input_dir / "hamiltonians_pred.h5"),
         "overlap_sha256": file_sha256(input_dir / "overlaps.h5"),
+        "folding_validation": folding_validation,
+        "primitive_path_validation": primitive_path_validation,
+        "orbital_mapping": orbital_mapping,
     }
     if returncode == 0:
         raw = parse_openmx_band(output_dir / "openmx.Band")
         order = np.argsort(raw, axis=1)
-        distances = [0.0]
-        a = float(geometry["geometry_inplane_lattice_ang"])
-        reciprocal = 2 * np.pi * np.linalg.inv(
-            np.asarray([[a, 0.0], [-a / 2.0, math.sqrt(3.0) * a / 2.0]])
-        ).T
-        primitive = [point for _label, point in samples]
-        for left, right in zip(primitive, primitive[1:]):
-            distances.append(distances[-1] + float(np.linalg.norm((right - left) @ reciprocal)))
+        reciprocal = 2 * np.pi * np.linalg.inv(primitive_lattice).T
+        distances = k_distances(samples, reciprocal)
         points = []
         for k_index, ((label, _point), distance) in enumerate(zip(samples, distances, strict=True)):
             payload = read_json(output_dir / f"unfolding_{k_index:03d}.json")
@@ -224,7 +318,11 @@ def main() -> int:
     parser.add_argument("--training-size", type=int, default=30)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-bands", type=int, default=16)
-    parser.add_argument("--points-per-segment", type=int, default=8)
+    parser.add_argument("--points-per-segment", type=int, default=16)
+    parser.add_argument(
+        "--backend", choices=("cpu_mkl_pardiso", "gpu_cudss"), default="cpu_mkl_pardiso"
+    )
+    parser.add_argument("--gpu-memory-limit-gib", type=float, default=DEFAULT_GPU_MEMORY_LIMIT_GIB)
     args = parser.parse_args()
     input_dir = args.root / f"predictions/graph2mat/n{args.training_size}/seed{args.seed}/solver_input"
     combined_path = args.root / f"spectra/graph2mat/n{args.training_size}/seed{args.seed}/solver_manifest.json"
@@ -242,6 +340,8 @@ def main() -> int:
             layer=layer,
             num_bands=args.num_bands,
             points_per_segment=args.points_per_segment,
+            backend=args.backend,
+            gpu_memory_limit_gib=args.gpu_memory_limit_gib,
         )
         results[layer] = result
         if result.get("status") != "completed":

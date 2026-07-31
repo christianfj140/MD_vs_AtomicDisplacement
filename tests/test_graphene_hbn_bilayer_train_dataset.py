@@ -179,12 +179,23 @@ def test_bilayer_ui_subsection_is_additive_and_last() -> None:
     assert "ct-spectral-dos-chart" in panel
     assert "ct-spectral-reference-validation" in panel
     assert "ct-spectral-downloads" in panel
+    assert "ct-spectral-visible-bands" in panel
+    assert "ct-spectral-energy-window" in panel
+    assert "ct-spectral-plot-mode" in panel
+    assert "ct-spectral-weight" in panel
+    assert "ct-spectral-artifact" in panel
+    assert "ct-spectral-diagnostic-window" in panel
+    assert "projected_progress" in app
     assert "Smoke legacy aislado" in panel
     spectral_plot = app[app.index("function ctSpectralBandPlot"):app.index("async function ctSpectralRender")]
     assert "point.band_index" in spectral_plot
     assert "showlegend: index === 0" in spectral_plot
     assert 'tickmode: "array"' in spectral_plot
     assert 'yref: "y"' in spectral_plot
+    assert 'mode === "projected"' in spectral_plot
+    assert "point.weight_c_pz" in spectral_plot
+    assert "point.layer_polarization" in spectral_plot
+    assert "range: [-energyWindow, energyWindow]" in spectral_plot
     for route in ("plan", "launch", "results", "stop", "artifact"):
         assert f"/api/cross-testing/bilayer/spectral/{route}" in app
     for route in ("plan", "launch", "status", "results", "stop"):
@@ -200,6 +211,21 @@ def test_bilayer_runner_is_independent() -> None:
     assert ui.CROSS_TESTING_BILAYER_RUNNER is not ui.CROSS_TESTING_VACANCY_RUNNER
     assert ui.CROSS_TESTING_BILAYER_RUNNER._output_root != ui.CROSS_TESTING_VACANCY_RUNNER._output_root
     assert ui.CROSS_TESTING_BILAYER_RUNNER._output_root != ui.CROSS_TESTING_RUNNER._output_root
+
+
+def test_magic_angle_projected_solver_config_has_safe_smoke_and_production_settings() -> None:
+    config = json.loads((
+        REPO_ROOT / "Comparison/config/graphene_hbn_magic_angle_spectral_campaign.json"
+    ).read_text(encoding="utf-8"))
+    solver = config["solver"]
+    assert solver["compute_backend"] == "gpu_cudss"
+    assert solver["project_mulliken"] is True
+    assert solver["tier_b_bands"] == 256
+    assert solver["tier_b_points_per_segment"] == 11
+    assert solver["production_points_per_segment"] == 51
+    assert solver["tier_c_kmesh"] == [6, 6, 1]
+    assert solver["dos_production_kmesh"] == [24, 24, 1]
+    assert solver["auto_launch_dos_production"] is False
 
 
 def test_spectral_artifact_download_is_confined_to_campaign(tmp_path: Path) -> None:

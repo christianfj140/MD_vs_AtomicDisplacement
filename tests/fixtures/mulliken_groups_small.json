@@ -1,0 +1,11 @@
+{
+  "groups": {
+    "carbon_pz": [1],
+    "carbon": [1],
+    "graphene_lower": [1],
+    "graphene_upper": [],
+    "boron": [2],
+    "nitrogen": [],
+    "hbn": [2]
+  }
+}

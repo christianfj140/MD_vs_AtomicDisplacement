@@ -1,6 +1,6 @@
 #!/bin/bash
-# Disk guard for the queued campaigns (derivative regeneration -> vacancy MD generation ->
-# vacancy->w90 training). Stops them if free space drops below MIN_FREE_PCT.
+# Disk guard for queued campaigns and the projected moiré spectral solver.
+# Stops them if free space drops below MIN_FREE_PCT.
 #
 # NOTE: watch_sweep_disk.sh gets this backwards. `df --output=pcent` reports the percentage
 # USED, but that script stores it in free_pct and then tests `free_pct < 10`, which is only
@@ -10,10 +10,10 @@ set -u
 
 PROJECT_ROOT="/home/christian/repositorios/MD_vs_AtomicDisplacement"
 LOG="$PROJECT_ROOT/Comparison/results/queue_disk_watchdog.log"
-MIN_FREE_PCT=10
+MIN_FREE_PCT=12
 
 # The whole queue, plus the SIESTA workers they spawn (those are what fill the disk).
-PID_PATTERN="regenerate_derivative_siesta_references.py|launch_vacancy_dataset_generation.py|queue_vacancy_train.sh|run_cross_structure_sweep_payload.py|run_hamiltonian_derivative_siesta_references.py"
+PID_PATTERN="regenerate_derivative_siesta_references.py|launch_vacancy_dataset_generation.py|queue_vacancy_train.sh|run_cross_structure_sweep_payload.py|run_hamiltonian_derivative_siesta_references.py|run_moire_tracked_band_sweep.py|run_moire_projected_followup.py|run_deeph_sparse_spectrum.py|deeph_sparse_calc_gpu.jl"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 

@@ -45,16 +45,24 @@
   },
   "solver": {
     "backend": "DeepH_sparse_calc.jl",
-    "compute_backend": "cpu_mkl_pardiso",
+    "compute_backend": "gpu_cudss",
     "gpu_hybrid_memory": true,
     "gpu_memory_limit_gib": 28,
     "dense_fallback_allowed": false,
     "active_models": ["graph2mat"],
     "active_training_sizes": [480],
     "tier_a_bands": 40,
-    "tier_b_points_per_segment": 8,
-    "tier_b_bands": 16,
-    "tier_c_kmesh": [3, 3, 1],
-    "tier_c_bands": 60
+    "project_mulliken": true,
+    "band_path": "gamma-k-m-gamma",
+    "tier_b_points_per_segment": 11,
+    "tier_b_bands": 256,
+    "production_points_per_segment": 51,
+    "tier_c_kmesh": [6, 6, 1],
+    "tier_c_bands": 256,
+    "dos_broadening_meV": 0.5,
+    "dos_supported_broadenings_meV": [0.25, 0.5, 1.0, 2.0],
+    "dos_production_kmesh": [24, 24, 1],
+    "dos_convergence_kmeshes": [[36, 36, 1], [48, 48, 1]],
+    "auto_launch_dos_production": false
   }
 }

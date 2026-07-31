@@ -18111,7 +18111,7 @@ class MoireSpectralCampaignRunner:
         status["disk"] = {
             "free_bytes": disk.free,
             "free_percent": 100.0 * disk.free / disk.total,
-            "minimum_free_percent": 10.0,
+            "minimum_free_percent": 12.0,
         }
         return status
 
@@ -18129,6 +18129,23 @@ class MoireSpectralCampaignRunner:
                 "status": "running",
                 "live_controls": controls,
             }
+        projected_root = self.root / "spectra/graph2mat/n480/seed0"
+        projected_progress = {
+            "followup": self._read(self.root / "spectra/projected_followup_status.json"),
+            "stages": {
+                name: {
+                    "completed_kpoints": len(list((projected_root / tier).glob("mulliken_[0-9][0-9][0-9].json"))),
+                    "expected_kpoints": expected,
+                    "manifest_status": self._read(projected_root / tier / "solver_manifest.json").get("status"),
+                }
+                for name, tier, expected in (
+                    ("smoke", "tier_projected_smoke", 31),
+                    ("kprime", "tier_projected_kprime_diagnostic", 3),
+                    ("production", "tier_projected_production", 151),
+                    ("dos_6x6", "tier_projected_dos_smoke", 36),
+                )
+            },
+        }
         return {
             **self.plan(),
             "status": status,
@@ -18143,6 +18160,7 @@ class MoireSpectralCampaignRunner:
             "tracked_band_sweep": self._read(
                 self.root / "spectra/tracked_band_sweep_status.json"
             ),
+            "projected_progress": projected_progress,
             "reference_validation": {
                 "overlap_only_vs_full": self._read(
                     self.root / "reference_validation/overlap_only_vs_full.json"
@@ -18186,13 +18204,13 @@ class MoireSpectralCampaignRunner:
             "seed": int(payload.get("seed") or 0),
             "model": str(payload.get("model") or "all"),
             "resolution": str(payload.get("resolution") or "coarse"),
-            "num_bands": int(payload.get("num_bands") or 60),
+            "num_bands": int(payload.get("num_bands") or 256),
         }
         if selection["training_size"] not in {30, 60, 120, 240, 480}:
             raise RuntimeError("Unsupported spectral training_size")
         if selection["seed"] not in {0, 1, 2} or selection["model"] not in {"all", "graph2mat", "deeph"}:
             raise RuntimeError("Unsupported spectral seed/model selection")
-        if selection["resolution"] not in {"coarse", "full"} or not 4 <= selection["num_bands"] <= 200:
+        if selection["resolution"] not in {"coarse", "full"} or not 4 <= selection["num_bands"] <= 512:
             raise RuntimeError("Unsupported spectral resolution/num_bands")
         (self.root / "ui_request.json").write_text(
             json.dumps(selection, indent=2, sort_keys=True) + "\n",

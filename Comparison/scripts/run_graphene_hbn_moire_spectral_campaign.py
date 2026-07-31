@@ -1112,6 +1112,9 @@ def solve_spectra(
                 backend=settings.get("compute_backend", "cpu_mkl_pardiso"),
                 gpu_hybrid_memory=bool(settings.get("gpu_hybrid_memory", True)),
                 gpu_memory_limit_gib=float(settings.get("gpu_memory_limit_gib", 28)),
+                band_path=str(settings.get("band_path", "gamma-k-m-gamma")),
+                project_mulliken=bool(settings.get("project_mulliken", False)),
+                dos_broadening_mev=float(settings.get("dos_broadening_meV", 0.5)),
             )
             result["tier"] = tier
             write_json(spectrum_root / tier / "solver_manifest.json", result)
@@ -1150,6 +1153,9 @@ def solve_spectra(
                 "gpu_hardware": visible_result.get("gpu_hardware"),
                 "cudss_timings": visible_result.get("cudss_timings"),
                 "gpu_observations": visible_result.get("gpu_observations"),
+                "projection": visible_result.get("projection"),
+                "projection_mapping": visible_result.get("projection_mapping"),
+                "neutrality_reference": visible_result.get("neutrality_reference"),
                 "dense_large_cell_fallback_used": False,
                 "identity_overlap_used": False,
             }
@@ -1157,9 +1163,13 @@ def solve_spectra(
         if job == "bands" and visible_result.get("bands"):
             combined["bands"] = visible_result["bands"]
             combined["visible_band_tier"] = visible_result["tier"]
+            combined["k_path"] = visible_result.get("k_path")
         if job == "dos" and visible_result.get("low_energy_dos"):
             combined["low_energy_dos"] = visible_result["low_energy_dos"]
             combined["visible_dos_tier"] = visible_result["tier"]
+        if job == "dos" and visible_result.get("projected_dos"):
+            combined["projected_dos"] = visible_result["projected_dos"]
+            combined["dos_observables"] = visible_result.get("dos_observables")
         write_json(combined_path, combined)
         aggregate(config, root)
         rows.append(combined)
@@ -1180,6 +1190,45 @@ def solve_spectra(
     return result
 
 
+def projected_resolution_stability(smoke: dict, production: dict) -> dict[str, Any]:
+    def special_rows(result: dict) -> list[list[dict]]:
+        grouped: dict[int, list[dict]] = {}
+        for point in result.get("bands") or []:
+            if point.get("k_label"):
+                grouped.setdefault(int(point["k_index"]), []).append(point)
+        return [
+            sorted(points, key=lambda point: int(point["band_index"]))
+            for _index, points in sorted(grouped.items())
+        ]
+
+    left, right = special_rows(smoke), special_rows(production)
+    if len(left) != len(right) or any(len(a) != len(b) for a, b in zip(left, right, strict=True)):
+        return {"status": "not_comparable", "reason": "high_symmetry_state_sets_differ"}
+    energy_differences = [
+        1000.0 * (float(a["energy_aligned_eV"]) - float(b["energy_aligned_eV"]))
+        for row_a, row_b in zip(left, right, strict=True)
+        for a, b in zip(row_a, row_b, strict=True)
+    ]
+    pz_differences = [
+        float(a["weight_c_pz"]) - float(b["weight_c_pz"])
+        for row_a, row_b in zip(left, right, strict=True)
+        for a, b in zip(row_a, row_b, strict=True)
+        if a.get("weight_c_pz") is not None and b.get("weight_c_pz") is not None
+    ]
+    return {
+        "status": "completed",
+        "comparison": "shared_high_symmetry_energy_ranks_not_band_identity",
+        "energy_rank_rmse_meV": (
+            sum(value**2 for value in energy_differences) / len(energy_differences)
+        ) ** 0.5,
+        "energy_rank_max_abs_difference_meV": max(map(abs, energy_differences)),
+        "carbon_pz_rank_mean_abs_difference": (
+            sum(map(abs, pz_differences)) / len(pz_differences) if pz_differences else None
+        ),
+        "band_count_stability": "not_evaluated_no_additional_solve",
+    }
+
+
 def aggregate(config: dict[str, Any], root: Path) -> dict[str, Any]:
     overlap_rows = [
         read_json(path)
@@ -1189,6 +1238,61 @@ def aggregate(config: dict[str, Any], root: Path) -> dict[str, Any]:
     for manifest in sorted((root / "spectra").glob("*/*/*/solver_manifest.json")):
         row = read_json(manifest)
         row["manifest_path"] = str(manifest)
+        for tier in (
+            "tier_projected_production",
+            "tier_projected_smoke",
+            "tier_projected_kprime_diagnostic",
+            "tier_b",
+            "tier_a",
+        ):
+            tier_manifest = manifest.parent / tier / "solver_manifest.json"
+            tier_result = read_json(tier_manifest)
+            if tier_result.get("status") == "completed" and tier_result.get("bands"):
+                if tier.startswith("tier_projected") or not row.get("bands"):
+                    row.update({
+                        "bands": tier_result["bands"],
+                        "bands_status": "completed",
+                        "visible_band_tier": tier,
+                        "manifest_path": str(tier_manifest),
+                        "status": "completed",
+                        "projection": tier_result.get("projection"),
+                        "projection_mapping": tier_result.get("projection_mapping"),
+                        "neutrality_reference": tier_result.get("neutrality_reference"),
+                        "k_path": tier_result.get("k_path"),
+                        "band_ordering": tier_result.get("band_ordering"),
+                        "backend_effective": tier_result.get("backend_effective"),
+                        "gpu_hardware": tier_result.get("gpu_hardware"),
+                        "gpu_observations": tier_result.get("gpu_observations"),
+                        "resources": tier_result.get("resources"),
+                        "num_bands": tier_result.get("num_bands"),
+                    })
+                break
+        available_band_results = {}
+        for key, tier in (
+            ("production", "tier_projected_production"),
+            ("smoke", "tier_projected_smoke"),
+            ("kprime", "tier_projected_kprime_diagnostic"),
+        ):
+            tier_result = read_json(manifest.parent / tier / "solver_manifest.json")
+            if tier_result.get("status") == "completed" and tier_result.get("bands"):
+                available_band_results[key] = {
+                    "tier": tier,
+                    "bands": tier_result["bands"],
+                    "k_path": tier_result.get("k_path"),
+                    "projection": tier_result.get("projection"),
+                    "resources": tier_result.get("resources"),
+                    "gpu_observations": tier_result.get("gpu_observations"),
+                    "backend_effective": tier_result.get("backend_effective"),
+                    "num_bands": tier_result.get("num_bands"),
+                }
+        if {"smoke", "production"} <= set(available_band_results):
+            row["resolution_stability"] = projected_resolution_stability(
+                available_band_results["smoke"], available_band_results["production"]
+            )
+            # Production is already the primary row; avoid duplicating tens of MB in the UI summary.
+            available_band_results.pop("production")
+        if available_band_results:
+            row["available_band_results"] = available_band_results
         if not row.get("bands"):
             for tier in ("tier_b", "tier_a"):
                 tier_manifest = manifest.parent / tier / "solver_manifest.json"
@@ -1200,18 +1304,60 @@ def aggregate(config: dict[str, Any], root: Path) -> dict[str, Any]:
                     row["manifest_path"] = str(tier_manifest)
                     row["status"] = "completed"
                     break
-        if not row.get("low_energy_dos"):
-            tier_manifest = manifest.parent / "tier_c/solver_manifest.json"
+        kprime_result = read_json(
+            manifest.parent / "tier_projected_kprime_diagnostic/solver_manifest.json"
+        )
+        if kprime_result.get("status") == "completed" and kprime_result.get("bands"):
+            row["kprime_diagnostic"] = {
+                "status": "completed",
+                "bands": kprime_result["bands"],
+                "k_path": kprime_result.get("k_path"),
+                "projection": kprime_result.get("projection"),
+                "comparison": kprime_result.get("kprime_comparison"),
+                "resources": kprime_result.get("resources"),
+            }
+        for tier in ("tier_projected_dos_production", "tier_projected_dos_smoke", "tier_c"):
+            tier_manifest = manifest.parent / tier / "solver_manifest.json"
             tier_result = read_json(tier_manifest)
-            if tier_result.get("status") == "completed" and tier_result.get("low_energy_dos"):
+            if tier_result.get("status") != "completed":
+                continue
+            if tier_result.get("projected_dos"):
+                row["projected_dos"] = tier_result["projected_dos"]
+                row["projection_dos"] = tier_result.get("projection")
+                row["dos_observables"] = tier_result.get("dos_observables")
+            if tier_result.get("low_energy_dos"):
                 row["low_energy_dos"] = tier_result["low_energy_dos"]
+            if row.get("projected_dos") or row.get("low_energy_dos"):
                 row["dos_status"] = "completed"
-                row["visible_dos_tier"] = "tier_c"
-                row["manifest_path"] = str(tier_manifest)
+                row["visible_dos_tier"] = tier
                 row["status"] = "completed"
+                break
         band_rows = row.get("bands") if isinstance(row.get("bands"), list) else []
         energies = [float(item["energy_aligned_eV"]) for item in band_rows if item.get("energy_aligned_eV") is not None]
         if energies:
+            if row.get("projection"):
+                row.pop("estimated_gap_meV", None)
+                row.pop("flat_band_width_meV", None)
+                cloud = [
+                    item for item in band_rows
+                    if abs(1000.0 * float(item["energy_aligned_eV"])) <= 15.0
+                    and item.get("weight_c_pz") is not None
+                ]
+                if cloud:
+                    cloud_energies = [1000.0 * float(item["energy_aligned_eV"]) for item in cloud]
+                    pz_weights = [float(item["weight_c_pz"]) for item in cloud]
+                    row["projected_low_energy_observables"] = {
+                        "scientific_status": "state_cloud_without_band_identity",
+                        "energy_window_meV": 15.0,
+                        "state_count": len(cloud),
+                        "energy_span_meV": max(cloud_energies) - min(cloud_energies),
+                        "carbon_pz_weight_mean": sum(pz_weights) / len(pz_weights),
+                        "carbon_pz_weight_min": min(pz_weights),
+                        "carbon_pz_weight_max": max(pz_weights),
+                        "gap_and_bandwidth_claimed": False,
+                    }
+                spectra.append(row)
+                continue
             occupied = [value for value in energies if value <= 0]
             empty = [value for value in energies if value > 0]
             if occupied and empty:

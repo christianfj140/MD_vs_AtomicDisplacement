@@ -1983,7 +1983,7 @@
                 <select id="ct-spectral-resolution"><option value="coarse">Coarse</option><option value="full">Full</option></select>
               </label>
               <label class="field"><span>Número de bandas</span>
-                <input id="ct-spectral-bands" type="number" min="4" max="200" value="16" />
+                <input id="ct-spectral-bands" type="number" min="4" max="512" value="256" />
               </label>
             </div>
             <div class="button-row">
@@ -1998,9 +1998,53 @@
               <div class="terminal-navbar"><span>Magic-angle spectral campaign</span></div>
               <pre id="ct-spectral-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando el plan persistente.</pre>
             </div>
+            <div class="form-grid compact-grid" aria-label="Controles del gráfico de minibandas">
+              <label class="field"><span>Modo</span>
+                <select id="ct-spectral-plot-mode">
+                  <option value="projected" selected>Minibandas moiré proyectadas</option>
+                  <option value="raw">Espectro bruto (diagnóstico)</option>
+                  <option value="exploratory">Selección energética exploratoria</option>
+                  <option value="unfolding">Unfolding primitivo existente</option>
+                </select>
+              </label>
+              <label class="field"><span>Camino / resolución persistida</span>
+                <select id="ct-spectral-artifact"><option value="auto" selected>Mejor disponible</option><option value="smoke">Smoke · 31 k</option><option value="production">Producción · 51/segmento</option><option value="kprime">K′–Γ–K diagnóstico</option></select>
+              </label>
+              <label class="field"><span>Peso proyectado</span>
+                <select id="ct-spectral-weight">
+                  <option value="weight_c_pz" selected>C pz</option><option value="weight_c_total">C total</option>
+                  <option value="weight_graphene_upper">Grafeno superior</option><option value="weight_graphene_lower">Grafeno inferior</option>
+                  <option value="weight_hbn">hBN</option><option value="layer_polarization">Polarización de capa</option>
+                </select>
+              </label>
+              <label class="field"><span>Bandas visibles (solo exploratorio)</span>
+                <select id="ct-spectral-visible-bands">
+                  <option value="8">8</option><option value="16" selected>16</option>
+                  <option value="32">32</option><option value="64">64</option>
+                  <option value="128">128</option><option value="256">Todas (256)</option>
+                </select>
+              </label>
+              <label class="field"><span>Ventana energética</span>
+                <select id="ct-spectral-energy-window">
+                  <option value="5">±5 meV</option><option value="10">±10 meV</option><option value="15" selected>±15 meV</option>
+                  <option value="20">±20 meV</option><option value="50">±50 meV</option><option value="100">±100 meV</option>
+                  <option value="0">Automática</option>
+                </select>
+              </label>
+              <label class="field"><span>Intensidad mínima (visual)</span><input id="ct-spectral-min-weight" type="number" min="0" max="1" step="0.01" value="0.20" /></label>
+              <label class="field"><span>Tamaño de marcador</span><input id="ct-spectral-marker-size" type="number" min="2" max="16" step="1" value="7" /></label>
+              <label class="field"><span>Opacidad</span><input id="ct-spectral-marker-opacity" type="number" min="0.1" max="1" step="0.1" value="0.8" /></label>
+              <label class="field"><span>Representación</span><select id="ct-spectral-draw-mode"><option value="markers" selected>Puntos</option><option value="lines">Líneas ordenadas por energía</option></select></label>
+              <label class="field"><span><input id="ct-spectral-background" type="checkbox" checked /> Fondo ±20 meV</span></label>
+              <label class="field"><span><input id="ct-spectral-show-kprime" type="checkbox" /> Mostrar K′ si está calculado</span></label>
+              <label class="field"><span>Ventana diagnóstica</span><select id="ct-spectral-diagnostic-window"><option value="50" selected>±50 meV</option><option value="100">±100 meV</option></select></label>
+            </div>
+            <p id="ct-spectral-scientific-warning" class="field-help">Geometría rígida/no relajada · hBN incluido · Hamiltoniano ML · base no ortogonal · sin Hamiltoniano SIESTA de referencia · prediction-only · cero visual de neutralidad estimado · identidad continua de banda no garantizada · los pesos Mulliken raw se conservan; el tamaño visual usa |w| y satura en 1 · la DOS/PDOS cubre solo los 256 estados shift-invert de baja energía, no el espectro orbital completo.</p>
             <div id="ct-spectral-bands-chart" class="plot-card full"></div>
             <div id="ct-spectral-unfolded-chart" class="plot-card full"></div>
             <div id="ct-spectral-dos-chart" class="plot-card full"></div>
+            <div id="ct-spectral-diagnostics-chart" class="plot-card full"></div>
+            <div id="ct-spectral-projection-diagnostics" class="field-help"></div>
             <div id="ct-spectral-width-chart" class="plot-card full"></div>
             <div id="ct-spectral-gap-chart" class="plot-card full"></div>
             <div id="ct-spectral-consistency-chart" class="plot-card full"></div>
@@ -2443,6 +2487,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260724-cross-derivative-metrics"></script>
+    <script src="/app.js?v=20260731-moire-projected-bands"></script>
   </body>
 </html>

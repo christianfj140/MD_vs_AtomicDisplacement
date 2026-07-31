@@ -14302,7 +14302,7 @@ function ctSpectralSelection() {
     seed: Number(document.getElementById("ct-spectral-seed")?.value || 0),
     model: document.getElementById("ct-spectral-model")?.value || "all",
     resolution: document.getElementById("ct-spectral-resolution")?.value || "coarse",
-    num_bands: Number(document.getElementById("ct-spectral-bands")?.value || 16),
+    num_bands: Number(document.getElementById("ct-spectral-bands")?.value || 256),
   };
 }
 
@@ -14327,42 +14327,106 @@ async function ctSpectralPlot(id, traces, title, xTitle, yTitle, layout = {}) {
 
 function ctSpectralBandPlot(spectra) {
   const ticks = new Map();
-  const traces = spectra.flatMap((row) => {
-    const bands = new Map();
+  const mode = document.getElementById("ct-spectral-plot-mode")?.value || "projected";
+  const weightKey = document.getElementById("ct-spectral-weight")?.value || "weight_c_pz";
+  const visibleBandCount = Math.max(1, Number(document.getElementById("ct-spectral-visible-bands")?.value || 16));
+  const energyWindow = Number(document.getElementById("ct-spectral-energy-window")?.value || 15);
+  const minWeight = Math.max(0, Number(document.getElementById("ct-spectral-min-weight")?.value || 0.2));
+  const markerSize = Math.max(2, Number(document.getElementById("ct-spectral-marker-size")?.value || 7));
+  const markerOpacity = Math.min(1, Math.max(0.1, Number(document.getElementById("ct-spectral-marker-opacity")?.value || 0.8)));
+  const drawMode = document.getElementById("ct-spectral-draw-mode")?.value || "markers";
+  const showBackground = document.getElementById("ct-spectral-background")?.checked !== false;
+  const showKPrime = document.getElementById("ct-spectral-show-kprime")?.checked === true;
+  const selected = spectra.filter((row) => showKPrime || !String(row.k_path?.name || "").includes("kprime"));
+  const pointsFor = (row) => (row.bands || []).filter((point) => {
+    const energy = 1000 * Number(point.energy_aligned_eV ?? point.energy_eV);
+    return Number.isFinite(energy) && (!energyWindow || Math.abs(energy) <= energyWindow);
+  });
+  const traces = selected.flatMap((row) => {
     (row.bands || []).forEach((point) => {
+      if (point.k_label) ticks.set(Number(point.k_distance), point.k_label);
+    });
+    const label = `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`;
+    if (mode === "projected" && row.projection?.status === "completed") {
+      const visible = pointsFor(row).filter((point) =>
+        Math.abs(Number(point[weightKey] || 0)) >= minWeight
+      );
+      const background = showBackground ? (row.bands || []).filter((point) =>
+        Math.abs(1000 * Number(point.energy_aligned_eV ?? point.energy_eV)) <= 20
+      ) : [];
+      return [
+        ...(background.length ? [{
+          x: background.map((point) => Number(point.k_distance)),
+          y: background.map((point) => 1000 * Number(point.energy_aligned_eV ?? point.energy_eV)),
+          mode: "markers", name: `${label} · fondo`, showlegend: false,
+          marker: { color: "#64748b", size: 2, opacity: 0.16 }, hoverinfo: "skip",
+        }] : []),
+        {
+          x: visible.map((point) => Number(point.k_distance)),
+          y: visible.map((point) => 1000 * Number(point.energy_aligned_eV ?? point.energy_eV)),
+          mode: drawMode === "lines" ? "lines+markers" : "markers",
+          name: label,
+          customdata: visible.map((point) => [
+            Number(point.solver_band_index), Number(point[weightKey]),
+            Number(point.weight_c_pz), Number(point.weight_hbn), Number(point.layer_polarization),
+            Number(point.normalization_cdagger_s_c), Number(point.generalized_relative_residual),
+          ]),
+          marker: {
+            size: visible.map((point) => markerSize * (0.35 + Math.min(1, Math.abs(Number(point[weightKey] || 0))))),
+            opacity: markerOpacity,
+            color: visible.map((point) => Number(point.layer_polarization)),
+            colorscale: "RdBu", cmin: -1, cmax: 1, showscale: true,
+            colorbar: { title: "P capa", thickness: 12 },
+            line: { color: "rgba(15,23,42,0.35)", width: 0.5 },
+          },
+          line: { color: "rgba(37,99,235,0.35)", width: 0.7 },
+          hovertemplate: "solver b%{customdata[0]}<br>E %{y:.3f} meV<br>peso seleccionado %{customdata[1]:.4f}<br>C pz %{customdata[2]:.4f}<br>hBN %{customdata[3]:.4f}<br>P capa %{customdata[4]:.3f}<br>C†SC %{customdata[5]:.6f}<br>residuo %{customdata[6]:.2e}<extra>%{fullData.name}</extra>",
+        },
+      ];
+    }
+    const bands = new Map();
+    pointsFor(row).forEach((point) => {
       const bandIndex = Number(point.band_index);
       if (!bands.has(bandIndex)) bands.set(bandIndex, []);
       bands.get(bandIndex).push(point);
-      if (point.k_label) ticks.set(Number(point.k_distance), point.k_label);
     });
     const model = String(row.model || "").toLowerCase();
     return Array.from(bands.entries())
+      .sort(([, left], [, right]) => {
+        const meanAbs = (points) => points.reduce((sum, point) =>
+          sum + Math.abs(Number(point.energy_aligned_eV ?? point.energy_eV)), 0) / points.length;
+        return meanAbs(left) - meanAbs(right);
+      })
+      .slice(0, mode === "exploratory" ? visibleBandCount : bands.size)
       .sort(([left], [right]) => left - right)
       .map(([bandIndex, points], index) => {
         points.sort((left, right) => Number(left.k_index) - Number(right.k_index));
         return {
           x: points.map((point) => Number(point.k_distance)),
-          y: points.map((point) => Number(point.energy_aligned_eV ?? point.energy_eV)),
+          y: points.map((point) => 1000 * Number(point.energy_aligned_eV ?? point.energy_eV)),
           customdata: points.map(() => bandIndex),
-          mode: "lines",
+          mode: mode === "raw" ? "markers" : drawMode,
           name: `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`,
           legendgroup: `${model}-${row.training_size}-${row.seed}`,
           showlegend: index === 0,
           line: {
             color: model === "deeph" ? "#d62728" : "#1f77b4",
             dash: model === "deeph" ? "dot" : "solid",
-            width: 1.35,
+            width: 0.8,
           },
-          hovertemplate: "banda %{customdata}<br>k %{x:.4f}<br>E %{y:.6f} eV<extra>%{fullData.name}</extra>",
+          marker: { size: mode === "raw" ? 3 : markerSize, opacity: mode === "raw" ? 0.3 : markerOpacity },
+          hovertemplate: "rango energético %{customdata}<br>k %{x:.4f}<br>E %{y:.3f} meV<extra>%{fullData.name}</extra>",
         };
       });
   });
   const tickRows = Array.from(ticks.entries()).sort(([left], [right]) => left - right);
   return {
     traces,
-    title: spectra.some((row) => row.band_ordering?.method === "ascending_energy_rank_per_k")
-      ? "Espectro moiré cerca de neutralidad · rango energético por k"
-      : "Bandas cerca de neutralidad",
+    title: mode === "projected" ? "Minibandas moiré proyectadas (Mulliken compatible con S)"
+      : mode === "raw" ? "Diagnóstico: espectro bruto sin identidad continua"
+      : mode === "unfolding" ? "Selecciona la figura de unfolding situada debajo"
+      : `Selección energética exploratoria · ${visibleBandCount} rangos`,
+    yTitle: "E − cero visual de neutralidad estimado (meV)",
     layout: {
       xaxis: {
         tickmode: "array",
@@ -14370,6 +14434,7 @@ function ctSpectralBandPlot(spectra) {
         ticktext: tickRows.map(([, label]) => label),
         showgrid: false,
       },
+      yaxis: energyWindow > 0 ? { range: [-energyWindow, energyWindow] } : {},
       shapes: [
         ...tickRows.map(([distance]) => ({
           type: "line",
@@ -14430,11 +14495,36 @@ async function ctSpectralRender(payload) {
       </dl>`;
   }
   const selection = ctSpectralSelection();
-  const spectra = (summary.spectra || []).filter((row) =>
+  const baseSpectra = (summary.spectra || []).filter((row) =>
     (!row.training_size || Number(row.training_size) === selection.training_size) &&
     (row.seed == null || Number(row.seed) === selection.seed) &&
     (selection.model === "all" || String(row.model || "").toLowerCase() === selection.model)
   );
+  const artifactChoice = document.getElementById("ct-spectral-artifact")?.value || "auto";
+  const selectedSpectra = baseSpectra.map((row) => {
+    const result = artifactChoice === "auto" ? null : row.available_band_results?.[artifactChoice];
+    if (artifactChoice === "production" && String(row.visible_band_tier || "").includes("production")) return row;
+    if (artifactChoice !== "auto" && !result) return {
+      ...row, bands: [], projection: null, visible_band_tier: `${artifactChoice}_pending`,
+    };
+    return result ? {
+      ...row, bands: result.bands, k_path: result.k_path, projection: result.projection,
+      resources: result.resources, gpu_observations: result.gpu_observations,
+      backend_effective: result.backend_effective, num_bands: result.num_bands,
+      visible_band_tier: result.tier,
+    } : row;
+  });
+  const includeKPrime = artifactChoice !== "kprime" && document.getElementById("ct-spectral-show-kprime")?.checked === true;
+  const spectra = selectedSpectra.flatMap((row) => [
+    row,
+    ...(includeKPrime && row.kprime_diagnostic?.status === "completed" ? [{
+      ...row,
+      bands: row.kprime_diagnostic.bands,
+      k_path: row.kprime_diagnostic.k_path,
+      projection: row.kprime_diagnostic.projection,
+      visible_band_tier: "tier_projected_kprime_diagnostic",
+    }] : []),
+  ]);
   const bandPlot = ctSpectralBandPlot(spectra);
   const unfoldedTicks = new Map();
   const unfoldedTraces = spectra.flatMap((row) =>
@@ -14461,12 +14551,43 @@ async function ctSpectralRender(payload) {
     })
   );
   const unfoldedTickRows = Array.from(unfoldedTicks.entries()).sort(([left], [right]) => left - right);
-  const dosTraces = spectra.flatMap((row) => (row.low_energy_dos || []).length ? [{
-    x: row.low_energy_dos.map((point) => point.energy_aligned_eV),
-    y: row.low_energy_dos.map((point) => point.dos),
-    mode: "lines",
-    name: `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`,
-  }] : []);
+  const dosTraces = spectra.flatMap((row) => {
+    const points = row.projected_dos || [];
+    if (points.length) return [
+      ["dos_total", "Total"], ["pdos_c_pz", "C pz"],
+      ["pdos_graphene_lower", "Grafeno inferior"], ["pdos_graphene_upper", "Grafeno superior"],
+      ["pdos_hbn", "hBN"],
+    ].map(([key, label]) => ({
+      x: points.map((point) => 1000 * Number(point.energy_aligned_eV)),
+      y: points.map((point) => Number(point[key])), mode: "lines",
+      name: `${label} · N${row.training_size}`,
+    }));
+    return (row.low_energy_dos || []).length ? [{
+      x: row.low_energy_dos.map((point) => 1000 * Number(point.energy_aligned_eV)),
+      y: row.low_energy_dos.map((point) => point.dos), mode: "lines",
+      name: `${methodDisplayLabel(row.model)} · N${row.training_size} · legacy`,
+    }] : [];
+  });
+  const diagnosticWindow = Number(document.getElementById("ct-spectral-diagnostic-window")?.value || 50);
+  const diagnosticTraces = spectra.flatMap((row) => {
+    const points = (row.bands || []).filter((point) =>
+      point.weight_c_pz != null && Math.abs(1000 * Number(point.energy_aligned_eV)) <= diagnosticWindow
+    );
+    return points.length ? [{
+      x: points.map((point) => Number(point.k_distance)),
+      y: points.map((point) => 1000 * Number(point.energy_aligned_eV)),
+      mode: "markers", name: `256 estados · N${row.training_size}`,
+      customdata: points.map((point) => [
+        Number(point.weight_c_pz), Number(point.normalization_cdagger_s_c),
+        Number(point.generalized_relative_residual),
+      ]),
+      marker: {
+        color: points.map((point) => Number(point.weight_c_pz)), colorscale: "Viridis",
+        size: 3, opacity: 0.35, showscale: true, colorbar: { title: "C pz" },
+      },
+      hovertemplate: "E %{y:.3f} meV<br>C pz %{customdata[0]:.4f}<br>C†SC %{customdata[1]:.6f}<br>residuo %{customdata[2]:.2e}<extra></extra>",
+    }] : [];
+  });
   const scalarTrace = (key, name) => {
     const points = (summary.spectra || []).filter((row) => Number.isFinite(Number(row[key])));
     return points.length ? [{
@@ -14478,7 +14599,7 @@ async function ctSpectralRender(payload) {
     }] : [];
   };
   await Promise.all([
-    ctSpectralPlot("ct-spectral-bands-chart", bandPlot.traces, bandPlot.title, "Camino de alta simetría", "E − neutralidad estimada (eV)", bandPlot.layout),
+    ctSpectralPlot("ct-spectral-bands-chart", bandPlot.traces, bandPlot.title, "Camino de alta simetría", bandPlot.yTitle, bandPlot.layout),
     ctSpectralPlot(
       "ct-spectral-unfolded-chart",
       unfoldedTraces,
@@ -14493,11 +14614,36 @@ async function ctSpectralRender(payload) {
         },
       },
     ),
-    ctSpectralPlot("ct-spectral-dos-chart", dosTraces, "DOS parcial de baja energía", "E − neutralidad estimada (eV)", "DOS parcial"),
+    ctSpectralPlot("ct-spectral-dos-chart", dosTraces, "DOS/PDOS parcial · 256 estados shift-invert en malla 2D", "E − cero visual estimado (meV)", "DOS del subespacio (estados/eV/celda)"),
+    ctSpectralPlot("ct-spectral-diagnostics-chart", diagnosticTraces, "Diagnóstico de los estados calculados", "Camino moiré", "E − cero visual estimado (meV)", { yaxis: { range: [-diagnosticWindow, diagnosticWindow] } }),
     ctSpectralPlot("ct-spectral-width-chart", scalarTrace("flat_band_width_meV", "Ancho"), "Ancho del manifold de baja energía", "Snapshots", "Ancho (meV)"),
     ctSpectralPlot("ct-spectral-gap-chart", scalarTrace("estimated_gap_meV", "Gap"), "Gap estimado", "Snapshots", "Gap (meV)"),
     ctSpectralPlot("ct-spectral-consistency-chart", scalarTrace("g2m_deeph_consistency_meV", "Graph2Mat–DeepH"), "Consistencia entre modelos (no error)", "Snapshots", "Diferencia (meV)"),
   ]);
+  const diagnosticHost = document.getElementById("ct-spectral-projection-diagnostics");
+  if (diagnosticHost) {
+    diagnosticHost.innerHTML = spectra.map((row) => {
+      const diagnostics = row.projection?.diagnostics || {};
+      if (!Object.keys(diagnostics).length) return "";
+      const valley = row.kprime_diagnostic?.comparison || row.kprime_comparison;
+      const resolution = row.resolution_stability;
+      const dosObservable = row.dos_observables;
+      return `<strong>N${row.training_size} · ${escapeHtml(row.visible_band_tier || "proyección")}</strong> · ` +
+        `${Number(row.num_bands || 0)} estados · ${Number(row.k_path?.sample_count || 0)} k · ` +
+        `norma máx. ${Number(diagnostics.maximum_normalization_error || 0).toExponential(2)} · ` +
+        `partición ${Number(diagnostics.maximum_partition_sum_error || 0).toExponential(2)} · ` +
+        `residuo máx. ${Number(diagnostics.maximum_generalized_relative_residual || 0).toExponential(2)} · ` +
+        `H hermiticidad ${Number(diagnostics.maximum_h_relative_hermiticity_before_solver_symmetrization || 0).toExponential(2)} · ` +
+        `S hermiticidad ${Number(diagnostics.maximum_s_relative_hermiticity_before_solver_symmetrization || 0).toExponential(2)} · ` +
+        `S muestreada ${diagnostics.sampled_eigenstate_s_norm_positive ? "positiva en autoestados" : "no evaluada"} · ` +
+        `RSS ${Number(row.resources?.max_rss_gib || 0).toFixed(1)} GiB · ` +
+        `VRAM ${((Number(row.gpu_observations?.maximum_used_bytes || 0)) / (1024 ** 3)).toFixed(1)} GiB · ` +
+        `tiempo ${escapeHtml(row.resources?.wall_clock || "—")} · ${escapeHtml(row.backend_effective || "solver")} · tolerancias partición 1e-6 / residuo 1e-5` +
+        (valley ? ` · K′/K RMSE por rango ${Number(valley.energy_rank_rmse_meV).toFixed(3)} meV (sin identidad de banda)` : "") +
+        (resolution?.status === "completed" ? ` · smoke/producción RMSE en puntos especiales ${Number(resolution.energy_rank_rmse_meV).toExponential(2)} meV` : "") +
+        (dosObservable ? ` · DOS(0 visual) ${Number(dosObservable.dos_at_visual_neutrality_states_per_eV_cell).toFixed(3)} estados/eV/celda` : "");
+    }).filter(Boolean).join("<br>") || "Proyecciones S-aware pendientes.";
+  }
   const overlapRows = [...(summary.overlap_benchmarks || [])];
   if (payload.overlap?.export) overlapRows.push(payload.overlap);
   const resourcePoints = overlapRows.filter((row) => row.export?.n_atoms && row.resources?.max_rss_gib != null);
@@ -14542,11 +14688,18 @@ async function ctSpectralRefresh() {
     .find((control) => control.running);
   const sweep = liveTraining?.training_sweep || {};
   const trackedSweep = payload.tracked_band_sweep || {};
-  const trainingDetail = sweep.active_config_id
+  const projected = payload.projected_progress || {};
+  const projectedStage = Object.entries(projected.stages || {}).find(([, stage]) =>
+    Number(stage.completed_kpoints || 0) < Number(stage.expected_kpoints || 0)
+  );
+  const projectedDetail = projectedStage && ["waiting_for_smoke", "running"].includes(projected.followup?.status)
+    ? ` · ${projectedStage[0]} (${projectedStage[1].completed_kpoints}/${projectedStage[1].expected_kpoints} k)`
+    : "";
+  const trainingDetail = projectedDetail || (sweep.active_config_id
     ? ` · ${sweep.active_config_id} (${sweep.completed || 0}/${sweep.total || 0})`
     : trackedSweep.status === "running"
       ? ` · espectro moiré N${trackedSweep.current_training_size} (${(trackedSweep.completed_training_sizes || []).length}/5)`
-      : "";
+      : "");
   ctSpectralStatus(`${status.state || "unknown"} · etapa ${status.current_stage || "—"}${trainingDetail}${coverage}${disk}`);
   await ctSpectralRender(payload);
   if (!status.running && ctSpectralStatusTimer) {
@@ -14772,7 +14925,13 @@ function setupCrossTesting() {
   mvsBind("ct-spectral-launch", "click", ctSpectralLaunch);
   mvsBind("ct-spectral-stop", "click", ctSpectralStop);
   mvsBind("ct-spectral-refresh", "click", ctSpectralRefresh);
-  ["ct-spectral-size", "ct-spectral-seed", "ct-spectral-model"].forEach((id) => {
+  [
+    "ct-spectral-size", "ct-spectral-seed", "ct-spectral-model", "ct-spectral-visible-bands",
+    "ct-spectral-energy-window", "ct-spectral-plot-mode", "ct-spectral-weight",
+    "ct-spectral-min-weight", "ct-spectral-marker-size", "ct-spectral-marker-opacity",
+    "ct-spectral-draw-mode", "ct-spectral-background", "ct-spectral-show-kprime",
+    "ct-spectral-artifact", "ct-spectral-diagnostic-window",
+  ].forEach((id) => {
     mvsBind(id, "change", () => ctSpectralRefresh().catch(() => {}));
   });
   mvsBind("ct-metrics-demo", "click", () => ctLoadMetrics(true));

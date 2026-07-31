@@ -12,6 +12,14 @@ const DEEPH_SPARSE_CALC = get(
 )
 
 source = read(DEEPH_SPARSE_CALC, String)
+if haskey(ENV, "DEEPH_UNFOLD_MAP")
+    include(joinpath(@__DIR__, "deeph_unfolding_weights.jl"))
+    source = patch_sparse_calc_for_unfolding(source)
+end
+if haskey(ENV, "DEEPH_MULLIKEN_GROUPS")
+    include(joinpath(@__DIR__, "deeph_mulliken_weights.jl"))
+    source = patch_sparse_calc_for_mulliken(source)
+end
 source_without_main = replace(source, r"\nmain\(\)\s*$" => "")
 source == source_without_main && error("DeepH sparse_calc.jl no longer ends in main(); refusing an unsafe wrapper")
 include_string(Main, source_without_main, DEEPH_SPARSE_CALC)
