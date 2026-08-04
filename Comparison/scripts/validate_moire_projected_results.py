@@ -54,7 +54,7 @@ def validate(root: Path, ui_url: str = "http://127.0.0.1:8770") -> dict:
         record(f"{name}_no_eigenvectors", diagnostics.get("eigenvectors_persisted") is False, diagnostics.get("eigenvectors_persisted"))
         mapping = manifest.get("projection_mapping") or {}
         record(f"{name}_orbital_mapping", (
-            mapping.get("carbon_pz_local_indices_zero_based") == [2]
+            mapping.get("carbon_pz_local_indices_zero_based") == [3]
             and mapping.get("group_orbital_counts", {}).get("carbon_pz") == 11164
             and bool(mapping.get("basis_evidence"))
         ), mapping)
@@ -106,6 +106,17 @@ def validate(root: Path, ui_url: str = "http://127.0.0.1:8770") -> dict:
     summary = read_json(root / "summary/spectral_results.json")
     row = next((item for item in summary.get("spectra") or [] if item.get("model") == "graph2mat" and item.get("training_size") == 480 and item.get("seed") == 0), {})
     record("summary_published", row.get("projection", {}).get("status") == "completed" and bool(row.get("projected_dos")), {"tier": row.get("visible_band_tier"), "dos_tier": row.get("visible_dos_tier")})
+    observables = row.get("projected_low_energy_observables") or {}
+    projected_observable_fields = {
+        "carbon_pz_weight_mean", "carbon_pz_weight_min", "carbon_pz_weight_max",
+        "hbn_weight_mean", "hbn_weight_min", "hbn_weight_max",
+        "layer_polarization_mean", "layer_polarization_min", "layer_polarization_max",
+    }
+    record("summary_projected_observables", (
+        projected_observable_fields <= set(observables)
+        and all(math.isfinite(float(observables[key])) for key in projected_observable_fields)
+        and observables.get("gap_and_bandwidth_claimed") is False
+    ), observables)
     neutrality = manifests["production"].get("neutrality_reference") or {}
     record("neutrality_honest", (
         neutrality.get("label") == "cero visual de neutralidad estimado"

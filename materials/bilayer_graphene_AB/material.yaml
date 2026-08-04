@@ -1,0 +1,6 @@
+material:
+  label: bilayer_graphene_AB
+  fdf: materials/bilayer_graphene_AB/RUN.fdf
+  pseudopotential_dir: materials/graphene_common/pseudos
+  basis_dir: materials/graphene_common/basis
+  structure_type: crystal

@@ -112,18 +112,30 @@ def _copy_dataset_material(source_dataset: Path, output_root: Path) -> None:
                 shutil.copy2(pseudo, target)
 
 
-def _assert_bilayer_sample(fdf_path: Path) -> None:
+def _sample_composition(fdf_path: Path) -> dict[str, int]:
     structure = extract_fdf_structure(fdf_path)
     labels = {species.index: species.label for species in structure.species}
     counts: dict[str, int] = {}
     for atom in structure.atoms:
         label = labels[atom.species_index]
         counts[label] = counts.get(label, 0) + 1
-    if structure.atom_count != 6 or counts != {"C": 4, "B": 1, "N": 1}:
+    return counts
+
+
+def _assert_bilayer_sample(fdf_path: Path, expected: dict[str, int] | None) -> dict[str, int]:
+    """Every merged sample must share one composition, whichever it is.
+
+    The point is to catch a foreign material sneaking into a merge, so the
+    reference is the first sample seen rather than a hard-coded cell: the same
+    check now covers C4BN (graphene/hBN) and pure-carbon bilayer training sets.
+    """
+    counts = _sample_composition(fdf_path)
+    if expected is not None and counts != expected:
         raise RuntimeError(
-            f"{fdf_path}: expected the six-atom C4BN bilayer training cell; "
-            f"found atom_count={structure.atom_count}, species={counts}."
+            f"{fdf_path}: merged samples must share one composition; "
+            f"expected {expected}, found {counts}."
         )
+    return counts
 
 
 def _write_split_manifest(output_root: Path, split: str, rows: list[dict[str, Any]]) -> None:
@@ -188,7 +200,8 @@ def _merge_source(
     split_counters: dict[str, int],
     *,
     train_quota: int | None = None,
-) -> None:
+    composition: dict[str, int] | None = None,
+) -> dict[str, int] | None:
     samples = read_dataset_samples(source_dataset)
     selected_train = 0
     for sample in samples:
@@ -204,7 +217,7 @@ def _merge_source(
         destination = output_root / "splits" / split / str(index)
         if not sample.sample_dir.is_dir():
             raise RuntimeError(f"Missing source sample dir: {sample.sample_dir}")
-        _assert_bilayer_sample(sample.sample_dir / "RUN.fdf")
+        composition = _assert_bilayer_sample(sample.sample_dir / "RUN.fdf", composition)
         shutil.copytree(sample.sample_dir, destination, dirs_exist_ok=True)
         sample_dirs.append(destination)
         merged_id = f"{stacking}__{sample.sample_id}"
@@ -230,7 +243,7 @@ def _merge_source(
                 "sample_dir": str(destination),
             }
         )
-
+    return composition
 
 def build_dataset(
     sources: list[Path],
@@ -268,13 +281,14 @@ def build_dataset(
         output_root.rename(backup)
     output_root.mkdir(parents=True)
 
+    composition: dict[str, int] | None = None
     split_rows: dict[str, list[dict[str, Any]]] = {split: [] for split in MERGE_SPLITS}
     split_counters: dict[str, int] = {split: 0 for split in MERGE_SPLITS}
     sample_dirs: list[Path] = []
     try:
         _copy_dataset_material(sources[0], output_root)
         for source_index, source in enumerate(sources):
-            _merge_source(
+            composition = _merge_source(
                 source,
                 source.name,
                 output_root,
@@ -284,6 +298,7 @@ def build_dataset(
                 train_quota=(
                     train_quotas[source_index] if train_quotas is not None else default_quota
                 ),
+                composition=composition,
             )
         if train_size is not None and len(split_rows["train"]) != train_size:
             raise RuntimeError(

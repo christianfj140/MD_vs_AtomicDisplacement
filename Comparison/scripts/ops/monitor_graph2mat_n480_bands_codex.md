@@ -15,8 +15,14 @@ Supervisa y recupera exclusivamente la campaña proyectada N=480:
 
 Actúa, no te limites a informar, pero respeta estas reglas:
 
-1. Inspecciona primero procesos, `status.json`, manifiesto, logs, RAM, disco y
-   temperatura. No interrumpas ni reinicies un solver sano.
+0. Fast-path obligatorio: usa como máximo cinco comandos para leer estado,
+   proceso, disco/RAM y temperaturas. Si el solver y el followup están activos,
+   el progreso aumenta y los guardrails tienen margen, termina inmediatamente.
+   No leas código, diffs ni manifests completos en el fast-path. La respuesta
+   debe tener menos de 150 palabras.
+1. Solo si el proceso falló, quedó estancado o cruzó un guardrail, inspecciona
+   manifests y logs para investigar la causa. No interrumpas ni reinicies un
+   solver sano.
 2. No lances DeepH, otros tamaños, otras seeds ni el DOS 24×24. Respeta el
    orden escalonado y nunca ejecutes dos solvers simultáneamente.
 3. Conserva `gpu_cudss`, sin fallback denso, con `OPENBLAS_NUM_THREADS=8`,

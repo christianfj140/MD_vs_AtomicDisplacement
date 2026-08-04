@@ -18117,6 +18117,17 @@ class MoireSpectralCampaignRunner:
 
     def results(self) -> dict[str, Any]:
         status = self.status()
+        pure_root = RESULTS_ROOT / "tbg_pure_graph2mat"
+        summary = self._read(self.root / "summary/spectral_results.json")
+        pure_summary = self._read(pure_root / "summary/spectral_results.json")
+        if pure_summary.get("spectra"):
+            summary = {
+                **summary,
+                "spectra": [
+                    row for row in summary.get("spectra", [])
+                    if row.get("material_system") != "pure_tbg"
+                ] + pure_summary["spectra"],
+            }
         training = self._read(self.root / "training/training_campaign_manifest.json")
         if status.get("running") and status.get("current_stage") == "train":
             controls = [
@@ -18149,7 +18160,12 @@ class MoireSpectralCampaignRunner:
         return {
             **self.plan(),
             "status": status,
-            "summary": self._read(self.root / "summary/spectral_results.json"),
+            "summary": summary,
+            "pure_tbg": {
+                "status": self._read(pure_root / "status.json"),
+                "precision_gate": self._read(pure_root / "precision_gate.json"),
+                "summary": pure_summary,
+            },
             "target": self._read(self.root / "target/moire_geometry.json"),
             "overlap": self._read(self.root / "overlap/overlap_manifest.json"),
             "coverage": self._read(self.root / "local_environment_coverage.json"),
@@ -18184,8 +18200,8 @@ class MoireSpectralCampaignRunner:
     def artifact_path(self, value: str) -> Path:
         requested = Path(value).expanduser()
         requested = requested.resolve() if requested.is_absolute() else (self.root / requested).resolve()
-        root = self.root.resolve()
-        if root != requested and root not in requested.parents:
+        roots = (self.root.resolve(), (RESULTS_ROOT / "tbg_pure_graph2mat").resolve())
+        if not any(root == requested or root in requested.parents for root in roots):
             raise RuntimeError("Artefacto espectral fuera de la campaña no permitido.")
         if requested.suffix.lower() not in {".json", ".csv", ".log", ".txt", ".fdf", ".ini"}:
             raise RuntimeError("Tipo de artefacto espectral no permitido.")
@@ -18939,6 +18955,8 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
         body = path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        if path.suffix in {".html", ".css", ".js"}:
+            self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -181,11 +182,28 @@ def test_bilayer_ui_subsection_is_additive_and_last() -> None:
     assert "ct-spectral-downloads" in panel
     assert "ct-spectral-visible-bands" in panel
     assert "ct-spectral-energy-window" in panel
+    assert "ct-spectral-selection-window" in panel
     assert "ct-spectral-plot-mode" in panel
     assert "ct-spectral-weight" in panel
     assert "ct-spectral-artifact" in panel
     assert "ct-spectral-diagnostic-window" in panel
+    assert '<option value="heuristic" selected>Manifold exploratorio · líneas estables</option>' in panel
+    assert '<option value="original">Estados originales</option>' in panel
+    assert '<option value="spectral">Espectro C-pz · heatmap</option>' in panel
+    assert '<option value="6" selected>6</option>' in panel
+    assert '<option value="50" selected>±50 meV</option>' in panel
+    assert '<option value="20" selected>±20 meV</option>' in panel
+    assert '<option value="30" selected>30</option>' in panel
+    assert '<option value="6" selected>6 meV</option>' in panel
+    assert '<option value="joint" selected>C-pz + C total − hBN</option>' in panel
+    assert 'id="ct-spectral-original-overlay"' in panel
+    assert 'id="ct-spectral-heuristic-diagnostics"' in panel
+    assert panel.index('id="ct-spectral-bands-chart"') < panel.index('id="ct-spectral-scientific-warning"')
+    assert 'id="ct-spectral-broadening"' in panel
+    assert 'id="ct-spectral-saturation"' in panel
+    assert 'id="ct-spectral-scale"' in panel
     assert "projected_progress" in app
+    assert "completed · flujo proyectado" in app
     assert "Smoke legacy aislado" in panel
     spectral_plot = app[app.index("function ctSpectralBandPlot"):app.index("async function ctSpectralRender")]
     assert "point.band_index" in spectral_plot
@@ -195,13 +213,126 @@ def test_bilayer_ui_subsection_is_additive_and_last() -> None:
     assert 'mode === "projected"' in spectral_plot
     assert "point.weight_c_pz" in spectral_plot
     assert "point.layer_polarization" in spectral_plot
+    assert "energyRankLines" in spectral_plot
+    assert "connectgaps: false" in spectral_plot
+    assert 'type: "heatmap"' in spectral_plot
+    assert 'colorscale: "Viridis"' in spectral_plot
+    assert 'zsmooth: false' in spectral_plot
     assert "range: [-energyWindow, energyWindow]" in spectral_plot
+    assert 'mode === "heuristic"' in spectral_plot
+    assert "ctSpectralCachedHeuristicTracks" in spectral_plot
+    assert "displayed.map(ctSpectralHeuristicTrace)" not in spectral_plot
+    assert 'mode === "original"' in spectral_plot
+    assert "function ctSpectralReorderKGammaMK" in app
+    assert 'visualization_only_reordered_from: "moire_gamma-k-m-gamma"' in app
+    heuristic_matching = app[app.index("function ctSpectralHeuristicTracks"):app.index("function ctSpectralOriginalTrace")]
+    assert "curvature" not in heuristic_matching
+    assert "curvatura" not in heuristic_matching
+    assert "spline" not in heuristic_matching
+    assert "bandwidth" not in heuristic_matching
     for route in ("plan", "launch", "results", "stop", "artifact"):
         assert f"/api/cross-testing/bilayer/spectral/{route}" in app
     for route in ("plan", "launch", "status", "results", "stop"):
         assert f"/api/cross-testing/bilayer/spectral/{route}" in (
             REPO_ROOT / "Comparison/scripts/pipeline_ui.py"
         ).read_text(encoding="utf-8")
+
+
+def test_magic_angle_spectral_heatmap_math() -> None:
+    app_path = REPO_ROOT / "Comparison/ui/app.js"
+    script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+vm.runInThisContext(source.slice(
+  source.indexOf("function ctSpectralPercentile"),
+  source.indexOf("function ctSpectralBandPlot"),
+));
+const points = [
+  {k_index: 0, k_distance: 0, energy_aligned_eV: -0.002, weight_c_pz: 1, weight_hbn: 0.1},
+  {k_index: 0, k_distance: 0, energy_aligned_eV:  0.002, weight_c_pz: 0.1, weight_hbn: 1},
+  {k_index: 1, k_distance: 1, energy_aligned_eV: -0.002, weight_c_pz: 1, weight_hbn: 0.1},
+  {k_index: 1, k_distance: 1, energy_aligned_eV:  0.002, weight_c_pz: 0.1, weight_hbn: 1},
+];
+const narrow = ctSpectralHeatmap(points, "weight_c_pz", 5, 0.25, 99.5, false);
+const wide = ctSpectralHeatmap(points, "weight_c_pz", 5, 1, 99.5, false);
+const hbn = ctSpectralHeatmap(points, "weight_hbn", 5, 0.25, 99.5, false);
+const logged = ctSpectralHeatmap(points, "weight_c_pz", 5, 0.25, 95, true);
+const finite = (result) => result.z.flat().every(Number.isFinite);
+if (!finite(narrow) || !finite(wide) || !finite(hbn) || !finite(logged)) throw Error("non-finite heatmap");
+if (narrow.z.length !== narrow.y.length || narrow.z.some((row) => row.length !== narrow.x.length)) throw Error("shape mismatch");
+if (Math.max(...narrow.z.flat()) <= 0) throw Error("empty heatmap");
+if (JSON.stringify(narrow.y) !== JSON.stringify(hbn.y) || JSON.stringify(narrow.x) !== JSON.stringify(hbn.x)) throw Error("channel moved axes");
+if (JSON.stringify(narrow.z) === JSON.stringify(hbn.z)) throw Error("channel did not change intensity");
+const width = (result) => result.z.flat().filter((value) => value > 0.1).length;
+if (width(wide) <= width(narrow)) throw Error("broadening did not widen peaks");
+const peakEnergy = (result) => result.y[result.z.findIndex((row) => row[0] === Math.max(...result.z.map((row) => row[0])))];
+if (Math.abs(peakEnergy(narrow) - peakEnergy(wide)) > 0.11) throw Error("broadening moved peak");
+"""
+    subprocess.run(["node", "-", str(app_path)], input=script, text=True, check=True)
+
+
+def test_magic_angle_heuristic_band_matching() -> None:
+    app_path = REPO_ROOT / "Comparison/ui/app.js"
+    script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+vm.runInThisContext(source.slice(
+  source.indexOf("function ctSpectralMedian"),
+  source.indexOf("function ctSpectralBandPlot"),
+));
+const assignment = ctSpectralHungarian([[4, 1, 3], [2, 0, 5], [3, 2, 2]]);
+if (JSON.stringify(assignment) !== JSON.stringify([1, 0, 2])) throw Error(`wrong Hungarian assignment: ${assignment}`);
+const points = [];
+for (let k = 0; k < 7; k += 1) {
+  for (let band = 7; band >= 0; band -= 1) {
+    points.push({
+      k_index: k,
+      k_distance: k / 2,
+      solver_band_index: (band * 5 + k) % 8,
+      energy_aligned_eV: ((band - 3.5) * 4 + 0.2 * k) / 1000,
+      weight_c_pz: 0.8 - 0.02 * band,
+      weight_c_total: 0.9 - 0.01 * band,
+      weight_hbn: 0.05 + 0.01 * band,
+      layer_polarization: 0.1 * Math.sin(k),
+    });
+  }
+}
+const baseOptions = {count: 4, windowMeV: 20, poolSize: 8, gateMeV: 6, filter: "joint"};
+const four = ctSpectralHeuristicTracks(points, baseOptions);
+const shuffled = ctSpectralHeuristicTracks(points.slice().reverse(), baseOptions);
+const signature = (result) => result.selected.map((track) => track.points.map((point) => [point.kIndex, point.source.solver_band_index, point.energy]));
+if (JSON.stringify(signature(four)) !== JSON.stringify(signature(shuffled))) throw Error("raw order changed heuristic tracks");
+if (four.selected.length !== 4 || four.selected.some((track) => track.points.length !== 7)) throw Error("expected four complete tracks");
+for (const track of four.selected) {
+  for (const point of track.points) {
+    if (point.energy !== 1000 * point.source.energy_aligned_eV) throw Error("energy no longer matches source eigenvalue");
+    if (point.kIndex !== point.source.k_index || point.source.solver_band_index == null) throw Error("source identity lost");
+  }
+  const jumps = track.points.slice(1).map((point, index) => Math.abs(point.energy - track.points[index].energy));
+  if (Math.max(...jumps) >= 6) throw Error("gate exceeded");
+}
+const eight = ctSpectralHeuristicTracks(points, {...baseOptions, count: 8});
+if (JSON.stringify(signature(eight).slice(0, 4)) !== JSON.stringify(signature(four))) throw Error("requesting eight changed the first four");
+const reverse = ctSpectralHeuristicTracks(points, {...baseOptions, direction: "reverse"});
+if (ctSpectralMatchedRms(four, reverse).some((value) => value > 1e-10)) throw Error("forward/backward disagreement on deterministic bands");
+const stability = ctSpectralHeuristicStability(points, baseOptions);
+if (!stability.branches.length || stability.maximumReverseRmsMeV > 1e-10) throw Error("missing stability audit");
+const trace = ctSpectralHeuristicTrace(four.selected[0], 0);
+if (trace.mode !== "lines" || trace.line.shape !== "linear" || trace.marker || trace.colorbar || trace.type === "heatmap") throw Error("clean trace style is not literal lines");
+const rejectedTrace = ctSpectralHeuristicTrace(four.selected[0], 0, false);
+if (rejectedTrace.line.color === trace.line.color || rejectedTrace.line.width >= trace.line.width) throw Error("unstable branch is highlighted");
+const original = ctSpectralOriginalTrace(points, 50);
+if (original.mode !== "markers" || original.marker.color !== "#64748b" || original.marker.opacity > 0.25) throw Error("original-state overlay is not subdued");
+const brokenPoints = [
+  {k_index: 0, k_distance: 0, solver_band_index: 0, energy_aligned_eV: 0, weight_c_pz: 1, weight_hbn: 0},
+  {k_index: 1, k_distance: 1, solver_band_index: 1, energy_aligned_eV: 0.010, weight_c_pz: 1, weight_hbn: 0},
+];
+const broken = ctSpectralHeuristicTracks(brokenPoints, {count: 1, windowMeV: 20, poolSize: 1, gateMeV: 6, filter: "joint"});
+if (!broken.brokenConnections || broken.ordered.some((track) => track.points.length > 1)) throw Error("invalid jump was connected");
+"""
+    subprocess.run(["node", "-", str(app_path)], input=script, text=True, check=True)
 
 
 def test_bilayer_runner_is_independent() -> None:

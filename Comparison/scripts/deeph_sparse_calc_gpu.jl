@@ -106,6 +106,8 @@ function construct_linear_map(H, S; out_of_core=false)
     started = time()
     cudss("factorization", solver, solution_gpu, rhs_gpu; asynchronous=false)
     factorization_seconds = time() - started
+    positive_inertia, negative_inertia = cudss_get(solver, "inertia")
+    println("cuDSS inertia: positive=", positive_inertia, " negative=", negative_inertia)
     solve_seconds = Ref(0.0)
     solve_count = Ref(0)
     state = CudssShiftInvertState(

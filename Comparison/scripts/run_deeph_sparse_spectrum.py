@@ -34,6 +34,7 @@ K_PATH = [
 BAND_PATH_INDICES = {
     "gamma-k-m-gamma": (0, 1, 2, 3),
     "k-gamma-m": (1, 0, 2),
+    "k-gamma-m-k": (1, 0, 2, 1),
     "kprime-gamma-k": (),
 }
 GIB = 1024**3
@@ -279,10 +280,11 @@ def mulliken_projection_groups(input_dir: Path) -> dict:
         local_offset = 0
         for ell in shells[atom]:
             if ell == 1:
-                # DeepH expands m=-l..l. Graph2Mat's documented
-                # siesta_spherical convention is (-py, pz, -px), so m=0 is pz.
-                pz_local_indices.add(local_offset + ell)
-                pz.append(int(offsets[atom] + local_offset + ell + 1))
+                # The DeepH export sorts each shell by _deeph_orbital_map's
+                # m_order[1] = {-1: 0, 0: 1, 1: -1}, so a p shell lands as
+                # (px, py, pz) and pz is the last slot, not m=0.
+                pz_local_indices.add(local_offset + 2)
+                pz.append(int(offsets[atom] + local_offset + 3))
             local_offset += 2 * ell + 1
     groups = {
         "carbon_pz": pz,
@@ -315,11 +317,14 @@ def mulliken_projection_groups(input_dir: Path) -> dict:
             },
             "carbon_shells": [list(value) for value in sorted(carbon_shells)],
             "carbon_pz_local_indices_zero_based": sorted(pz_local_indices),
-            "orbital_expansion": "shell order, then m=-l..l",
-            "basis_convention": "siesta_spherical=(-py,pz,-px) for l=1",
+            "orbital_expansion": "shell order, then the DeepH export's m_order",
+            "basis_convention": "deeph_export=(px,py,pz) for l=1",
             "basis_evidence": (
-                "graph2mat/core/data/basis.py maps siesta_spherical to -yz-x; "
-                "PointBasis expands m=-l..l"
+                "generate_siesta_overlap_only._deeph_orbital_map sorts l=1 by "
+                "m_order[1]={-1:0,0:1,1:-1}, giving (m=+1, m=-1, m=0)=(px,py,pz); "
+                "confirmed on the 6-atom reference, where local index 3 carries "
+                "99-100% of the carbon weight of the K-point frontier states "
+                "and index 2 carries ~0.01%"
             ),
             "graphene_z_levels": carbon_z.tolist(),
             "layer_boundary_z": layer_boundary,
@@ -335,7 +340,7 @@ def estimated_neutrality_reference(input_dir: Path, energy_eV: float) -> dict:
     if not (input_dir / "element.dat").is_file():
         return {
             "label": "cero visual de neutralidad estimado",
-            "method": "median_small_cell_SIESTA_Fermi_levels",
+            "method": "exported_hamiltonian_is_already_aligned_to_E_F_zero",
             "energy_eV": energy_eV,
             "expected_neutral_valence_electrons": None,
             "chemical_potential_available": False,
@@ -372,7 +377,7 @@ def estimated_neutrality_reference(input_dir: Path, energy_eV: float) -> dict:
     source_fdf = REPO_ROOT / "materials/bilayer_graphene_hBN_AA/RUN.fdf"
     return {
         "label": "cero visual de neutralidad estimado",
-        "method": "median_small_cell_SIESTA_Fermi_levels",
+        "method": "exported_hamiltonian_is_already_aligned_to_E_F_zero",
         "energy_eV": energy_eV,
         "expected_neutral_valence_electrons": electron_count,
         "valence_electrons_per_species": {str(key): value for key, value in valence.items()},
@@ -562,7 +567,7 @@ def projected_dos_data(
         "full_orbital_spectrum": False,
         "scope_limitation": (
             "DOS/PDOS contains only the requested shift-invert states near the visual "
-            "neutrality reference, not all 117222 orbital eigenstates."
+            "neutrality reference, not the full orbital spectrum."
         ),
         "maximum_normalization_error": max(normalization_errors, default=0.0),
         "maximum_partition_sum_error": max(partition_errors, default=0.0),
@@ -595,6 +600,65 @@ def projected_dos_observables(rows: list[dict]) -> dict:
             for index in strongest
         ],
         "gap_claimed": False,
+    }
+
+
+def neutral_fermi_from_inertia(
+    raw_energies: np.ndarray,
+    inertias: list[dict],
+    shift_eV: float,
+    neutral_electrons: int,
+    spin_degeneracy: int = 2,
+) -> dict:
+    """Locate the zero-temperature neutral chemical potential from inertia counts."""
+    energies = np.asarray(raw_energies, dtype=float)
+    if energies.ndim != 2 or energies.shape[0] != len(inertias):
+        raise ValueError("Inertia rows must match the k-point energy rows")
+    if spin_degeneracy <= 0 or neutral_electrons % spin_degeneracy:
+        raise ValueError("Neutral electron count must be divisible by spin degeneracy")
+    dimensions = {int(row["positive"]) + int(row["negative"]) for row in inertias}
+    if len(dimensions) != 1:
+        raise ValueError("Inertia dimension changed across k points")
+    occupied_per_k = neutral_electrons // spin_degeneracy
+    dimension = dimensions.pop()
+    if not 0 <= occupied_per_k <= dimension:
+        raise ValueError("Neutral occupation is outside the matrix dimension")
+    target = occupied_per_k * energies.shape[0]
+    count_at_shift = sum(int(row["negative"]) for row in inertias)
+    delta = target - count_at_shift
+    below = sorted(float(value) for value in energies.ravel() if value < shift_eV)
+    above = sorted(float(value) for value in energies.ravel() if value >= shift_eV)
+    if delta > 0:
+        if len(above) <= delta:
+            raise RuntimeError("Local eigenspectrum does not bracket neutral filling above the shift")
+        homo, lumo = above[delta - 1], above[delta]
+    elif delta < 0:
+        removed = -delta
+        if len(below) <= removed:
+            raise RuntimeError("Local eigenspectrum does not bracket neutral filling below the shift")
+        homo, lumo = below[-removed - 1], below[-removed]
+    else:
+        if not below or not above:
+            raise RuntimeError("Local eigenspectrum does not bracket the shift")
+        homo, lumo = below[-1], above[0]
+    chemical_potential = 0.5 * (homo + lumo) if lumo > homo else homo
+    return {
+        "status": "computed",
+        "method": "uniform_kmesh_generalized_inertia_zero_temperature",
+        "energy_eV": chemical_potential,
+        "homo_edge_eV": homo,
+        "lumo_edge_eV": lumo,
+        "finite_mesh_gap_eV": max(0.0, lumo - homo),
+        "chemical_potential_available": True,
+        "neutral_electrons": neutral_electrons,
+        "spin_degeneracy": spin_degeneracy,
+        "target_occupied_bands_per_k": occupied_per_k,
+        "kpoint_count": energies.shape[0],
+        "matrix_dimension": dimension,
+        "occupied_count_at_shift_total": count_at_shift,
+        "target_occupied_count_total": target,
+        "shift_eV": shift_eV,
+        "scope": "Graph2Mat-predicted Hamiltonian; not a target DFT reference",
     }
 
 
@@ -748,6 +812,8 @@ def run(
     project_mulliken: bool = False,
     dos_broadening_mev: float = 0.5,
     dos_energy_window_mev: float = 100.0,
+    neutral_electrons: int | None = None,
+    spin_degeneracy: int = 2,
 ) -> dict:
     if backend not in {"cpu_mkl_pardiso", "gpu_cudss"}:
         raise ValueError(f"Unsupported sparse solver backend: {backend}")
@@ -768,7 +834,7 @@ def run(
     initial_free_disk_percent = free_disk_percent(output_dir)
     disk_usage = shutil.disk_usage(output_dir)
     if job == "band":
-        segments = 3 if band_path == "gamma-k-m-gamma" else 2
+        segments = 2 if band_path == "kprime-gamma-k" else len(BAND_PATH_INDICES[band_path]) - 1
         estimated_kpoints = 1 if gamma_only else 1 + segments * max(0, points_per_segment - 1)
     else:
         estimated_kpoints = int(np.prod(kmesh))
@@ -972,6 +1038,11 @@ def run(
         r"cuDSS maximum relative solve residual: ([0-9.eE+-]+)",
         stdout_text,
     )
+    inertia_matches = re.findall(r"cuDSS inertia: positive=(\d+) negative=(\d+)", stdout_text)
+    inertia_rows = [
+        {"k_index": index, "positive": int(positive), "negative": int(negative)}
+        for index, (positive, negative) in enumerate(inertia_matches)
+    ]
     manifest = {
         "status": "resource_blocked" if resource_blocked else "completed" if returncode == 0 else "failed",
         "job": job,
@@ -1031,6 +1102,11 @@ def run(
         "overlap_sha256": file_sha256(input_dir / "overlaps.h5"),
         "command": command,
         "projection_mapping": projection_mapping.get("mapping") if projection_mapping else None,
+        "inertia_at_shift": {
+            "status": "valid" if len(inertia_rows) == estimated_kpoints else "unavailable",
+            "shift_eV": fermi_level,
+            "rows": inertia_rows,
+        },
     }
     if returncode == 0 and job == "band":
         raw_energies = parse_openmx_band(output_dir / "openmx.Band")
@@ -1077,7 +1153,7 @@ def run(
                 "diagnostics": projection_diagnostics,
                 "mapping_path": str(projection_groups_path),
                 "full_space_lowdin_used": False,
-                "lowdin_reason": "dense S^(1/2) is unsafe for 117222 orbitals",
+                "lowdin_reason": "dense full-space S^(1/2) is unsafe for this large sparse system",
             }
         if band_path == "kprime-gamma-k":
             manifest["kprime_comparison"] = kprime_comparison(manifest["bands"])
@@ -1107,6 +1183,17 @@ def run(
             }
     elif returncode == 0:
         dos = np.loadtxt(output_dir / "dos.dat")
+        raw_energies = np.loadtxt(output_dir / "egvals.dat", dtype=float).T
+        if neutral_electrons is not None:
+            if len(inertia_rows) != raw_energies.shape[0]:
+                raise RuntimeError("Neutral Fermi calculation requires one inertia count per k point")
+            manifest["neutrality_reference"] = neutral_fermi_from_inertia(
+                raw_energies,
+                inertia_rows,
+                fermi_level,
+                neutral_electrons,
+                spin_degeneracy,
+            )
         manifest["low_energy_dos"] = [
             {
                 "energy_aligned_eV": float(row[0]),
@@ -1116,7 +1203,6 @@ def run(
             for row in dos
         ]
         if project_mulliken:
-            raw_energies = np.loadtxt(output_dir / "egvals.dat", dtype=float).T
             projected_dos, projection_diagnostics = projected_dos_data(
                 output_dir,
                 raw_energies,
@@ -1134,7 +1220,7 @@ def run(
                 "eigenvectors_persisted": False,
                 "full_orbital_spectrum": False,
                 "scope_limitation": (
-                    "Low-energy 256-state shift-invert subspace; not a full-spectrum DOS."
+                    f"Low-energy {num_bands}-state shift-invert subspace; not a full-spectrum DOS."
                 ),
             }
     write_json(output_dir / "solver_manifest.json", manifest)
@@ -1163,6 +1249,8 @@ def main() -> int:
         "--dos-broadening-mev", type=float, choices=(0.25, 0.5, 1.0, 2.0), default=0.5
     )
     parser.add_argument("--dos-energy-window-mev", type=float, default=100.0)
+    parser.add_argument("--neutral-electrons", type=int)
+    parser.add_argument("--spin-degeneracy", type=int, default=2)
     args = parser.parse_args()
     environment = (
         DEFAULT_GPU_ENVIRONMENT
@@ -1188,6 +1276,8 @@ def main() -> int:
         project_mulliken=args.project_mulliken,
         dos_broadening_mev=args.dos_broadening_mev,
         dos_energy_window_mev=args.dos_energy_window_mev,
+        neutral_electrons=args.neutral_electrons,
+        spin_degeneracy=args.spin_degeneracy,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["status"] == "completed" else 2 if result["status"] == "resource_blocked" else 1

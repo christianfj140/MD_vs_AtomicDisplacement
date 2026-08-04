@@ -23,6 +23,7 @@ fi
     --color never \
     --sandbox danger-full-access \
     --config 'approval_policy="never"' \
+    --config 'model_reasoning_effort="low"' \
     --cd "$REPO" \
     --output-last-message "$RESULTS/last_message.md" \
     - < "$PROMPT"

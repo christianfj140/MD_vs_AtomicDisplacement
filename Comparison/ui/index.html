@@ -1959,7 +1959,7 @@
               <span class="badge">Prediction only</span>
               <span class="badge">Exact PAO overlap</span>
               <span class="badge">Sparse partial eigensolver</span>
-              <span class="badge">Estimated neutrality energy</span>
+              <span class="badge">Electron-counted neutrality energy</span>
               <span class="badge">Rigid/unrelaxed structure</span>
               <span class="badge">hBN strain recorded</span>
               <span class="badge">AA/AB/BA registries included</span>
@@ -1970,14 +1970,16 @@
                 <select id="ct-spectral-size">
                   <option value="30">30</option><option value="60">60</option>
                   <option value="120">120</option><option value="240">240</option>
-                  <option value="480" selected>480</option>
+                  <option value="474">474 (TBG puro; 480 solicitados)</option>
+                  <option value="480">480 (TBG/hBN)</option>
+                  <option value="558" selected>558 (50/50 + loss espectral)</option>
                 </select>
               </label>
               <label class="field"><span>Seed</span>
                 <select id="ct-spectral-seed"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select>
               </label>
               <label class="field"><span>Modelo</span>
-                <select id="ct-spectral-model"><option value="all">Graph2Mat + DeepH</option><option value="graph2mat">Graph2Mat</option><option value="deeph">DeepH</option></select>
+                <select id="ct-spectral-model"><option value="all">Graph2Mat + DeepH</option><option value="graph2mat" selected>Graph2Mat</option><option value="deeph">DeepH</option></select>
               </label>
               <label class="field"><span>Resolución</span>
                 <select id="ct-spectral-resolution"><option value="coarse">Coarse</option><option value="full">Full</option></select>
@@ -1999,48 +2001,55 @@
               <pre id="ct-spectral-log" class="log-output mix-payload-log" role="log" aria-live="polite">Esperando el plan persistente.</pre>
             </div>
             <div class="form-grid compact-grid" aria-label="Controles del gráfico de minibandas">
-              <label class="field"><span>Modo</span>
+              <label class="field"><span>Representación</span>
                 <select id="ct-spectral-plot-mode">
-                  <option value="projected" selected>Minibandas moiré proyectadas</option>
-                  <option value="raw">Espectro bruto (diagnóstico)</option>
-                  <option value="exploratory">Selección energética exploratoria</option>
-                  <option value="unfolding">Unfolding primitivo existente</option>
+                  <option value="bands" selected>Bandas calculadas · líneas</option>
+                  <option value="heuristic">Manifold exploratorio · líneas estables</option>
+                  <option value="original">Estados originales</option>
+                  <option value="spectral">Espectro C-pz · heatmap</option>
+                  <option value="raw">Espectro completo · diagnóstico</option>
                 </select>
               </label>
               <label class="field"><span>Camino / resolución persistida</span>
-                <select id="ct-spectral-artifact"><option value="auto" selected>Mejor disponible</option><option value="smoke">Smoke · 31 k</option><option value="production">Producción · 51/segmento</option><option value="kprime">K′–Γ–K diagnóstico</option></select>
+                <select id="ct-spectral-artifact"><option value="auto">Mejor disponible</option><option value="smoke">Smoke · 31 k</option><option value="production" selected>Producción · K–Γ–M–K reordenado</option><option value="kprime">K′–Γ–K diagnóstico</option></select>
               </label>
               <label class="field"><span>Peso proyectado</span>
                 <select id="ct-spectral-weight">
                   <option value="weight_c_pz" selected>C pz</option><option value="weight_c_total">C total</option>
                   <option value="weight_graphene_upper">Grafeno superior</option><option value="weight_graphene_lower">Grafeno inferior</option>
-                  <option value="weight_hbn">hBN</option><option value="layer_polarization">Polarización de capa</option>
+                  <option value="weight_hbn">hBN</option>
                 </select>
               </label>
-              <label class="field"><span>Bandas visibles (solo exploratorio)</span>
+              <label class="field"><span>Número de bandas visibles</span>
                 <select id="ct-spectral-visible-bands">
-                  <option value="8">8</option><option value="16" selected>16</option>
-                  <option value="32">32</option><option value="64">64</option>
-                  <option value="128">128</option><option value="256">Todas (256)</option>
+                  <option value="4">4</option><option value="6" selected>6</option><option value="8">8</option>
                 </select>
               </label>
               <label class="field"><span>Ventana energética</span>
                 <select id="ct-spectral-energy-window">
-                  <option value="5">±5 meV</option><option value="10">±10 meV</option><option value="15" selected>±15 meV</option>
-                  <option value="20">±20 meV</option><option value="50">±50 meV</option><option value="100">±100 meV</option>
-                  <option value="0">Automática</option>
+                  <option value="25">±25 meV</option><option value="50" selected>±50 meV</option><option value="75">±75 meV</option>
                 </select>
               </label>
+              <label class="field"><span>Ventana de candidatos</span><select id="ct-spectral-selection-window"><option value="10">±10 meV</option><option value="15">±15 meV</option><option value="20" selected>±20 meV</option></select></label>
+              <label class="field"><span>Pool de candidatos</span><select id="ct-spectral-heuristic-pool"><option value="20">20</option><option value="30" selected>30</option><option value="40">40</option></select></label>
+              <label class="field"><span>Salto máximo</span><select id="ct-spectral-heuristic-gate"><option value="5">5 meV</option><option value="6" selected>6 meV</option><option value="8">8 meV</option></select></label>
+              <label class="field"><span>Filtro de candidatos</span><select id="ct-spectral-heuristic-filter"><option value="joint" selected>C-pz + C total − hBN</option><option value="cpz">C-pz</option><option value="energy">Energía</option></select></label>
+              <label class="field"><span><input id="ct-spectral-original-overlay" type="checkbox" /> Superponer estados originales</span></label>
+              <label class="field"><span>Broadening σ</span><select id="ct-spectral-broadening"><option value="0.25">0.25 meV</option><option value="0.5" selected>0.5 meV</option><option value="1">1.0 meV</option><option value="2">2.0 meV</option></select></label>
+              <label class="field"><span>Saturación global</span><select id="ct-spectral-saturation"><option value="95">p95</option><option value="99">p99</option><option value="99.5" selected>p99.5</option><option value="100">Máximo</option></select></label>
+              <label class="field"><span>Escala de intensidad</span><select id="ct-spectral-scale"><option value="linear" selected>Lineal</option><option value="log">Logarítmica</option></select></label>
               <label class="field"><span>Intensidad mínima (visual)</span><input id="ct-spectral-min-weight" type="number" min="0" max="1" step="0.01" value="0.20" /></label>
               <label class="field"><span>Tamaño de marcador</span><input id="ct-spectral-marker-size" type="number" min="2" max="16" step="1" value="7" /></label>
               <label class="field"><span>Opacidad</span><input id="ct-spectral-marker-opacity" type="number" min="0.1" max="1" step="0.1" value="0.8" /></label>
-              <label class="field"><span>Representación</span><select id="ct-spectral-draw-mode"><option value="markers" selected>Puntos</option><option value="lines">Líneas ordenadas por energía</option></select></label>
+              <label class="field"><span>Trazado proyectado</span><select id="ct-spectral-draw-mode"><option value="lines" selected>Curvas por rango + proyección</option><option value="markers">Solo puntos proyectados</option></select></label>
               <label class="field"><span><input id="ct-spectral-background" type="checkbox" checked /> Fondo ±20 meV</span></label>
               <label class="field"><span><input id="ct-spectral-show-kprime" type="checkbox" /> Mostrar K′ si está calculado</span></label>
               <label class="field"><span>Ventana diagnóstica</span><select id="ct-spectral-diagnostic-window"><option value="50" selected>±50 meV</option><option value="100">±100 meV</option></select></label>
+              <label class="field"><span>Recta de Dirac (extrapolada)</span><select id="ct-spectral-dirac-reach"><option value="0">oculta</option><option value="1000">hasta ±1 eV</option><option value="2000">hasta ±2 eV</option><option value="5000" selected>hasta ±5 eV</option></select></label>
             </div>
-            <p id="ct-spectral-scientific-warning" class="field-help">Geometría rígida/no relajada · hBN incluido · Hamiltoniano ML · base no ortogonal · sin Hamiltoniano SIESTA de referencia · prediction-only · cero visual de neutralidad estimado · identidad continua de banda no garantizada · los pesos Mulliken raw se conservan; el tamaño visual usa |w| y satura en 1 · la DOS/PDOS cubre solo los 256 estados shift-invert de baja energía, no el espectro orbital completo.</p>
             <div id="ct-spectral-bands-chart" class="plot-card full"></div>
+            <p id="ct-spectral-scientific-warning" class="field-help">Las líneas aceptadas pasan por autovalores calculados y son estables frente a pool/gate y seguimiento forward/backward; siguen siendo una conexión heurística.</p>
+            <div id="ct-spectral-heuristic-diagnostics" class="field-help"></div>
             <div id="ct-spectral-unfolded-chart" class="plot-card full"></div>
             <div id="ct-spectral-dos-chart" class="plot-card full"></div>
             <div id="ct-spectral-diagnostics-chart" class="plot-card full"></div>
@@ -2487,6 +2496,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260731-moire-projected-bands"></script>
+    <script src="/app.js?v=20260804-tbg-n558-unfolding"></script>
   </body>
 </html>

@@ -1,0 +1,62 @@
+SystemName                       bilayer_graphene_BA
+SystemLabel                      bilayer_graphene_BA
+
+NumberOfAtoms                    4
+NumberOfSpecies                  1
+
+%block ChemicalSpeciesLabel
+  1   6  C
+%endblock ChemicalSpeciesLabel
+%block PAO.Basis
+C           2
+ n=2   0   1
+   4.088
+   1.000
+ n=2   1   1
+   4.870
+   1.000
+%endblock PAO.Basis
+
+# Carbon-only structure derived from materials/bilayer_graphene_hBN_AA_topBA/RUN.fdf.
+# Rigid local Bernal BA registry for training; no twist.
+
+LatticeConstant      1.00000 Ang
+
+%block LatticeVectors
+   2.4800000000       0.0000000000       0.0000000000
+  -1.2400000000       2.1477430000       0.0000000000
+   0.0000000000       0.0000000000      20.0000000000
+%endblock LatticeVectors
+
+AtomicCoordinatesFormat Ang
+%block AtomicCoordinatesAndAtomicSpecies
+ 0.0000000000  0.0000000000  9.3500000000  1  # C
+ 0.0000000000  1.4318286667  9.3500000000  1  # C
+ 1.2400000000  0.7159143333  12.7000000000  1  # C
+ 0.0000000000  0.0000000000  12.7000000000  1  # C
+%endblock AtomicCoordinatesAndAtomicSpecies
+%block kgrid_Monkhorst_Pack
+  20   0   0  0.0
+   0  20   0  0.0
+   0   0   1  0.0
+%endblock kgrid_Monkhorst_Pack
+
+XC.functional          VDW
+XC.authors             DRSLL
+MeshCutoff             600.0 Ry
+MaxSCFIterations       500
+DM.MixingWeight        0.1
+DM.NumberPulay         5
+DM.Tolerance           1.d-4
+DM.UseSaveDM           F
+SolutionMethod         diagon
+ElectronicTemperature  0.075 eV
+SaveHS                 T
+Save.HS                T
+TS.HS.Save             T
+TS.DE.Save             T
+XML.Write              T
+WriteMullikenPop       1
+Write.OrbitalIndex     T
+WriteForces            T
+WriteCoorXmol          T

@@ -18,11 +18,30 @@ from run_deeph_sparse_spectrum import (  # noqa: E402
     estimated_neutrality_reference,
     kprime_comparison,
     mulliken_projection_groups,
+    neutral_fermi_from_inertia,
     projected_band_data,
     projected_dos_data,
     projected_dos_observables,
     select_band_path,
 )
+
+
+def test_neutral_fermi_uses_inertia_and_local_frontier_states() -> None:
+    energies = sparse_spectrum.np.asarray([
+        [-1.0, 0.2, 1.0, 2.0],
+        [-1.0, -0.1, 0.3, 1.0],
+    ])
+    result = neutral_fermi_from_inertia(
+        energies,
+        [{"positive": 3, "negative": 1}, {"positive": 2, "negative": 2}],
+        0.0,
+        neutral_electrons=4,
+        spin_degeneracy=2,
+    )
+    assert result["energy_eV"] == pytest.approx(0.25)
+    assert result["homo_edge_eV"] == pytest.approx(0.2)
+    assert result["lumo_edge_eV"] == pytest.approx(0.3)
+    assert result["target_occupied_count_total"] == 4
 
 
 def test_band_k_data_supports_single_high_symmetry_points() -> None:
@@ -208,6 +227,8 @@ def test_hexagonal_path_is_selected_from_the_actual_reciprocal_metric() -> None:
     assert moire_path[1][1] == (1 / 3, 2 / 3, 0.0)
     open_path, _validation = select_band_path(moire_reciprocal, "k-gamma-m")
     assert [label for label, _point in open_path] == ["K", "Γ", "M"]
+    closed_path, _validation = select_band_path(moire_reciprocal, "k-gamma-m-k")
+    assert [label for label, _point in closed_path] == ["K", "Γ", "M", "K"]
 
 
 def test_magic_angle_mulliken_groups_prove_pz_and_partition_the_basis() -> None:
@@ -220,8 +241,20 @@ def test_magic_angle_mulliken_groups_prove_pz_and_partition_the_basis() -> None:
     payload = mulliken_projection_groups(input_dir)
     groups = payload["groups"]
     mapping = payload["mapping"]
-    assert mapping["carbon_pz_local_indices_zero_based"] == [2]
-    assert mapping["basis_convention"] == "siesta_spherical=(-py,pz,-px) for l=1"
+    assert mapping["carbon_pz_local_indices_zero_based"] == [3]
+    assert mapping["basis_convention"] == "deeph_export=(px,py,pz) for l=1"
+    # The projection must track the export's ordering, not restate it: ask
+    # _deeph_orbital_map where a [s, p] carbon puts m=0 and compare.
+    from generate_siesta_overlap_only import _deeph_orbital_map
+
+    carbon_rows = [
+        {"io": 0, "atom": 0, "n": 2, "l": 0, "m": 0, "zeta": 1},
+        {"io": 1, "atom": 0, "n": 2, "l": 1, "m": -1, "zeta": 1},
+        {"io": 2, "atom": 0, "n": 2, "l": 1, "m": 0, "zeta": 1},
+        {"io": 3, "atom": 0, "n": 2, "l": 1, "m": 1, "zeta": 1},
+    ]
+    export_mapping, _signs, _types = _deeph_orbital_map(carbon_rows)
+    assert export_mapping[2] == mapping["carbon_pz_local_indices_zero_based"][0]
     assert len(groups["carbon_pz"]) == mapping["species_atom_counts"]["C"]
     assert len(groups["carbon"]) == len(groups["graphene_lower"]) + len(groups["graphene_upper"])
     assert len(groups["carbon"]) + len(groups["boron"]) + len(groups["nitrogen"]) == mapping["total_orbitals"]

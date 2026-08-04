@@ -39,11 +39,20 @@ from validate_deeph_sparse_solver import parse_openmx_band
 
 
 PRIMITIVE_PATH = [
-    ("Γ", (0.0, 0.0, 0.0)),
     ("K", (1.0 / 3.0, 1.0 / 3.0, 0.0)),
-    ("M", (0.5, 0.0, 0.0)),
     ("Γ", (0.0, 0.0, 0.0)),
+    ("M", (0.5, 0.0, 0.0)),
+    ("K", (1.0 / 3.0, 1.0 / 3.0, 0.0)),
 ]
+
+
+def graphene_layer_indices(positions: np.ndarray, layer: str) -> np.ndarray:
+    z_levels = np.unique(np.round(positions[:, 2], 6))
+    if len(z_levels) not in {2, 3}:
+        raise RuntimeError(f"Expected two graphene levels, optionally plus hBN, found {z_levels.tolist()}")
+    first_graphene = len(z_levels) - 2
+    layer_index = first_graphene + {"bottom": 0, "top": 1}[layer]
+    return np.flatnonzero(np.isclose(positions[:, 2], z_levels[layer_index], atol=1e-5))
 
 
 def primitive_samples(points_per_segment: int) -> list[tuple[str, np.ndarray]]:
@@ -58,11 +67,7 @@ def orbital_map(input_dir: Path, layer: str, geometry: dict, destination: Path) 
         if line.strip()
     ]
     offsets = np.cumsum([0, *[sum(2 * ell + 1 for ell in row) for row in shells]])
-    z_levels = np.unique(np.round(positions[:, 2], 6))
-    if len(z_levels) != 3:
-        raise RuntimeError(f"Expected hBN plus two graphene z levels, found {z_levels.tolist()}")
-    layer_index = {"bottom": 1, "top": 2}[layer]
-    atom_indices = np.flatnonzero(np.isclose(positions[:, 2], z_levels[layer_index], atol=1e-5))
+    atom_indices = graphene_layer_indices(positions, layer)
     expected = 2 * int(geometry["commensurate_cell_index"])
     if len(atom_indices) != expected:
         raise RuntimeError(f"{layer}: expected {expected} carbon atoms, found {len(atom_indices)}")
@@ -176,8 +181,12 @@ def run_layer(
             [[math.cos(theta), math.sin(theta)], [-math.sin(theta), math.cos(theta)]]
         )
     primitive_reciprocal = 2 * np.pi * np.linalg.inv(primitive_lattice).T
-    validated_path, primitive_path_validation = validated_hexagonal_k_path(primitive_reciprocal)
-    if validated_path != PRIMITIVE_PATH:
+    primitive_reciprocal_3d = np.zeros((3, 3))
+    primitive_reciprocal_3d[:2, :2] = primitive_reciprocal
+    primitive_reciprocal_3d[2, 2] = 2 * np.pi
+    validated_path, primitive_path_validation = validated_hexagonal_k_path(primitive_reciprocal_3d)
+    expected_path = [validated_path[1], validated_path[0], validated_path[2], validated_path[1]]
+    if expected_path != PRIMITIVE_PATH:
         raise RuntimeError("Primitive graphene path disagrees with its reciprocal metric")
     folding_validation = validate_folding(samples, matrix, primitive_lattice)
     folded = folded_kpoints(samples, matrix)
@@ -303,7 +312,7 @@ def run_layer(
                 )
         result["unfolded_bands"] = points
         result["k_path"] = {
-            "name": f"{layer}_graphene_primitive_Gamma-K-M-Gamma",
+            "name": f"{layer}_graphene_primitive_K-Gamma-M-K",
             "points_per_segment": points_per_segment,
             "sample_count": len(samples),
         }

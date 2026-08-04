@@ -1,0 +1,195 @@
+{
+  "description": "Pure twisted-bilayer-graphene AB smoke MD dataset (no hBN substrate).",
+  "source_reference_payloads": [],
+  "pipeline_config": "Comparison/config/graphene_hbn_bilayer_md_pipeline_config.yaml",
+  "material_preset": "bilayer_graphene_AB",
+  "material": {
+    "mode": "preset",
+    "preset": "bilayer_graphene_AB"
+  },
+  "dataset_mode": "generate_new",
+  "run_mode": "generate_datasets_only",
+  "dataset_root": "${REPO_ROOT}/Comparison/datasets/bilayer_graphene_AB_md30",
+  "output_root": "${REPO_ROOT}/Comparison/results/bilayer_graphene_AB_md30",
+  "system_label": "bilayer_graphene_AB",
+  "require_tshs": true,
+  "require_tsde": true,
+  "require_run_output": true,
+  "allow_repair": false,
+  "repair_mode": "disabled",
+  "allow_diagnostic_metrics": false,
+  "metric_fail_policy": "fail_closed",
+  "split_mode": "blocked_with_gap",
+  "temporal_gap": 1,
+  "block_order": "train,validation,test",
+  "splits": {
+    "train": 0.8,
+    "validation": 0.1,
+    "test": 0.1
+  },
+  "performance": {
+    "preset": "dynamic_cpu_heavy_siesta",
+    "compute_accelerator": "gpu",
+    "store_in_memory": true,
+    "reuse_validated_siesta_outputs": true,
+    "enable_experiment_cache": false,
+    "max_parallel_dataset_jobs": 1,
+    "max_parallel_siesta_jobs": 5,
+    "max_parallel_prediction_jobs": 1,
+    "max_parallel_evaluation_jobs": 3,
+    "max_parallel_metric_jobs": 8,
+    "max_parallel_graph2mat_training_jobs": 7,
+    "max_parallel_deeph_training_jobs": 5,
+    "model_batch_schedule": "alternating",
+    "model_batch_start": "deeph",
+    "omp_num_threads": 1,
+    "mkl_num_threads": 1,
+    "openblas_num_threads": 1,
+    "numexpr_num_threads": 1,
+    "torch_num_threads": 1,
+    "torch_float32_matmul_precision": "high",
+    "torch_mixed_precision": "bf16-mixed",
+    "graph2mat_log_every_n_steps": 1,
+    "graph2mat_check_val_every_n_epoch": 1,
+    "graph2mat_checkpoint_every_n_epochs": 1,
+    "graph2mat_require_cuequivariance": true,
+    "error_policy": "continue_on_error"
+  },
+  "dataset_sweep": {
+    "enabled": true,
+    "max_datasets": 1,
+    "recipes": [
+      {
+        "recipe_id": "bilayer_graphene_AB_md30",
+        "label": "Pure bilayer graphene AB smoke: 30 snapshots",
+        "size": 30,
+        "thermal_regime": "iid_mixed",
+        "split_intent": "IID mixed temperature train/validation/test with blocked temporal gap.",
+        "blocks": [
+          {
+            "block_id": "AB_T150_6",
+            "label": "6 snapshots @ 150 K",
+            "n_snapshots": 6,
+            "temperature_K": 150,
+            "seed": 3150
+          },
+          {
+            "block_id": "AB_T300_18",
+            "label": "18 snapshots @ 300 K",
+            "n_snapshots": 18,
+            "temperature_K": 300,
+            "seed": 3300
+          },
+          {
+            "block_id": "AB_T450_6",
+            "label": "6 snapshots @ 450 K",
+            "n_snapshots": 6,
+            "temperature_K": 450,
+            "seed": 3450
+          }
+        ]
+      }
+    ]
+  },
+  "graph2mat_overrides": {
+    "max_epochs": 750,
+    "optim_lr": 0.0018,
+    "batch_size": 40,
+    "loader_threads": 4,
+    "num_interactions": 3,
+    "correlation": 3,
+    "max_ell": 3,
+    "hidden_irreps": "64x0e + 64x1o + 64x2e + 64x3o",
+    "loss": "graph2mat.metrics.block_type_huber",
+    "loss_kwargs": {
+      "beta": 0.006
+    },
+    "readout": "edge_node_mix",
+    "seed_everything": 0
+  },
+  "deeph": {
+    "device": "cuda:0",
+    "disable_cuda": false,
+    "num_threads": 2,
+    "multiprocessing": 0,
+    "epochs": 750,
+    "batch_size": 4,
+    "learning_rate": 0.0003,
+    "criterion": "MaskMSELoss",
+    "retain_edge_fea": true,
+    "weight_decay": 0.0,
+    "optimizer": "adamW",
+    "edge_fea_len": 192,
+    "normalization": "LayerNorm",
+    "atom_update_net": "CGConv",
+    "if_lcmp": true,
+    "gauss_stop": 6,
+    "atom_fea_len": 192,
+    "num_l": 4,
+    "if_edge_update": true
+  },
+  "training_sweep": {
+    "enabled": false,
+    "manual_runs": [],
+    "max_runs": 0,
+    "apply_to_datasets": []
+  },
+  "cost_accounting": {
+    "dataset_sweep_summary_json": "summary/dataset_sweep_summary.json",
+    "dataset_sweep_summary_csv": "summary/dataset_sweep_summary.csv",
+    "fields": [
+      "dataset_size",
+      "blocks",
+      "split_counts",
+      "generation_seconds",
+      "elapsed_seconds",
+      "artifact_validation_status",
+      "benchmark_manifest_path",
+      "frozen_split_manifest_path"
+    ],
+    "siesta_wall_time_source": "RUN.out timer: Elapsed wall time (sec), plus runner generation_seconds/elapsed_seconds per dataset row."
+  },
+  "notes": {
+    "intended_use": "Fresh graphene_5x5 SIESTA MD dataset generation for mixing compatibility test.",
+    "expected_dataset_count": 2,
+    "expected_dataset_recipe_ids": [
+      "graphene_w90_scale_iid10",
+      "graphene_w90_scale_iid25",
+      "graphene_w90_scale_iid50",
+      "graphene_w90_scale_iid100",
+      "graphene_w90_scale_iid200",
+      "graphene_w90_scale_iid300",
+      "graphene_w90_scale_iid500"
+    ],
+    "expected_total_snapshots": 3000,
+    "expected_training_runs": 80,
+    "temperature_distribution": "20% at 150 K, 60% at 300 K, 20% at 450 K for every dataset size.",
+    "paper_ready_parallelism": "Graph2Mat 7 parallel jobs, DeepH 5 parallel jobs, alternating model batches, starting with DeepH.",
+    "scientific_policy": "Only MD size varies. SIESTA physics/template, material, basis and pseudopotentials are held fixed. Test/validation split policy remains blocked_with_gap.",
+    "material_scope": "This payload is graphene-only.",
+    "expected_dataset_sizes": [
+      20,
+      50
+    ],
+    "paper_ready_similarity": "Uses two fixed paper-ready anchors per model: G2M-T600-26, G2M-T1000-03, DH-T600-13 and DH-T1000-04. Hyperparameter search is disabled so dataset size remains the main variable.",
+    "batch_size_guard": "Graph2Mat anchors use batch_size 40 and 32; DeepH anchors use batch_size 4 and 8. Reject this payload if any generated Graph2Mat config has batch_size > 80.",
+    "manual_anchor_configs_per_dataset": 4,
+    "discretization_policy": "Dense dataset-size grid from 10 to 500 snapshots, reusing requested/previous scaling sizes where possible: 10,20,25,30,40,50,55,60,70,75,80,90,95,100,120,150,180,200,220,250,280,300,500.",
+    "dataset_root_policy": "Uses a fresh dataset root to avoid overwriting or colliding with previous snapshot-scaling datasets that were generated with a different training payload.",
+    "source_protocol": "graphene_w90_snapshot_scaling_reuse_10_1000_4seeds, restricted to N<=100",
+    "configs_per_dataset": 4,
+    "training_seeds": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "supercell": "5x5 graphene, 50 carbon atoms",
+    "fdf_template": "materials/graphene_5x5/RUN.fdf",
+    "force_constants_used": false,
+    "kpoint_mesh": "4x4x1 scaled from primitive 20x20x1",
+    "training": "disabled"
+  },
+  "run_id": "bilayer_graphene_AB_md30_smoke",
+  "overwrite_datasets": true
+}

@@ -966,9 +966,16 @@ def predict_models(config: dict[str, Any], root: Path, *, resume: bool) -> dict[
 
 
 def neutrality_estimate(root: Path) -> dict[str, Any]:
+    """Shift-invert target energy for the predicted Hamiltonian.
+
+    sisl hands back SIESTA Hamiltonians already aligned to E_F = 0 and the DeepH
+    export never adds the offset back, so the predicted matrix is neutral at zero.
+    The per-cell Fermi levels are still collected: their spread is the only
+    available bound on how well that zero is defined across training snapshots.
+    """
     path = root / "neutrality_estimate.json"
     existing = read_json(path)
-    if existing.get("status") == "estimated":
+    if existing.get("status") == "referenced":
         return existing
     dataset = REPO_ROOT / "Comparison/datasets/graphene_hbn_bilayer_md_nested/n480"
     frozen = read_json(dataset / "frozen_split_manifest.json")
@@ -995,18 +1002,21 @@ def neutrality_estimate(root: Path) -> dict[str, Any]:
     array = np.asarray(values)
     median = float(np.median(array))
     result = {
-        "status": "estimated",
-        "energy_eV": median,
-        "source": "median_small_cell_SIESTA_Fermi_levels",
+        "status": "referenced",
+        "energy_eV": 0.0,
+        "source": "exported_hamiltonian_is_already_aligned_to_E_F_zero",
         "target_SCF_used": False,
         "sample_count": len(values),
-        "median_absolute_deviation_eV": float(np.median(np.abs(array - median))),
-        "minimum_eV": float(array.min()),
-        "maximum_eV": float(array.max()),
+        "source_absolute_fermi_median_eV": median,
+        "source_absolute_fermi_mad_eV": float(np.median(np.abs(array - median))),
+        "source_absolute_fermi_minimum_eV": float(array.min()),
+        "source_absolute_fermi_maximum_eV": float(array.max()),
+        "gauge_scatter_eV": float(array.max() - array.min()),
         "source_files": sources,
         "limitation": (
-            "Energy gauge estimated from training cells; no magic-angle chemical potential "
-            "or target Hamiltonian reference is claimed."
+            "Each training TSHS is aligned to its own SCF Fermi level, so the shared zero "
+            "is defined only to within the recorded gauge scatter; no magic-angle chemical "
+            "potential or target Hamiltonian reference is claimed."
         ),
     }
     write_json(path, result)
@@ -1346,6 +1356,8 @@ def aggregate(config: dict[str, Any], root: Path) -> dict[str, Any]:
                 if cloud:
                     cloud_energies = [1000.0 * float(item["energy_aligned_eV"]) for item in cloud]
                     pz_weights = [float(item["weight_c_pz"]) for item in cloud]
+                    hbn_weights = [float(item["weight_hbn"]) for item in cloud]
+                    layer_polarizations = [float(item["layer_polarization"]) for item in cloud]
                     row["projected_low_energy_observables"] = {
                         "scientific_status": "state_cloud_without_band_identity",
                         "energy_window_meV": 15.0,
@@ -1354,6 +1366,12 @@ def aggregate(config: dict[str, Any], root: Path) -> dict[str, Any]:
                         "carbon_pz_weight_mean": sum(pz_weights) / len(pz_weights),
                         "carbon_pz_weight_min": min(pz_weights),
                         "carbon_pz_weight_max": max(pz_weights),
+                        "hbn_weight_mean": sum(hbn_weights) / len(hbn_weights),
+                        "hbn_weight_min": min(hbn_weights),
+                        "hbn_weight_max": max(hbn_weights),
+                        "layer_polarization_mean": sum(layer_polarizations) / len(layer_polarizations),
+                        "layer_polarization_min": min(layer_polarizations),
+                        "layer_polarization_max": max(layer_polarizations),
                         "gap_and_bandwidth_claimed": False,
                     }
                 spectra.append(row)
