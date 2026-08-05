@@ -2044,11 +2044,13 @@
               <label class="field"><span>Trazado proyectado</span><select id="ct-spectral-draw-mode"><option value="lines" selected>Curvas por rango + proyección</option><option value="markers">Solo puntos proyectados</option></select></label>
               <label class="field"><span><input id="ct-spectral-background" type="checkbox" checked /> Fondo ±20 meV</span></label>
               <label class="field"><span><input id="ct-spectral-show-kprime" type="checkbox" /> Mostrar K′ si está calculado</span></label>
+              <label class="field"><span><input id="ct-spectral-tight-binding" type="checkbox" checked /> Superponer tight binding pz (Moon–Koshino)</span></label>
               <label class="field"><span>Ventana diagnóstica</span><select id="ct-spectral-diagnostic-window"><option value="50" selected>±50 meV</option><option value="100">±100 meV</option></select></label>
-              <label class="field"><span>Recta de Dirac (extrapolada)</span><select id="ct-spectral-dirac-reach"><option value="0">oculta</option><option value="1000">hasta ±1 eV</option><option value="2000">hasta ±2 eV</option><option value="5000" selected>hasta ±5 eV</option></select></label>
+              <label class="field"><span>Benchmark monocapa (no es el moiré)</span><select id="ct-spectral-dirac-reach"><option value="0" selected>oculto</option><option value="200">hasta ±200 meV</option><option value="500">hasta ±500 meV</option><option value="1000">hasta ±1 eV</option></select></label>
             </div>
             <div id="ct-spectral-bands-chart" class="plot-card full"></div>
             <p id="ct-spectral-scientific-warning" class="field-help">Las líneas aceptadas pasan por autovalores calculados y son estables frente a pool/gate y seguimiento forward/backward; siguen siendo una conexión heurística.</p>
+            <div id="ct-spectral-tight-binding-observables" class="field-help" aria-label="Observables de baja energía">Sin espectros cargados.</div>
             <div id="ct-spectral-heuristic-diagnostics" class="field-help"></div>
             <div id="ct-spectral-unfolded-chart" class="plot-card full"></div>
             <div id="ct-spectral-dos-chart" class="plot-card full"></div>

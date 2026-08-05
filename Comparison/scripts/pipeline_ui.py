@@ -18118,6 +18118,7 @@ class MoireSpectralCampaignRunner:
     def results(self) -> dict[str, Any]:
         status = self.status()
         pure_root = RESULTS_ROOT / "tbg_pure_graph2mat"
+        tight_binding_root = RESULTS_ROOT / "tbg_tight_binding"
         summary = self._read(self.root / "summary/spectral_results.json")
         pure_summary = self._read(pure_root / "summary/spectral_results.json")
         if pure_summary.get("spectra"):
@@ -18127,6 +18128,17 @@ class MoireSpectralCampaignRunner:
                     row for row in summary.get("spectra", [])
                     if row.get("material_system") != "pure_tbg"
                 ] + pure_summary["spectra"],
+            }
+        tight_binding_summary = self._read(
+            tight_binding_root / "summary/spectral_results.json"
+        )
+        if tight_binding_summary.get("spectra"):
+            summary = {
+                **summary,
+                "spectra": [
+                    row for row in summary.get("spectra", [])
+                    if row.get("model") != "tight_binding"
+                ] + tight_binding_summary["spectra"],
             }
         training = self._read(self.root / "training/training_campaign_manifest.json")
         if status.get("running") and status.get("current_stage") == "train":
@@ -18166,6 +18178,10 @@ class MoireSpectralCampaignRunner:
                 "precision_gate": self._read(pure_root / "precision_gate.json"),
                 "summary": pure_summary,
             },
+            "tight_binding": {
+                "preflight": self._read(tight_binding_root / "stages/preflight.json"),
+                "summary": tight_binding_summary,
+            },
             "target": self._read(self.root / "target/moire_geometry.json"),
             "overlap": self._read(self.root / "overlap/overlap_manifest.json"),
             "coverage": self._read(self.root / "local_environment_coverage.json"),
@@ -18200,7 +18216,11 @@ class MoireSpectralCampaignRunner:
     def artifact_path(self, value: str) -> Path:
         requested = Path(value).expanduser()
         requested = requested.resolve() if requested.is_absolute() else (self.root / requested).resolve()
-        roots = (self.root.resolve(), (RESULTS_ROOT / "tbg_pure_graph2mat").resolve())
+        roots = (
+            self.root.resolve(),
+            (RESULTS_ROOT / "tbg_pure_graph2mat").resolve(),
+            (RESULTS_ROOT / "tbg_tight_binding").resolve(),
+        )
         if not any(root == requested or root in requested.parents for root in roots):
             raise RuntimeError("Artefacto espectral fuera de la campaña no permitido.")
         if requested.suffix.lower() not in {".json", ".csv", ".log", ".txt", ".fdf", ".ini"}:

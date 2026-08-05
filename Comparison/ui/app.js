@@ -33,6 +33,7 @@ const METHOD_DISPLAY_LABELS = {
   md: "MD",
   siesta_fc_cartesian: "FC Cartesian",
   random_cartesian: "Random Cartesian",
+  tight_binding: "Tight binding pz (Moon–Koshino)",
 };
 
 const TEST_SET_DISPLAY_LABELS = {
@@ -14652,6 +14653,169 @@ function ctSpectralHeuristicTrace(track, index, accepted = true) {
   };
 }
 
+function ctSpectralRowLabel(row) {
+  // Number(null) === 0 y es finito, asi que un isFinite a secas etiquetaba el tight
+  // binding (training_size y seed nulos) como "N0 · s0", que sugiere un entrenamiento
+  // inexistente. Hay que descartar null/undefined antes de convertir.
+  const suffix = [];
+  if (row.training_size != null && Number.isFinite(Number(row.training_size))) {
+    suffix.push(`N${Number(row.training_size)}`);
+  }
+  if (row.seed != null && Number.isFinite(Number(row.seed))) {
+    suffix.push(`s${Number(row.seed)}`);
+  }
+  return [methodDisplayLabel(row.model), ...suffix].join(" · ");
+}
+
+function ctSpectralDirectBandTraces(
+  row, points, markerSize, markerOpacity, raw = false, bandLimit = 0,
+) {
+  const model = String(row.model || "").toLowerCase();
+  const tightBinding = model === "tight_binding";
+  // Rejilla completa de k del espectro: una banda que sale de la ventana energetica y
+  // vuelve a entrar debe quedar cortada con null, no unida por encima del hueco.
+  const kGrid = new Map();
+  [...(row.bands || []), ...points].forEach((point) => {
+    const index = Number(point.k_index);
+    if (Number.isFinite(index) && !kGrid.has(index)) kGrid.set(index, Number(point.k_distance));
+  });
+  const kIndices = Array.from(kGrid.keys()).sort((left, right) => left - right);
+  const grouped = new Map();
+  points.forEach((point) => {
+    const index = Number(tightBinding ? point.absolute_band_index : point.band_index);
+    if (!Number.isFinite(index)) return;
+    if (!grouped.has(index)) grouped.set(index, new Map());
+    grouped.get(index).set(Number(point.k_index), point);
+  });
+  let entries = Array.from(grouped.entries()).sort(([left], [right]) => left - right);
+  if (bandLimit > 0 && entries.length > bandLimit) {
+    // Conserva las bandas mas proximas a la neutralidad, por energia media |E - E_F|.
+    const centrality = (byK) => {
+      const values = Array.from(byK.values())
+        .map((point) => Math.abs(Number(point.energy_aligned_eV ?? point.energy_eV)));
+      return values.reduce((sum, value) => sum + value, 0) / (values.length || 1);
+    };
+    const keep = new Set(entries.slice()
+      .sort(([, left], [, right]) => centrality(left) - centrality(right))
+      .slice(0, bandLimit).map(([index]) => index));
+    entries = entries.filter(([index]) => keep.has(index));
+  }
+  return entries
+    .map(([bandIndex, byK], index) => {
+      const rows = kIndices.map((kIndex) => byK.get(kIndex) || null);
+      return {
+        x: kIndices.map((kIndex) => kGrid.get(kIndex)),
+        y: rows.map((point) => (point
+          ? 1000 * Number(point.energy_aligned_eV ?? point.energy_eV) : null)),
+        customdata: rows.map((point) => [
+          bandIndex, point ? Number(point.solver_band_index) : null,
+        ]),
+        mode: raw ? "markers" : "lines+markers",
+        name: ctSpectralRowLabel(row),
+        legendgroup: `${model}-${row.training_size ?? "reference"}-${row.seed ?? "none"}`,
+        showlegend: index === 0,
+        line: {
+          color: tightBinding ? "#b91c1c" : model === "deeph" ? "#d62728" : "#1f77b4",
+          dash: tightBinding || model === "deeph" ? "dash" : "solid",
+          width: tightBinding ? 1.5 : 1.2,
+          shape: "linear",
+        },
+        marker: {
+          size: raw ? 3 : markerSize,
+          opacity: raw ? 0.3 : markerOpacity,
+        },
+        connectgaps: false,
+        hovertemplate: `${tightBinding ? "índice absoluto" : "rango energético"} %{customdata[0]}` +
+          "<br>solver %{customdata[1]}<br>k %{x:.4f}<br>E %{y:.3f} meV<extra>%{fullData.name}</extra>",
+      };
+    });
+}
+
+// Devuelve el indice del primer estado de conduccion del manifold central en una lista de
+// autovalores ordenada. Dos reglas, ninguna basada en planitud:
+//   - Con indices de banda absolutos (tight binding): conteo electronico puro, exacto.
+//   - Sin ellos (Graph2Mat no los persiste): la ventana de 4 estados consecutivos que
+//     contiene la neutralidad y esta mas aislada del resto.
+// La regla por aislamiento se contrasto contra la regla por indice en los datos TB:
+// coincide en 29/31 puntos k y falla en dos puntos interiores del tramo Γ-M donde las
+// bandas dispersan fuerte. Coincide en TODOS los puntos de alta simetria. Por eso, sin
+// indices absolutos solo se publican observables en K/Γ/M, nunca gaps globales.
+// NO vale separar por el signo de E - E_F: en K de Graph2Mat el manifold tiene 1 estado
+// por debajo y 3 por encima, y en K del tight binding los 4 son degenerados.
+function ctSpectralManifoldSplit(sorted, occupied) {
+  if (Number.isFinite(occupied)) {
+    const split = sorted.findIndex((state) => state.index >= occupied);
+    return split >= 3 && sorted.length - split >= 3
+      ? { split, rule: "índice de banda" } : null;
+  }
+  const nearest = sorted.reduce((best, state, index) =>
+    Math.abs(state.energy) < Math.abs(sorted[best].energy) ? index : best, 0);
+  let best = null;
+  for (let start = Math.max(1, nearest - 3); start <= nearest && start + 4 < sorted.length; start += 1) {
+    const isolation = Math.min(
+      sorted[start].energy - sorted[start - 1].energy,
+      sorted[start + 4].energy - sorted[start + 3].energy,
+    );
+    if (!best || isolation > best.isolation) best = { isolation, split: start + 2 };
+  }
+  return best ? { split: best.split, rule: "aislamiento" } : null;
+}
+
+// Observables de baja energia invariantes frente a un desplazamiento rigido de energia.
+function ctSpectralLowEnergyObservables(row) {
+  const occupied = Number(row.flat_manifold?.occupied_bands_per_k ?? row.occupied_bands_per_k);
+  const perK = new Map();
+  (row.bands || []).forEach((point) => {
+    const energy = Number(point.energy_aligned_eV ?? point.energy_eV);
+    if (!Number.isFinite(energy)) return;
+    if (!perK.has(point.k_index)) perK.set(point.k_index, { label: "", states: [] });
+    const entry = perK.get(point.k_index);
+    entry.states.push({ energy, index: Number(point.absolute_band_index) });
+    if (point.k_label) entry.label = point.k_label;
+  });
+  const manifold = [];
+  const valence = [];
+  const conduction = [];
+  const remoteAbove = [];
+  const remoteBelow = [];
+  const atLabel = new Map();
+  const rules = new Set();
+  let truncated = 0;
+  perK.forEach(({ label, states }) => {
+    const sorted = states.slice().sort((left, right) => left.energy - right.energy);
+    const chosen = ctSpectralManifoldSplit(sorted, occupied);
+    if (!chosen) { truncated += 1; return; }
+    rules.add(chosen.rule);
+    const split = chosen.split;
+    const four = sorted.slice(split - 2, split + 2).map((state) => state.energy);
+    manifold.push(...four);
+    valence.push(four[0], four[1]);
+    conduction.push(four[2], four[3]);
+    remoteBelow.push(sorted[split - 3].energy);
+    remoteAbove.push(sorted[split + 2].energy);
+    if (label && !atLabel.has(label)) atLabel.set(label, four);
+  });
+  if (!manifold.length) return null;
+  const indexAnchored = rules.has("índice de banda") && rules.size === 1;
+  return {
+    truncated,
+    indexAnchored,
+    rule: Array.from(rules).join("+"),
+    kpoints: perK.size,
+    widthMeV: 1000 * (Math.max(...manifold) - Math.min(...manifold)),
+    // Minimos y maximos sobre todo el camino: solo son fiables si el manifold esta
+    // anclado por indice de banda en cada k.
+    neutralityGapMeV: indexAnchored
+      ? 1000 * (Math.min(...conduction) - Math.max(...valence)) : null,
+    remoteConductionGapMeV: indexAnchored
+      ? 1000 * (Math.min(...remoteAbove) - Math.max(...conduction)) : null,
+    remoteValenceGapMeV: indexAnchored
+      ? 1000 * (Math.min(...valence) - Math.max(...remoteBelow)) : null,
+    splittings: Array.from(atLabel.entries()).map(([label, four]) =>
+      `${label} ${(1000 * (four[3] - four[0])).toFixed(1)}`),
+  };
+}
+
 function ctSpectralReorderKGammaMK(row) {
   const path = row.k_path || {};
   const pointsPerSegment = Number(path.points_per_segment);
@@ -14710,10 +14874,10 @@ function ctSpectralBandPlot(spectra) {
   const showKPrime = document.getElementById("ct-spectral-show-kprime")?.checked === true;
   const selected = spectra.filter((row) => showKPrime || !String(row.k_path?.name || "").includes("kprime"));
   const hasComputedFermi = selected.some((row) => row.neutrality_reference?.chemical_potential_available === true);
-  const pureTbg = selected.find((row) => row.material_system === "pure_tbg");
+  const pureTbg = selected.some((row) => row.material_system === "pure_tbg");
   const plotContext = pureTbg
-    ? `TBG puro · Graph2Mat N${Number(pureTbg.training_size)}`
-    : "Graph2Mat N480";
+    ? `TBG puro · ${selected.map((row) => ctSpectralRowLabel(row)).join(" + ")}`
+    : selected.map((row) => ctSpectralRowLabel(row)).join(" + ") || "espectro moiré";
   const heuristicRows = [];
   const pointsFor = (row) => (row.bands || []).filter((point) => {
     const energy = 1000 * Number(point.energy_aligned_eV ?? point.energy_eV);
@@ -14723,7 +14887,13 @@ function ctSpectralBandPlot(spectra) {
     (row.bands || []).forEach((point) => {
       if (point.k_label) ticks.set(Number(point.k_distance), point.k_label);
     });
-    const label = `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`;
+    const label = ctSpectralRowLabel(row);
+    const model = String(row.model || "").toLowerCase();
+    if (model === "tight_binding") {
+      return ctSpectralDirectBandTraces(
+        row, pointsFor(row), markerSize, markerOpacity, mode === "raw", visibleBandCount,
+      );
+    }
     if (mode === "heuristic") {
       const result = ctSpectralCachedHeuristicTracks(row.bands || [], {
         count: visibleBandCount, windowMeV: selectionWindow, poolSize: heuristicPool,
@@ -14807,42 +14977,9 @@ function ctSpectralBandPlot(spectra) {
         },
       ];
     }
-    const bands = new Map();
-    pointsFor(row).forEach((point) => {
-      const bandIndex = Number(point.band_index);
-      if (!bands.has(bandIndex)) bands.set(bandIndex, []);
-      bands.get(bandIndex).push(point);
-    });
-    const model = String(row.model || "").toLowerCase();
-    return Array.from(bands.entries())
-      .sort(([, left], [, right]) => {
-        const meanAbs = (points) => points.reduce((sum, point) =>
-          sum + Math.abs(Number(point.energy_aligned_eV ?? point.energy_eV)), 0) / points.length;
-        return meanAbs(left) - meanAbs(right);
-      })
-      .slice(0, bands.size)
-      .sort(([left], [right]) => left - right)
-      .map(([bandIndex, points], index) => {
-        points.sort((left, right) => Number(left.k_index) - Number(right.k_index));
-        return {
-          x: points.map((point) => Number(point.k_distance)),
-          y: points.map((point) => 1000 * Number(point.energy_aligned_eV ?? point.energy_eV)),
-          customdata: points.map(() => bandIndex),
-          mode: mode === "raw" ? "markers" : "lines+markers",
-          name: `${methodDisplayLabel(row.model)} · N${row.training_size} · s${row.seed}`,
-          legendgroup: `${model}-${row.training_size}-${row.seed}`,
-          showlegend: index === 0,
-          line: {
-            color: model === "deeph" ? "#d62728" : "#1f77b4",
-            dash: model === "deeph" ? "dot" : "solid",
-            width: 1.2,
-            shape: "spline",
-            smoothing: 0.45,
-          },
-          marker: { size: mode === "raw" ? 3 : markerSize, opacity: mode === "raw" ? 0.3 : markerOpacity },
-          hovertemplate: "rango energético %{customdata}<br>k %{x:.4f}<br>E %{y:.3f} meV<extra>%{fullData.name}</extra>",
-        };
-      });
+    return ctSpectralDirectBandTraces(
+      row, pointsFor(row), markerSize, markerOpacity, mode === "raw", visibleBandCount,
+    );
   });
   const tickRows = Array.from(ticks.entries()).sort(([left], [right]) => left - right);
   return {
@@ -14934,7 +15071,10 @@ async function ctSpectralRender(payload) {
       </dl>`;
   }
   const selection = ctSpectralSelection();
+  // El tight binding no pasa por los filtros de entrenamiento/seed/modelo: es una
+  // referencia analitica independiente, se superpone con su propia casilla.
   const baseSpectra = (summary.spectra || []).filter((row) =>
+    row.model !== "tight_binding" &&
     (!row.training_size || Number(row.training_size) === selection.training_size) &&
     (row.seed == null || Number(row.seed) === selection.seed) &&
     (selection.model === "all" || String(row.model || "").toLowerCase() === selection.model)
@@ -14964,16 +15104,77 @@ async function ctSpectralRender(payload) {
       visible_band_tier: "tier_projected_kprime_diagnostic",
     }] : []),
   ]);
+  const tightBinding = (summary.spectra || []).find((row) => row.model === "tight_binding");
+  const showTightBinding = tightBinding
+    && document.getElementById("ct-spectral-tight-binding")?.checked === true;
+  if (showTightBinding) spectra.push(tightBinding);
   const bandPlot = ctSpectralBandPlot(spectra);
   const hasComputedFermi = spectra.some((row) => row.neutrality_reference?.chemical_potential_available === true);
   const warning = document.getElementById("ct-spectral-scientific-warning");
   if (warning) {
     const plotMode = document.getElementById("ct-spectral-plot-mode")?.value;
-    warning.textContent = plotMode === "spectral"
+    warning.textContent = (plotMode === "spectral"
       ? "El heatmap C-pz no afirma identidad continua de banda."
       : plotMode === "heuristic"
         ? "Las líneas aceptadas pasan por autovalores calculados; siguen siendo una conexión heurística, no identidad física de banda."
-        : "Los marcadores son autovalores calculados y la spline entre ellos es sólo una guía visual; en cruces no garantiza identidad física de banda.";
+        : "Los marcadores son autovalores calculados y los segmentos lineales son una guía visual; en cruces no garantizan identidad física de banda.")
+      + (showTightBinding
+        ? " TB atomístico pz: referencia aproximada, no ground truth DFT; base y teoría electrónica distintas de Graph2Mat, sólo comparable tras recentrar cada método por su propia neutralidad."
+        : "");
+  }
+  const tightBindingHost = document.getElementById("ct-spectral-tight-binding-observables");
+  if (tightBindingHost) {
+    const rows = spectra.filter((row) => (row.bands || []).length).map((row) => {
+      const observables = ctSpectralLowEnergyObservables(row);
+      const label = ctSpectralRowLabel(row);
+      if (!observables) return `<div><dt>${escapeHtml(label)}</dt><dd>ventana insuficiente</dd></div>`;
+      // Un valor negativo es un solape de bandas, no un gap: se etiqueta como tal.
+      const asGap = (value) => `${value > 0 ? "gap" : "solape"} ${Math.abs(value).toFixed(1)}`;
+      const path = row.path_observables || {};
+      const mesh = row.mesh_observables || {};
+      const pathWidth = Number(path.path_manifold_width_eV);
+      const globalWidth = Number(mesh.global_manifold_width_eV);
+      const tightBindingSummary = row.model === "tight_binding"
+        ? `camino: ${Number.isFinite(pathWidth) ? (1000 * pathWidth).toFixed(1) : "—"} meV · ` +
+          `malla ${escapeHtml((mesh.mesh || []).join("×"))}: ${Number.isFinite(globalWidth) ? (1000 * globalWidth).toFixed(1) : "—"} meV · ` +
+          `neutralidad indirecta: ${Number.isFinite(Number(mesh.indirect_neutrality_gap_eV)) ? asGap(1000 * Number(mesh.indirect_neutrality_gap_eV)) : "—"} meV · `
+        : "comparación global: no disponible sin índices absolutos Graph2Mat · ";
+      const selectedSummary = row.model === "tight_binding"
+        ? ""
+        : `estimación visual del camino ${observables.widthMeV.toFixed(1)} meV · `;
+      return `<div><dt>${escapeHtml(label)}</dt><dd>` +
+        tightBindingSummary + selectedSummary +
+        `splitting ${escapeHtml(observables.splittings.join(", "))} meV · ` +
+        `manifold por ${escapeHtml(observables.rule)}` +
+        (observables.truncated ? ` · ${observables.truncated}/${observables.kpoints} k sin ventana suficiente` : "") +
+        `</dd></div>`;
+    });
+    // Resolucion de Graph2Mat frente a la escala de cada observable: el gate congelado
+    // del modelo es una cota inferior de su incertidumbre, asi que todo observable de
+    // tamano comparable o menor queda fuera de lo que la comparacion puede afirmar.
+    const gate = 1000 * Number(payload.pure_tbg?.precision_gate?.score_eV
+      ?? summary.precision_gate?.score_eV ?? NaN);
+    const tightBinding = spectra.find((row) => row.model === "tight_binding");
+    const resolutionNote = tightBinding && Number.isFinite(gate) ? (() => {
+      const path = tightBinding.path_observables || {};
+      const scales = [
+        ["anchura del manifold", 1000 * Number(path.path_manifold_width_eV)],
+        ["separación a bandas remotas", 1000 * Math.min(
+          Math.abs(Number(path.path_remote_valence_gap_eV)),
+          Math.abs(Number(path.path_remote_conduction_gap_eV)))],
+        ["splitting en K", 1000 * Math.abs(Number(path.path_neutrality_gap_eV))],
+      ].filter(([, value]) => Number.isFinite(value));
+      const resolved = scales.filter(([, value]) => value > gate).map(([name]) => name);
+      const unresolved = scales.filter(([, value]) => value <= gate)
+        .map(([name, value]) => `${name} (${value.toFixed(2)} meV)`);
+      return `<p class="field-help"><strong>Resolución:</strong> el gate congelado de ` +
+        `Graph2Mat es ${gate.toFixed(2)} meV. Comparable: ${resolved.join(", ") || "ninguno"}. ` +
+        `Por debajo del gate, NO comparable cuantitativamente: ` +
+        `${unresolved.join(", ") || "ninguno"}.</p>`;
+    })() : "";
+    tightBindingHost.innerHTML = rows.length
+      ? `<dl class="summary-grid">${rows.join("")}</dl>${resolutionNote}`
+      : "Sin espectros cargados.";
   }
   const heuristicHost = document.getElementById("ct-spectral-heuristic-diagnostics");
   if (heuristicHost) {
@@ -15028,52 +15229,74 @@ async function ctSpectralRender(payload) {
     ].map(([key, label]) => ({
       x: points.map((point) => 1000 * Number(point.energy_aligned_eV)),
       y: points.map((point) => Number(point[key])), mode: "lines",
-      name: `${label} · N${row.training_size}`,
+      name: `${label} · ${ctSpectralRowLabel(row)}`,
     }));
     return (row.low_energy_dos || []).length ? [{
       x: row.low_energy_dos.map((point) => 1000 * Number(point.energy_aligned_eV)),
       y: row.low_energy_dos.map((point) => point.dos), mode: "lines",
-      name: `${methodDisplayLabel(row.model)} · N${row.training_size} · legacy`,
+      name: `${ctSpectralRowLabel(row)} · DOS parcial`,
+      line: {
+        color: row.model === "tight_binding" ? "#b91c1c" : "#1f77b4",
+        dash: row.model === "tight_binding" ? "dash" : "solid",
+      },
     }] : [];
   });
   // Recta de Dirac analitica g(E) = 4*A*|E| / (2*pi*(hbar*v_F)^2), con A el area de la
   // celda moire y hbar*v_F = 6.58 eV*A. NO es un ajuste ni un calculo: es la DOS lineal
   // del grafeno, y se extiende mas alla de lo calculado para situar el pico frente al
   // fondo. El cruce con la altura del pico marca donde la V supera a las bandas planas.
-  const diracTraces = spectra.flatMap((row) => {
-    const cell = row.moire_cell_area_ang2 || 14866;
-    const coefficient = (2 * 2 * cell) / (2 * Math.PI * 6.58 * 6.58);
-    const reach = Number(document.getElementById("ct-spectral-dirac-reach")?.value || 0);
-    if (!reach) return [];
-    const grid = Array.from({ length: 401 }, (_, index) => -reach + (index * 2 * reach) / 400);
-    return [{
+  // Benchmark de MONOCAPA, no del moire: g(E) = 4*A*|E| / (2*pi*(hbar*v_F)^2). No es un
+  // ajuste ni un calculo del sistema. Se dibuja UNA sola traza (antes se duplicaba por
+  // cada espectro) y usa el hbar*v_F medido del propio modelo TB cuando esta disponible,
+  // en vez del 6.58 eV*A generico del grafeno, que no es el de esta parametrizacion.
+  const diracReach = Number(document.getElementById("ct-spectral-dirac-reach")?.value || 0);
+  if (diracReach) {
+    const reference = spectra.find((row) => row.preflight?.monolayer?.hbar_v_fermi_eV_ang)
+      || spectra[0] || {};
+    const hbarV = Number(reference.preflight?.monolayer?.hbar_v_fermi_eV_ang) || 6.58;
+    const measured = Boolean(reference.preflight?.monolayer?.hbar_v_fermi_eV_ang);
+    const cell = reference.moire_cell_area_ang2 || 14866;
+    const coefficient = (2 * 2 * cell) / (2 * Math.PI * hbarV * hbarV);
+    const grid = Array.from({ length: 401 },
+      (_, index) => -diracReach + (index * 2 * diracReach) / 400);
+    dosTraces.push({
       x: grid,
       y: grid.map((energy) => (coefficient * Math.abs(energy)) / 1000),
       mode: "lines",
-      name: `Dirac analitica (extrapolada) · N${row.training_size}`,
+      name: `Benchmark monocapa · ħv_F ${hbarV.toFixed(3)} eV·Å ${measured ? "(medido)" : "(genérico)"}`,
       line: { dash: "dash", width: 2, color: "#8a8984" },
-      hovertemplate: "E %{x:.0f} meV<br>DOS Dirac %{y:.0f} estados/eV<extra>extrapolacion, no calculada</extra>",
-    }];
-  });
-  dosTraces.push(...diracTraces);
+      hovertemplate: "E %{x:.0f} meV<br>DOS monocapa %{y:.0f} estados/eV<extra>benchmark lineal, no calculado sobre el moiré</extra>",
+    });
+  }
   const diagnosticWindow = Number(document.getElementById("ct-spectral-diagnostic-window")?.value || 50);
   const diagnosticTraces = spectra.flatMap((row) => {
     const points = (row.bands || []).filter((point) =>
       point.weight_c_pz != null && Math.abs(1000 * Number(point.energy_aligned_eV)) <= diagnosticWindow
     );
+    // El tight binding es ortogonal (S = I) y no tiene C†SC ni residuo generalizado; el
+    // hover generico les metia NaN. Y el recuento debe ser el de estados REALMENTE
+    // dibujados en la ventana, no el num_bands nominal del solver.
+    const orthogonal = String(row.model || "").toLowerCase() === "tight_binding";
+    const shown = new Set(points.map((point) =>
+      orthogonal ? point.absolute_band_index : point.band_index)).size;
     return points.length ? [{
       x: points.map((point) => Number(point.k_distance)),
       y: points.map((point) => 1000 * Number(point.energy_aligned_eV)),
-      mode: "markers", name: `${Number(row.num_bands || new Set(points.map((point) => point.band_index)).size)} estados · N${row.training_size}`,
-      customdata: points.map((point) => [
-        Number(point.weight_c_pz), Number(point.normalization_cdagger_s_c),
-        Number(point.generalized_relative_residual),
-      ]),
+      mode: "markers",
+      name: `${shown}/${Number(row.num_bands) || shown} estados en ventana · ${ctSpectralRowLabel(row)}`,
+      customdata: points.map((point) => (orthogonal
+        ? [Number(point.weight_c_pz), Number(point.weight_graphene_lower)]
+        : [
+          Number(point.weight_c_pz), Number(point.normalization_cdagger_s_c),
+          Number(point.generalized_relative_residual),
+        ])),
       marker: {
         color: points.map((point) => Number(point.weight_c_pz)), colorscale: "Viridis",
         size: 7, opacity: 0.8, showscale: true, colorbar: { title: "C pz" },
       },
-      hovertemplate: "E %{y:.3f} meV<br>C pz %{customdata[0]:.4f}<br>C†SC %{customdata[1]:.6f}<br>residuo %{customdata[2]:.2e}<extra></extra>",
+      hovertemplate: orthogonal
+        ? "E %{y:.3f} meV<br>C pz %{customdata[0]:.4f} (base ortogonal, S = I)<br>peso capa inferior %{customdata[1]:.4f}<extra></extra>"
+        : "E %{y:.3f} meV<br>C pz %{customdata[0]:.4f}<br>C†SC %{customdata[1]:.6f}<br>residuo %{customdata[2]:.2e}<extra></extra>",
     }] : [];
   });
   const scalarTrace = (key, name) => {
@@ -15438,6 +15661,7 @@ function setupCrossTesting() {
     "ct-spectral-min-weight", "ct-spectral-marker-size", "ct-spectral-marker-opacity",
     "ct-spectral-draw-mode", "ct-spectral-background", "ct-spectral-show-kprime",
     "ct-spectral-artifact", "ct-spectral-diagnostic-window", "ct-spectral-dirac-reach",
+    "ct-spectral-tight-binding",
   ].forEach((id) => {
     mvsBind(id, "change", ctSpectralRerender);
   });
