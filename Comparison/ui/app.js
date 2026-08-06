@@ -9664,7 +9664,9 @@ function currentPlotAxisColor() {
 // always reflect the active theme (dark by default, light via the UI toggle).
 Object.defineProperty(globalThis, "SCIENCE_PLOT_AXIS_COLOR", { get: currentPlotAxisColor });
 Object.defineProperty(globalThis, "SCIENCE_PLOT_GRID_COLOR", { get: currentPlotGridColor });
-const SCIENCE_PLOT_FONT_FAMILY = '"Inter", "STIX Two Text", "Latin Modern Roman", "Times New Roman", Georgia, sans-serif';
+// Serifa primero: es lo que da el aspecto de figura de paper del estilo "science" de
+// SciencePlots (New Computer Modern). Cae a Times/Georgia si no hay nada instalado.
+const SCIENCE_PLOT_FONT_FAMILY = '"STIX Two Text", "Latin Modern Roman", "CMU Serif", "Nimbus Roman", "Times New Roman", Georgia, serif';
 const PLOT_COLORS = [
   "#4477aa",
   "#228833",
@@ -9676,6 +9678,98 @@ const PLOT_COLORS = [
   "#009988",
   "#997700",
 ];
+// Estilo tipo "science" de SciencePlots, pero en Plotly: marco cerrado en los cuatro
+// lados, ticks hacia dentro con ticks menores, sin rejilla y tipografia con serifa. Toma
+// los colores del tema activo, asi que funciona igual en oscuro y en claro.
+// Tipografia de las graficas. Todo lo legible va a ~2x del tamano por defecto de Plotly:
+// estas figuras se miran de lejos y se exportan a PNG para informes.
+const SCIENCE_PLOT_TICK_SIZE = 20;
+const SCIENCE_PLOT_AXIS_TITLE_SIZE = 25;
+const SCIENCE_PLOT_TITLE_SIZE = 26;
+const SCIENCE_PLOT_LEGEND_SIZE = 19;
+const SCIENCE_PLOT_HOVER_SIZE = 17;
+
+function scienceAxis(overrides = {}) {
+  const ink = SCIENCE_PLOT_AXIS_COLOR;
+  const { title, ...rest } = overrides;
+  return {
+    color: ink,
+    showline: true,
+    linecolor: ink,
+    linewidth: 1.6,
+    mirror: "ticks",
+    ticks: "inside",
+    tickcolor: ink,
+    ticklen: 9,
+    tickwidth: 1.5,
+    minor: { ticks: "inside", ticklen: 5, tickwidth: 1.1, tickcolor: ink, showgrid: false },
+    showgrid: false,
+    zeroline: false,
+    automargin: true,
+    tickfont: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_TICK_SIZE, color: ink },
+    ...rest,
+    title: typeof title === "string"
+      ? {
+        text: title,
+        font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_AXIS_TITLE_SIZE, color: ink },
+        standoff: 18,
+      }
+      : {
+        font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_AXIS_TITLE_SIZE, color: ink },
+        standoff: 18,
+        ...(title || {}),
+      },
+  };
+}
+
+function scienceLayout(overrides = {}) {
+  const ink = SCIENCE_PLOT_AXIS_COLOR;
+  const paper = currentPlotPaperColor();
+  const { title, xaxis, yaxis, legend, ...rest } = overrides;
+  return {
+    paper_bgcolor: paper,
+    plot_bgcolor: paper,
+    colorway: PLOT_COLORS,
+    font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_TICK_SIZE, color: ink },
+    title: typeof title === "string"
+      ? {
+        text: title,
+        font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_TITLE_SIZE, color: ink },
+        x: 0.02,
+        xanchor: "left",
+      }
+      : title,
+    legend: {
+      bgcolor: paper,
+      bordercolor: ink,
+      borderwidth: 1,
+      font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_LEGEND_SIZE, color: ink },
+      ...(legend || {}),
+    },
+    hoverlabel: { font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_HOVER_SIZE } },
+    ...rest,
+    xaxis: scienceAxis(xaxis || {}),
+    yaxis: scienceAxis(yaxis || {}),
+  };
+}
+
+// Un color por modelo, el mismo en bandas y en DOS. Colores del ciclo "science" de
+// SciencePlots, pensados para fondo claro: rojo 4.7:1 y azul 6.7:1 de contraste sobre
+// blanco. Ademas se distinguen en escala de grises por el trazo (discontinuo el TB,
+// continuo Graph2Mat).
+// El TB va en rojo saturado a proposito: en la DOS convive con hasta cinco series PDOS
+// de la paleta Tol, cuyo azul (#4477aa) le restaba contraste a un TB azulado.
+const SPECTRAL_MODEL_STYLE = {
+  tight_binding: { color: "#e8000b", dash: "dash", width: 2.6 },
+  graph2mat: { color: "#0c5da5", dash: "solid", width: 2.1 },
+  deeph: { color: "#c76a00", dash: "dot", width: 2.1 },
+};
+
+function spectralModelStyle(model) {
+  return SPECTRAL_MODEL_STYLE[String(model || "").toLowerCase()]
+    || { color: "#5b3a86", dash: "solid", width: 1.9 };
+}
+
 const DEEPH_REFERENCE_COLORS = ["#cc3311", "#882255", "#332288", "#117733", "#666666"];
 const DEEPH_PAPER_REFERENCE_LINES = {
   "g2m-deeph-plot-metric_scaling_h_mae": [
@@ -14319,14 +14413,16 @@ async function ctSpectralPlot(id, traces, title, xTitle, yTitle, layout = {}) {
     host.innerHTML = `<p class="field-help">${title}: pendiente de artefactos reales.</p>`;
     return;
   }
-  window.Plotly.newPlot(host, traces, {
+  window.Plotly.newPlot(host, traces, scienceLayout({
     title,
     ...layout,
     xaxis: { title: xTitle, ...(layout.xaxis || {}) },
     yaxis: { title: yTitle, ...(layout.yaxis || {}) },
-    margin: { l: 65, r: 20, t: 45, b: 55, ...(layout.margin || {}) },
-    height: layout.height || 430,
-  }, { displayModeBar: true, responsive: true });
+    // Margenes generosos: con etiquetas al doble de tamano, los valores del eje y y los
+    // titulos se cortaban contra el borde de la tarjeta.
+    margin: { l: 110, r: 34, t: 72, b: 96, ...(layout.margin || {}) },
+    height: layout.height || 700,
+  }), { displayModeBar: true, responsive: true, scrollZoom: true });
   requestAnimationFrame(() => resizePlot(id));
 }
 
@@ -14672,6 +14768,7 @@ function ctSpectralDirectBandTraces(
 ) {
   const model = String(row.model || "").toLowerCase();
   const tightBinding = model === "tight_binding";
+  const style = spectralModelStyle(model);
   // Rejilla completa de k del espectro: una banda que sale de la ventana energetica y
   // vuelve a entrar debe quedar cortada con null, no unida por encima del hueco.
   const kGrid = new Map();
@@ -14689,15 +14786,24 @@ function ctSpectralDirectBandTraces(
   });
   let entries = Array.from(grouped.entries()).sort(([left], [right]) => left - right);
   if (bandLimit > 0 && entries.length > bandLimit) {
-    // Conserva las bandas mas proximas a la neutralidad, por energia media |E - E_F|.
-    const centrality = (byK) => {
+    // El recorte tiene que ser SIMETRICO respecto a la neutralidad. Ordenar por |E| medio
+    // a secas borra un lado entero del espectro: en Graph2Mat band_index es el rango
+    // energetico dentro de la ventana, no una banda fisica, y los rangos bajos bajan
+    // mucho en negativo, asi que ganaban la media y se perdian los estados de +8 a +49 meV.
+    const meanEnergy = (byK) => {
       const values = Array.from(byK.values())
-        .map((point) => Math.abs(Number(point.energy_aligned_eV ?? point.energy_eV)));
+        .map((point) => Number(point.energy_aligned_eV ?? point.energy_eV));
       return values.reduce((sum, value) => sum + value, 0) / (values.length || 1);
     };
-    const keep = new Set(entries.slice()
-      .sort(([, left], [, right]) => centrality(left) - centrality(right))
-      .slice(0, bandLimit).map(([index]) => index));
+    const signed = entries.map(([index, byK]) => ({ index, mean: meanEnergy(byK) }));
+    const below = signed.filter((item) => item.mean < 0)
+      .sort((left, right) => right.mean - left.mean);   // los mas proximos a 0 primero
+    const above = signed.filter((item) => item.mean >= 0)
+      .sort((left, right) => left.mean - right.mean);
+    const half = Math.floor(bandLimit / 2);
+    const keptBelow = below.slice(0, Math.max(half, bandLimit - above.length));
+    const keptAbove = above.slice(0, bandLimit - keptBelow.length);
+    const keep = new Set([...keptBelow, ...keptAbove].map((item) => item.index));
     entries = entries.filter(([index]) => keep.has(index));
   }
   return entries
@@ -14715,14 +14821,16 @@ function ctSpectralDirectBandTraces(
         legendgroup: `${model}-${row.training_size ?? "reference"}-${row.seed ?? "none"}`,
         showlegend: index === 0,
         line: {
-          color: tightBinding ? "#b91c1c" : model === "deeph" ? "#d62728" : "#1f77b4",
-          dash: tightBinding || model === "deeph" ? "dash" : "solid",
-          width: tightBinding ? 1.5 : 1.2,
+          color: style.color,
+          dash: style.dash,
+          width: style.width,
           shape: "linear",
         },
         marker: {
-          size: raw ? 3 : markerSize,
-          opacity: raw ? 0.3 : markerOpacity,
+          size: raw ? 3.5 : markerSize,
+          opacity: raw ? 0.35 : markerOpacity,
+          color: style.color,
+          line: { width: 0 },
         },
         connectgaps: false,
         hovertemplate: `${tightBinding ? "índice absoluto" : "rango energético"} %{customdata[0]}` +
@@ -14856,7 +14964,11 @@ function ctSpectralBandPlot(spectra) {
   const ticks = new Map();
   const mode = document.getElementById("ct-spectral-plot-mode")?.value || "bands";
   const weightKey = document.getElementById("ct-spectral-weight")?.value || "weight_c_pz";
-  const visibleBandCount = Math.max(1, Number(document.getElementById("ct-spectral-visible-bands")?.value || 6));
+  // "0" = todas las bandas de la ventana en el modo directo. El modo heuristico necesita
+  // un numero de trazas >= 1, asi que conserva su valor por defecto cuando se pide todas.
+  const directBandLimit = Math.max(0, Number(
+    document.getElementById("ct-spectral-visible-bands")?.value ?? 0) || 0);
+  const visibleBandCount = Math.max(1, directBandLimit || 6);
   const energyWindow = Number(document.getElementById("ct-spectral-energy-window")?.value || 50);
   const selectionWindow = Number(document.getElementById("ct-spectral-selection-window")?.value || 20);
   const heuristicPool = Number(document.getElementById("ct-spectral-heuristic-pool")?.value || 30);
@@ -14891,7 +15003,7 @@ function ctSpectralBandPlot(spectra) {
     const model = String(row.model || "").toLowerCase();
     if (model === "tight_binding") {
       return ctSpectralDirectBandTraces(
-        row, pointsFor(row), markerSize, markerOpacity, mode === "raw", visibleBandCount,
+        row, pointsFor(row), markerSize, markerOpacity, mode === "raw", directBandLimit,
       );
     }
     if (mode === "heuristic") {
@@ -14978,7 +15090,7 @@ function ctSpectralBandPlot(spectra) {
       ];
     }
     return ctSpectralDirectBandTraces(
-      row, pointsFor(row), markerSize, markerOpacity, mode === "raw", visibleBandCount,
+      row, pointsFor(row), markerSize, markerOpacity, mode === "raw", directBandLimit,
     );
   });
   const tickRows = Array.from(ticks.entries()).sort(([left], [right]) => left - right);
@@ -14994,18 +15106,20 @@ function ctSpectralBandPlot(spectra) {
     heuristicRows,
     layout: {
       autosize: true,
-      height: mode === "heuristic" || mode === "original" ? 520 : 430,
-      paper_bgcolor: "#ffffff",
-      plot_bgcolor: "#ffffff",
+      height: mode === "heuristic" || mode === "original" ? 900 : 860,
       showlegend: !["heuristic", "original"].includes(mode),
       xaxis: {
         tickmode: "array",
         tickvals: tickRows.map(([distance]) => distance),
         ticktext: tickRows.map(([, label]) => label),
+        // Las verticales de alta simetria ya las dibujan las shapes de abajo.
         showgrid: false,
         zeroline: false,
+        minor: { ticks: "" },
+        // K, Γ, M: son las etiquetas mas importantes de la figura, van mas grandes aun.
+        tickfont: { family: SCIENCE_PLOT_FONT_FAMILY, size: 28, color: SCIENCE_PLOT_AXIS_COLOR },
       },
-      yaxis: energyWindow > 0 ? { range: [-energyWindow, energyWindow], gridcolor: "#e5e7eb", zeroline: false } : {},
+      yaxis: energyWindow > 0 ? { range: [-energyWindow, energyWindow], zeroline: false } : {},
       shapes: [
         ...tickRows.map(([distance]) => ({
           type: "line",
@@ -15015,9 +15129,12 @@ function ctSpectralBandPlot(spectra) {
           yref: "paper",
           y0: 0,
           y1: 1,
-          line: { color: mode === "heuristic" ? "#6b7280" : "#9ca3af", width: 1, dash: mode === "heuristic" ? "dot" : "solid" },
+          line: { color: SCIENCE_PLOT_GRID_COLOR, width: 1, dash: "solid" },
+          layer: "below",
         })),
         {
+          // Neutralidad. Discontinua y en el color del tema para que se lea sin competir
+          // con las bandas, como la linea de E_F de los papers.
           type: "line",
           xref: "paper",
           x0: 0,
@@ -15025,13 +15142,15 @@ function ctSpectralBandPlot(spectra) {
           yref: "y",
           y0: 0,
           y1: 0,
-          line: { color: "#4b5563", width: 1 },
+          line: { color: SCIENCE_PLOT_AXIS_COLOR, width: 1, dash: "dot" },
+          layer: "below",
         },
       ],
       annotations: mode === "heuristic" && !heuristicRows.some((row) => row.displayed.length) ? [{
         xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false,
         text: "Ninguna rama supera la estabilidad; las candidatas sensibles se muestran en gris",
-        font: { color: "#991b1b", size: 14 }, bgcolor: "rgba(255,255,255,0.9)",
+        font: { color: "#e8000b", size: 14, family: SCIENCE_PLOT_FONT_FAMILY },
+        bgcolor: currentPlotPaperColor(), bordercolor: SCIENCE_PLOT_AXIS_COLOR, borderwidth: 1,
       }] : [],
     },
   };
@@ -15220,25 +15339,37 @@ async function ctSpectralRender(payload) {
     })
   );
   const unfoldedTickRows = Array.from(unfoldedTicks.entries()).sort(([left], [right]) => left - right);
+  // Las componentes PDOS llevan color fijo y NINGUNA es roja: el rojo queda reservado al
+  // tight binding, que es la referencia independiente y tiene que destacar sobre todas.
+  // Antes salian del ciclo Tol, cuyo azul (#4477aa) competia con la linea del TB.
+  const PDOS_COMPONENTS = [
+    ["dos_total", "Total", "#3a3a3a"],
+    ["pdos_c_pz", "C pz", "#0c5da5"],
+    ["pdos_graphene_lower", "Grafeno inferior", "#00994e"],
+    ["pdos_graphene_upper", "Grafeno superior", "#845b97"],
+    ["pdos_hbn", "hBN", "#00879b"],
+  ];
+  let pdosRowIndex = 0;
   const dosTraces = spectra.flatMap((row) => {
     const points = row.projected_dos || [];
-    if (points.length) return [
-      ["dos_total", "Total"], ["pdos_c_pz", "C pz"],
-      ["pdos_graphene_lower", "Grafeno inferior"], ["pdos_graphene_upper", "Grafeno superior"],
-      ["pdos_hbn", "hBN"],
-    ].map(([key, label]) => ({
-      x: points.map((point) => 1000 * Number(point.energy_aligned_eV)),
-      y: points.map((point) => Number(point[key])), mode: "lines",
-      name: `${label} · ${ctSpectralRowLabel(row)}`,
-    }));
+    if (points.length) {
+      // Varias filas comparten los mismos cinco colores; se separan por el trazo.
+      const dash = pdosRowIndex++ === 0 ? "solid" : "dashdot";
+      return PDOS_COMPONENTS.map(([key, label, color]) => ({
+        x: points.map((point) => 1000 * Number(point.energy_aligned_eV)),
+        y: points.map((point) => Number(point[key])), mode: "lines",
+        name: `${label} · ${ctSpectralRowLabel(row)}`,
+        line: { color, dash, width: key === "dos_total" ? 2.2 : 1.6 },
+        hovertemplate: "E − E_F %{x:.1f} meV<br>%{y:.1f} estados/eV<extra>%{fullData.name}</extra>",
+      }));
+    }
+    const style = spectralModelStyle(row.model);
     return (row.low_energy_dos || []).length ? [{
       x: row.low_energy_dos.map((point) => 1000 * Number(point.energy_aligned_eV)),
       y: row.low_energy_dos.map((point) => point.dos), mode: "lines",
       name: `${ctSpectralRowLabel(row)} · DOS parcial`,
-      line: {
-        color: row.model === "tight_binding" ? "#b91c1c" : "#1f77b4",
-        dash: row.model === "tight_binding" ? "dash" : "solid",
-      },
+      line: { color: style.color, dash: style.dash, width: style.width },
+      hovertemplate: "E − E_F %{x:.1f} meV<br>DOS %{y:.1f} estados/eV<extra>%{fullData.name}</extra>",
     }] : [];
   });
   // Recta de Dirac analitica g(E) = 4*A*|E| / (2*pi*(hbar*v_F)^2), con A el area de la
@@ -15399,7 +15530,34 @@ function ctSpectralRerender() {
   }, 100);
 }
 
+// Marca las tarjetas de grafica como "Cargando...". El endpoint espectral son varios MB
+// incluso comprimido, asi que entre la peticion y el primer pintado hay un hueco visible.
+function ctSpectralBusy(loading) {
+  document
+    .querySelectorAll("#tab-cross-testing .plot-card, #ct-spectral-bands-chart, #ct-spectral-dos-chart")
+    .forEach((node) => node.classList.toggle("is-loading", Boolean(loading)));
+  const button = document.getElementById("ct-spectral-refresh");
+  if (button) {
+    button.disabled = Boolean(loading);
+    if (loading) {
+      button.dataset.idleLabel = button.dataset.idleLabel || button.textContent;
+      button.textContent = "Cargando…";
+    } else if (button.dataset.idleLabel) {
+      button.textContent = button.dataset.idleLabel;
+    }
+  }
+}
+
 async function ctSpectralRefresh() {
+  ctSpectralBusy(true);
+  try {
+    return await ctSpectralRefreshInner();
+  } finally {
+    ctSpectralBusy(false);
+  }
+}
+
+async function ctSpectralRefreshInner() {
   const payload = await request("/api/cross-testing/bilayer/spectral/results");
   ctSpectralLog("Resultados persistidos", payload);
   const status = payload.status || {};

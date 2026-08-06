@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import subprocess
 from pathlib import Path
@@ -90,6 +91,7 @@ def test_ui_groups_tb_by_absolute_index_and_uses_linear_style() -> None:
 const fs = require("fs");
 const vm = require("vm");
 global.methodDisplayLabel = (value) => value;
+global.spectralModelStyle = () => ({color: "#0c5da5", dash: "dash", width: 2.4});
 const source = fs.readFileSync(process.argv[2], "utf8");
 vm.runInThisContext(source.slice(
   source.indexOf("function ctSpectralRowLabel"),
@@ -331,3 +333,178 @@ def test_inertia_certification_reads_the_sign_it_certifies() -> None:
         diagnostic = result["inertia_diagnostic"]
         assert diagnostic["pivot_sign_margin"] < 1e-3
         assert diagnostic["smallest_absolute_real_pivot"] > 0.0
+
+
+def test_direct_band_limit_never_hides_one_side_of_the_spectrum() -> None:
+    """Recortar bandas por |E| medio borraba el lado positivo de Graph2Mat.
+
+    En Graph2Mat `band_index` es el rango energético dentro de la ventana shift-invert,
+    no una banda física: los rangos bajos bajan mucho en negativo, ganaban la media y se
+    perdían los estados de +8 a +49 meV. El recorte debe ser simétrico.
+    """
+    summary = REPO / "Comparison/results/tbg_pure_graph2mat/summary/spectral_results.json"
+    if not summary.exists():
+        pytest.skip("no Graph2Mat summary available")
+    script = r'''
+const fs = require("fs");
+const vm = require("vm");
+global.methodDisplayLabel = (value) => value;
+global.spectralModelStyle = () => ({color: "#0c5da5", dash: "dash", width: 2.4});
+const source = fs.readFileSync(process.argv[2], "utf8");
+vm.runInThisContext(source.slice(
+  source.indexOf("function ctSpectralRowLabel"),
+  source.indexOf("function ctSpectralManifoldSplit"),
+));
+const row = JSON.parse(fs.readFileSync(process.argv[3], "utf8")).spectra[0];
+for (const windowMeV of [25, 50, 75]) {
+  const points = (row.bands || []).filter((point) => {
+    const energy = 1000 * Number(point.energy_aligned_eV ?? point.energy_eV);
+    return Number.isFinite(energy) && Math.abs(energy) <= windowMeV;
+  });
+  for (const limit of [0, 4, 6, 8]) {
+    const traces = ctSpectralDirectBandTraces(row, points, 4, 0.8, false, limit);
+    const values = traces.flatMap((trace) => trace.y.filter((value) => value !== null));
+    if (!values.some((value) => value > 0.5)) {
+      throw Error(`ventana ${windowMeV} limite ${limit}: sin bandas de energia positiva`);
+    }
+    if (!values.some((value) => value < -0.5)) {
+      throw Error(`ventana ${windowMeV} limite ${limit}: sin bandas de energia negativa`);
+    }
+    if (limit > 0 && traces.length > limit) throw Error("el limite no se respeta");
+  }
+}
+'''
+    subprocess.run(
+        ["node", "-", str(REPO / "Comparison/ui/app.js"), str(summary)],
+        input=script, text=True, check=True,
+    )
+    html = (REPO / "Comparison/ui/index.html").read_text(encoding="utf-8")
+    control = html[html.index('id="ct-spectral-visible-bands"'):]
+    control = control[: control.index("</select>")]
+    # Por defecto no se debe ocultar nada en el gráfico científico principal.
+    assert '<option value="0" selected>' in control
+
+
+def test_api_compresses_large_payloads(tmp_path) -> None:
+    """El endpoint espectral son decenas de MB y congelaba la UI al cargar."""
+    import gzip as gzip_module
+    import json as json_module
+    import threading
+    import urllib.request
+    from http.server import HTTPServer
+
+    import pipeline_ui
+
+    payload = {"rows": [{"index": i, "value": i * 1.5, "label": "x" * 40} for i in range(20000)]}
+    compact = json_module.dumps(payload, separators=(",", ":")).encode()
+    assert len(compact) > pipeline_ui.GZIP_MINIMUM_BYTES
+
+    class Handler(pipeline_ui.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            pipeline_ui.json_response(self, payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url)) as response:
+            plain, plain_encoding = response.read(), response.headers.get("Content-Encoding")
+        request = urllib.request.Request(url, headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(request) as response:
+            packed, packed_encoding = response.read(), response.headers.get("Content-Encoding")
+    finally:
+        server.shutdown()
+
+    assert plain_encoding is None
+    assert packed_encoding == "gzip"
+    assert len(packed) < len(plain) / 2
+    assert json_module.loads(gzip_module.decompress(packed)) == payload
+    assert json_module.loads(plain) == payload
+    # Compacto, no pretty-printed: el indent=2 añadía ~50 % de bytes.
+    assert b'": ' not in plain[:200]
+
+
+def test_spectral_plots_use_a_paper_style_and_contrasting_model_colours() -> None:
+    """Estilo tipo SciencePlots y TB en azul frente a Graph2Mat en rojo."""
+    source = (REPO / "Comparison/ui/app.js").read_text(encoding="utf-8")
+    helper = source[source.index("function scienceAxis"): source.index("function spectralModelStyle")]
+    for expected in ('mirror: "ticks"', 'ticks: "inside"', "showgrid: false", "minor:"):
+        assert expected in helper, expected
+    assert "serif" in source[source.index("SCIENCE_PLOT_FONT_FAMILY"):][:400]
+    assert "scienceLayout({" in source  # el helper compartido lo aplica
+
+    style = source[source.index("const SPECTRAL_MODEL_STYLE"):]
+    style = style[: style.index("};")]
+    # Tight binding en rojo y Graph2Mat en azul, y cada uno con su propio trazo.
+    tight_binding = style[style.index("tight_binding:"): style.index("graph2mat:")]
+    graph2mat = style[style.index("graph2mat:"): style.index("deeph:")]
+    assert "#e8000b" in tight_binding and '"dash"' in tight_binding
+    assert "#0c5da5" in graph2mat and '"solid"' in graph2mat
+
+    # Todo lo legible al doble del tamaño por defecto de Plotly (12 px).
+    for name, minimum in (
+        ("SCIENCE_PLOT_TICK_SIZE", 20),
+        ("SCIENCE_PLOT_AXIS_TITLE_SIZE", 24),
+        ("SCIENCE_PLOT_TITLE_SIZE", 24),
+        ("SCIENCE_PLOT_LEGEND_SIZE", 18),
+    ):
+        value = int(source.split(f"const {name} = ")[1].split(";")[0])
+        assert value >= minimum, f"{name} = {value}, se esperaba >= {minimum}"
+
+    css = (REPO / "Comparison/ui/styles.css").read_text(encoding="utf-8")
+    card = css[css.index(".plot-card {"): css.index(".plot-card.js-plotly-plot")]
+    height = int(card.split("min-height:")[1].split("px")[0].strip())
+    assert height >= 860, f"las gráficas deben ser más altas que las 480px previas: {height}"
+    assert ".plot-card.is-loading::after" in css
+    assert 'content: "Cargando…"' in css
+
+
+def test_api_drops_payload_no_client_reads() -> None:
+    """`band_representations` son 6.3 MB que ningún cliente lee; fuera de la respuesta."""
+    import pipeline_ui
+
+    for client in ("Comparison/ui/app.js", "Comparison/ui/index.html", "Comparison/ui/lite.html"):
+        assert "band_representations" not in (REPO / client).read_text(encoding="utf-8")
+    trimmed = pipeline_ui.drop_unused_spectral_payload(
+        {"spectra": [{"bands": [1], "band_representations": {"raw": [1, 2, 3]}}], "other": 1}
+    )
+    assert trimmed["spectra"] == [{"bands": [1]}]
+    assert trimmed["other"] == 1
+    # No debe romperse con resúmenes sin `spectra`.
+    assert pipeline_ui.drop_unused_spectral_payload({"a": 1}) == {"a": 1}
+
+
+def test_plot_loading_indicator_always_clears() -> None:
+    """El indicador debe quitarse aunque la petición falle, o la UI se queda colgada."""
+    source = (REPO / "Comparison/ui/app.js").read_text(encoding="utf-8")
+    body = source[source.index("async function ctSpectralRefresh()"):]
+    body = body[: body.index("async function ctSpectralRefreshInner")]
+    assert "ctSpectralBusy(true)" in body
+    assert "finally" in body and "ctSpectralBusy(false)" in body
+
+
+def test_dos_reserves_red_for_the_tight_binding_reference() -> None:
+    """Graph2Mat entra por la rama projected_dos, así que no toma el color de modelo.
+
+    Sus cinco componentes salían del ciclo Tol, cuyo azul competía con la línea del TB.
+    Ahora llevan color fijo y ninguna es roja: el rojo es solo del tight binding.
+    """
+    source = (REPO / "Comparison/ui/app.js").read_text(encoding="utf-8")
+    block = source[source.index("const PDOS_COMPONENTS"):]
+    block = block[: block.index("];")]
+    colours = re.findall(r'"(#[0-9a-fA-F]{6})"', block)
+    assert len(colours) == 5, colours
+
+    def channels(value: str) -> tuple[int, int, int]:
+        return tuple(int(value[index:index + 2], 16) for index in (1, 3, 5))
+
+    for colour in colours:
+        red, green, blue = channels(colour)
+        assert not (red > 150 and red > green + 60 and red > blue + 60), (
+            f"{colour} es rojizo y compite con la serie del tight binding"
+        )
+    tight_binding_red = channels("#e8000b")
+    assert tight_binding_red[0] > 200 and tight_binding_red[1] < 80

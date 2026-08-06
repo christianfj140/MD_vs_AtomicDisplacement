@@ -110,9 +110,14 @@ sólo se acepta cuando:
 
 - se usa `SymmetricMode`, `MMD_AT_PLUS_A`, `diag_pivot_thresh=0` y sin equilibrado;
 - las permutaciones de filas y columnas son idénticas;
-- la parte imaginaria relativa de los pivotes es menor de `1e-7`;
+- el margen **por pivote** `|Im d_i| / |Re d_i|` es menor de `1e-3`, es decir, el signo de
+  cada pivote —lo único que la inercia lee— está determinado con holgura;
 - los tests pequeños coinciden exactamente con diagonalización densa;
 - los mismos índices dan los mismos autovalores con `sigma ± 50 meV`.
+
+El criterio es por pivote a propósito. Una razón global contra el pivote mayor mezcla
+escalas separadas por nueve órdenes de magnitud y produce falsos positivos; ver la sección
+de auditoría.
 
 Por eso el manifest lo llama
 `empirically_validated_not_sparse_ldlh_proof`, no una demostración LDLH general. La
@@ -293,7 +298,7 @@ comparables y no comparables, en vez de una advertencia genérica.
 | P2-03 | Confirmado | Se valida finitud, rangos e índices antes de aceptar el progreso |
 | P2-04 | Confirmado: etiqueta `single_12x12` fija | Se construye desde `mesh`; el test que consolidaba el bug, corregido |
 | P2-05 | Confirmado: `Number(null) === 0` → "N0 · s0" | Descarta null antes de convertir |
-| P2-06 | Confirmado | El control se aplica también al modo directo, por cercanía a neutralidad |
+| P2-06 | Confirmado, pero **la primera corrección causó una regresión** | Ver abajo |
 | P2-07 | Confirmado: NaN en hover para TB | Hover específico por método y recuento real de estados en ventana |
 | P2-08 | Confirmado | Traza única, `ħv_F` medido del modelo, oculta por defecto, alcance ≤1 eV |
 | P2-09 | Confirmado: 73.05 °C del proceso de agregación | Recursos por etapa; sólo se publica máximo global si todas registraron |
@@ -351,3 +356,34 @@ de una razón global. En aritmética exacta `D` es real, así que `|Im d_i|` mid
 local sobre ese mismo número. El peor caso observado deja seis órdenes de margen, y una
 degeneración real de LDL^H empuja esa razón hacia 1. Se conserva intacto el requisito
 estructural de permutación simétrica, que es el que exige la FAQ de SuperLU.
+
+### P2-06: la primera corrección ocultó medio espectro
+
+Aplicar "número de bandas visibles" al modo directo seleccionando por `|E - E_F|` medio
+**borró todo el lado positivo de Graph2Mat**. Con el valor por defecto de 6:
+
+```text
+sin límite:  12 trazas,  -47.9 .. +48.9 meV
+límite 6:     6 trazas,  -47.9 ..  +3.2 meV   <- desaparecen +8 .. +49 meV
+```
+
+La causa es que en Graph2Mat `band_index` no es una banda física, sino el **rango
+energético dentro de la ventana shift-invert** en cada k. Los rangos bajos descienden
+hasta −47.9 meV, así que su `|E|` medio (13–15 meV) gana a los rangos altos (22–28 meV) y
+el recorte se lleva un lado entero.
+
+Corregido en dos partes:
+
+1. El recorte es **simétrico**: mitad de las bandas por debajo de neutralidad y mitad por
+   encima, según la energía media con signo, rellenando desde el otro lado si falta.
+2. El control gana la opción **"todas las de la ventana"**, que pasa a ser la de por
+   defecto. El gráfico científico principal no oculta nada salvo que se pida.
+
+Verificado sobre datos reales para Graph2Mat y tight binding, en ventanas de ±25/±50/±75
+meV y límites 0/4/6/8: ambos lados del espectro presentes en las 24 combinaciones. Con
+test de regresión que falla si alguna deja de tener bandas de un signo.
+
+Lección: la auditoría clasificó P2-06 como cosmético ("saturación visual y control
+incumplido") y ofrecía como alternativa renombrar el control. La alternativa era la opción
+segura; aplicar el control sin pensar en la simetría convirtió un nit de UI en pérdida de
+datos en la figura principal.

@@ -1670,8 +1670,11 @@ pre {
   position: relative;
   width: 100%;
   min-width: 0;
-  height: 480px;
-  min-height: 480px;
+  /* La altura la manda el CSS: .plot-card .plot-container fuerza height:100%, asi que el
+     `height` del layout de Plotly no tiene efecto. Para agrandar una grafica hay que
+     tocar estas reglas, no el JS. */
+  height: 860px;
+  min-height: 860px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--plot-bg);
@@ -1692,8 +1695,15 @@ pre {
 }
 
 .plot-card.wide {
-  height: 520px;
-  min-height: 520px;
+  height: 960px;
+  min-height: 960px;
+}
+
+/* Las graficas a ancho completo son las cientificas principales (bandas, DOS): se les da
+   el maximo alto util sin obligar a hacer scroll en una pantalla de portatil. */
+.plot-card.full {
+  height: clamp(900px, calc(100vh - 110px), 1240px);
+  min-height: 900px;
 }
 
 .plot-card-row {
@@ -2335,4 +2345,36 @@ pre {
     text-align: left;
   }
 
+}
+
+/* Indicador de carga de las gráficas. El endpoint espectral son varios MB incluso
+   comprimido; sin esto la tarjeta se queda en blanco sin explicar por qué. */
+.plot-card.is-loading::after {
+  content: "Cargando…";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--plot-bg) 82%, transparent);
+  color: var(--ink-strong);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  z-index: 3;
+  animation: plot-loading-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes plot-loading-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plot-card.is-loading::after { animation: none; }
+}
+
+#ct-spectral-refresh[disabled] {
+  opacity: 0.65;
+  cursor: progress;
 }

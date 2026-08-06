@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 import csv
 import glob
+import gzip
 import hashlib
 import itertools
 import math
@@ -16232,15 +16233,50 @@ def archived_result_manifest_paths(root: Path) -> list[Path]:
     return sorted(selected.values())
 
 
+# Umbral a partir del cual comprimir. Por debajo, el gzip cuesta mas de lo que ahorra.
+GZIP_MINIMUM_BYTES = 64_000
+
+# Claves del resumen espectral que ningun cliente lee y que pesan mucho. Solo se omiten de
+# la respuesta HTTP: los ficheros de resultados en disco quedan intactos, que es donde
+# vive el registro cientifico. `band_representations` duplica el espectro en orden ARPACK
+# y son 6.3 MB de los 39 MB del endpoint.
+UNUSED_SPECTRAL_ROW_KEYS = ("band_representations",)
+
+
+def drop_unused_spectral_payload(summary: dict[str, Any]) -> dict[str, Any]:
+    rows = summary.get("spectra")
+    if not isinstance(rows, list):
+        return summary
+    return {
+        **summary,
+        "spectra": [
+            {key: value for key, value in row.items() if key not in UNUSED_SPECTRAL_ROW_KEYS}
+            if isinstance(row, dict) else row
+            for row in rows
+        ],
+    }
+
+
 def json_response(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
+    # El endpoint espectral devuelve decenas de MB (una sola fila de bandas proyectadas
+    # son 38 656 puntos). Con indent=2 eran 61 MB por el cable y 0.83 s de servidor, que
+    # es lo que congelaba la UI al cargar. Compacto son 39 MB en 0.27 s, y gzip nivel 1
+    # los deja en 9.4 MB por 0.13 s: el nivel 1 comprime 4x y es el que mejor relacion
+    # tiempo/tamano da aqui, ya que subir el nivel triplica el coste para ganar un 15 %.
     body = json.dumps(
         json_safe(payload),
-        indent=2,
         ensure_ascii=False,
         allow_nan=False,
+        separators=(",", ":"),
     ).encode("utf-8")
+    headers = [("Content-Type", "application/json; charset=utf-8")]
+    accepted = handler.headers.get("Accept-Encoding", "") if handler.headers else ""
+    if len(body) >= GZIP_MINIMUM_BYTES and "gzip" in accepted.lower():
+        body = gzip.compress(body, 1)
+        headers.append(("Content-Encoding", "gzip"))
     handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    for name, value in headers:
+        handler.send_header(name, value)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -18120,6 +18156,7 @@ class MoireSpectralCampaignRunner:
         pure_root = RESULTS_ROOT / "tbg_pure_graph2mat"
         tight_binding_root = RESULTS_ROOT / "tbg_tight_binding"
         summary = self._read(self.root / "summary/spectral_results.json")
+        summary = drop_unused_spectral_payload(summary)
         pure_summary = self._read(pure_root / "summary/spectral_results.json")
         if pure_summary.get("spectra"):
             summary = {
