@@ -14991,6 +14991,17 @@ function ctSpectralBandPlot(spectra) {
     ? `TBG puro · ${selected.map((row) => ctSpectralRowLabel(row)).join(" + ")}`
     : selected.map((row) => ctSpectralRowLabel(row)).join(" + ") || "espectro moiré";
   const heuristicRows = [];
+  let heatmapCount = 0;
+  // Un peso constante no aporta informacion espectral: colorea todos los puntos igual y,
+  // si el heatmap se dibuja encima de otro, lo tapa con una capa plana. Pasa en TBG puro,
+  // donde todo es carbono (weight_c_pz = 1, weight_hbn = 0 en todos los estados).
+  const weightIsInformative = (row) => {
+    const values = (row.bands || [])
+      .map((point) => Number(point[weightKey]))
+      .filter(Number.isFinite);
+    if (values.length < 2) return false;
+    return Math.max(...values) - Math.min(...values) > 1e-6;
+  };
   const pointsFor = (row) => (row.bands || []).filter((point) => {
     const energy = 1000 * Number(point.energy_aligned_eV ?? point.energy_eV);
     return Number.isFinite(energy) && (!energyWindow || Math.abs(energy) <= energyWindow);
@@ -15022,12 +15033,33 @@ function ctSpectralBandPlot(spectra) {
     if (mode === "original") {
       return [ctSpectralOriginalTrace(row.bands || [], energyWindow, 0.22)];
     }
-    if (mode === "spectral" && row.projection?.status === "completed") {
+    if (mode === "spectral" && row.projection?.status === "completed"
+        && weightIsInformative(row)) {
       const heatmap = ctSpectralHeatmap(row.bands || [], weightKey, energyWindow, broadening, saturation, logarithmic);
+      // Todas las trazas comparten la misma escala normalizada 0-1, asi que una sola
+      // colorbar las describe. Antes cada fila con proyeccion completa dibujaba la suya
+      // y salian tres apiladas y solapadas.
+      const firstHeatmap = heatmapCount === 0;
+      heatmapCount += 1;
       return [{
         type: "heatmap", x: heatmap.x, y: heatmap.y, z: heatmap.z,
-        name: label, showscale: true, colorscale: "Viridis", zmin: 0, zmax: 1, zsmooth: false,
-        colorbar: { title: logarithmic ? "log intensidad" : `I / p${saturation}`, thickness: 14 },
+        name: label, showscale: firstHeatmap, colorscale: "Viridis", zmin: 0, zmax: 1, zsmooth: false,
+        colorbar: {
+          title: {
+            text: logarithmic ? "log intensidad" : `intensidad / p${saturation}`,
+            side: "right",
+            font: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_AXIS_TITLE_SIZE, color: SCIENCE_PLOT_AXIS_COLOR },
+          },
+          thickness: 26,
+          len: 0.92,
+          outlinecolor: SCIENCE_PLOT_AXIS_COLOR,
+          outlinewidth: 1.4,
+          ticks: "outside",
+          ticklen: 7,
+          tickwidth: 1.4,
+          tickcolor: SCIENCE_PLOT_AXIS_COLOR,
+          tickfont: { family: SCIENCE_PLOT_FONT_FAMILY, size: SCIENCE_PLOT_TICK_SIZE, color: SCIENCE_PLOT_AXIS_COLOR },
+        },
         customdata: heatmap.z.map((values) => values.map(() => heatmap.colorMax)),
         hovertemplate: "k %{x:.5f}<br>E %{y:.2f} meV<br>intensidad normalizada %{z:.3f}<br>umbral global %{customdata:.3e}<extra></extra>",
       }];
@@ -15104,8 +15136,12 @@ function ctSpectralBandPlot(spectra) {
       : `Bandas de baja energía · ${plotContext}`,
     yTitle: hasComputedFermi ? "E − E_F (meV)" : "E − E_ref (meV)",
     heuristicRows,
+    informativeWeightRows: selected.filter(weightIsInformative),
     layout: {
       autosize: true,
+      // La colorbar vive fuera del area de dibujo: con las fuentes al doble necesita
+      // ~170 px a la derecha o Plotly la recorta contra el borde de la tarjeta.
+      ...(heatmapCount ? { margin: { l: 110, r: 190, t: 72, b: 96 } } : {}),
       height: mode === "heuristic" || mode === "original" ? 900 : 860,
       showlegend: !["heuristic", "original"].includes(mode),
       xaxis: {
@@ -15232,8 +15268,20 @@ async function ctSpectralRender(payload) {
   const warning = document.getElementById("ct-spectral-scientific-warning");
   if (warning) {
     const plotMode = document.getElementById("ct-spectral-plot-mode")?.value;
+    // En TBG puro todo es carbono: weight_c_pz = 1 y weight_hbn = 0 en todos los estados,
+    // asi que el peso no separa nada y el heatmap saldria de un solo color.
+    const weightLabel = document.getElementById("ct-spectral-weight")
+      ?.selectedOptions?.[0]?.textContent || weightKey;
+    const flatWeightRows = spectra.filter((row) =>
+      (row.bands || []).length && row.projection?.status === "completed"
+      && !bandPlot.informativeWeightRows.includes(row));
     warning.textContent = (plotMode === "spectral"
-      ? "El heatmap C-pz no afirma identidad continua de banda."
+      ? (flatWeightRows.length
+        ? `El peso «${weightLabel}» es constante en ${flatWeightRows.length} espectro(s) de carbono puro, `
+          + "donde no hay especies que separar: esos no se dibujan como heatmap. "
+          + "Usa «Grafeno inferior/superior», que sí varía, o un sistema con hBN. "
+        : "")
+        + "El heatmap no afirma identidad continua de banda."
       : plotMode === "heuristic"
         ? "Las líneas aceptadas pasan por autovalores calculados; siguen siendo una conexión heurística, no identidad física de banda."
         : "Los marcadores son autovalores calculados y los segmentos lineales son una guía visual; en cruces no garantizan identidad física de banda.")

@@ -508,3 +508,32 @@ def test_dos_reserves_red_for_the_tight_binding_reference() -> None:
         )
     tight_binding_red = channels("#e8000b")
     assert tight_binding_red[0] > 200 and tight_binding_red[1] < 80
+
+
+def test_spectral_heatmap_skips_constant_weights_and_shows_one_colorbar() -> None:
+    """En TBG puro todo es carbono: weight_c_pz = 1 y weight_hbn = 0 en todo el espectro.
+
+    Un heatmap de peso constante sale de un solo color y, dibujado encima de otro, lo tapa
+    con una capa plana. Y con varias filas proyectadas, Plotly apilaba una colorbar por
+    cada una.
+    """
+    source = (REPO / "Comparison/ui/app.js").read_text(encoding="utf-8")
+    assert "const weightIsInformative" in source
+    branch = source[source.index('if (mode === "spectral"'):]
+    branch = branch[: branch.index("}];")]
+    assert "weightIsInformative(row)" in branch, "el heatmap no filtra pesos constantes"
+    assert "showscale: firstHeatmap" in branch, "debe dibujarse una sola colorbar"
+    assert "thickness: 26" in branch and "outlinecolor" in branch
+
+    summary = REPO / "Comparison/results/tbg_tight_binding/summary/spectral_results.json"
+    if not summary.exists():
+        pytest.skip("no tight binding summary available")
+    row = __import__("json").loads(summary.read_text())["spectra"][0]
+    spread = {}
+    for key in ("weight_c_pz", "weight_hbn", "weight_graphene_lower"):
+        values = [float(point[key]) for point in row["bands"]]
+        spread[key] = max(values) - min(values)
+    # El TB es un modelo de un orbital: p_z y hBN no separan nada, las capas sí.
+    assert spread["weight_c_pz"] < 1e-6
+    assert spread["weight_hbn"] < 1e-6
+    assert spread["weight_graphene_lower"] > 1e-3

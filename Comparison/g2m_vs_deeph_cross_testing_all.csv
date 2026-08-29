@@ -1,0 +1,117 @@
+campaign,source_id,target_id,model,n_seeds,source_n_snapshots,source_n_atoms,target_n_atoms,h_mae_meV_mean,h_mae_meV_std,relative_frobenius_mean
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid100,graphene_5x5_vacancy,deeph,1,88,50,49,41.0731,0,0.05786
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid100,graphene_5x5_vacancy,graph2mat,1,88,50,49,14.0814,0,0.05151
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid150,graphene_5x5_vacancy,deeph,1,133,50,49,44.7472,0,0.05945
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid150,graphene_5x5_vacancy,graph2mat,1,133,50,49,15.7798,0,0.05848
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid20,graphene_5x5_vacancy,deeph,1,16,50,49,64.3169,0,0.07531
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid20,graphene_5x5_vacancy,graph2mat,1,16,50,49,17.8997,0,0.06263
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid200,graphene_5x5_vacancy,deeph,1,178,50,49,39.566,0,0.05435
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid200,graphene_5x5_vacancy,graph2mat,1,178,50,49,13.3874,0,0.05169
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid30,graphene_5x5_vacancy,deeph,1,25,50,49,48.2618,0,0.06124
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid30,graphene_5x5_vacancy,graph2mat,1,25,50,49,16.2767,0,0.05847
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid300,graphene_5x5_vacancy,deeph,1,268,50,49,27.7363,0,0.04701
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid300,graphene_5x5_vacancy,graph2mat,1,268,50,49,8.6892,0,0.03394
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid400,graphene_5x5_vacancy,deeph,1,358,50,49,20.6977,0,0.03882
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid400,graphene_5x5_vacancy,graph2mat,1,358,50,49,7.2281,0,0.03484
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid50,graphene_5x5_vacancy,deeph,1,43,50,49,45.7132,0,0.0562
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid50,graphene_5x5_vacancy,graph2mat,1,43,50,49,13.8348,0,0.05204
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid500,graphene_5x5_vacancy,deeph,1,448,50,49,23.2698,0,0.04505
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid500,graphene_5x5_vacancy,graph2mat,1,448,50,49,12.6846,0,0.04873
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid60,graphene_5x5_vacancy,deeph,1,52,50,49,39.5851,0,0.05585
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid60,graphene_5x5_vacancy,graph2mat,1,52,50,49,14.8472,0,0.05685
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid600,graphene_5x5_vacancy,deeph,1,538,50,49,23.7263,0,0.04451
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid600,graphene_5x5_vacancy,graph2mat,1,538,50,49,12.0944,0,0.04606
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid80,graphene_5x5_vacancy,deeph,1,70,50,49,37.1204,0,0.05441
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid80,graphene_5x5_vacancy,graph2mat,1,70,50,49,13.0564,0,0.04715
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid90,graphene_5x5_vacancy,deeph,1,79,50,49,49.8524,0,0.06542
+vacancy (w90->5x5_vacancy),graphene_5x5__graphene_5x5_scale_iid90,graphene_5x5_vacancy,graph2mat,1,79,50,49,12.1994,0,0.04697
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid100,graphene__graphene_w90_scale_iid500,deeph,1,88,49,2,158.6742,0,0.02628
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid100,graphene__graphene_w90_scale_iid500,graph2mat,1,88,49,2,68.7905,0,0.02443
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid200,graphene__graphene_w90_scale_iid500,deeph,1,178,49,2,123.3294,0,0.02186
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid200,graphene__graphene_w90_scale_iid500,graph2mat,1,178,49,2,57.2348,0,0.01976
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid30,graphene__graphene_w90_scale_iid500,deeph,1,25,49,2,180.9308,0,0.03278
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid30,graphene__graphene_w90_scale_iid500,graph2mat,1,25,49,2,75.6368,0,0.02575
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid400,graphene__graphene_w90_scale_iid500,graph2mat,1,358,49,2,80.119,0,0.02617
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid500,graphene__graphene_w90_scale_iid500,deeph,1,448,49,2,87.6085,0,0.01511
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid500,graphene__graphene_w90_scale_iid500,graph2mat,1,448,49,2,49.0834,0,0.01442
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid60,graphene__graphene_w90_scale_iid500,deeph,1,52,49,2,127.4273,0,0.02234
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid60,graphene__graphene_w90_scale_iid500,graph2mat,1,52,49,2,80.1224,0,0.02618
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid80,graphene__graphene_w90_scale_iid500,deeph,1,70,49,2,144.246,0,0.02528
+vacancy (w90->5x5_vacancy),graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid80,graphene__graphene_w90_scale_iid500,graph2mat,1,70,49,2,92.3672,0,0.02949
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid100,graphene_5x5_vacancy,deeph,1,88,2,49,46.1573,0,0.06003
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid100,graphene_5x5_vacancy,graph2mat,1,88,2,49,28.3565,0,0.08588
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid150,graphene_5x5_vacancy,deeph,1,133,2,49,54.2778,0,0.06801
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid150,graphene_5x5_vacancy,graph2mat,1,133,2,49,28.6025,0,0.0866
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid20,graphene_5x5_vacancy,deeph,1,16,2,49,53.562,0,0.07312
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid20,graphene_5x5_vacancy,graph2mat,1,16,2,49,33.7565,0,0.10861
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid200,graphene_5x5_vacancy,deeph,1,178,2,49,48.6612,0,0.06313
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid200,graphene_5x5_vacancy,graph2mat,1,178,2,49,27.3169,0,0.08183
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid30,graphene_5x5_vacancy,deeph,1,25,2,49,50.1936,0,0.06773
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid30,graphene_5x5_vacancy,graph2mat,1,25,2,49,33.1371,0,0.10679
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid300,graphene_5x5_vacancy,deeph,1,268,2,49,48.6715,0,0.06439
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid300,graphene_5x5_vacancy,graph2mat,1,268,2,49,26.0691,0,0.07749
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid400,graphene_5x5_vacancy,deeph,1,358,2,49,31.3871,0,0.04756
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid400,graphene_5x5_vacancy,graph2mat,1,358,2,49,26.4036,0,0.07874
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid50,graphene_5x5_vacancy,deeph,1,43,2,49,57.9834,0,0.07346
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid50,graphene_5x5_vacancy,graph2mat,1,43,2,49,30.7879,0,0.09717
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid500,graphene_5x5_vacancy,deeph,1,448,2,49,40.3594,0,0.05895
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid500,graphene_5x5_vacancy,graph2mat,1,448,2,49,25.6984,0,0.08294
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid60,graphene_5x5_vacancy,deeph,1,52,2,49,50.7019,0,0.07139
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid60,graphene_5x5_vacancy,graph2mat,1,52,2,49,29.7215,0,0.09197
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid600,graphene_5x5_vacancy,deeph,1,538,2,49,37.9472,0,0.05569
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid600,graphene_5x5_vacancy,graph2mat,1,538,2,49,26.2312,0,0.09104
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid80,graphene_5x5_vacancy,deeph,1,70,2,49,45.4045,0,0.05933
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid80,graphene_5x5_vacancy,graph2mat,1,70,2,49,31.8006,0,0.10122
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid90,graphene_5x5_vacancy,deeph,1,79,2,49,56.0509,0,0.0748
+vacancy (w90->5x5_vacancy),graphene__graphene_w90_scale_iid90,graphene_5x5_vacancy,graph2mat,1,79,2,49,29.2943,0,0.09013
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid100,graphene__graphene_w90_scale_iid500,deeph,1,88,49,2,158.6742,0,0.02628
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid100,graphene__graphene_w90_scale_iid500,graph2mat,1,88,49,2,68.7905,0,0.02443
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid200,graphene__graphene_w90_scale_iid500,deeph,1,178,49,2,123.3294,0,0.02186
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid200,graphene__graphene_w90_scale_iid500,graph2mat,1,178,49,2,57.2348,0,0.01976
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid30,graphene__graphene_w90_scale_iid500,deeph,1,25,49,2,180.9308,0,0.03278
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid30,graphene__graphene_w90_scale_iid500,graph2mat,1,25,49,2,75.6368,0,0.02575
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid400,graphene__graphene_w90_scale_iid500,graph2mat,1,358,49,2,80.119,0,0.02617
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid500,graphene__graphene_w90_scale_iid500,deeph,1,448,49,2,87.6085,0,0.01511
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid500,graphene__graphene_w90_scale_iid500,graph2mat,1,448,49,2,49.0834,0,0.01442
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid60,graphene__graphene_w90_scale_iid500,deeph,1,52,49,2,127.4273,0,0.02234
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid60,graphene__graphene_w90_scale_iid500,graph2mat,1,52,49,2,80.1224,0,0.02618
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid80,graphene__graphene_w90_scale_iid500,deeph,1,70,49,2,144.246,0,0.02528
+vacancy_to_w90,graphene_5x5_vacancy__graphene_5x5_vacancy_scale_iid80,graphene__graphene_w90_scale_iid500,graph2mat,1,70,49,2,92.3672,0,0.02949
+sweep (base),graphene_5x5__graphene_5x5_scale_iid100,graphene__graphene_w90_scale_iid500,deeph,3,88,50,2,49.8989,0.8823,0.00868
+sweep (base),graphene_5x5__graphene_5x5_scale_iid100,graphene__graphene_w90_scale_iid500,graph2mat,3,88,50,2,61.508,14.8138,0.02144
+sweep (base),graphene_5x5__graphene_5x5_scale_iid400,graphene__graphene_w90_scale_iid500,deeph,3,358,50,2,34.2499,1.9107,0.00693
+sweep (base),graphene_5x5__graphene_5x5_scale_iid400,graphene__graphene_w90_scale_iid500,graph2mat,3,358,50,2,31.1346,20.3871,0.01042
+sweep (base),graphene_5x5__graphene_5x5_scale_iid500,graphene__graphene_w90_scale_iid500,deeph,3,448,50,2,31.3019,3.6038,0.00611
+sweep (base),graphene_5x5__graphene_5x5_scale_iid500,graphene__graphene_w90_scale_iid500,graph2mat,3,448,50,2,62.6517,10.7756,0.02233
+sweep (base),graphene_5x5__graphene_5x5_scale_iid60,graphene__graphene_w90_scale_iid500,deeph,3,52,50,2,52.3847,1.9284,0.00895
+sweep (base),graphene_5x5__graphene_5x5_scale_iid60,graphene__graphene_w90_scale_iid500,graph2mat,3,52,50,2,66.0614,6.1909,0.02356
+sweep (base),graphene_5x5__graphene_5x5_scale_iid80,graphene__graphene_w90_scale_iid500,deeph,3,70,50,2,49.9218,1.9988,0.00867
+sweep (base),graphene_5x5__graphene_5x5_scale_iid80,graphene__graphene_w90_scale_iid500,graph2mat,3,70,50,2,68.9801,5.5021,0.02431
+sweep (base),graphene__graphene_w90_scale_iid100,graphene_5x5__graphene_5x5_scale_iid100,deeph,1,88,2,50,17.8882,0,0.02744
+sweep (base),graphene__graphene_w90_scale_iid100,graphene_5x5__graphene_5x5_scale_iid100,graph2mat,1,88,2,50,26.2496,0,0.06835
+sweep (base),graphene__graphene_w90_scale_iid150,graphene_5x5__graphene_5x5_scale_iid150,deeph,1,133,2,50,16.0331,0,0.0238
+sweep (base),graphene__graphene_w90_scale_iid150,graphene_5x5__graphene_5x5_scale_iid150,graph2mat,1,133,2,50,24.2051,0,0.06295
+sweep (base),graphene__graphene_w90_scale_iid20,graphene_5x5__graphene_5x5_scale_iid20,deeph,1,16,2,50,13.7963,0,0.02102
+sweep (base),graphene__graphene_w90_scale_iid20,graphene_5x5__graphene_5x5_scale_iid20,graph2mat,1,16,2,50,19.1811,0,0.05179
+sweep (base),graphene__graphene_w90_scale_iid200,graphene_5x5__graphene_5x5_scale_iid200,deeph,1,178,2,50,15.5477,0,0.02413
+sweep (base),graphene__graphene_w90_scale_iid200,graphene_5x5__graphene_5x5_scale_iid200,graph2mat,1,178,2,50,22.4681,0,0.05936
+sweep (base),graphene__graphene_w90_scale_iid30,graphene_5x5__graphene_5x5_scale_iid30,deeph,1,25,2,50,15.3346,0,0.02812
+sweep (base),graphene__graphene_w90_scale_iid30,graphene_5x5__graphene_5x5_scale_iid30,graph2mat,1,25,2,50,24.5112,0,0.06833
+sweep (base),graphene__graphene_w90_scale_iid300,graphene_5x5__graphene_5x5_scale_iid300,deeph,1,268,2,50,16.2337,0,0.02485
+sweep (base),graphene__graphene_w90_scale_iid300,graphene_5x5__graphene_5x5_scale_iid300,graph2mat,1,268,2,50,21.9646,0,0.05777
+sweep (base),graphene__graphene_w90_scale_iid400,graphene_5x5__graphene_5x5_scale_iid400,deeph,1,358,2,50,15.2274,0,0.02408
+sweep (base),graphene__graphene_w90_scale_iid400,graphene_5x5__graphene_5x5_scale_iid400,graph2mat,1,358,2,50,22.7008,0,0.0593
+sweep (base),graphene__graphene_w90_scale_iid50,graphene_5x5__graphene_5x5_scale_iid50,deeph,1,43,2,50,20.6981,0,0.03604
+sweep (base),graphene__graphene_w90_scale_iid50,graphene_5x5__graphene_5x5_scale_iid50,graph2mat,1,43,2,50,28.0538,0,0.07797
+sweep (base),graphene__graphene_w90_scale_iid500,graphene_5x5__graphene_5x5_scale_iid500,deeph,1,448,2,50,16.6758,0,0.02618
+sweep (base),graphene__graphene_w90_scale_iid500,graphene_5x5__graphene_5x5_scale_iid500,graph2mat,1,448,2,50,21.8557,0,0.06496
+sweep (base),graphene__graphene_w90_scale_iid60,graphene_5x5__graphene_5x5_scale_iid60,deeph,1,52,2,50,19.2967,0,0.03182
+sweep (base),graphene__graphene_w90_scale_iid60,graphene_5x5__graphene_5x5_scale_iid60,graph2mat,1,52,2,50,27.6128,0,0.07533
+sweep (base),graphene__graphene_w90_scale_iid600,graphene_5x5__graphene_5x5_scale_iid600,deeph,1,538,2,50,18.0776,0,0.02735
+sweep (base),graphene__graphene_w90_scale_iid600,graphene_5x5__graphene_5x5_scale_iid600,graph2mat,1,538,2,50,21.7181,0,0.0689
+sweep (base),graphene__graphene_w90_scale_iid80,graphene_5x5__graphene_5x5_scale_iid80,deeph,1,70,2,50,19.4018,0,0.02871
+sweep (base),graphene__graphene_w90_scale_iid80,graphene_5x5__graphene_5x5_scale_iid80,graph2mat,1,70,2,50,28.5563,0,0.07641
+sweep (base),graphene__graphene_w90_scale_iid90,graphene_5x5__graphene_5x5_scale_iid90,deeph,1,79,2,50,19.8128,0,0.02854
+sweep (base),graphene__graphene_w90_scale_iid90,graphene_5x5__graphene_5x5_scale_iid90,graph2mat,1,79,2,50,26.8032,0,0.0703
+sweep_inverse_probe,graphene_5x5__graphene_5x5_scale_iid20,graphene__graphene_w90_scale_iid20,deeph,1,16,50,2,144.1822,0,0.02732
+sweep_inverse_probe,graphene_5x5__graphene_5x5_scale_iid20,graphene__graphene_w90_scale_iid20,graph2mat,1,16,50,2,79.1153,0,0.02694
