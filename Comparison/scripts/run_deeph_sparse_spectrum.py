@@ -10,6 +10,7 @@ import re
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -21,6 +22,16 @@ from validate_deeph_sparse_solver import parse_openmx_band
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT / "shared") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "shared"))
+
+from artifact_signature import (  # noqa: E402
+    epc_artifact_node,
+    input_signature_sha256,
+)
+from artifact_signature import file_sha256 as optional_file_sha256  # noqa: E402
+from epc_occupations import contract_from_neutrality_reference  # noqa: E402
+
 DEFAULT_ENVIRONMENT = REPO_ROOT / "Comparison/results/graphene_hbn_magic_angle_spectral/solver/environment.json"
 DEFAULT_GPU_ENVIRONMENT = (
     REPO_ROOT / "Comparison/results/graphene_hbn_magic_angle_spectral/solver/environment_gpu_cudss.json"
@@ -48,6 +59,16 @@ DISK_POLL_SECONDS = 300.0
 MAX_CPU_TEMPERATURE_C = 85.0
 MAX_GPU_TEMPERATURE_C = 80.0
 DEFAULT_GPU_MEMORY_LIMIT_GIB = 28.0
+
+# C15 / E-F_001-S18: opt-in persistence of the S-normalised eigenspaces.
+EIGENSPACE_SCHEMA = "persisted_eigenspace_v1"
+EIGENSPACE_MANIFEST_NAME = "eigenspaces_manifest.json"
+DEFAULT_EIGENSPACE_DEGENERACY_EV = 1e-6
+DEFAULT_EIGENSPACE_MIN_METRIC = 1e-10
+EIGENSPACE_IDENTITY_TOLERANCE_POLICY = (
+    "max(norbits * eps_float64 * cond(V^dag S V), max_generalized_relative_residual)"
+)
+UNRECORDED = "unrecorded"
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -399,7 +420,9 @@ def estimated_neutrality_reference(input_dir: Path, energy_eV: float) -> dict:
     }
 
 
-def projected_band_data(output_dir: Path, raw_energies: np.ndarray) -> tuple[list[list[dict]], dict]:
+def projected_band_data(
+    output_dir: Path, raw_energies: np.ndarray, eigenvectors_persisted: bool = False
+) -> tuple[list[list[dict]], dict]:
     rows = []
     normalization_errors = []
     residuals = []
@@ -480,7 +503,7 @@ def projected_band_data(output_dir: Path, raw_energies: np.ndarray) -> tuple[lis
         "maximum_s_relative_hermiticity_before_solver_symmetrization": max(hermiticity_s, default=0.0),
         "overlap_positive_definite_full_space": "not_evaluated_large_sparse_system",
         "sampled_eigenstate_s_norm_positive": True,
-        "eigenvectors_persisted": False,
+        "eigenvectors_persisted": bool(eigenvectors_persisted),
         "validation_tolerances": {
             "normalization_absolute": 1e-8,
             "partition_absolute": 1e-6,
@@ -792,6 +815,377 @@ def track_bands_by_overlap(output_dir: Path, energies: np.ndarray) -> tuple[np.n
     }
 
 
+# ---------------------------------------------------------------------------
+# C15 / E-F_001-S18: S-normalised eigenspaces of the requested window
+# ---------------------------------------------------------------------------
+# The solver writes one ``eigenspace_<k>.json`` plus two raw ComplexF64 files per
+# k point (``deeph_eigenspace_persist.jl``); this side validates them, labels the
+# degenerate subspaces and signs one ``electronic_eigenspace`` DAG node per k.
+# The node's fields carry no q and no phonon mode by construction, which is what
+# lets the same eigenpairs be reused by every mode and every q (roadmap IV/V).
+
+
+def eigenspace_identity_tolerance(
+    maximum_residual: float, condition_number: float, orbital_count: int
+) -> float:
+    """``C†SC - I`` budget from the eigen-residual and the S conditioning.
+
+    Each entry of ``C†SC`` is an inner product over ``orbital_count`` terms, whose
+    standard floating-point bound is ``n * eps * |x|^T|y|``; ``cond(V†SV)`` — the
+    conditioning of the overlap *restricted to the persisted window*, which the
+    solver computes for free while Loewdin-orthonormalising — is what amplifies
+    that. The residual term takes over when the states themselves are only
+    loosely converged, because then it, not roundoff, sets the gauge error.
+    """
+    floor = orbital_count * float(np.finfo(np.float64).eps) * max(float(condition_number), 1.0)
+    return float(max(floor, float(maximum_residual)))
+
+
+def degenerate_subspace_labels(energies: np.ndarray, tolerance: float) -> list[int]:
+    """One label per state; states closer than ``tolerance`` share a subspace."""
+    energies = np.asarray(energies, dtype=float)
+    if energies.size == 0:
+        return []
+    if np.any(np.diff(energies) < -1e-12):
+        raise RuntimeError("Persisted eigenvalues are not ascending; cannot label subspaces")
+    return np.concatenate(([0], np.cumsum(np.diff(energies) > tolerance))).astype(int).tolist()
+
+
+def _read_complex_matrix(path: Path, shape: tuple[int, int]) -> np.ndarray:
+    values = np.fromfile(path, dtype=np.complex128)
+    if values.size != shape[0] * shape[1]:
+        raise RuntimeError(f"{path.name} holds {values.size} entries, expected {shape[0] * shape[1]}")
+    return values.reshape(shape, order="F")
+
+
+def load_persisted_eigenspace(output_dir: Path, k_index: int) -> dict:
+    """Read one persisted eigenspace: metadata, ``C`` and ``C†SC - I``."""
+    payload = json.loads(
+        (output_dir / f"eigenspace_{k_index:03d}.json").read_text(encoding="utf-8")
+    )
+    if payload.get("schema") != EIGENSPACE_SCHEMA or int(payload.get("k_index", -1)) != k_index:
+        raise RuntimeError(f"Eigenspace payload {k_index} is not a {EIGENSPACE_SCHEMA} for that k")
+    if payload.get("dtype") != "complex128" or payload.get("storage_order") != "fortran":
+        raise RuntimeError("Unsupported persisted eigenvector layout")
+    states = int(payload["state_count"])
+    payload["coefficients"] = _read_complex_matrix(
+        output_dir / payload["vectors_file"], (int(payload["norbits"]), states)
+    )
+    payload["overlap_minus_identity"] = _read_complex_matrix(
+        output_dir / payload["overlap_minus_identity_file"], (states, states)
+    )
+    return payload
+
+
+def persisted_eigenspace_data(
+    output_dir: Path, expected_kpoints: int, *, degeneracy_ev: float
+) -> tuple[list[dict], dict]:
+    """Validate every persisted window and summarise the S-orthonormality."""
+    rows: list[dict] = []
+    for k_index in range(expected_kpoints):
+        payload = load_persisted_eigenspace(output_dir, k_index)
+        energies = np.asarray(payload["energies_eV"], dtype=float)
+        residuals = np.asarray(payload["generalized_relative_residual"], dtype=float)
+        coefficients = payload["coefficients"]
+        deviation = payload["overlap_minus_identity"]
+        if not all(np.isfinite(value).all() for value in (energies, residuals, coefficients, deviation)):
+            raise RuntimeError(f"Non-finite persisted eigenspace at k={k_index}")
+        maximum_residual = float(residuals.max(initial=0.0))
+        condition_number = float(payload["window_metric_condition_number"])
+        tolerance = eigenspace_identity_tolerance(
+            maximum_residual, condition_number, int(payload["norbits"])
+        )
+        identity_error = float(np.abs(deviation).max(initial=0.0))
+        rows.append({
+            "k_index": k_index,
+            "k_fractional": [float(value) for value in payload["k_fractional"]],
+            "state_count": int(payload["state_count"]),
+            "solver_band_indices": [int(value) for value in payload["solver_band_indices"]],
+            "energies_eV": energies.tolist(),
+            "subspace_labels": degenerate_subspace_labels(energies, degeneracy_ev),
+            "maximum_energy_shift_vs_solver_eV": float(payload["maximum_energy_shift_vs_solver_eV"]),
+            "maximum_generalized_relative_residual": maximum_residual,
+            "window_metric_condition_number": condition_number,
+            "window_metric_minimum_eigenvalue": float(payload["window_metric_minimum_eigenvalue"]),
+            "identity_maximum_absolute_error": identity_error,
+            "identity_tolerance": tolerance,
+            "s_orthonormal": identity_error <= tolerance,
+            "vectors_file": payload["vectors_file"],
+            "vectors_sha256": optional_file_sha256(output_dir / payload["vectors_file"]),
+            "overlap_minus_identity_file": payload["overlap_minus_identity_file"],
+            "overlap_minus_identity_sha256": optional_file_sha256(
+                output_dir / payload["overlap_minus_identity_file"]
+            ),
+        })
+    diagnostics = {
+        "status": "valid" if rows and all(row["s_orthonormal"] for row in rows) else "failed",
+        "method": "loewdin_S_metric_then_rayleigh_ritz_in_window",
+        "eigenvectors_persisted": True,
+        "kpoint_count": len(rows),
+        "maximum_identity_absolute_error": max(
+            (row["identity_maximum_absolute_error"] for row in rows), default=0.0
+        ),
+        "maximum_identity_tolerance": max((row["identity_tolerance"] for row in rows), default=0.0),
+        "maximum_generalized_relative_residual": max(
+            (row["maximum_generalized_relative_residual"] for row in rows), default=0.0
+        ),
+        "maximum_window_metric_condition_number": max(
+            (row["window_metric_condition_number"] for row in rows), default=0.0
+        ),
+        "maximum_energy_shift_vs_solver_eV": max(
+            (row["maximum_energy_shift_vs_solver_eV"] for row in rows), default=0.0
+        ),
+        "identity_tolerance_policy": EIGENSPACE_IDENTITY_TOLERANCE_POLICY,
+        "degeneracy_tolerance_eV": degeneracy_ev,
+    }
+    if diagnostics["status"] != "valid":
+        raise RuntimeError(f"Persisted eigenspaces are not S-orthonormal: {diagnostics}")
+    return rows, diagnostics
+
+
+def _hamiltonian_sidecar(input_dir: Path) -> dict:
+    sidecar = input_dir / "hamiltonians_pred.manifest.json"
+    if not sidecar.is_file():
+        return {}
+    try:
+        return json.loads(sidecar.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+
+
+def solver_input_nodes(
+    input_dir: Path, *, hamiltonian_backend: str, siesta_runtime_ref: str
+) -> dict[str, dict]:
+    """The geometry/H/S DAG nodes the eigenspaces hang from.
+
+    Everything is taken from the files the solver actually consumed; whatever the
+    solver input does not record stays ``unrecorded`` rather than being invented,
+    while the sidecar hashes still make the signature move if it changes.
+    """
+    lattice = input_dir / "lat.dat"
+    element = input_dir / "element.dat"
+    sidecar = _hamiltonian_sidecar(input_dir)
+    geometry = epc_artifact_node(
+        "geometry",
+        {
+            "cell": {
+                "lattice_vectors_ang": np.loadtxt(lattice).T.tolist() if lattice.is_file() else None,
+                "reciprocal_sha256": optional_file_sha256(input_dir / "rlat.dat"),
+            },
+            "species": {
+                "element_dat_sha256": optional_file_sha256(element),
+                "atomic_numbers": (
+                    np.loadtxt(element, dtype=int).reshape(-1).tolist() if element.is_file() else None
+                ),
+            },
+            "positions_sha256": optional_file_sha256(input_dir / "site_positions.dat"),
+            "coordinate_convention": "deeph_site_positions_cartesian_ang",
+        },
+    )
+    hamiltonian = epc_artifact_node(
+        "electronic_hamiltonian",
+        {
+            "source_backend": hamiltonian_backend,
+            "model_or_binary_sha256": sidecar.get("source_sha256") or optional_file_sha256(
+                input_dir / "hamiltonians_pred.h5"
+            ),
+            "code_version": sidecar.get("code_version", UNRECORDED),
+            "basis": {
+                "orbital_types_sha256": optional_file_sha256(input_dir / "orbital_types.dat"),
+                "n_orbitals": sidecar.get("n_orbitals"),
+            },
+            "neighbor_cutoff_policy": "inherited_from_exported_sparse_blocks",
+            "topology_sha256": optional_file_sha256(input_dir / "R_list.dat")
+            or optional_file_sha256(input_dir / "overlaps.h5"),
+            "dtype": "complex128",
+            "mapping_version": sidecar.get("basis_transform", UNRECORDED),
+        },
+        {"geometry": geometry},
+    )
+    overlap = epc_artifact_node(
+        "overlap",
+        {
+            "pao_basis": optional_file_sha256(input_dir / "orbital_types.dat"),
+            "siesta_runtime_ref": siesta_runtime_ref,
+            "fdf_physics_sha256": optional_file_sha256(input_dir / "info.json"),
+            "orb_indx_sha256": optional_file_sha256(sidecar.get("orb_indx")),
+            "overlap_export_convention": sidecar.get("basis_transform", UNRECORDED),
+            "units": "dimensionless",
+        },
+        {"geometry": geometry},
+    )
+    return {"geometry": geometry, "hamiltonian": hamiltonian, "overlap": overlap}
+
+
+def eigenspace_signature_node(
+    parents: dict[str, dict],
+    *,
+    k: list[float],
+    solver_backend: str,
+    solver_version: dict,
+    window: dict,
+    shift: float,
+    tolerances: dict,
+    state_count: int,
+    occupations: dict,
+) -> dict:
+    """One signed ``electronic_eigenspace`` node (H, S, k, solver, shift, window,
+    state count, tolerances) — no q and no phonon mode, so it is reusable."""
+    return epc_artifact_node(
+        "electronic_eigenspace",
+        {
+            "k": [float(value) for value in k],
+            "solver_backend": solver_backend,
+            "solver_version": solver_version,
+            "window": window,
+            "shift": float(shift),
+            "tolerances": tolerances,
+            "state_count": int(state_count),
+            "dtype": "complex128",
+            "occupations": occupations,
+        },
+        {"hamiltonian": parents["hamiltonian"], "overlap": parents["overlap"]},
+    )
+
+
+def eigenspace_set_signature(nodes: list[dict]) -> str:
+    """One hash over the whole persisted set, from the per-k node signatures."""
+    return input_signature_sha256(
+        {"eigenspace_nodes": [str(node["signature_sha256"]) for node in nodes]}
+    )
+
+
+def eigenspace_cache_status(expected_signature: str, manifest_path: Path) -> str:
+    """Whether an already written eigenspace manifest may be reused as is."""
+    if not manifest_path.is_file():
+        return "missing_metadata"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return "unreadable"
+    stored = manifest.get("input_signature_sha256")
+    if not stored:
+        return "legacy_unverified"
+    if str(stored) != str(expected_signature):
+        return "signature_mismatch"
+    root = manifest_path.parent
+    for row in manifest.get("eigenspaces", []):
+        for name, digest in (
+            (row.get("vectors_file"), row.get("vectors_sha256")),
+            (row.get("overlap_minus_identity_file"), row.get("overlap_minus_identity_sha256")),
+        ):
+            if not name or optional_file_sha256(root / name) != digest:
+                return "unreadable"
+    return "valid"
+
+
+def eigenspace_manifest(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    kpoint_count: int,
+    shift: float,
+    solver_backend: str,
+    backend_requested: str,
+    gpu_preflight: dict | None,
+    environment: dict,
+    solver_script: Path,
+    window_ev: float,
+    degeneracy_ev: float,
+    min_metric: float,
+    state_budget: int,
+    max_iter: int,
+    neutrality_reference: dict,
+    hamiltonian_backend: str,
+    siesta_runtime_ref: str,
+) -> dict:
+    """Validate, sign and describe the persisted eigenspaces of one solver run."""
+    rows, diagnostics = persisted_eigenspace_data(
+        output_dir, kpoint_count, degeneracy_ev=degeneracy_ev
+    )
+    contract = contract_from_neutrality_reference(neutrality_reference)
+    parents = solver_input_nodes(
+        input_dir, hamiltonian_backend=hamiltonian_backend, siesta_runtime_ref=siesta_runtime_ref
+    )
+    solver_version = {
+        "julia_version": environment.get("julia_version"),
+        "julia_sha256": environment.get("julia_sha256"),
+        "project_manifest_sha256": optional_file_sha256(environment.get("manifest")),
+        "deeph_sparse_calc_sha256": optional_file_sha256(
+            REPO_ROOT.parent / "DeepH-pack/deeph/inference/sparse_calc.jl"
+        ),
+        "wrapper_sha256": optional_file_sha256(solver_script),
+        "eigenspace_patch_sha256": optional_file_sha256(
+            REPO_ROOT / "Comparison/scripts/deeph_eigenspace_persist.jl"
+        ),
+    }
+    window = {
+        "half_width_eV": float(window_ev) if window_ev > 0 else None,
+        "reference": "shift",
+        "state_selection": "energy_window_expanded_to_whole_degenerate_clusters",
+        "degeneracy_tolerance_eV": float(degeneracy_ev),
+        "solver_state_budget": int(state_budget),
+    }
+    tolerances = {
+        "solver_max_iter": int(max_iter),
+        "window_metric_minimum_eigenvalue": float(min_metric),
+        "identity_tolerance_policy": EIGENSPACE_IDENTITY_TOLERANCE_POLICY,
+    }
+    occupations = contract.eigenspace_fields()
+    nodes = []
+    for row in rows:
+        node = eigenspace_signature_node(
+            parents,
+            k=row["k_fractional"],
+            solver_backend=solver_backend,
+            solver_version=solver_version,
+            window=window,
+            shift=shift,
+            tolerances=tolerances,
+            state_count=row["state_count"],
+            occupations=occupations,
+        )
+        row["signature"] = node
+        nodes.append(node)
+    payload = {
+        "schema": EIGENSPACE_SCHEMA,
+        "status": diagnostics["status"],
+        "input_signature_sha256": eigenspace_set_signature(nodes),
+        "eigenvectors_persisted": True,
+        "diagnostics": diagnostics,
+        "window": window,
+        "tolerances": tolerances,
+        "shift_eV": float(shift),
+        "solver_backend": solver_backend,
+        "backend_policy": {
+            "requested": backend_requested,
+            "effective": solver_backend,
+            "gpu_preflight": gpu_preflight,
+            "cpu_fallback_reason": None if solver_backend == backend_requested else "unrequested",
+            "note": (
+                "gpu_cudss and cpu_mkl_pardiso factorise the same generalized pencil and are "
+                "scientifically equivalent; a failed GPU preflight blocks the run instead of "
+                "falling back silently, and the backend is part of the signature because the "
+                "two factorisations are not bitwise identical"
+            ),
+        },
+        "solver_version": solver_version,
+        "occupation_contract": contract.artifact_fields(),
+        "parents": parents,
+        "eigenspaces": rows,
+        "reuse": {
+            "keyed_by": ["hamiltonian", "overlap", "k", "solver", "shift", "window", "state_count", "tolerances"],
+            "independent_of": ["phonon mode", "q", "displacement", "smearing"],
+            "note": (
+                "electronic_eigenspace declares no q and no mode, so the same eigenpairs "
+                "serve every (q, nu) built on the same H/S/k/window"
+            ),
+        },
+    }
+    write_json(output_dir / EIGENSPACE_MANIFEST_NAME, payload)
+    return payload
+
+
 def run(
     input_dir: Path,
     output_dir: Path,
@@ -814,6 +1208,12 @@ def run(
     dos_energy_window_mev: float = 100.0,
     neutral_electrons: int | None = None,
     spin_degeneracy: int = 2,
+    persist_eigenspaces: bool = False,
+    eigenspace_window_ev: float = 0.0,
+    eigenspace_degeneracy_ev: float = DEFAULT_EIGENSPACE_DEGENERACY_EV,
+    eigenspace_min_metric: float = DEFAULT_EIGENSPACE_MIN_METRIC,
+    hamiltonian_backend: str = UNRECORDED,
+    siesta_runtime_ref: str = UNRECORDED,
 ) -> dict:
     if backend not in {"cpu_mkl_pardiso", "gpu_cudss"}:
         raise ValueError(f"Unsupported sparse solver backend: {backend}")
@@ -821,6 +1221,13 @@ def run(
         raise ValueError("Eigenvector-overlap tracking currently requires cpu_mkl_pardiso")
     if track_bands and project_mulliken:
         raise ValueError("Approximate band tracking and physical projections are separate modes")
+    if persist_eigenspaces and track_bands:
+        raise ValueError(
+            "Band tracking replaces the solver eigenvectors with an assignment heuristic; "
+            "it cannot produce a persisted S-normalised eigenspace"
+        )
+    if persist_eigenspaces and eigenspace_window_ev < 0:
+        raise ValueError("The eigenspace window half width cannot be negative")
     environment = json.loads(environment_path.read_text(encoding="utf-8"))
     if environment.get("status") != "valid":
         raise RuntimeError(f"Invalid sparse solver environment: {environment_path}")
@@ -841,6 +1248,11 @@ def run(
     estimated_output_bytes = 10 * 1024**2 + estimated_kpoints * num_bands * (
         1200 if project_mulliken else 400
     )
+    if persist_eigenspaces:
+        info = input_dir / "info.json"
+        norbits = int(json.loads(info.read_text(encoding="utf-8"))["norbits"]) if info.is_file() else num_bands
+        # complex128 coefficients (norbits x states) plus the C†SC-I block per k
+        estimated_output_bytes += estimated_kpoints * 16 * num_bands * (norbits + num_bands)
     estimated_free_disk_percent_after = 100.0 * max(
         0, disk_usage.free - estimated_output_bytes
     ) / disk_usage.total
@@ -946,6 +1358,8 @@ def run(
         if project_mulliken
         else REPO_ROOT / "Comparison/scripts/deeph_sparse_calc_tracked.jl"
         if track_bands
+        else REPO_ROOT / "Comparison/scripts/deeph_sparse_calc_eigenspace.jl"
+        if persist_eigenspaces
         else REPO_ROOT.parent / "DeepH-pack/deeph/inference/sparse_calc.jl"
     )
     command = [
@@ -976,6 +1390,11 @@ def run(
     if project_mulliken:
         env["DEEPH_MULLIKEN_GROUPS"] = str(projection_groups_path)
         env["DEEPH_PROJECTION_CHUNK_BANDS"] = "16"
+    if persist_eigenspaces:
+        env["DEEPH_PERSIST_EIGENSPACES"] = "1"
+        env["DEEPH_EIGENSPACE_WINDOW_EV"] = repr(float(eigenspace_window_ev))
+        env["DEEPH_EIGENSPACE_DEGENERACY_EV"] = repr(float(eigenspace_degeneracy_ev))
+        env["DEEPH_EIGENSPACE_MIN_METRIC"] = repr(float(eigenspace_min_metric))
     gpu_memory_limit_bytes = int(gpu_memory_limit_gib * GIB) if backend == "gpu_cudss" else None
     if backend == "gpu_cudss":
         env["DEEPH_SPARSE_CALC"] = str(REPO_ROOT.parent / "DeepH-pack/deeph/inference/sparse_calc.jl")
@@ -1057,6 +1476,7 @@ def run(
         "backend_effective": backend if returncode == 0 else None,
         "band_tracking_requested": track_bands,
         "mulliken_projection_requested": project_mulliken,
+        "eigenspace_persistence_requested": persist_eigenspaces,
         "fermi_level_eV": fermi_level,
         "neutrality_reference": estimated_neutrality_reference(input_dir, fermi_level),
         "num_bands": num_bands,
@@ -1144,7 +1564,9 @@ def run(
             k_path,
         )
         if project_mulliken:
-            projected, projection_diagnostics = projected_band_data(output_dir, raw_energies)
+            projected, projection_diagnostics = projected_band_data(
+                output_dir, raw_energies, persist_eigenspaces
+            )
             for point in manifest["bands"]:
                 point.update(projected[int(point["k_index"])][int(point["band_index"])])
             manifest["projection"] = {
@@ -1183,7 +1605,16 @@ def run(
             }
     elif returncode == 0:
         dos = np.loadtxt(output_dir / "dos.dat")
-        raw_energies = np.loadtxt(output_dir / "egvals.dat", dtype=float).T
+        # egvals.dat is one row per band, one column per k point. A single
+        # solved k point collapses to a 1-D loadtxt result (one value per
+        # band, no column axis); reshape it to one column *before* the
+        # transpose or it silently reads as one k point per band instead of
+        # one k point total (persist_eigenspaces then looks for eigenspace
+        # files that were never written).
+        raw_egvals = np.loadtxt(output_dir / "egvals.dat", dtype=float)
+        if raw_egvals.ndim == 1:
+            raw_egvals = raw_egvals.reshape(-1, 1)
+        raw_energies = raw_egvals.T
         if neutral_electrons is not None:
             if len(inertia_rows) != raw_energies.shape[0]:
                 raise RuntimeError("Neutral Fermi calculation requires one inertia count per k point")
@@ -1217,12 +1648,36 @@ def run(
                 "scientific_status": "s_aware_mulliken_pdos_on_uniform_2d_mesh",
                 "diagnostics": projection_diagnostics,
                 "mapping_path": str(projection_groups_path),
-                "eigenvectors_persisted": False,
+                "eigenvectors_persisted": persist_eigenspaces,
                 "full_orbital_spectrum": False,
                 "scope_limitation": (
                     f"Low-energy {num_bands}-state shift-invert subspace; not a full-spectrum DOS."
                 ),
             }
+    if returncode == 0 and persist_eigenspaces:
+        reference = dict(manifest["neutrality_reference"])
+        if neutral_electrons is not None:
+            reference.setdefault("neutral_electrons", neutral_electrons)
+            reference.setdefault("spin_degeneracy", spin_degeneracy)
+        manifest["eigenspaces"] = eigenspace_manifest(
+            input_dir,
+            output_dir,
+            kpoint_count=len(raw_energies),
+            shift=fermi_level,
+            solver_backend=backend,
+            backend_requested=backend,
+            gpu_preflight=initial_gpu,
+            environment=environment,
+            solver_script=solver_script,
+            window_ev=eigenspace_window_ev,
+            degeneracy_ev=eigenspace_degeneracy_ev,
+            min_metric=eigenspace_min_metric,
+            state_budget=num_bands,
+            max_iter=config["max_iter"],
+            neutrality_reference=reference,
+            hamiltonian_backend=hamiltonian_backend,
+            siesta_runtime_ref=siesta_runtime_ref,
+        )
     write_json(output_dir / "solver_manifest.json", manifest)
     return manifest
 
@@ -1251,6 +1706,23 @@ def main() -> int:
     parser.add_argument("--dos-energy-window-mev", type=float, default=100.0)
     parser.add_argument("--neutral-electrons", type=int)
     parser.add_argument("--spin-degeneracy", type=int, default=2)
+    parser.add_argument(
+        "--persist-eigenspaces",
+        action="store_true",
+        help="persist S-normalised C, eps, residuals and C^dag S C - I for the window",
+    )
+    parser.add_argument(
+        "--eigenspace-window-ev",
+        type=float,
+        default=0.0,
+        help="half width around the shift; 0 persists every solved state",
+    )
+    parser.add_argument(
+        "--eigenspace-degeneracy-ev", type=float, default=DEFAULT_EIGENSPACE_DEGENERACY_EV
+    )
+    parser.add_argument("--eigenspace-min-metric", type=float, default=DEFAULT_EIGENSPACE_MIN_METRIC)
+    parser.add_argument("--hamiltonian-backend", default=UNRECORDED)
+    parser.add_argument("--siesta-runtime-ref", default=UNRECORDED)
     args = parser.parse_args()
     environment = (
         DEFAULT_GPU_ENVIRONMENT
@@ -1278,6 +1750,12 @@ def main() -> int:
         dos_energy_window_mev=args.dos_energy_window_mev,
         neutral_electrons=args.neutral_electrons,
         spin_degeneracy=args.spin_degeneracy,
+        persist_eigenspaces=args.persist_eigenspaces,
+        eigenspace_window_ev=args.eigenspace_window_ev,
+        eigenspace_degeneracy_ev=args.eigenspace_degeneracy_ev,
+        eigenspace_min_metric=args.eigenspace_min_metric,
+        hamiltonian_backend=args.hamiltonian_backend,
+        siesta_runtime_ref=args.siesta_runtime_ref,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["status"] == "completed" else 2 if result["status"] == "resource_blocked" else 1

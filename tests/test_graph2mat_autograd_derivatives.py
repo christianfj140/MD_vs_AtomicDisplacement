@@ -21,7 +21,9 @@ if str(TORCH_COMPAT_DIR) not in sys.path:
 
 from graph2mat_autograd_derivatives import (  # noqa: E402
     Graph2MatAutogradDerivativeError,
+    compute_graph2mat_directional_derivative,
     compute_graph2mat_position_jacobian,
+    compute_graph2mat_vjp_contraction,
     flatten_graph2mat_predictions,
     graph2mat_forward_labels,
     require_single_structure_batch,
@@ -121,6 +123,19 @@ class MultiComponentFakeModel(torch.nn.Module):
         return {
             "node_labels": torch.stack([positions.sum(dim=1), positions.prod(dim=1)], dim=1),
             "edge_labels": positions.reshape(-1, 3),
+        }
+
+
+class TrainableFakeModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(2.0, dtype=torch.float64))
+
+    def forward(self, data) -> dict[str, torch.Tensor]:
+        positions = data["positions"]
+        return {
+            "node_labels": self.scale * positions.square().sum(dim=1),
+            "edge_labels": self.scale * torch.sin(positions).reshape(-1),
         }
 
 
@@ -421,6 +436,82 @@ class SparseConversionTests(unittest.TestCase):
         self.assertEqual(recorded["copy_kwargs"], {"sub_point_matrix": False})
         self.assertIsNone(recorded["threshold"])
         self.assertFalse(recorded["predictions"]["node_labels"].requires_grad)
+
+
+class VjpContractionTests(unittest.TestCase):
+    """E-F_001-S37 / D06: the contract-before-materialize primitive."""
+
+    def _cotangent_and_direction(self, generator_seed: int = 3):
+        generator = torch.Generator().manual_seed(generator_seed)
+        weight = torch.randn(N_NODE_OUTPUTS + N_EDGE_OUTPUTS, generator=generator, dtype=torch.float64)
+        direction = torch.randn(N_ATOMS, 3, generator=generator, dtype=torch.float64)
+        return weight, direction
+
+    def test_matches_analytic_linear_model(self) -> None:
+        model = LinearFakeModel()
+        batch = make_batch()
+        weight, direction = self._cotangent_and_direction()
+
+        result = compute_graph2mat_vjp_contraction(model, batch, weight, direction)
+
+        jacobian = model.analytic_jacobian()  # [n_outputs, N_ATOMS, 3]
+        expected = torch.einsum("o,oij,ij->", weight, jacobian, direction)
+        self.assertAlmostEqual(result.value, float(expected), places=10)
+        self.assertEqual(result.metadata["derivative_method"], "vjp_contraction_before_materialize")
+        self.assertFalse(result.metadata["materialized_jacobian"])
+        self.assertFalse(result.metadata["materialized_directional_derivative"])
+
+    def test_agrees_with_materialize_once_dot_product(self) -> None:
+        """w^T (J v) must not depend on which of the two primitives computed it."""
+        model = NonlinearFakeModel()
+        batch = make_batch()
+        weight, direction = self._cotangent_and_direction(generator_seed=5)
+
+        materialized = compute_graph2mat_directional_derivative(model, batch, direction)
+        flat_derivative, _ = flatten_graph2mat_predictions(materialized.derivative)
+        expected = float(torch.sum(weight * flat_derivative))
+
+        contracted = compute_graph2mat_vjp_contraction(model, batch, weight, direction)
+        self.assertAlmostEqual(contracted.value, expected, places=8)
+
+    def test_directional_derivative_can_train_model_parameters(self) -> None:
+        model = TrainableFakeModel()
+        result = compute_graph2mat_directional_derivative(
+            model, make_batch(), torch.ones(N_ATOMS, 3, dtype=torch.float64),
+            create_graph=True,
+        )
+        loss = sum(value.square().mean() for value in result.derivative.values())
+        loss.backward()
+        self.assertIsNotNone(model.scale.grad)
+        self.assertTrue(torch.isfinite(model.scale.grad))
+        self.assertGreater(abs(float(model.scale.grad)), 0.0)
+
+    def test_change_of_basis_matches_directional_derivative_convention(self) -> None:
+        model = LinearFakeModel()
+        batch = make_batch()
+        weight, direction = self._cotangent_and_direction(generator_seed=9)
+        cob = torch.tensor(
+            [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]], dtype=torch.float64
+        )
+
+        materialized = compute_graph2mat_directional_derivative(
+            model, batch, direction, change_of_basis=cob
+        )
+        flat_derivative, _ = flatten_graph2mat_predictions(materialized.derivative)
+        expected = float(torch.sum(weight * flat_derivative))
+
+        contracted = compute_graph2mat_vjp_contraction(
+            model, batch, weight, direction, change_of_basis=cob
+        )
+        self.assertAlmostEqual(contracted.value, expected, places=8)
+        self.assertTrue(contracted.metadata["change_of_basis_applied"])
+
+    def test_cotangent_size_mismatch_is_rejected(self) -> None:
+        model = LinearFakeModel()
+        batch = make_batch()
+        _, direction = self._cotangent_and_direction()
+        with self.assertRaises(Graph2MatAutogradDerivativeError):
+            compute_graph2mat_vjp_contraction(model, batch, torch.zeros(3), direction)
 
 
 # --------------------------------------------------------------------------- #

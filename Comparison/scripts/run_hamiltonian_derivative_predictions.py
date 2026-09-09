@@ -350,16 +350,39 @@ def deeph_command_cwd(command_template: str | None) -> Path:
 
 
 def deeph_runtime_settings(model_dir: Path, *, python_executable: str, command_template: str | None) -> dict[str, Any]:
+    """Resolve the DeepH inference backend for a checkpoint's model_dir.
+
+    requested_backend: this runner has no torch.cuda.is_available() probe of
+    its own -- it defaults to cpu (disable_cuda=True) unconditionally, then
+    overrides that default only if the model's own config.ini (written by
+    whatever training/inference run produced it) already declares a backend.
+    A CPU default is always safe here; it is never silently upgraded to GPU.
+    """
+
     config_path = model_dir / "config.ini"
     radius = -1.0
     disable_cuda = True
     device = "cpu"
+    backend_fallback_reason = (
+        "no_cuda_probe: deeph_runtime_settings has no CUDA-availability check; "
+        "it defaults effective_backend=cpu unless model_dir/config.ini overrides it"
+    )
     huge_structure = False
     if config_path.exists():
         config = read_ini(config_path)
         radius = config.getfloat("graph", "radius", fallback=-1.0)
         disable_cuda = config.getboolean("basic", "disable_cuda", fallback=True)
         device = config.get("basic", "device", fallback="cpu")
+        if not disable_cuda:
+            backend_fallback_reason = None
+        else:
+            backend_fallback_reason = (
+                "config_ini_declares_cpu: model_dir/config.ini already recorded "
+                "disable_cuda=true from the run that produced this checkpoint"
+            )
+    if os.environ.get("DEEPH_FORCE_CPU") == "1":
+        disable_cuda, device = True, "cpu"
+        backend_fallback_reason = "DEEPH_FORCE_CPU=1"
     python_path = python_executable
     if python_path in ("", sys.executable):
         inference_cli = Path(infer_deeph_cli(command_template, cli_name="deeph-inference"))
@@ -375,6 +398,9 @@ def deeph_runtime_settings(model_dir: Path, *, python_executable: str, command_t
         "device": device,
         "huge_structure": huge_structure,
         "python_interpreter": python_path,
+        "requested_backend": "cpu" if disable_cuda else "cuda",
+        "effective_backend": "cpu" if disable_cuda else "cuda",
+        "backend_fallback_reason": backend_fallback_reason,
     }
 
 

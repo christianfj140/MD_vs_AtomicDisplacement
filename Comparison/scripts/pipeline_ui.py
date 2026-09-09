@@ -27,7 +27,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2280,6 +2280,80 @@ def write_yaml(path: Path, config: dict[str, Any]) -> None:
     )
 
 
+BACKEND_RUNTIME_PROVENANCE_SCHEMA = "backend_runtime_provenance_v1"
+
+
+def backend_runtime_provenance_path(config_path: Path) -> Path:
+    """Where the standalone runtime manifest for a run's config.yaml lives.
+
+    A dedicated JSON artifact next to the run's own config.yaml, so a GPU-policy
+    auditor can point at one small file instead of digging requested_backend /
+    effective_backend / backend_fallback_reason out of the performance block of
+    a much larger config (see the audit finding this addresses: a static code
+    scanner cannot prove what a *run* actually did).
+    """
+
+    return config_path.parent / "backend_runtime_provenance.json"
+
+
+def write_backend_runtime_provenance(
+    config_path: Path,
+    *,
+    requested_backend: str,
+    effective_backend: str,
+    device: str,
+    hardware: dict[str, Any],
+    performance: dict[str, Any] | None = None,
+    fallback_reason: str | None = None,
+) -> Path:
+    """Write the standalone runtime backend-provenance manifest for one run.
+
+    Mirrors graph2mat_autograd_derivatives.JvpBackendRecord (requested/effective/
+    preflight/reason) rather than inventing a new shape, and reuses whatever
+    hardware dict detect_hardware() (a real nvidia-smi + torch.cuda.is_available()
+    probe, not a synthetic guess) already produced for this run.
+
+    precision is whatever this pipeline already tracks in performance
+    (torch_mixed_precision / torch_float32_matmul_precision); if performance is
+    not supplied or tracks neither, that absence is recorded honestly instead of
+    inventing a value.
+    """
+
+    performance = performance or {}
+    mixed = performance.get("torch_mixed_precision")
+    matmul = performance.get("torch_float32_matmul_precision")
+    if mixed is None and matmul is None:
+        precision: Any = {"value": None, "reason": "not_tracked_for_this_run"}
+    else:
+        precision = {"torch_mixed_precision": mixed, "torch_float32_matmul_precision": matmul}
+
+    cuda_available = bool(hardware.get("cuda_available"))
+    preflight = {
+        "cuda_available": cuda_available,
+        "device_name": hardware.get("gpu_name"),
+        "device_count": 1 if hardware.get("gpu_available") else 0,
+        "vram_total_gb": hardware.get("gpu_vram_total_gb"),
+        "torch_available": hardware.get("torch_available"),
+        "torch_cuda_available": hardware.get("torch_cuda_available"),
+        "notes": hardware.get("detection_notes") or [],
+    }
+
+    manifest = {
+        "schema": BACKEND_RUNTIME_PROVENANCE_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config_path": str(config_path),
+        "requested_backend": requested_backend,
+        "effective_backend": effective_backend,
+        "device": device,
+        "precision": precision,
+        "preflight": preflight,
+        "backend_fallback_reason": fallback_reason,
+    }
+    out_path = backend_runtime_provenance_path(config_path)
+    out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True, sort_keys=False) + "\n", encoding="utf-8")
+    return out_path
+
+
 MATERIAL_BUNDLE_PAYLOAD_KEYS = (
     "preset",
     "label",
@@ -3295,7 +3369,14 @@ def _base_profile(
     graph2mat_check_val_every_n_epoch: int | None = None,
     graph2mat_checkpoint_every_n_epochs: int | None = None,
     graph2mat_require_cuequivariance: bool = False,
+    requested_backend: str = "auto",
+    backend_fallback_reason: str | None = None,
 ) -> dict[str, Any]:
+    # A CPU accelerator is never silent here: requested_backend/backend_fallback_reason
+    # record why (auto-detected no CUDA, or a preset that deliberately forces cpu),
+    # matching the effective_backend/requested_backend provenance pair used elsewhere
+    # in this repo (graph2mat_autograd_derivatives.JvpBackendRecord, the S53/S55
+    # preregistration protocols).
     return {
         "max_parallel_siesta_jobs": int(siesta_jobs),
         "max_parallel_dataset_jobs": 1,
@@ -3322,6 +3403,9 @@ def _base_profile(
         "graph2mat_check_val_every_n_epoch": graph2mat_check_val_every_n_epoch,
         "graph2mat_checkpoint_every_n_epochs": graph2mat_checkpoint_every_n_epochs,
         "graph2mat_require_cuequivariance": bool(graph2mat_require_cuequivariance),
+        "requested_backend": requested_backend,
+        "effective_backend": "gpu" if accelerator == "gpu" else "cpu",
+        "backend_fallback_reason": backend_fallback_reason,
     }
 
 
@@ -3334,6 +3418,15 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
     has_cuda = bool(hw.get("cuda_available"))
     low_ram = bool(ram_gb is not None and float(ram_gb) < 32)
     strong_gpu = bool(has_cuda and vram_gb is not None and float(vram_gb) >= 20)
+    # requested_backend="auto" for every preset below except cpu_only: the
+    # effective "gpu"/"cpu" choice is has_cuda-driven, and when it lands on cpu
+    # this is why -- reuses detect_hardware()'s own detection_notes so the
+    # reason always matches whatever detect_hardware() actually observed.
+    auto_backend_reason = None
+    if not has_cuda:
+        auto_backend_reason = "; ".join(hw.get("detection_notes") or []) or (
+            "cuda_unavailable: detect_hardware() reported cuda_available=False"
+        )
 
     soft = _base_profile(
         preset="soft",
@@ -3346,6 +3439,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         threads=1,
         torch_threads=_clamp(logical // 4, 1, 4),
         store_in_memory=False if low_ram else True,
+        backend_fallback_reason=auto_backend_reason,
     )
     balanced = _base_profile(
         preset="balanced",
@@ -3358,6 +3452,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         threads=2 if logical >= 8 else 1,
         torch_threads=_clamp(logical // 3, 2, 8),
         store_in_memory=False if low_ram else True,
+        backend_fallback_reason=auto_backend_reason,
     )
     aggressive = _base_profile(
         preset="aggressive",
@@ -3372,6 +3467,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         store_in_memory=False if low_ram else True,
         graph2mat_training_jobs=1,
         torch_mixed_precision="bf16-mixed" if has_cuda else None,
+        backend_fallback_reason=auto_backend_reason,
     )
     gpu_focused = _base_profile(
         preset="gpu_focused",
@@ -3389,6 +3485,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         graph2mat_log_every_n_steps=10 if strong_gpu else None,
         graph2mat_check_val_every_n_epoch=5 if strong_gpu else None,
         graph2mat_checkpoint_every_n_epochs=5 if strong_gpu else None,
+        backend_fallback_reason=auto_backend_reason,
     )
     parallel_trains = _base_profile(
         preset="parallel_trains",
@@ -3407,6 +3504,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         graph2mat_log_every_n_steps=10 if strong_gpu else None,
         graph2mat_check_val_every_n_epoch=5 if strong_gpu else None,
         graph2mat_checkpoint_every_n_epochs=5 if strong_gpu else None,
+        backend_fallback_reason=auto_backend_reason,
     )
     parallel_trains["numexpr_num_threads"] = 1
     cpu_only = _base_profile(
@@ -3420,6 +3518,8 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         threads=_clamp(logical // max(1, _clamp(physical // 2, 1, 6)), 1, 4),
         torch_threads=_clamp(logical // 2, 2, 12),
         store_in_memory=False if low_ram else True,
+        requested_backend="cpu",
+        backend_fallback_reason="cpu_only preset: deliberately forces cpu regardless of detected hardware",
     )
     stress = _base_profile(
         preset="max_aggressive",
@@ -3434,6 +3534,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         store_in_memory=False if low_ram else True,
         graph2mat_training_jobs=2 if strong_gpu else 1,
         torch_mixed_precision="bf16-mixed" if has_cuda else None,
+        backend_fallback_reason=auto_backend_reason,
     )
     debug = _base_profile(
         preset="single_run_debug",
@@ -3446,6 +3547,7 @@ def performance_preset_catalog(hardware: dict[str, Any] | None = None) -> dict[s
         threads=1,
         torch_threads=1,
         store_in_memory=False,
+        backend_fallback_reason=auto_backend_reason,
     )
 
     recommended = "cpu_only"
@@ -4525,6 +4627,493 @@ def graph2mat_git_metadata(config: dict[str, Any]) -> dict[str, Any]:
     metadata = git_metadata_for_path(package_file.parent)
     metadata["package_file"] = str(package_file)
     return metadata
+
+
+EPC_RESULTS_ROOT = RESULTS_ROOT / "epc"
+
+EPC_GAMMA_SOURCES = {
+    "verdict": EPC_RESULTS_ROOT / "gamma_epc" / "graphene" / "go4_verdict.json",
+    "summary": EPC_RESULTS_ROOT / "gamma_epc" / "graphene" / "graphene_gamma_epc_summary.json",
+    "g_blocks": EPC_RESULTS_ROOT / "gamma_epc" / "graphene" / "graphene_gamma_epc_g_blocks.json",
+    "siesta_reference": EPC_RESULTS_ROOT
+    / "siesta_reference"
+    / "graphene_e2g"
+    / "epc_siesta_reference_manifest.json",
+}
+
+EPC_GAMMA_BACKEND_FIELDS = (
+    "electronic_derivative_backend",
+    "basis_response_backend",
+    "basis_response_representation",
+    "phonon_backend",
+    "epc_backend_class",
+)
+
+
+def _epc_tau_rows(entries: Any, key_fields: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Split the artifact's compound keys ('path|direction|k') into columns. No arithmetic."""
+    if not isinstance(entries, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for key, value in sorted(entries.items()):
+        row: dict[str, Any] = {"key": key}
+        row.update(dict(zip(key_fields, str(key).split("|"))))
+        if isinstance(value, dict):
+            row.update(value)
+        else:
+            row["value"] = value
+        rows.append(row)
+    return rows
+
+
+def epc_graphene_gamma_payload() -> dict[str, Any]:
+    """C21: publish the GO-4 graphene-Γ adjudication straight from its canonical artifacts.
+
+    Reads, selects and reshapes; it never recomputes physics. Every number shown by the UI is
+    a field that ``evaluate_epc_metrics.py`` / ``compute_epc_matrix_elements.py`` already wrote.
+    """
+    payload: dict[str, Any] = {
+        "schema": "epc_graphene_gamma_ui_payload_v1",
+        "ticket": "C21 / E-F_001-S28",
+        "system": "graphene",
+        "gate": "GO-4",
+        "sources": {
+            name: repository_display_path(path) for name, path in EPC_GAMMA_SOURCES.items()
+        },
+    }
+    missing = [name for name, path in EPC_GAMMA_SOURCES.items() if not path.exists()]
+    if missing:
+        payload["available"] = False
+        payload["missing"] = missing
+        return payload
+
+    documents: dict[str, Any] = {}
+    for name, path in EPC_GAMMA_SOURCES.items():
+        try:
+            documents[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - UI must not crash
+            payload["available"] = False
+            payload["unreadable"] = {"artifact": name, "error": str(exc)}
+            return payload
+
+    verdict = documents["verdict"]
+    summary = documents["summary"]
+    tolerances = summary.get("tolerances") or {}
+    runtime_ref = documents["siesta_reference"].get("siesta_runtime_ref") or {}
+
+    payload.update(
+        {
+            "available": True,
+            "generated_at": verdict.get("generated_at"),
+            "verdict": verdict.get("verdict"),
+            "scientific_verdict": verdict.get("scientific_verdict"),
+            "scientific_reason": verdict.get("scientific_reason"),
+            "GO4_finite_PAO": verdict.get("GO4_finite_PAO") or summary.get("GO4_finite_PAO"),
+            "full_KS": verdict.get("full_KS") or summary.get("full_KS"),
+            "levels": verdict.get("levels"),
+            "label": verdict.get("label"),
+            "label_rule": verdict.get("label_rule"),
+            "status": verdict.get("status"),
+            "result_class": verdict.get("result_class") or summary.get("result_class"),
+            "candidate": verdict.get("candidate"),
+            "candidate_result_class": verdict.get("candidate_result_class"),
+            "formalism_id": verdict.get("formalism_id"),
+            "protocol_id": verdict.get("protocol_id"),
+            "preregistration_sha256": verdict.get("preregistration_sha256"),
+            "gates": verdict.get("gates"),
+            "frozen_checks": verdict.get("frozen_checks"),
+            "failure_attribution": verdict.get("failure_attribution"),
+            "nonblocking_protocol_findings": verdict.get("nonblocking_protocol_findings"),
+            "model_statement": verdict.get("model_statement"),
+            "claim": verdict.get("claim"),
+            "recommended_next_work": verdict.get("recommended_next_work"),
+            "blocking": verdict.get("blocking"),
+            "limitations": verdict.get("limitations"),
+            "checks_failed": summary.get("checks_failed"),
+            "summary_verdict": summary.get("verdict"),
+            "intra_atomic_sensitivity": summary.get("intra_atomic_sensitivity"),
+            "tolerances": {
+                "definition": tolerances.get("definition"),
+                "tau_num": _epc_tau_rows(tolerances.get("tau_num"), ("path", "direction", "k")),
+                "tau_backend": _epc_tau_rows(tolerances.get("tau_backend"), ("direction", "k")),
+                "tau_model": tolerances.get("tau_model"),
+            },
+            "provenance": {
+                "siesta_runtime": runtime_ref,
+                "siesta_runtime_classification": runtime_ref.get("classification"),
+                "siesta_source_verified": runtime_ref.get("classification") == "VERIFIED_SOURCE",
+                "shared_contracts": summary.get("shared_contracts"),
+                "compute_policy": summary.get("compute_policy"),
+                "artifacts": [
+                    {
+                        "artifact": name,
+                        "path": repository_display_path(path),
+                        "sha256": file_sha256(path),
+                    }
+                    for name, path in EPC_GAMMA_SOURCES.items()
+                ],
+            },
+        }
+    )
+
+    payload["g_blocks"] = [
+        {
+            "label": report.get("label"),
+            "path": report.get("path"),
+            "k_label": report.get("k_label"),
+            "mode_label": report.get("mode_label"),
+            "split": report.get("split"),
+            "formalism_id": report.get("formalism_id"),
+            "result_class": report.get("result_class"),
+            "intra_atomic_included": report.get("intra_atomic_included"),
+            "degraded_formalism": report.get("degraded_formalism"),
+            "backends": {field: report.get(field) for field in EPC_GAMMA_BACKEND_FIELDS},
+            "mode": report.get("mode"),
+            "electronic_states": report.get("electronic_states"),
+            "hellmann_feynman": report.get("hellmann_feynman"),
+            "g": report.get("g"),
+            # ponytail: only the gauge-invariant half of the per-unit-displacement block; its
+            # matrix duplicates g up to the zero-point factor and nothing in the view reads it.
+            "g_per_unit_displacement": {
+                key: value
+                for key, value in (report.get("g_per_unit_displacement") or {}).items()
+                if key in {"units", "gauge_invariant"}
+            },
+            "signatures": report.get("signatures"),
+        }
+        for report in documents["g_blocks"].get("reports") or []
+    ]
+    return payload
+
+
+def epc_snapshot_scaling_payload() -> dict[str, Any]:
+    path = RESULTS_ROOT / "ui_real_metrics_derivatives/epc/snapshot_scaling_20260908/derivative_metrics/summary/derivative_plots/derivative_plot_payload.json"
+    if not path.is_file():
+        return {"available": False, "message": f"Missing EPC snapshot-scaling artifact: {path}"}
+    payload = load_json_object(path)
+    paired_path = RESULTS_ROOT / "ui_real_metrics_derivatives/derivative_metrics/summary/derivative_plots/derivative_plot_payload.json"
+    if paired_path.is_file():
+        paired = load_json_object(paired_path)
+        payload["paired_comparison"] = {
+            "diagnostic_only": True,
+            "title": "Graph2Mat vs DeepH · derivadas cross W90→5×5",
+            "warning": "Protocolo cross-testing distinto de E2g; DeepH sigue diagnostic-only por equivalencia orbital no demostrada.",
+            "plots": [plot for plot in paired.get("plots") or [] if plot.get("id") in {
+                "dh_mae_vs_dataset_size", "relative_frobenius_vs_dataset_size"
+            }],
+        }
+    return payload
+
+
+EPC_MATBG_ROOT = EPC_RESULTS_ROOT / "gamma_epc" / "matbg"
+
+EPC_MATBG_REQUIRED_SOURCES = {
+    "go8a": EPC_RESULTS_ROOT / "certification" / "matbg" / "s39_matbg_phonon_provider_go8a_certification.json",
+    "go8b": EPC_RESULTS_ROOT / "certification" / "matbg" / "s40_matbg_qneq0_response_go8b_certification.json",
+    "go9_gamma": EPC_RESULTS_ROOT / "certification" / "matbg" / "s43_rigid_gamma_campaign_go9_certification.json",
+    "go9_qneq0": EPC_RESULTS_ROOT / "certification" / "matbg" / "s45_rigid_qneq0_campaign_go9_certification.json",
+    "protocol_gamma": EPC_RESULTS_ROOT / "preregistration" / "matbg" / "epc_matbg_rigid_gamma_protocol.json",
+    "protocol_qneq0": EPC_RESULTS_ROOT / "preregistration" / "matbg" / "epc_matbg_rigid_qneq0_protocol.json",
+}
+
+# run_tbg_pure_graph2mat_campaign.epc_gamma_rigid() (S42) only ever writes these once a real GPU
+# campaign runs against the production checkpoint; S43 Sec. 2 (resource_budget_suite) records that
+# has never happened, so they are read opportunistically and never gate ``available``. The q != 0
+# branch (S44) has no execution stage at all -- ``ready_to_execute`` stays False by design.
+EPC_MATBG_OPTIONAL_SOURCES = {
+    "gamma_campaign_summary": EPC_MATBG_ROOT / "epc_gamma_rigid_summary.json",
+    "gamma_campaign_status": EPC_MATBG_ROOT / "artifact_status.json",
+}
+
+EPC_MATBG_PROTOCOL_FIELDS = (
+    "protocol_id",
+    "gate",
+    "generated_at",
+    "ready_to_execute",
+    "blocking",
+    "claim_ladder",
+    "checks",
+    "experiment",
+    "physics_review",
+    "preconditions",
+    "references",
+    "electronic",
+    "sensitivity",
+    "splits",
+    "perturbation",
+    "tolerances",
+)
+
+
+def _epc_matbg_protocol_summary(protocol: dict[str, Any]) -> dict[str, Any]:
+    """Selects the frozen protocol fields; drops ``phonon.candidate_sectors[*].vectors`` -- the
+    per-atom (11164, 3) displacement fields, several MB per candidate direction, that the UI never
+    plots. Everything else in the protocol is small (tens of KB) and passed through unchanged.
+    """
+    summary = {field: protocol.get(field) for field in EPC_MATBG_PROTOCOL_FIELDS}
+    phonon = protocol.get("phonon") or {}
+    summary["phonon"] = {
+        "status": phonon.get("status"),
+        "artifact_kind_forbidden_until_go8a": phonon.get("artifact_kind_forbidden_until_go8a"),
+        "artifact_kind_of_candidates": phonon.get("artifact_kind_of_candidates"),
+        "candidate_sectors": {
+            name: {key: value for key, value in row.items() if key != "vectors"}
+            for name, row in (phonon.get("candidate_sectors") or {}).items()
+        },
+    }
+    return summary
+
+
+def epc_matbg_payload() -> dict[str, Any]:
+    """S46: publish the rigid-MATBG Gamma and q != 0 campaigns -- gates, provenance, resources and
+    restart state -- straight from their canonical artifacts.
+
+    Reads, selects and reshapes; it never computes g, a Fourier transform or any observable. The
+    q != 0 branch has no execution stage (S44/S45): its absence is reported as ``executed: False``
+    with a reason, never as a zero or a validated result.
+    """
+    payload: dict[str, Any] = {
+        "schema": "epc_matbg_ui_payload_v1",
+        "ticket": "S46 / E-F_001-S46",
+        "system": "rigid_matbg_31_30",
+        "sources": {
+            name: repository_display_path(path)
+            for name, path in {**EPC_MATBG_REQUIRED_SOURCES, **EPC_MATBG_OPTIONAL_SOURCES}.items()
+        },
+    }
+    missing = [name for name, path in EPC_MATBG_REQUIRED_SOURCES.items() if not path.exists()]
+    if missing:
+        payload["available"] = False
+        payload["missing"] = missing
+        return payload
+
+    documents: dict[str, Any] = {}
+    for name, path in EPC_MATBG_REQUIRED_SOURCES.items():
+        try:
+            documents[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - UI must not crash
+            payload["available"] = False
+            payload["unreadable"] = {"artifact": name, "error": str(exc)}
+            return payload
+
+    optional: dict[str, Any] = {}
+    for name, path in EPC_MATBG_OPTIONAL_SOURCES.items():
+        if not path.exists():
+            continue
+        try:
+            optional[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - UI must not crash
+            optional[name] = {"unreadable": str(exc)}
+
+    campaign_summary = optional.get("gamma_campaign_summary")
+    campaign_status = optional.get("gamma_campaign_status") or {}
+    restart_state = [
+        {"artifact_id": artifact_id, **{key: value for key, value in row.items() if key != "jvp_metadata"}}
+        for artifact_id, row in sorted((campaign_status.get("artifacts") or {}).items())
+    ]
+
+    go8a = documents["go8a"]
+    go8b = documents["go8b"]
+    go9_gamma = documents["go9_gamma"]
+    go9_qneq0 = documents["go9_qneq0"]
+
+    payload.update(
+        {
+            "available": True,
+            "gates": {
+                "go8a": {
+                    "status": go8a.get("go8a_status"),
+                    "selected_provider": (go8a.get("decision") or {}).get("selected_provider"),
+                    "physical_phonon_produced": go8a.get("physical_phonon_produced"),
+                    "matbg_scale_suite_status": (go8a.get("matbg_scale_suite") or {}).get("status"),
+                    "small_system_suite_status": (go8a.get("small_system_suite") or {}).get("status"),
+                    "memo": go8a.get("memo"),
+                },
+                "go8b": {
+                    "status": go8b.get("go8b_status"),
+                    "primary_route": go8b.get("primary_route"),
+                    "matbg_qneq0_production_authorized": go8b.get("matbg_qneq0_production_authorized"),
+                    "route_mechanics_suite_status": (go8b.get("route_mechanics_suite") or {}).get("status"),
+                    "graphene_k_agreement_suite_status": (
+                        go8b.get("graphene_k_agreement_suite") or {}
+                    ).get("status"),
+                    "memo": go8b.get("memo"),
+                },
+                "go9_gamma": {
+                    "status": go9_gamma.get("go9_status"),
+                    "certified": go9_gamma.get("rigid_gamma_campaign_certified"),
+                    "final_publication_label": go9_gamma.get("final_publication_label"),
+                    "forbidden_publication_labels": go9_gamma.get("forbidden_publication_labels"),
+                    "suites": {
+                        name: (go9_gamma.get(name) or {}).get("status")
+                        for name in (
+                            "gate_authorization_suite",
+                            "reproducibility_suite",
+                            "reorder_and_interruption_suite",
+                            "synthetic_dependency_guard_suite",
+                            "resource_budget_suite",
+                        )
+                    },
+                    "memo": go9_gamma.get("memo"),
+                },
+                "go9_qneq0": {
+                    "status": go9_qneq0.get("go9_status"),
+                    "certified": go9_qneq0.get("rigid_qneq0_campaign_certified"),
+                    "final_publication_label": go9_qneq0.get("final_publication_label"),
+                    "forbidden_publication_labels": go9_qneq0.get("forbidden_publication_labels"),
+                    "suites": {
+                        name: (go9_qneq0.get(name) or {}).get("status")
+                        for name in (
+                            "gate_authorization_suite",
+                            "go5_and_go8b_dependency_suite",
+                            "route_mechanics_and_reproducibility_suite",
+                            "phase_and_basis_response_guard_suite",
+                            "resource_budget_suite",
+                        )
+                    },
+                    "memo": go9_qneq0.get("memo"),
+                },
+            },
+            "branches": {
+                "gamma": {
+                    "protocol": _epc_matbg_protocol_summary(documents["protocol_gamma"]),
+                    "campaign": {
+                        "executed": campaign_summary is not None,
+                        "claim": (campaign_summary or {}).get("claim"),
+                        "result_status": (campaign_summary or {}).get("result_status"),
+                        "artifact_kind": (campaign_summary or {}).get("artifact_kind"),
+                        "backend": (campaign_summary or {}).get("backend"),
+                        "directions": {
+                            name: {
+                                "state": row.get("state"),
+                                "artifact_kind": row.get("artifact_kind"),
+                                "checks": row.get("checks"),
+                                "reused": row.get("reused"),
+                            }
+                            for name, row in ((campaign_summary or {}).get("directions") or {}).items()
+                        },
+                        "blocked": (campaign_summary or {}).get("blocked"),
+                        "restart_state": restart_state,
+                    },
+                },
+                "qneq0": {
+                    "protocol": _epc_matbg_protocol_summary(documents["protocol_qneq0"]),
+                    "campaign": {
+                        "executed": False,
+                        "reason": "no execution stage is authorised for this branch (S44 claim "
+                        "ladder): ready_to_execute stays False until GO-8a and GO-8b close",
+                    },
+                },
+            },
+            "provenance": {
+                "artifacts": [
+                    {
+                        "artifact": name,
+                        "path": repository_display_path(path),
+                        "sha256": file_sha256(path),
+                    }
+                    for name, path in EPC_MATBG_REQUIRED_SOURCES.items()
+                ],
+                "optional_artifacts": [
+                    {
+                        "artifact": name,
+                        "path": repository_display_path(path),
+                        "present": path.exists(),
+                        "sha256": file_sha256(path) if path.exists() else None,
+                    }
+                    for name, path in EPC_MATBG_OPTIONAL_SOURCES.items()
+                ],
+            },
+        }
+    )
+    return payload
+
+
+EPC_INTEGRATED_OBSERVABLES_SOURCES = {
+    "rigid": EPC_RESULTS_ROOT / "integrated_observables" / "matbg" / "rigid_integrated_observables_result.json",
+    "relaxed": EPC_RESULTS_ROOT / "integrated_observables" / "matbg" / "relaxed_integrated_observables_result.json",
+}
+
+EPC_INTEGRATED_OBSERVABLES_RESULT_FIELDS = (
+    "ticket",
+    "memo",
+    "gate",
+    "generated_at",
+    "result_status",
+    "overall_claim",
+)
+
+
+def _epc_integrated_observables_branch(document: dict[str, Any]) -> dict[str, Any]:
+    """Selects the fields the UI shows for one branch (rigid or relaxed); never recomputes."""
+    production = document.get("production") or {}
+    interpretation = document.get("interpretation") or {}
+    row = {field: document.get(field) for field in EPC_INTEGRATED_OBSERVABLES_RESULT_FIELDS}
+    row.update(
+        {
+            "state": production.get("state"),
+            "blocking": production.get("blocking"),
+            "observables": production.get("observables"),
+            "backends": {
+                field: production.get(field)
+                for field in (
+                    "electronic_derivative_backend",
+                    "basis_response_backend",
+                    "phonon_backend",
+                    "epc_backend_class",
+                )
+            },
+            "verdict": interpretation.get("verdict"),
+            "forbidden": interpretation.get("forbidden"),
+        }
+    )
+    return row
+
+
+def epc_integrated_observables_payload() -> dict[str, Any]:
+    """E-F_001-S56 / Fase 12: publish rigid (S54) and relaxed (S55) integrated-observable results
+    -- |g|^2, gamma_qnu, lambda_qnu, lambda, alpha2F -- straight from their canonical artifacts.
+
+    Reads, selects and reshapes; it never sums a mesh, weights an occupation or fabricates an
+    observable. Every entry the UI shows is a field S54/S55 already wrote; while both stay blocked
+    (GO-9/GO-10 not cleared) every observable renders as ``not_attempted``, never as a zero.
+    """
+    payload: dict[str, Any] = {
+        "schema": "epc_integrated_observables_ui_payload_v1",
+        "ticket": "E-F_001-S56",
+        "system": "matbg_31_30",
+        "sources": {name: repository_display_path(path) for name, path in EPC_INTEGRATED_OBSERVABLES_SOURCES.items()},
+    }
+    missing = [name for name, path in EPC_INTEGRATED_OBSERVABLES_SOURCES.items() if not path.exists()]
+    if missing:
+        payload["available"] = False
+        payload["missing"] = missing
+        return payload
+
+    documents: dict[str, Any] = {}
+    for name, path in EPC_INTEGRATED_OBSERVABLES_SOURCES.items():
+        try:
+            documents[name] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - UI must not crash
+            payload["available"] = False
+            payload["unreadable"] = {"artifact": name, "error": str(exc)}
+            return payload
+
+    relaxed_production = documents["relaxed"].get("production") or {}
+    payload.update(
+        {
+            "available": True,
+            "branches": {name: _epc_integrated_observables_branch(doc) for name, doc in documents.items()},
+            "rigid_vs_relaxed_delta": relaxed_production.get("rigid_vs_relaxed_delta"),
+            "provenance": {
+                "artifacts": [
+                    {"artifact": name, "path": repository_display_path(path), "sha256": file_sha256(path)}
+                    for name, path in EPC_INTEGRATED_OBSERVABLES_SOURCES.items()
+                ],
+            },
+        }
+    )
+    return payload
 
 
 def run_inventory_payload() -> dict[str, Any]:
@@ -13661,18 +14250,55 @@ class ExperimentRunner:
         python_executable = venv_activate.parent / "python"
         if not python_executable.exists():
             python_executable = Path(sys.executable)
-        accelerator = str(config.get("training", {}).get("trainer", {}).get("accelerator", "cpu"))
-        if accelerator in {"gpu", "auto"}:
-            has_cuda = cuda_available(python_executable)
-            if accelerator == "gpu" and not has_cuda:
-                raise RuntimeError(f"{spec.label}: accelerator=gpu solicitado pero CUDA no esta disponible.")
-            if accelerator == "auto":
-                resolved = "gpu" if has_cuda else "cpu"
-                config.setdefault("training", {}).setdefault("trainer", {})["accelerator"] = resolved
-                config.setdefault("performance", {})["compute_accelerator"] = resolved
-                write_yaml(config_path, config)
-                message = "GPU disponible; usando accelerator=gpu." if has_cuda else "CUDA no disponible; auto usa accelerator=cpu."
-                self._append(f"[PERF] {spec.label}: {message}\n")
+        requested_accelerator = str(config.get("training", {}).get("trainer", {}).get("accelerator", "cpu"))
+        # Runtime backend-provenance manifest: a static source-code scanner can only
+        # prove this pipeline is *capable* of recording requested/effective backend;
+        # it cannot prove what an actual run observed. So every run through this
+        # method (gpu, auto or cpu) probes real hardware once via detect_hardware()
+        # (nvidia-smi + torch.cuda.is_available(), not a synthetic guess) and writes
+        # a standalone JSON artifact next to the run's own config.yaml, mirroring
+        # graph2mat_autograd_derivatives.JvpBackendRecord's requested/effective/
+        # preflight/reason shape instead of only burying the decision in config.yaml.
+        hardware = detect_hardware()
+        has_cuda = bool(hardware.get("cuda_available"))
+        fallback_reason: str | None = None
+        if requested_accelerator == "gpu" and not has_cuda:
+            raise RuntimeError(f"{spec.label}: accelerator=gpu solicitado pero CUDA no esta disponible.")
+        if requested_accelerator == "auto":
+            resolved = "gpu" if has_cuda else "cpu"
+            # A CPU fallback here is never silent: requested_backend/effective_backend/
+            # backend_fallback_reason get written into the run's own config.yaml,
+            # matching the provenance pair already used by graph2mat_autograd_derivatives
+            # (JvpBackendRecord) and the S53/S55 preregistration protocols.
+            performance = config.setdefault("performance", {})
+            config.setdefault("training", {}).setdefault("trainer", {})["accelerator"] = resolved
+            performance["compute_accelerator"] = resolved
+            performance["requested_backend"] = "auto"
+            performance["effective_backend"] = resolved
+            fallback_reason = None if has_cuda else "cuda_unavailable: cuda_available(python_executable) returned False"
+            performance["backend_fallback_reason"] = fallback_reason
+            write_yaml(config_path, config)
+            message = "GPU disponible; usando accelerator=gpu." if has_cuda else "CUDA no disponible; auto usa accelerator=cpu."
+            self._append(f"[PERF] {spec.label}: {message}\n")
+            effective_accelerator = resolved
+        elif requested_accelerator == "cpu":
+            # Deliberate cpu (explicit config or the "cpu" default), not a real
+            # fallback -- but recorded here regardless, same distinction the
+            # cpu_only preset already draws in performance_preset_catalog().
+            effective_accelerator = "cpu"
+            fallback_reason = "cpu requested: training.trainer.accelerator is 'cpu' (explicit or default), not a GPU fallback"
+        else:  # "gpu", confirmed available above
+            effective_accelerator = "gpu"
+        provenance_path = write_backend_runtime_provenance(
+            config_path,
+            requested_backend=requested_accelerator,
+            effective_backend=effective_accelerator,
+            device=("cuda:0" if effective_accelerator == "gpu" else "cpu"),
+            hardware=hardware,
+            performance=config.get("performance", {}),
+            fallback_reason=fallback_reason,
+        )
+        self._append(f"[PERF] {spec.label}: backend runtime provenance -> {provenance_path}\n")
         shell_command = (
             f"source {shlex.quote(str(venv_activate))} "
             f"&& {shlex.quote(python)} {shlex.quote(str(spec.main_script))}"
@@ -18478,6 +19104,14 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, deeph_capabilities_payload())
             elif path == "/api/run-inventory":
                 json_response(self, run_inventory_payload())
+            elif path == "/api/epc/graphene-gamma":
+                json_response(self, epc_graphene_gamma_payload())
+            elif path == "/api/epc/snapshot-scaling":
+                json_response(self, epc_snapshot_scaling_payload())
+            elif path == "/api/epc/matbg":
+                json_response(self, epc_matbg_payload())
+            elif path == "/api/epc/integrated-observables":
+                json_response(self, epc_integrated_observables_payload())
             elif path == "/api/mixing-e2e/status":
                 json_response(self, MIXING_E2E_RUNNER.status())
             elif path == "/api/mixing-e2e/logs":

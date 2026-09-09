@@ -1,0 +1,23 @@
+{
+  "schema": "pao_numerical_convergence_protocol_v2",
+  "status": "PREREGISTERED_NOT_EXECUTED",
+  "basis": "exact PROD-SZ certified ion hashes",
+  "direction": "C1_x",
+  "kgrid": [20,20,1],
+  "h_ang": 0.005,
+  "stencil_steps": [-2,-1,0,1,2],
+  "gauge": "H_absolute-c_vac(R)*S(R)",
+  "connection": "certified PROD-SZ S_L/S_R, validated D_S closure at every setting",
+  "stages": [
+    {"name":"scf", "mesh_ry":600, "dm_tolerances":[1e-6,1e-7,1e-8], "reuse":"1e-6 stencil only with exact manifest match", "decisive_pair":[1e-7,1e-8]},
+    {"name":"mesh", "mesh_ry":[600,800,1000], "dm_tolerance":1e-8, "decisive_pair":[800,1000]},
+    {"name":"egg_box", "mesh_ry":1000, "dm_tolerance":1e-8, "translations":"baseline and rigid half-grid-step shift of all atoms in Cartesian x; derive actual grid step from VT cell/shape", "reuse":"1000 Ry unshifted stencil"}
+  ],
+  "observable":"Delta_PAO_cov = D5 K - S_L solve(S,K0) - K0 solve(S,S_R)",
+  "metrics":"S0^-1/2 X S0^-1/2; Frobenius/sqrt(n_A), relative to finer response, maximum element",
+  "limits":{"rms_ev_per_ang":0.005,"relative":0.01,"maximum_ev_per_ang":0.015,"connection_ev_per_ang":0.001},
+  "aggregation":"all examined k on full 20x20x1 mesh; all decisive pairs must pass; nonfinite/missing data BLOCKED",
+  "stop_policy":"stop at failing stage; no PAO enrichment, MATBG or long finite-q calculation",
+  "reuse_policy":"hash geometry, PAOs, pseudo, executable, numerical controls and convergence logs; raw DHS cannot replace covariant response",
+  "physical_objective_satisfied":false
+}

@@ -455,6 +455,10 @@ def run_autograd_derivative_predictions(args: argparse.Namespace) -> dict[str, A
             "reject the vectorized batched backward on CUDA with current "
             "torch/mace versions. Run on cpu (default)."
         )
+    # requested_backend=cpu, effective_backend=cpu: the only other option
+    # (--accelerator cuda) fails closed above instead of running here, so
+    # reaching this line always means cpu was requested. backend_fallback_reason:
+    # not applicable -- this is not a fallback, cpu is the only supported backend.
     device = torch.device("cpu")
 
     # The checkpoint's saved basis_files hparam is a path relative to the cwd
@@ -702,7 +706,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--basis-files", required=True)
     parser.add_argument("--output-root", type=Path, default=None)
+    # requested_backend defaults to cpu; --accelerator cuda raises explicitly at
+    # runtime instead of falling back (MACE's TorchScript backward rejects the
+    # vectorized batched backward on CUDA -- see the fail-closed check above).
+    # backend_fallback_reason: cuda_unsupported_current_torch_mace_versions.
     parser.add_argument("--accelerator", choices=["cpu", "cuda"], default="cpu")
+    # effective_backend=cpu is this parser's only working choice today; see
+    # backend_fallback_reason above (cuda_unsupported_current_torch_mace_versions).
     parser.add_argument("--out-matrix", default="hamiltonian")
     parser.add_argument("--symmetric-matrix", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sub-point-matrix", action=argparse.BooleanOptionalAction, default=False)

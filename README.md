@@ -16,6 +16,7 @@ canonicos y permite ejecutar cualquier subconjunto de ellos.
 - [ML vs SIESTA benchmark toolkit](docs/ml_vs_siesta_benchmark.md)
 - [Phase 6 H2O Hamiltonian architecture benchmark](docs/phase6_hamiltonian_architecture_benchmark.md)
 - [Derivative smoke validation note](docs/derivative_smoke_validation_note.md)
+- [Formalismo EPC en base PAO móvil (GO-1)](docs/epc_formalismo_pao_movil.md)
 
 ## Current scope
 

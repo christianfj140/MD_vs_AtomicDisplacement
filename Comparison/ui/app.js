@@ -15947,6 +15947,701 @@ function setupCrossTesting() {
   ctVacancyLoadMatrixRuns().catch(() => {});
 }
 
+// ===== EPC graphene Gamma (C21 / E-F_001-S28) =====
+// Todo lo que se ve aquí lo escribieron evaluate_epc_metrics.py y compute_epc_matrix_elements.py.
+// Esta vista lee /api/epc/graphene-gamma y formatea: no hay Fourier, ni contracciones, ni
+// observables, ni aritmética sobre g. Cambiarla no invalida ningún artifact científico.
+
+function epcChip(label, tone) {
+  return `<span class="phase-chip ${tone}">${escapeHtml(label)}</span>`;
+}
+
+function epcVerdictTone(verdict) {
+  const text = String(verdict || "").toUpperCase();
+  if (text === "PASS" || text === "CHECKS_PASS") return "done";
+  if (text.startsWith("NO_GO") || text === "FAIL" || text === "CHECKS_FAIL") return "failed";
+  return "";
+}
+
+function epcPassChip(passed) {
+  if (passed === true) return epcChip("PASS", "done");
+  if (passed === false) return epcChip("FAIL", "failed");
+  return "-";
+}
+
+function epcList(values) {
+  const items = (Array.isArray(values) ? values : [])
+    .map((entry) => (typeof entry === "string" ? entry : JSON.stringify(entry)))
+    .map((text) => `<li>${escapeHtml(text)}</li>`)
+    .join("");
+  return items ? `<ul class="muted-text">${items}</ul>` : "";
+}
+
+function epcSetRows(id, rows, columns) {
+  const body = document.getElementById(id);
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="${columns}" class="muted-text">Sin datos en el artifact.</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.join("");
+}
+
+function renderEpcGammaVerdict(payload) {
+  const title = document.getElementById("epc-gamma-verdict-title");
+  const help = document.getElementById("epc-gamma-verdict-help");
+  const chips = document.getElementById("epc-gamma-chips");
+  const levels = payload.levels || {};
+  if (title) title.textContent = `${payload.gate || "GO-4"} · ${payload.verdict || "-"}`;
+  if (help) {
+    help.textContent = payload.label
+      ? `Etiqueta: ${payload.label}. ${payload.label_rule || ""}`
+      : `Sin etiqueta. ${payload.label_rule || ""}`;
+  }
+  if (chips) {
+    chips.innerHTML = [
+      epcChip(`GO-4 ${payload.verdict || "-"}`, epcVerdictTone(payload.verdict)),
+      epcChip(
+        `finite-PAO ${levels.finite_PAO?.verdict || "-"}`,
+        epcVerdictTone(levels.finite_PAO?.verdict),
+      ),
+      epcChip(
+        `Full-KS EPC claim ${(levels.full_ks_epc_level || levels.physical_epc_level)?.verdict || "-"}`,
+        epcVerdictTone((levels.full_ks_epc_level || levels.physical_epc_level)?.verdict),
+      ),
+      epcChip(`status ${payload.status || "-"}`, ""),
+      epcChip(
+        `SIESTA ${payload.provenance?.siesta_runtime_classification || "-"}`,
+        payload.provenance?.siesta_source_verified ? "done" : "failed",
+      ),
+    ].join("");
+  }
+
+  const identity = document.getElementById("epc-gamma-identity");
+  if (identity) {
+    clearNode(identity);
+    appendKeyValue(identity, "Ticket", payload.ticket);
+    appendKeyValue(identity, "Candidato", payload.candidate);
+    appendKeyValue(identity, "Sistema / q", `${payload.system || "-"} · Gamma`);
+    appendKeyValue(identity, "formalism_id", payload.formalism_id);
+    appendKeyValue(identity, "protocol_id", payload.protocol_id);
+    appendKeyValue(identity, "result_class", payload.result_class);
+    appendKeyValue(identity, "label", payload.label ?? "null");
+    appendKeyValue(identity, "preregistration_sha256", payload.preregistration_sha256);
+    appendKeyValue(identity, "Veredicto del summary", payload.summary_verdict);
+    appendKeyValue(identity, "Checks fallidos", (payload.checks_failed || []).join(", "));
+    appendKeyValue(identity, "Generado", payload.generated_at);
+  }
+
+  const model = document.getElementById("epc-gamma-model-statement");
+  if (model) {
+    clearNode(model);
+    const statement = payload.model_statement || {};
+    appendKeyValue(model, "tau_model", g2mDeephValue(statement.tau_model));
+    appendKeyValue(model, "Umbral de adecuación", g2mDeephValue(statement.adequacy_threshold));
+    appendKeyValue(model, "quantitative_for_g", g2mDeephValue(statement.quantitative_for_g));
+    appendKeyValue(model, "La cota cubre el result set", g2mDeephValue(statement.bound_covers_result));
+    appendKeyValue(model, "Transfiere a validación", g2mDeephValue(statement.transfers_to_validation_split));
+    appendKeyValue(model, "Se culpa al modelo", g2mDeephValue(statement.charged_to_the_model));
+    appendKeyValue(model, "Ticket de fine-tuning", g2mDeephValue(statement.fine_tuning_ticket_authorized));
+    appendKeyValue(model, "Trabajo recomendado", g2mDeephValue(payload.recommended_next_work));
+    if (statement.floor) {
+      const floor = document.createElement("p");
+      floor.className = "muted-text";
+      floor.textContent = statement.floor;
+      model.appendChild(floor);
+    }
+  }
+
+  const claimNode = document.getElementById("epc-gamma-claim");
+  if (claimNode) {
+    const claim = payload.claim || {};
+    const alsoActive = (claim.also_active || [])
+      .map((entry) => `<li>escalón ${escapeHtml(entry.rung)}: ${escapeHtml(entry.claim)}</li>`)
+      .join("");
+    const sensitivity = (payload.intra_atomic_sensitivity?.per_direction || [])
+      .flatMap((direction) =>
+        (direction.sensitivity || []).map(
+          (item) =>
+            `<li><code>${escapeHtml(direction.direction)}</code> · ${escapeHtml(item.state)}: ` +
+            `max ${escapeHtml(g2mDeephValue(item.max_interband_response))}, ` +
+            `rms ${escapeHtml(g2mDeephValue(item.rms_interband_response))} ${escapeHtml(item.units || "")}</li>`,
+        ),
+      )
+      .join("");
+    claimNode.innerHTML = [
+      `<p><strong>Escalón de claim ${escapeHtml(claim.rung)}:</strong> ${escapeHtml(claim.claim || "-")}</p>`,
+      `<p><strong>Publicable:</strong> ${escapeHtml(claim.publishable || "-")}</p>`,
+      alsoActive ? `<p><strong>También activo</strong></p><ul class="muted-text">${alsoActive}</ul>` : "",
+      payload.blocking?.length ? `<p><strong>Bloqueantes</strong></p>${epcList(payload.blocking)}` : "",
+      payload.limitations?.length ? `<p><strong>Limitaciones</strong></p>${epcList(payload.limitations)}` : "",
+      sensitivity
+        ? `<p><strong>Anchura de la cota (sensibilidad intra-atómica, no un factor de corrección)</strong></p>` +
+          `<ul class="muted-text">${sensitivity}</ul>`
+        : "",
+    ].join("");
+  }
+}
+
+function renderEpcGammaGates(payload) {
+  const attribution = new Map(
+    (payload.failure_attribution || []).map((entry) => [entry.gate, entry]),
+  );
+  epcSetRows(
+    "epc-gamma-gates",
+    (payload.gates || []).map((gate) => {
+      const evidence = (gate.evidence || [])
+        .map((item) => `${item.check}: ${item.passed ? "PASS" : "FAIL"}`)
+        .join("; ");
+      const charged = attribution.get(gate.gate);
+      const note = charged
+        ? `<div class="muted-text">capa ${escapeHtml(charged.layer)}${charged.kind ? ` · ${escapeHtml(charged.kind)}` : ""}</div>`
+        : "";
+      return `<tr>
+          <td>${escapeHtml(gate.gate)}</td>
+          <td><code>${escapeHtml(gate.id)}</code><div class="muted-text">${escapeHtml(gate.question || "")}</div></td>
+          <td>${escapeHtml(gate.level)}</td>
+          <td>${escapeHtml(gate.layer)}</td>
+          <td>${epcPassChip(gate.passed)}</td>
+          <td>${escapeHtml(evidence)}${note}</td>
+        </tr>`;
+    }),
+    6,
+  );
+  epcSetRows(
+    "epc-gamma-frozen-checks",
+    (payload.frozen_checks || []).map(
+      (check) => `<tr>
+          <td><code>${escapeHtml(check.id)}</code></td>
+          <td>${escapeHtml(check.stage)}</td>
+          <td><code>${escapeHtml(check.evaluated_as)}</code></td>
+          <td>${epcPassChip(check.passed)}</td>
+        </tr>`,
+    ),
+    4,
+  );
+}
+
+function renderEpcGammaTolerances(payload) {
+  const tolerances = payload.tolerances || {};
+  const tauModel = tolerances.tau_model || {};
+  const help = document.getElementById("epc-gamma-tau-help");
+  if (help) {
+    help.textContent =
+      `tau_model = ${g2mDeephValue(tauModel.value)} (umbral de adecuación ` +
+      `${g2mDeephValue(tauModel.adequacy_threshold)}). ${tauModel.note || ""}`;
+  }
+  epcSetRows(
+    "epc-gamma-tau-num",
+    (tolerances.tau_num || []).map(
+      (row) => `<tr>
+          <td>${escapeHtml(row.path)}</td>
+          <td>${escapeHtml(row.direction)}</td>
+          <td>${escapeHtml(row.k)}</td>
+          <td>${escapeHtml(row.split)}</td>
+          <td>${escapeHtml(g2mDeephValue(row.tau_num))}</td>
+          <td>${escapeHtml(row.unit)}</td>
+        </tr>`,
+    ),
+    6,
+  );
+  epcSetRows(
+    "epc-gamma-tau-backend",
+    (tolerances.tau_backend || []).map(
+      (row) => `<tr>
+          <td>${escapeHtml(row.direction)}</td>
+          <td>${escapeHtml(row.k)}</td>
+          <td>${escapeHtml(row.split)}</td>
+          <td>${escapeHtml(g2mDeephValue(row.tau_backend))}</td>
+          <td>${escapeHtml(g2mDeephValue(row.limit))}</td>
+          <td>${escapeHtml(g2mDeephValue(row.delta_ang))}</td>
+          <td>${epcPassChip(row.passes)}</td>
+        </tr>`,
+    ),
+    7,
+  );
+  const modelRows = Object.entries(tauModel)
+    .filter(([, value]) => Array.isArray(value))
+    .flatMap(([split, entries]) =>
+      entries.map(
+        (row) => `<tr>
+            <td>${escapeHtml(split)}</td>
+            <td>${escapeHtml(row.model_path)}</td>
+            <td>${escapeHtml(row.direction)}</td>
+            <td>${escapeHtml(row.k)}</td>
+            <td>${escapeHtml(g2mDeephValue(row.relative_subspace_error))}</td>
+            <td>${escapeHtml(g2mDeephValue(row.delta_g_frobenius))}</td>
+            <td>${escapeHtml(g2mDeephValue(row.reference_frobenius))}</td>
+          </tr>`,
+      ),
+    );
+  epcSetRows("epc-gamma-tau-model", modelRows, 7);
+}
+
+function renderEpcGammaBlocks(payload) {
+  epcSetRows(
+    "epc-gamma-g-blocks",
+    (payload.g_blocks || []).map((block) => {
+      const gauge = block.g?.gauge_invariant || {};
+      const perUnit = block.g_per_unit_displacement?.gauge_invariant || {};
+      const singular = (gauge.singular_values || [])
+        .map((value) => g2mDeephValue(value))
+        .join(", ");
+      const hf = block.hellmann_feynman || [];
+      const hfPasses = hf.length ? hf.every((item) => item.passes === true) : null;
+      const hfResidual = hf.length
+        ? hf.map((item) => g2mDeephValue(item.residual)).join(", ")
+        : "-";
+      const backends = Object.entries(block.backends || {})
+        .map(([key, value]) => `${key}: ${value ?? "-"}`)
+        .join("; ");
+      return `<tr>
+          <td>${escapeHtml(block.path)}</td>
+          <td>${escapeHtml(block.mode_label)}
+            <div class="muted-text">${escapeHtml(block.mode?.artifact_kind || "-")} · rama ${escapeHtml(block.mode?.branch)}</div>
+          </td>
+          <td>${escapeHtml(block.k_label)}</td>
+          <td>${escapeHtml(block.split)}</td>
+          <td>${escapeHtml(g2mDeephValue(block.mode?.frequency_eV))}</td>
+          <td>${escapeHtml(g2mDeephValue(gauge.frobenius_norm))}</td>
+          <td>${escapeHtml(singular)}</td>
+          <td>${escapeHtml(g2mDeephValue(perUnit.frobenius_norm))}</td>
+          <td>${epcPassChip(hfPasses)}<div class="muted-text">residuo ${escapeHtml(hfResidual)}</div></td>
+          <td class="muted-text">${escapeHtml(backends)}
+            <div>intra_atomic_included: ${escapeHtml(g2mDeephValue(block.intra_atomic_included))}</div>
+          </td>
+        </tr>`;
+    }),
+    10,
+  );
+}
+
+function renderEpcGammaCharts(payload) {
+  const gates = payload.gates || [];
+  renderPlot("epc-gamma-gates-chart", [{
+    type: "bar",
+    orientation: "h",
+    x: gates.map((gate) => gate.passed ? 1 : 0),
+    y: gates.map((gate) => `${gate.gate}. ${gate.id}`),
+    text: gates.map((gate) => gate.passed ? "PASS" : "FAIL"),
+    textposition: "inside",
+    marker: { color: gates.map((gate) => gate.passed ? "#22c55e" : "#ef4444") },
+    hovertemplate: "%{y}<br>%{text}<extra></extra>",
+  }], {
+    title: "Resultado por gate",
+    xaxis: { range: [0, 1], showticklabels: false, title: "" },
+    yaxis: { autorange: "reversed", automargin: true },
+    showlegend: false,
+  }, { toImageButtonOptions: { filename: "epc_graphene_gamma_gates" } });
+
+  const statement = payload.model_statement || {};
+  renderPlot("epc-gamma-tau-model-chart", [{
+    type: "bar",
+    x: ["Error medido", "Umbral"],
+    y: [statement.tau_model, statement.adequacy_threshold],
+    text: [statement.tau_model, statement.adequacy_threshold].map(g2mDeephValue),
+    textposition: "outside",
+    marker: { color: ["#ef4444", "#22c55e"] },
+    hovertemplate: "%{x}: %{y:.4g}<extra></extra>",
+  }], {
+    title: "τmodel frente al límite de adecuación",
+    yaxis: { title: "Error relativo", rangemode: "tozero" },
+    showlegend: false,
+  }, { toImageButtonOptions: { filename: "epc_graphene_gamma_tau_model" } });
+
+  const blocks = payload.g_blocks || [];
+  const labels = [...new Set(blocks.map((block) => `${block.mode_label} · ${block.k_label}`))];
+  const paths = [...new Set(blocks.map((block) => block.path))];
+  renderPlot("epc-gamma-paths-chart", paths.map((path) => ({
+    type: "bar",
+    name: path,
+    x: labels,
+    y: labels.map((label) => blocks.find(
+      (block) => block.path === path && `${block.mode_label} · ${block.k_label}` === label,
+    )?.g?.gauge_invariant?.frobenius_norm ?? null),
+    hovertemplate: `${path}<br>%{x}<br>‖g‖F = %{y:.4g} eV<extra></extra>`,
+  })), {
+    title: "Norma de Frobenius de g por modo, k y path",
+    barmode: "group",
+    xaxis: { automargin: true },
+    yaxis: { title: "‖g‖F (eV)", rangemode: "tozero" },
+    legend: { orientation: "h" },
+  }, { toImageButtonOptions: { filename: "epc_graphene_gamma_paths" } });
+}
+
+function renderEpcGammaProvenance(payload) {
+  const provenance = payload.provenance || {};
+  const runtime = provenance.siesta_runtime || {};
+  const node = document.getElementById("epc-gamma-provenance");
+  if (node) {
+    clearNode(node);
+    appendKeyValue(node, "Clasificación del runtime SIESTA", provenance.siesta_runtime_classification);
+    appendKeyValue(
+      node,
+      "¿VERIFIED_SOURCE?",
+      provenance.siesta_source_verified ? "sí" : "no (sólo binario hasheado)",
+    );
+    appendKeyValue(node, "SHA256 del binario", runtime.binary_sha256);
+    appendKeyValue(node, "Record de provenance", runtime.record_path);
+    Object.entries(provenance.compute_policy || {}).forEach(([component, policy]) => {
+      appendKeyValue(
+        node,
+        `Backend ${component}`,
+        `${policy?.requested_backend ?? "-"} → ${policy?.effective_backend ?? "-"}` +
+          (policy?.fallback ? " (fallback)" : ""),
+      );
+    });
+  }
+
+  const contracts = document.getElementById("epc-gamma-contracts");
+  if (contracts) {
+    clearNode(contracts);
+    const shared = provenance.shared_contracts || {};
+    Object.entries(shared).forEach(([key, value]) => {
+      if (key === "basis_response_block_sha256") return;
+      appendKeyValue(contracts, key, typeof value === "object" ? JSON.stringify(value) : value);
+    });
+    Object.entries(shared.basis_response_block_sha256 || {}).forEach(([direction, sha]) => {
+      appendKeyValue(contracts, `basis_response ${direction}`, sha);
+    });
+  }
+
+  epcSetRows(
+    "epc-gamma-artifacts",
+    (provenance.artifacts || []).map(
+      (artifact) => `<tr>
+          <td>${escapeHtml(artifact.artifact)}</td>
+          <td><code>${escapeHtml(artifact.path)}</code></td>
+          <td><code>${escapeHtml(artifact.sha256)}</code></td>
+        </tr>`,
+    ),
+    3,
+  );
+}
+
+function renderEpcGamma(payload) {
+  if (!payload?.available) {
+    const title = document.getElementById("epc-gamma-verdict-title");
+    const help = document.getElementById("epc-gamma-verdict-help");
+    if (title) title.textContent = "Artifacts no disponibles";
+    if (help) {
+      help.textContent = payload?.unreadable
+        ? `No se pudo leer ${payload.unreadable.artifact}: ${payload.unreadable.error}`
+        : `Faltan artifacts: ${(payload?.missing || []).join(", ") || "desconocido"}`;
+    }
+    ["epc-gamma-chips", "epc-gamma-identity", "epc-gamma-model-statement", "epc-gamma-claim",
+      "epc-gamma-provenance", "epc-gamma-contracts"].forEach((id) =>
+      clearNode(document.getElementById(id)),
+    );
+    [["epc-gamma-gates", 6], ["epc-gamma-frozen-checks", 4], ["epc-gamma-tau-num", 6],
+      ["epc-gamma-tau-backend", 7], ["epc-gamma-tau-model", 7], ["epc-gamma-g-blocks", 10],
+      ["epc-gamma-artifacts", 3]].forEach(([id, columns]) => epcSetRows(id, [], columns));
+    ["epc-gamma-gates-chart", "epc-gamma-tau-model-chart", "epc-gamma-paths-chart"]
+      .forEach((id) => renderEmptyPlot(id, "Sin datos", "Faltan los artifacts EPC graphene Γ."));
+    return;
+  }
+  renderEpcGammaVerdict(payload);
+  renderEpcGammaGates(payload);
+  renderEpcGammaTolerances(payload);
+  renderEpcGammaBlocks(payload);
+  renderEpcGammaCharts(payload);
+  renderEpcGammaProvenance(payload);
+}
+
+async function loadEpcGamma() {
+  renderEpcGamma(await request("/api/epc/graphene-gamma"));
+}
+
+let epcScalingPayload = null;
+
+function renderEpcScaling(payload = {}) {
+  epcScalingPayload = payload;
+  const status = document.getElementById("epc-scaling-status");
+  const table = document.getElementById("epc-scaling-metrics");
+  const plots = document.getElementById("epc-scaling-plots");
+  if (!payload.available) {
+    if (status) status.textContent = payload.message || "No hay resultados EPC de escalado.";
+    if (table) table.innerHTML = '<tr><td colspan="7" class="muted-text">Sin datos.</td></tr>';
+    if (plots) plots.textContent = "Sin gráficas disponibles.";
+    return;
+  }
+  const family = document.getElementById("epc-scaling-family")?.value || "all";
+  const allRows = payload.plots?.[0]?.rows || [];
+  const keep = (row) => family === "all" || row.family === family ||
+    (family === "w90" && row.family === "w90_adjusted") ||
+    (family === "5x5" && row.family === "5x5_adjusted");
+  const rows = allRows.filter(keep);
+  if (status) status.textContent = `${rows.length} checkpoints · referencia SIESTA fija · menor error es mejor, salvo Support F1 y Pearson.`;
+  if (table) {
+    table.innerHTML = rows.map((row) => `<tr>
+      <td>${escapeHtml(row.model_label)}</td><td>${escapeHtml(row.snapshots)}</td>
+      <td>${escapeHtml(g2mDeephValue(row.dh_mae_union_eV_per_Ang))}</td>
+      <td>${escapeHtml(g2mDeephValue(row.dh_rmse_union_eV_per_Ang))}</td>
+      <td>${escapeHtml(g2mDeephValue(row.dh_relative_frobenius_ref))}</td>
+      <td>${escapeHtml(g2mDeephValue(row.dh_support_f1))}</td>
+      <td>${escapeHtml(g2mDeephValue(row.dh_pearson_union))}</td>
+    </tr>`).join("");
+  }
+  if (!plots) return;
+  plots.textContent = "";
+  for (const source of payload.plots || []) {
+    const plot = {...source, rows: (source.rows || []).filter(keep)};
+    const card = document.createElement("div");
+    card.className = "plot-card wide";
+    plots.appendChild(card);
+    if (window.Plotly) renderG2MDeepHDerivativeScatterPlot(card, plot);
+    else renderG2MDeepHDerivativePlotSummary(card, plot);
+  }
+  const paired = payload.paired_comparison || {};
+  const pairedTitle = document.getElementById("epc-scaling-deeph-title");
+  const pairedWarning = document.getElementById("epc-scaling-deeph-warning");
+  const pairedPlots = document.getElementById("epc-scaling-deeph-plots");
+  if (pairedTitle) pairedTitle.textContent = paired.title || "Graph2Mat vs DeepH";
+  if (pairedWarning) pairedWarning.textContent = paired.warning || "Sin comparación emparejada disponible.";
+  if (pairedPlots) {
+    pairedPlots.textContent = "";
+    for (const plot of paired.plots || []) {
+      const card = document.createElement("div");
+      card.className = "plot-card wide";
+      pairedPlots.appendChild(card);
+      if (window.Plotly) renderG2MDeepHDerivativeScatterPlot(card, plot);
+      else renderG2MDeepHDerivativePlotSummary(card, plot);
+    }
+  }
+  schedulePlotResize();
+}
+
+async function loadEpcScaling() {
+  const payload = await request("/api/epc/snapshot-scaling");
+  await ensurePlotlyLoaded();
+  renderEpcScaling(payload);
+}
+
+// ===== EPC MATBG rigid Gamma / q != 0 campaigns (S46 / E-F_001-S46) =====
+// Lee /api/epc/matbg: agrega GO-8a/GO-8b/GO-9 y los protocolos S41/S44 congelados. No calcula
+// física; una rama q != 0 sin ejecución se muestra explícitamente como no ejecutada, nunca como
+// cero ni como validada.
+
+function epcMatbgGateTone(status) {
+  const text = String(status || "").toUpperCase();
+  if (text.startsWith("NO-GO") || text === "NO_GO" || text === "FAIL") return "failed";
+  if (text.startsWith("GO") || text === "PASS") return "done";
+  return "";
+}
+
+function renderEpcMatbgGates(payload) {
+  const gates = payload.gates || {};
+  const title = document.getElementById("epc-matbg-verdict-title");
+  const help = document.getElementById("epc-matbg-verdict-help");
+  if (title) {
+    title.textContent =
+      `GO-8a ${gates.go8a?.status ?? "-"} · GO-8b ${gates.go8b?.status ?? "-"} · ` +
+      `GO-9(Gamma) ${gates.go9_gamma?.status ?? "-"} · GO-9(q!=0) ${gates.go9_qneq0?.status ?? "-"}`;
+  }
+  if (help) {
+    help.textContent =
+      `Etiqueta de publicación autorizada: ${gates.go9_gamma?.final_publication_label ?? "-"}. ` +
+      `Etiquetas prohibidas: ${(gates.go9_gamma?.forbidden_publication_labels || []).join(", ") || "-"}.`;
+  }
+  const chips = document.getElementById("epc-matbg-chips");
+  if (chips) {
+    chips.innerHTML = [
+      epcChip(`GO-8a ${gates.go8a?.status ?? "-"}`, epcMatbgGateTone(gates.go8a?.status)),
+      epcChip(`GO-8b ${gates.go8b?.status ?? "-"}`, epcMatbgGateTone(gates.go8b?.status)),
+      epcChip(`GO-9 Gamma ${gates.go9_gamma?.status ?? "-"}`, epcMatbgGateTone(gates.go9_gamma?.status)),
+      epcChip(`GO-9 q!=0 ${gates.go9_qneq0?.status ?? "-"}`, epcMatbgGateTone(gates.go9_qneq0?.status)),
+    ].join("");
+  }
+  const rows = [
+    [
+      "GO-8a",
+      gates.go8a?.status,
+      `provider=${gates.go8a?.selected_provider ?? "null"} · matbg_scale=` +
+        `${gates.go8a?.matbg_scale_suite_status ?? "-"} · small_system=${gates.go8a?.small_system_suite_status ?? "-"}`,
+      gates.go8a?.memo,
+    ],
+    [
+      "GO-8b",
+      gates.go8b?.status,
+      `route=${gates.go8b?.primary_route ?? "-"} · mechanics=${gates.go8b?.route_mechanics_suite_status ?? "-"} · ` +
+        `graphene_k_agreement=${gates.go8b?.graphene_k_agreement_suite_status ?? "-"} · ` +
+        `producción autorizada=${g2mDeephValue(gates.go8b?.matbg_qneq0_production_authorized)}`,
+      gates.go8b?.memo,
+    ],
+    [
+      "GO-9 (Gamma)",
+      gates.go9_gamma?.status,
+      Object.entries(gates.go9_gamma?.suites || {}).map(([key, value]) => `${key}=${value}`).join(" · "),
+      gates.go9_gamma?.memo,
+    ],
+    [
+      "GO-9 (q!=0)",
+      gates.go9_qneq0?.status,
+      Object.entries(gates.go9_qneq0?.suites || {}).map(([key, value]) => `${key}=${value}`).join(" · "),
+      gates.go9_qneq0?.memo,
+    ],
+  ];
+  epcSetRows(
+    "epc-matbg-gates",
+    rows.map(
+      ([gate, status, detail, memo]) => `<tr>
+          <td>${escapeHtml(gate)}</td>
+          <td>${epcChip(String(status ?? "-"), epcMatbgGateTone(status))}</td>
+          <td class="muted-text">${escapeHtml(detail || "-")}</td>
+          <td class="muted-text">${escapeHtml(memo || "-")}</td>
+        </tr>`,
+    ),
+    4,
+  );
+}
+
+function renderEpcMatbgBranch(prefix, branch) {
+  const protocol = branch.protocol || {};
+  const experiment = protocol.experiment || {};
+  const identity = document.getElementById(`epc-matbg-${prefix}-identity`);
+  if (identity) {
+    clearNode(identity);
+    appendKeyValue(identity, "protocol_id", protocol.protocol_id);
+    appendKeyValue(identity, "gate", protocol.gate);
+    appendKeyValue(identity, "ready_to_execute", g2mDeephValue(protocol.ready_to_execute));
+    appendKeyValue(identity, "q", experiment.q_label ?? experiment.q_label_primary ?? "-");
+    appendKeyValue(identity, "publication_label_if_validated", experiment.publication_label_if_validated);
+    appendKeyValue(
+      identity,
+      "forbidden_publication_labels",
+      (experiment.forbidden_publication_labels || []).join(", "),
+    );
+    appendKeyValue(identity, "matrix_dimension", protocol.electronic?.matrix_dimension);
+    appendKeyValue(identity, "phonon status", protocol.phonon?.status);
+    appendKeyValue(identity, "artifact_kind de candidatos", protocol.phonon?.artifact_kind_of_candidates);
+  }
+
+  const campaign = branch.campaign || {};
+  const campaignNode = document.getElementById(`epc-matbg-${prefix}-campaign`);
+  if (campaignNode) {
+    clearNode(campaignNode);
+    appendKeyValue(campaignNode, "ejecutada", campaign.executed ? "sí" : "no");
+    if (campaign.executed) {
+      appendKeyValue(campaignNode, "claim", campaign.claim);
+      appendKeyValue(campaignNode, "result_status", campaign.result_status);
+      appendKeyValue(campaignNode, "artifact_kind", campaign.artifact_kind);
+      appendKeyValue(
+        campaignNode,
+        "backend solicitado -> efectivo",
+        `${campaign.backend?.requested_backend ?? "-"} -> ${campaign.backend?.effective_backend ?? "-"}`,
+      );
+    } else if (campaign.reason) {
+      appendKeyValue(campaignNode, "motivo", campaign.reason);
+    }
+  }
+
+  const blockingNode = document.getElementById(`epc-matbg-${prefix}-blocking`);
+  if (blockingNode) {
+    blockingNode.innerHTML = (protocol.blocking || []).length
+      ? `<p><strong>Bloqueantes congelados</strong></p>${epcList(protocol.blocking)}`
+      : "";
+  }
+
+  epcSetRows(
+    `epc-matbg-${prefix}-ladder`,
+    (protocol.claim_ladder || []).map(
+      (row, index) => `<tr>
+          <td>${index + 1}</td>
+          <td>${escapeHtml(row.claim || "-")}</td>
+          <td class="muted-text">${escapeHtml(row.outcome || "-")}</td>
+        </tr>`,
+    ),
+    3,
+  );
+}
+
+function renderEpcMatbgGammaCampaignDetails(branch) {
+  const campaign = branch.campaign || {};
+  epcSetRows(
+    "epc-matbg-gamma-directions",
+    Object.entries(campaign.directions || {}).map(
+      ([name, row]) => `<tr>
+          <td>${escapeHtml(name)}</td>
+          <td>${escapeHtml(row.state || "-")}</td>
+          <td>${escapeHtml(row.artifact_kind || "-")}</td>
+          <td>${epcPassChip(row.checks?.jvp_equals_frozen_within_backend_margin)}</td>
+          <td>${row.reused ? "sí" : "no"}</td>
+        </tr>`,
+    ),
+    5,
+  );
+  epcSetRows(
+    "epc-matbg-gamma-restart",
+    (campaign.restart_state || []).map(
+      (row) => `<tr>
+          <td>${escapeHtml(row.artifact_id)}</td>
+          <td>${escapeHtml(row.state || "-")}</td>
+          <td><code>${escapeHtml(row.signature_sha256 || "-")}</code></td>
+          <td>${escapeHtml(row.updated_at || "-")}</td>
+        </tr>`,
+    ),
+    4,
+  );
+}
+
+function renderEpcMatbgProvenance(payload) {
+  const provenance = payload.provenance || {};
+  const rows = [
+    ...(provenance.artifacts || []).map((artifact) => ({ ...artifact, present: true })),
+    ...(provenance.optional_artifacts || []),
+  ];
+  epcSetRows(
+    "epc-matbg-artifacts",
+    rows.map(
+      (artifact) => `<tr>
+          <td>${escapeHtml(artifact.artifact)}</td>
+          <td><code>${escapeHtml(artifact.path)}</code></td>
+          <td>${artifact.present ? "sí" : "no"}</td>
+          <td><code>${escapeHtml(artifact.sha256 || "-")}</code></td>
+        </tr>`,
+    ),
+    4,
+  );
+}
+
+function renderEpcMatbg(payload) {
+  if (!payload?.available) {
+    const title = document.getElementById("epc-matbg-verdict-title");
+    const help = document.getElementById("epc-matbg-verdict-help");
+    if (title) title.textContent = "Artifacts no disponibles";
+    if (help) {
+      help.textContent = payload?.unreadable
+        ? `No se pudo leer ${payload.unreadable.artifact}: ${payload.unreadable.error}`
+        : `Faltan artifacts: ${(payload?.missing || []).join(", ") || "desconocido"}`;
+    }
+    clearNode(document.getElementById("epc-matbg-chips"));
+    ["epc-matbg-gamma-identity", "epc-matbg-gamma-campaign", "epc-matbg-qneq0-identity", "epc-matbg-qneq0-campaign"]
+      .forEach((id) => clearNode(document.getElementById(id)));
+    ["epc-matbg-gamma-blocking", "epc-matbg-qneq0-blocking"].forEach((id) => {
+      const node = document.getElementById(id);
+      if (node) node.innerHTML = "";
+    });
+    [
+      ["epc-matbg-gates", 4],
+      ["epc-matbg-gamma-ladder", 3],
+      ["epc-matbg-gamma-directions", 5],
+      ["epc-matbg-gamma-restart", 4],
+      ["epc-matbg-qneq0-ladder", 3],
+      ["epc-matbg-artifacts", 4],
+    ].forEach(([id, columns]) => epcSetRows(id, [], columns));
+    return;
+  }
+  renderEpcMatbgGates(payload);
+  renderEpcMatbgBranch("gamma", payload.branches?.gamma || {});
+  renderEpcMatbgGammaCampaignDetails(payload.branches?.gamma || {});
+  renderEpcMatbgBranch("qneq0", payload.branches?.qneq0 || {});
+  renderEpcMatbgProvenance(payload);
+}
+
+async function loadEpcMatbg() {
+  renderEpcMatbg(await request("/api/epc/matbg"));
+}
+
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -15987,6 +16682,12 @@ function setupTabs() {
         loadG2MDeepHPlotRuns({ preserveSelection: true })
           .then(() => loadG2MDeepHDerivativeMaeCampaign("cross-testing"))
           .catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "epc-gamma") {
+        loadEpcGamma().catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "epc-scaling") {
+        loadEpcScaling().catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "epc-matbg") {
+        loadEpcMatbg().catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "terminal") {
         renderTerminalView();
         Promise.all([pollMixingE2ELogs(), pollMixingTerminalStatus()])
@@ -16003,6 +16704,20 @@ function setupEvents() {
   });
   document.getElementById("stop-all").addEventListener("click", () => {
     stopAll().catch((error) => showToast(error.message));
+  });
+  document.getElementById("epc-gamma-refresh")?.addEventListener("click", () => {
+    loadEpcGamma()
+      .then(() => showToast("Artifacts EPC recargados"))
+      .catch((error) => showToast(error.message));
+  });
+  document.getElementById("epc-scaling-refresh")?.addEventListener("click", () => {
+    loadEpcScaling().then(() => showToast("Métricas EPC recargadas")).catch((error) => showToast(error.message));
+  });
+  document.getElementById("epc-scaling-family")?.addEventListener("change", () => renderEpcScaling(epcScalingPayload || {}));
+  document.getElementById("epc-matbg-refresh")?.addEventListener("click", () => {
+    loadEpcMatbg()
+      .then(() => showToast("Artifacts EPC MATBG recargados"))
+      .catch((error) => showToast(error.message));
   });
   document.getElementById("refresh-results").addEventListener("click", () => {
     Promise.all([loadResults(), loadDatasetTargets()])

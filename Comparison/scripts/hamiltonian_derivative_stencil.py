@@ -2253,8 +2253,16 @@ def sparse_blockwise_hermiticity_defect(
         diff = block_r - block_minus.getH()
         defect_sq += sparse_frobenius_norm(diff) ** 2
         norm_sq += sparse_frobenius_norm(block_r) ** 2 + sparse_frobenius_norm(block_minus) ** 2
-    if norm_sq == 0.0:
+    if not seen:
+        # No R block has its -R partner in this layout: hermiticity is not
+        # computable here, which is a different statement from "it fails".
         return math.nan
+    if norm_sq == 0.0:
+        # Paired blocks exist and are identically zero -- the derivative of a
+        # direction the operator annihilates (a uniform translation). A zero
+        # matrix is hermitian; reporting NaN would fail a gate for the one
+        # direction whose correct answer is exactly zero.
+        return 0.0
     return math.sqrt(defect_sq / norm_sq)
 
 

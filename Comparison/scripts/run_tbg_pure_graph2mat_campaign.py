@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = Path(__file__).resolve().parent
@@ -32,6 +33,15 @@ from generate_siesta_overlap_only import generate as generate_overlap  # noqa: E
 from run_graphene_hbn_moire_spectral_campaign import _link_exact_overlap_inputs  # noqa: E402
 from run_deeph_sparse_spectrum import projected_dos_observables  # noqa: E402
 from run_graphene_unfolded_spectrum import run_layer as run_unfolded_layer  # noqa: E402
+
+# E-F_001-S42: the rigid-Gamma raw-derivative stage. Kept as plain imports of
+# the same generic modules run_graphene_gamma_epc_paths.py already exercises
+# for graphene, not a parallel campaign runner.
+import graph2mat_autograd_derivatives as epc_g2m_deriv  # noqa: E402
+import preregister_matbg_gamma_rigid_epc as epc_prereg  # noqa: E402
+import quantify_checkpoint_derivative_error as epc_c14  # noqa: E402
+from artifact_signature import SYNTHETIC_TEST_DISPLACEMENT, file_sha256, input_signature_sha256  # noqa: E402
+from certify_siesta_dhsdr import difference_norms, norms  # noqa: E402
 
 
 def read_json(path: Path) -> dict:
@@ -382,6 +392,322 @@ def solve_unfolding(solver_input: Path) -> dict:
     return {"status": "completed", "layers": layers}
 
 
+# --------------------------------------------------------------------------- #
+# E-F_001-S42: rigid-Gamma raw-derivative stage
+#
+# preregister_matbg_gamma_rigid_epc.py (S41) already froze the experiment --
+# the five candidate directions, the delta sweep, the two allowed reference
+# paths (graph2mat_jvp / graph2mat_frozen; no SIESTA reference exists at this
+# cell's scale, S38) and the claim ladder rung this stage is authorised to
+# produce: "derivative-level checks pass ... but GO-8a is still NO-GO-8a" ->
+# graph2mat_derivative_validated_no_full_ks_coupling. Building PAO-covariant response and g needs
+# a basis-response artifact (S_L/S_R); the only producer this repository has
+# (epc_basis_response.py / certify_basis_response.py) requires a certified
+# SIESTA FC.Save.dHS campaign object, and S38 measured that campaign
+# intractable here (66984 displaced SCF solves). That gap is recorded on every
+# artifact this stage writes, not silently skipped.
+# --------------------------------------------------------------------------- #
+
+EPC_ROOT = epc_prereg.DEFAULT_RESULT_ROOT
+EPC_ARRAYS_DIR = EPC_ROOT / "arrays"
+EPC_STATUS_PATH = EPC_ROOT / "artifact_status.json"
+EPC_RESULT_STATUS = "candidate_rigid_tbg"
+
+# Prefixes of the S41 protocol's own frozen ``blocking`` reasons this stage is
+# pre-authorised to run under (its claim ladder names this exact set). Any
+# other blocking reason means the protocol is stuck for something nobody
+# accounted for, and this stage must stop rather than guess at it.
+EPC_ALLOWED_BLOCKER_PREFIXES = (
+    "GO-8a MATBG PhononProvider",
+    "C14C basis response (global formalism gate)",
+    "k_selection",
+    "moire_hexagonal_convention_checked",
+)
+
+
+class EpcGammaRigidError(RuntimeError):
+    """The S41 pre-registered protocol cannot be executed as specified."""
+
+
+def epc_authorize(protocol: dict) -> dict:
+    """S41's own gate, minus the one rung its frozen claim ladder pre-authorises.
+
+    Mirrors ``run_graphene_gamma_epc_paths.authorize()``: a *quantitative* g
+    needs GO-8a and C14C closed, and
+    ``preregister_matbg_gamma_rigid_epc.require_frozen_protocol`` correctly
+    refuses to run anything while ``ready_to_execute`` is false. The frozen
+    claim ladder names this exact blocking set explicitly and authorises the
+    two-path raw-derivative validation in exchange; this grants exactly that
+    and nothing wider.
+    """
+    stored = protocol.get("frozen_content_sha256")
+    if epc_prereg.prereg.freeze_hash(protocol) != stored:
+        raise EpcGammaRigidError("the protocol has been edited since it was frozen")
+    blocking = [str(reason) for reason in protocol.get("blocking") or []]
+    unexpected = [
+        reason
+        for reason in blocking
+        if not any(reason.startswith(prefix) for prefix in EPC_ALLOWED_BLOCKER_PREFIXES)
+    ]
+    if unexpected:
+        raise EpcGammaRigidError(
+            f"the protocol is blocked for reasons the claim ladder did not pre-authorise: "
+            f"{unexpected}; resolve them, re-freeze and re-run"
+        )
+    ladder = protocol["claim_ladder"]
+    rung = next(
+        row
+        for row in ladder
+        if "derivative-level checks pass" in row["outcome"] and "NO-GO-8a" in row["outcome"]
+    )
+    return {
+        "preregistration_sha256": stored,
+        "protocol_id": protocol.get("protocol_id"),
+        "blocking": blocking,
+        "authorised_claim": rung["claim"],
+        "authorised_outcome": rung["outcome"],
+        "result_status": EPC_RESULT_STATUS,
+    }
+
+
+def epc_artifact_signature(*, checkpoint: Path, direction_hash: str, deltas: list[float], topology_hash: str) -> str:
+    return input_signature_sha256(
+        {
+            "schema": "epc_gamma_rigid_matbg_raw_derivative_v1",
+            "checkpoint_sha256": file_sha256(checkpoint),
+            "direction_hash": direction_hash,
+            "delta_sweep_ang": [round(float(value), 9) for value in deltas],
+            "topology_hash": topology_hash,
+            "code_sha256": file_sha256(Path(__file__)),
+        }
+    )
+
+
+def _write_sparse_field_npz(path: Path, **fields) -> None:
+    payload: dict[str, np.ndarray] = {}
+    for field_name, field in fields.items():
+        keys = list(field)
+        payload[f"{field_name}__rows"] = np.array([key[0] for key in keys], dtype=np.int64)
+        payload[f"{field_name}__cols"] = np.array([key[1] for key in keys], dtype=np.int64)
+        payload[f"{field_name}__images"] = np.array([key[2] for key in keys], dtype=np.int64)
+        payload[f"{field_name}__values"] = np.array([field[key] for key in keys], dtype=np.float64)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **payload)
+
+
+def epc_raw_derivative_for_direction(
+    *,
+    name: str,
+    direction,
+    model,
+    batch,
+    processor,
+    change_of_basis: np.ndarray,
+    deltas: list[float],
+    checkpoint: Path,
+    topology_hash: str,
+    backend,
+    status: dict,
+) -> dict:
+    """``D_H[v]`` of one pre-registered direction, JVP and frozen, reusing one model load."""
+    artifact_id = f"raw_derivative__{name}"
+    signature = epc_artifact_signature(
+        checkpoint=checkpoint, direction_hash=direction.direction_hash, deltas=deltas, topology_hash=topology_hash
+    )
+    existing = status["artifacts"].get(artifact_id, {})
+    if existing.get("state") == "completed" and existing.get("signature_sha256") == signature:
+        return {**existing, "reused": True}
+
+    status["artifacts"][artifact_id] = {
+        "state": "running",
+        "signature_sha256": signature,
+        "result_status": EPC_RESULT_STATUS,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json(EPC_STATUS_PATH, status)
+    try:
+        d_h_jvp, jvp_meta = epc_c14.directional_derivative_field(
+            model, batch, direction, processor=processor, change_of_basis=change_of_basis, backend=backend
+        )
+        d_h_frozen_by_delta: dict[float, dict] = {}
+        frozen_topology_hashes: list[str] = []
+        for delta in deltas:
+            d_h_frozen, hashes = epc_c14.frozen_derivative_field(
+                model, batch, direction, delta, processor=processor, change_of_basis=change_of_basis
+            )
+            d_h_frozen_by_delta[delta] = d_h_frozen
+            frozen_topology_hashes.extend(hashes)
+
+        reference_delta = max(deltas)
+        agreement = difference_norms(d_h_jvp, d_h_frozen_by_delta[reference_delta])
+        frozen_scale = norms(
+            np.array(list(d_h_frozen_by_delta[reference_delta].values()), dtype=np.float64)
+        )
+        # tau_backend rule (S41 TOLERANCES): the two numerical routes to the
+        # same model's own derivative must agree well inside the frozen side's
+        # own delta-plateau spread, not to an absolute eV number.
+        plateau = [
+            difference_norms(d_h_frozen_by_delta[deltas[i]], d_h_frozen_by_delta[deltas[j]])["frobenius"]
+            for i in range(len(deltas))
+            for j in range(i + 1, len(deltas))
+        ]
+        tau_num = max(plateau, default=0.0)
+        jvp_equals_frozen = agreement["frobenius"] <= epc_prereg.BACKEND_NOISE_MARGIN * max(tau_num, 1e-12)
+
+        npz_path = EPC_ARRAYS_DIR / f"{artifact_id}.npz"
+        _write_sparse_field_npz(npz_path, d_h_jvp=d_h_jvp, d_h_frozen=d_h_frozen_by_delta[reference_delta])
+
+        result = {
+            "state": "completed",
+            "signature_sha256": signature,
+            "result_status": EPC_RESULT_STATUS,
+            "artifact_kind": SYNTHETIC_TEST_DISPLACEMENT,
+            "direction_hash": direction.direction_hash,
+            "direction_kind": direction.kind,
+            "reference_delta_ang": reference_delta,
+            "delta_sweep_ang": list(deltas),
+            "jvp_metadata": jvp_meta,
+            "frozen_topology_hashes": frozen_topology_hashes,
+            "checks": {
+                "jvp_equals_frozen_within_backend_margin": bool(jvp_equals_frozen),
+                "jvp_vs_frozen_frobenius": agreement,
+                "frozen_delta_plateau_tau_num": tau_num,
+                "frozen_reference_scale": frozen_scale,
+                "topology_unchanged": "not_measured: real MATBG neighbour edge count has never "
+                "been measured in this repository (S40 item 7); this check blocks a claim above "
+                "graph2mat_derivative_validated_no_full_ks_coupling, it is not assumed",
+            },
+            "array_path": str(npz_path),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:  # noqa: BLE001 - a failed artifact is a recorded state, not a crash
+        result = {
+            "state": "failed",
+            "signature_sha256": signature,
+            "result_status": EPC_RESULT_STATUS,
+            "error": f"{type(exc).__name__}: {exc}"[:2000],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    status["artifacts"][artifact_id] = result
+    write_json(EPC_STATUS_PATH, status)
+    return result
+
+
+def epc_gamma_rigid(checkpoint: Path, target_fdf: Path, basis_dir: Path, requested_backend: str = "cuda") -> dict:
+    """E-F_001-S42: raw ``D_H`` responses of the five S41 pre-registered rigid-Gamma directions.
+
+    Reuses the checkpoint, the equilibrium geometry and the overlap-stage
+    positions this campaign already produced -- one model load, one CUDA
+    preflight, no SIESTA call, no eigensolve, nothing recomputed per
+    direction. ``PAO-covariant response`` and ``g`` are not computable today (no
+    basis-response provider exists at this cell's scale); every direction's
+    ``basis_response``/``eigenspace``/``pao_covariant_response``/``g`` are recorded
+    ``status: "not_attempted"`` with the reason, rather than fabricated or
+    silently dropped. Idempotent: an artifact whose signature (checkpoint,
+    direction, delta sweep, neighbour topology, this file's own hash) already
+    matches a ``completed`` entry in ``artifact_status.json`` is reused as is.
+    """
+    EPC_ROOT.mkdir(parents=True, exist_ok=True)
+    EPC_ARRAYS_DIR.mkdir(parents=True, exist_ok=True)
+
+    protocol = epc_prereg.load_protocol()
+    gate = epc_authorize(protocol)
+
+    status = read_json(EPC_STATUS_PATH)
+    status.setdefault("artifacts", {})
+
+    positions = epc_prereg.read_xyz_positions_ang(epc_prereg.DEFAULT_POSITIONS_XYZ)
+    directions = epc_prereg.build_candidate_directions(positions)
+    frozen_sectors = protocol["phonon"]["candidate_sectors"]
+    for direction_name, direction in directions.items():
+        if direction.direction_hash != frozen_sectors[direction_name]["direction_hash"]:
+            raise EpcGammaRigidError(
+                f"{direction_name}: rebuilt direction hash != the S41 frozen protocol's hash; "
+                "the geometry or fd_perturbation_space has drifted since the protocol was frozen"
+            )
+
+    model, batch, processor, _provenance = epc_c14.load_model_and_batch(
+        checkpoint, target_fdf, basis_dir=basis_dir
+    )
+    model, batch, backend = epc_g2m_deriv.resolve_jvp_backend(
+        model, batch, requested_backend, output_keys=epc_c14.OUTPUT_KEYS
+    )
+    topology = epc_g2m_deriv.batch_topology_hash(batch)
+    change_of_basis = np.asarray(processor.basis_table.change_of_basis, dtype=np.float64)
+    deltas = [float(value) for value in protocol["perturbation"]["delta_sweep_ang"]]
+
+    direction_results = {
+        direction_name: epc_raw_derivative_for_direction(
+            name=direction_name,
+            direction=direction,
+            model=model,
+            batch=batch,
+            processor=processor,
+            change_of_basis=change_of_basis,
+            deltas=deltas,
+            checkpoint=checkpoint,
+            topology_hash=topology["topology_hash"],
+            backend=backend,
+            status=status,
+        )
+        for direction_name, direction in directions.items()
+    }
+    write_json(EPC_STATUS_PATH, status)
+
+    all_completed = all(row["state"] == "completed" for row in direction_results.values())
+    checks_passed = all_completed and all(
+        row["checks"]["jvp_equals_frozen_within_backend_margin"] for row in direction_results.values()
+    )
+    claim = gate["authorised_claim"] if checks_passed else "NO_GO"
+
+    summary = {
+        "schema": "epc_gamma_rigid_matbg_v1",
+        "ticket": "E-F_001-S42",
+        "gate": "S41 claim ladder rung: derivative-level validation while GO-8a is NO-GO-8a",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "result_status": EPC_RESULT_STATUS,
+        "artifact_kind": SYNTHETIC_TEST_DISPLACEMENT,
+        "preregistration": gate,
+        "backend": backend.to_metadata(),
+        "topology": topology,
+        "checkpoint_sha256": file_sha256(checkpoint),
+        "formalism_id": protocol["references"]["formalism_id"],
+        "directions": direction_results,
+        "blocked": {
+            "basis_response": {
+                "status": "not_attempted",
+                "reason": "no SIESTA basis-response provider is tractable at this cell's scale "
+                "(S38: an exact FC.Save.dHS campaign needs 66984 displaced SCF solves); the "
+                f"{protocol['references']['basis_response']['representation']} representation "
+                f"formalism_id {protocol['references']['formalism_id']} requires has no producer "
+                "here yet",
+            },
+            "eigenspace": {
+                "status": "not_attempted",
+                "reason": "no electronic k has passed k_selection (protocol status: "
+                "pending_measurement); persisting an eigenspace before a k is selected would "
+                "pre-empt that measurement instead of reusing it",
+            },
+            "pao_covariant_response": {"status": "not_attempted", "reason": "blocked by basis_response"},
+            "g": {"status": "not_attempted", "reason": "blocked by pao_covariant_response"},
+            "phonon": {
+                "status": "not_attempted",
+                "reason": "GO-8a is NO-GO-8a (certify_matbg_phonon_provider); every direction "
+                "here stays a synthetic_test_displacement candidate pattern, never a phonon "
+                "eigenvector (roadmap B7)",
+            },
+        },
+        "claim": claim,
+        "forbidden_publication_labels": [
+            "quantitative_relaxed_matbg_prediction",
+            "g_mn_nu",
+            "phonon_eigenmode",
+        ],
+    }
+    write_json(EPC_ROOT / "epc_gamma_rigid_summary.json", summary)
+    return summary
+
+
 def _recenter(rows: list[dict], fermi_level_eV: float) -> list[dict]:
     return [
         {**row, "energy_aligned_eV": float(row["energy_eV"]) - fermi_level_eV}
@@ -457,6 +783,12 @@ def main() -> int:
     parser.add_argument("--training-size", type=int, default=474)
     parser.add_argument("--dos-tier", choices=tuple(DOS_TIERS), default="8x8",
                         help="Which DOS calculation the summary publishes to the UI.")
+    parser.add_argument(
+        "--epc-gamma-rigid", action="store_true",
+        help="E-F_001-S42: after the spectral pipeline, run the S41 pre-registered rigid-Gamma "
+        "raw-derivative stage (reuses this campaign's own checkpoint/H/S; no SIESTA, no eigensolve).",
+    )
+    parser.add_argument("--epc-backend", default="cuda", choices=("cpu", "cuda"))
     args = parser.parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
     try:
@@ -488,7 +820,12 @@ def main() -> int:
         fermi = solve_fermi(solver_input)
         unfolding = solve_unfolding(solver_input)
         publish_summary(solver, gate, training_size=args.training_size, dos=dos, fermi=fermi, unfolding=unfolding, dos_tier=args.dos_tier)
-        update_status("completed", "completed", precision_gate=gate, ui_ready=True)
+        epc_claim = None
+        if args.epc_gamma_rigid:
+            update_status("epc_gamma_rigid")
+            epc_summary = epc_gamma_rigid(checkpoint, target, ROOT / "target/material_basis", args.epc_backend)
+            epc_claim = epc_summary["claim"]
+        update_status("completed", "completed", precision_gate=gate, ui_ready=True, epc_gamma_rigid_claim=epc_claim)
         return 0
     except Exception as exc:
         update_status("failed", "failed", error=str(exc))

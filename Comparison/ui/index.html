@@ -34,6 +34,9 @@
           <button class="tab active" data-view="g2m-deeph" data-icon="GD">G2M vs DeepH</button>
           <button class="tab" data-view="mixing-datasets" data-icon="MX">Mixing datasets</button>
           <button class="tab" data-view="cross-testing" data-icon="CT">Cross testing</button>
+          <button class="tab" data-view="epc-scaling" data-icon="EPC">EPC precision</button>
+          <button class="tab" data-view="epc-gamma" data-icon="EPC">EPC graphene &#915;</button>
+          <button class="tab" data-view="epc-matbg" data-icon="EPC">EPC MATBG</button>
           <button class="tab" data-view="terminal" data-icon="TM">Terminal</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -2454,6 +2457,325 @@
           </section>
         </section>
 
+        <section id="view-epc-scaling" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Electron&#8211;phonon coupling &middot; graphene &#915; E2g</p>
+              <h2>EPC precision vs training snapshots</h2>
+              <p class="field-help">
+                Compara los checkpoints de graphene W90 y 5&times;5 frente a la misma referencia SIESTA
+                congelada. Las curvas miden la derivada electr&oacute;nica dH/dR; no son una barra de error
+                directa sobre el acoplamiento final g.
+              </p>
+            </div>
+            <div class="button-row">
+              <label class="field compact-field">
+                <span>Familia</span>
+                <select id="epc-scaling-family">
+                  <option value="all">W90 y 5&times;5</option>
+                  <option value="w90">W90</option>
+                  <option value="5x5">5&times;5</option>
+                </select>
+              </label>
+              <button id="epc-scaling-refresh" class="button secondary" type="button">Recargar</button>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">M&eacute;tricas disponibles</p>
+                <h3>MAE, RMSE, Frobenius, soporte, correlaci&oacute;n y residuos</h3>
+                <p id="epc-scaling-status" class="field-help">Sin artifacts cargados.</p>
+              </div>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead><tr><th>Familia</th><th>Snapshots</th><th>MAE (eV/&Aring;)</th><th>RMSE (eV/&Aring;)</th><th>Frobenius relativo</th><th>Support F1</th><th>Pearson</th></tr></thead>
+                <tbody id="epc-scaling-metrics"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div id="epc-scaling-plots" class="plot-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Comparaci&oacute;n emparejada</p>
+                <h3 id="epc-scaling-deeph-title">Graph2Mat vs DeepH</h3>
+                <p id="epc-scaling-deeph-warning" class="field-help"></p>
+              </div>
+            </div>
+            <div id="epc-scaling-deeph-plots" class="plot-grid"></div>
+          </section>
+        </section>
+
+        <section id="view-epc-gamma" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Electron&#8211;fon&oacute;n &middot; C21 / E-F_001-S28</p>
+              <h2>EPC graphene &#915; (GO-4)</h2>
+              <p class="field-help">
+                Publica el resultado adjudicado leyendo <code>go4_verdict.json</code>,
+                <code>graphene_gamma_epc_summary.json</code>, <code>graphene_gamma_epc_g_blocks.json</code>
+                y el manifest de referencia SIESTA. La vista no calcula f&iacute;sica: no hay Fourier,
+                ni contracciones, ni observables; s&oacute;lo muestra lo que los artifacts ya escribieron.
+              </p>
+            </div>
+            <div class="button-row">
+              <button id="epc-gamma-refresh" class="button secondary" type="button">Recargar artifacts</button>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Veredicto adjudicado</p>
+                <h3 id="epc-gamma-verdict-title">&mdash;</h3>
+                <p class="field-help" id="epc-gamma-verdict-help">Sin artifacts cargados.</p>
+              </div>
+            </div>
+            <div id="epc-gamma-chips" class="phase-progress"></div>
+            <div class="grid two">
+              <div id="epc-gamma-identity"></div>
+              <div id="epc-gamma-model-statement"></div>
+            </div>
+            <div id="epc-gamma-claim" class="field-help"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Resumen visual</p>
+                <h3>Gates, adecuaci&oacute;n del modelo y comparaci&oacute;n de paths</h3>
+                <p class="field-help">Los valores proceden directamente de los artifacts adjudicados.</p>
+              </div>
+            </div>
+            <div class="plot-grid">
+              <div id="epc-gamma-gates-chart" class="plot-card wide"></div>
+              <div id="epc-gamma-tau-model-chart" class="plot-card wide"></div>
+              <div id="epc-gamma-paths-chart" class="plot-card full"></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Gates del experimento (roadmap &sect;IX.D)</p>
+                <h3>PASS / FAIL por gate y capa</h3>
+              </div>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr>
+                    <th>#</th><th>Gate</th><th>Nivel</th><th>Capa</th><th>Resultado</th><th>Evidencia</th>
+                  </tr>
+                </thead>
+                <tbody id="epc-gamma-gates"></tbody>
+              </table>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Check congelado</th><th>Etapa</th><th>Evaluado como</th><th>Resultado</th></tr>
+                </thead>
+                <tbody id="epc-gamma-frozen-checks"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Tolerancias medidas</p>
+                <h3 id="epc-gamma-tau-title">&tau;<sub>num</sub>, &tau;<sub>backend</sub>, &tau;<sub>model</sub></h3>
+                <p class="field-help" id="epc-gamma-tau-help"></p>
+              </div>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Path</th><th>Direcci&oacute;n</th><th>k</th><th>Split</th><th>&tau;<sub>num</sub></th><th>Unidad</th></tr>
+                </thead>
+                <tbody id="epc-gamma-tau-num"></tbody>
+              </table>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Direcci&oacute;n</th><th>k</th><th>Split</th><th>&tau;<sub>backend</sub></th><th>L&iacute;mite</th><th>&delta; (&Aring;)</th><th>Resultado</th></tr>
+                </thead>
+                <tbody id="epc-gamma-tau-backend"></tbody>
+              </table>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Split</th><th>Path</th><th>Direcci&oacute;n</th><th>k</th><th>r = &#8214;&delta;g&#8214;/&#8214;g<sub>ref</sub>&#8214;</th><th>&#8214;&delta;g&#8214;<sub>F</sub></th><th>&#8214;g<sub>ref</sub>&#8214;<sub>F</sub></th></tr>
+                </thead>
+                <tbody id="epc-gamma-tau-model"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Los tres paths</p>
+                <h3>g y m&eacute;tricas gauge-invariantes</h3>
+                <p class="field-help">
+                  Norma de Frobenius y valores singulares del bloque, tal y como los escribi&oacute;
+                  <code>compute_epc_matrix_elements.py</code>.
+                </p>
+              </div>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr>
+                    <th>Path</th><th>Modo</th><th>k</th><th>Split</th><th>&hbar;&omega; (eV)</th>
+                    <th>&#8214;g&#8214;<sub>F</sub> (eV)</th><th>Valores singulares de g (eV)</th>
+                    <th>&#8214;g/u&#8214;<sub>F</sub> (eV/&Aring;)</th><th>HF diagonal</th><th>Backends</th>
+                  </tr>
+                </thead>
+                <tbody id="epc-gamma-g-blocks"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Provenance</p>
+                <h3 id="epc-gamma-provenance-title">Runtime SIESTA y contratos compartidos</h3>
+              </div>
+            </div>
+            <div class="grid two">
+              <div id="epc-gamma-provenance"></div>
+              <div id="epc-gamma-contracts"></div>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead><tr><th>Artifact</th><th>Ruta</th><th>SHA256</th></tr></thead>
+                <tbody id="epc-gamma-artifacts"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-epc-matbg" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">Electr&oacute;n&#8211;fon&oacute;n &middot; S46 / E-F_001-S46</p>
+              <h2>EPC MATBG r&iacute;gido (GO-8a / GO-8b / GO-9)</h2>
+              <p class="field-help">
+                Publica las campa&ntilde;as r&iacute;gidas Gamma y q != 0 de la TBG (31,30) leyendo
+                las certificaciones GO-8a/GO-8b/GO-9 y los protocolos congelados S41/S44. No calcula
+                f&iacute;sica: sin Fourier, sin observables, sin g; s&oacute;lo agrega y formatea lo
+                que los artifacts ya escribieron. Una rama q != 0 ausente se muestra como ausente,
+                nunca como cero ni como validada.
+              </p>
+            </div>
+            <div class="button-row">
+              <button id="epc-matbg-refresh" class="button secondary" type="button">Recargar artifacts</button>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Estado de gates</p>
+                <h3 id="epc-matbg-verdict-title">&mdash;</h3>
+                <p class="field-help" id="epc-matbg-verdict-help">Sin artifacts cargados.</p>
+              </div>
+            </div>
+            <div id="epc-matbg-chips" class="phase-progress"></div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Gate</th><th>Estado</th><th>Detalle</th><th>Memo</th></tr>
+                </thead>
+                <tbody id="epc-matbg-gates"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Rama Gamma (q=0)</p>
+                <h3>Protocolo S41 y campa&ntilde;a S42/S43</h3>
+              </div>
+            </div>
+            <div class="grid two">
+              <div id="epc-matbg-gamma-identity"></div>
+              <div id="epc-matbg-gamma-campaign"></div>
+            </div>
+            <div id="epc-matbg-gamma-blocking" class="field-help"></div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead><tr><th>#</th><th>Claim</th><th>Condici&oacute;n (outcome)</th></tr></thead>
+                <tbody id="epc-matbg-gamma-ladder"></tbody>
+              </table>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Direcci&oacute;n candidata</th><th>Estado</th><th>artifact_kind</th><th>JVP = frozen</th><th>Reused</th></tr>
+                </thead>
+                <tbody id="epc-matbg-gamma-directions"></tbody>
+              </table>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead>
+                  <tr><th>Artifact (estado de restart)</th><th>Estado</th><th>Signature</th><th>Actualizado</th></tr>
+                </thead>
+                <tbody id="epc-matbg-gamma-restart"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Rama q != 0</p>
+                <h3>Protocolo S44 y GO-9 (S45)</h3>
+              </div>
+            </div>
+            <div class="grid two">
+              <div id="epc-matbg-qneq0-identity"></div>
+              <div id="epc-matbg-qneq0-campaign"></div>
+            </div>
+            <div id="epc-matbg-qneq0-blocking" class="field-help"></div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead><tr><th>#</th><th>Claim</th><th>Condici&oacute;n (outcome)</th></tr></thead>
+                <tbody id="epc-matbg-qneq0-ladder"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Provenance</p>
+                <h3>Artifacts fuente (requeridos + opcionales de ejecuci&oacute;n)</h3>
+              </div>
+            </div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead><tr><th>Artifact</th><th>Ruta</th><th>Presente</th><th>SHA256</th></tr></thead>
+                <tbody id="epc-matbg-artifacts"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="view-api" class="view">
           <header class="content-header">
             <div>
@@ -2493,12 +2815,13 @@
             <code>POST /api/mixing-e2e/stop</code>
             <code>GET /api/mixing-e2e/status</code>
             <code>GET /api/mixing-e2e/logs?since=0&amp;limit=2000</code>
+            <code>GET /api/epc/graphene-gamma</code>
           </div>
         </section>
       </main>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260804-tbg-n558-unfolding"></script>
+    <script src="/app.js?v=20260909-epc-deeph-charts"></script>
   </body>
 </html>

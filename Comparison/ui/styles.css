@@ -1956,6 +1956,12 @@ pre {
   color: var(--success);
 }
 
+.phase-chip.failed {
+  border-color: rgba(212, 80, 90, 0.34);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+}
+
 .phase-chip.active {
   border-color: rgba(15, 141, 134, 0.44);
   background: var(--accent-soft);

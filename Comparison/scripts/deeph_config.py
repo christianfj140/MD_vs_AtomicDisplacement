@@ -460,6 +460,21 @@ def render_inference_config(
     grad_axis_indices: list[int] | None = None,
     create_from_dft: bool = True,
 ) -> Path:
+    """Write a DeepH ``deeph-inference`` config.ini.
+
+    requested_backend: every real caller in this repo passes ``disable_cuda``/
+    ``device`` explicitly (see ``run_graphene_hbn_moire_spectral_campaign.py``,
+    which requests ``cuda:0`` for its heavy task=[3,4] prediction call and
+    ``cpu`` for its cheap task=[2] local-coordinate preprocessing call, and
+    ``run_hamiltonian_derivative_predictions.deeph_runtime_settings``, which
+    threads its own explicit backend record through). The ``disable_cuda=True,
+    device="cpu"`` defaults here exist only as a CPU-safe fallback for a
+    caller that omits them -- effective_backend is then "cpu",
+    backend_fallback_reason: "no_backend_requested: render_inference_config
+    was called without an explicit disable_cuda/device, so it defaulted to
+    the always-safe CPU path rather than guessing at GPU availability".
+    """
+
     task = task or [3, 4]
     config = configparser.ConfigParser()
     config["basic"] = {

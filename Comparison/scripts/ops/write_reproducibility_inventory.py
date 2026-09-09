@@ -20,7 +20,13 @@ SHARED_DIR = REPO_ROOT / "shared"
 if str(SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(SHARED_DIR))
 
-from run_inventory import collect_run_inventory  # noqa: E402
+from run_inventory import (  # noqa: E402
+    collect_run_inventory,
+    collect_siesta_runtime,
+    default_siesta_runtime,
+    validate_siesta_runtime_ref,
+    write_siesta_runtime_record,
+)
 
 DEFAULT_OUTPUT = (
     REPO_ROOT
@@ -83,6 +89,64 @@ def executable_record(name: str, path: str | Path | None, version_args: list[str
     }
 
 
+def siesta_runtime_views(siesta: str | None, output_dir: Path | None = None) -> dict[str, Any]:
+    """Legacy ``executables.siesta`` / ``siesta_linkage`` views over the C01 record.
+
+    The identity of the binary now lives in one immutable, content-addressed
+    record; this inventory only mirrors it into the keys it always had.
+    """
+    if not siesta:
+        return {
+            "siesta": executable_record("siesta", None, ["--version"]),
+            "siesta_linkage": None,
+            "siesta_runtime_provenance": None,
+            "siesta_runtime_validation": None,
+        }
+    # Same evidence set as `run_inventory.py --verify-upstream`, so both writers
+    # converge on one record instead of minting a weaker duplicate. Offline it
+    # degrades to upstream status "unavailable", never to a failure.
+    record_root = output_dir.parent if output_dir else REPO_ROOT
+    record = collect_siesta_runtime(
+        siesta, verify_upstream=True, repo_root=record_root
+    )
+    probe = (record["probe"]["attempts"] or [{}])[-1]
+    linkage = record["libraries"]
+    ldd = linkage.get("ldd") or {}
+    ref = write_siesta_runtime_record(
+        record,
+        output_dir or REPO_ROOT / "Comparison" / "results" / "provenance" / "siesta",
+        repo_root=record_root,
+    )
+    validation = validate_siesta_runtime_ref(
+        ref, effective_executable=siesta, repo_root=record_root
+    )
+    validation.pop("record", None)
+    if not validation["valid"]:
+        raise RuntimeError(f"SIESTA runtime reference failed validation: {validation['reasons']}")
+    return {
+        "siesta": {
+            "name": "siesta",
+            "path": record["binary"]["requested_absolute"],
+            "resolved_path": record["binary"]["final_target"],
+            "sha256": record["binary"]["sha256"],
+            "version_probe": {
+                "command": probe.get("argv"),
+                "returncode": probe.get("returncode"),
+                "stdout": str(probe.get("stdout_text") or "").strip(),
+                "stderr": str(probe.get("stderr_text") or "").strip(),
+            },
+        },
+        "siesta_linkage": {
+            "command": ["ldd", record["binary"]["final_target"]],
+            "returncode": ldd.get("returncode"),
+            "stdout": str(ldd.get("stdout_normalized") or "").strip(),
+            "stderr": str(ldd.get("stderr_normalized") or "").strip(),
+        },
+        "siesta_runtime_provenance": ref,
+        "siesta_runtime_validation": validation,
+    }
+
+
 def dependency_pins() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for root in (REPO_ROOT, REPO_ROOT.parent / "graph2mat", REPO_ROOT.parent / "DeepH-pack"):
@@ -128,7 +192,7 @@ assert values.tolist() == [1.0, 2.0, 3.0]
 
 
 def build_inventory() -> dict[str, Any]:
-    siesta = shutil.which("siesta")
+    siesta_views = siesta_runtime_views(default_siesta_runtime())
     nvidia_smi = shutil.which("nvidia-smi")
     package_versions = {}
     for name in PACKAGE_NAMES:
@@ -153,10 +217,12 @@ def build_inventory() -> dict[str, Any]:
                 ),
             },
             "executables": {
-                "siesta": executable_record("siesta", siesta, ["--version"]),
+                "siesta": siesta_views["siesta"],
                 "nvidia_smi": executable_record("nvidia-smi", nvidia_smi, ["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"]),
             },
-            "siesta_linkage": command_output(["ldd", siesta]) if siesta else None,
+            "siesta_linkage": siesta_views["siesta_linkage"],
+            "siesta_runtime_provenance": siesta_views["siesta_runtime_provenance"],
+            "siesta_runtime_validation": siesta_views["siesta_runtime_validation"],
             "cuda": {
                 "torch_cuda_version": getattr(__import__("torch").version, "cuda", None),
                 "torch_cuda_available": bool(__import__("torch").cuda.is_available()),

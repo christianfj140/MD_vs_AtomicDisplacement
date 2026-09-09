@@ -9,6 +9,10 @@ const DEEPH_SPARSE_CALC = get(
 
 include(joinpath(@__DIR__, "deeph_mulliken_weights.jl"))
 patched = patch_sparse_calc_for_mulliken(read(DEEPH_SPARSE_CALC, String))
+if haskey(ENV, "DEEPH_PERSIST_EIGENSPACES")
+    include(joinpath(@__DIR__, "deeph_eigenspace_persist.jl"))
+    patched = patch_sparse_calc_for_eigenspace(patched)
+end
 patched_without_main = replace(patched, r"\nmain\(\)\s*$" => "")
 patched == patched_without_main && error("DeepH sparse_calc.jl no longer ends in main()")
 include_string(Main, patched_without_main, DEEPH_SPARSE_CALC)

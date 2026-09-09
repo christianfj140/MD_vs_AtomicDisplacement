@@ -14,18 +14,14 @@ function patch_sparse_calc_for_mulliken(source)
     patched = replace(source, band_eigen_needle => band_eigen_replacement; count=1)
     patched = replace(patched, dos_eigen_needle => dos_eigen_replacement; count=1)
 
-    band_projected_needle = "                            egvec = egvec_sub * egvec\n"
-    dos_projected_needle = "                    egvec = egvec_sub * egvec\n"
-    patched = replace(
-        patched,
-        band_projected_needle => band_projected_needle * "                            physical_egvec = egvec\n";
-        count=1,
-    )
-    patched = replace(
-        patched,
-        dos_projected_needle => dos_projected_needle * "                    physical_egvec = egvec\n";
-        count=1,
-    )
+    # The leading newline pins the indentation: without it the 20-space DOS
+    # needle also matches 8 characters into the 28-space band line, and the DOS
+    # ill-projection branch silently keeps its pre-projection Ritz vectors.
+    for indent in ("                            ", "                    ")
+        needle = "\n" * indent * "egvec = egvec_sub * egvec\n"
+        occursin(needle, patched) || error("DeepH ill-projection insertion point changed")
+        patched = replace(patched, needle => needle * indent * "physical_egvec = egvec\n"; count=1)
+    end
 
     band_needle = "                    egvals[:, idx_k] = egval\n                    if which_k == 0"
     band_replacement = "                    record_mulliken!(parsed_args[\"output_dir\"], idx_k, egval, physical_egvec, H_k, S_k)\n" *

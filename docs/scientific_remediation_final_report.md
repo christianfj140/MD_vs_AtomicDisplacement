@@ -61,7 +61,7 @@ This distinction matters:
 
 ## Bounded positive physical result
 
-The raw-global Graph2Mat/DeepH preflight remains `proven` for physical graphene
+The raw-global Graph2Mat/DeepH preflight remains `proven` for PAO-projected couplingraphene
 samples `md_18` and `md_19`, across 17 k-points each.
 
 - \( \lambda_\min(S) \ge 0.1649 \)

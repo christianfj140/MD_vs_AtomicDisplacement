@@ -1,0 +1,350 @@
+{
+  "checkpoint_lineage": [
+    {
+      "checkpoint_id": "tbg_registry_spectral_loss/spectral-best-epoch=247-step=03472",
+      "checkpoint_path": "Comparison/results/tbg_registry_spectral_loss/training/checkpoints/spectral-best-epoch=247-step=03472.ckpt",
+      "checkpoint_selection": {
+        "monitor_metric": "val_spectral_frontier_aligned_rmse_eV",
+        "monitor_source": "Comparison/results/tbg_registry_spectral_loss/training_plan.json:checkpoint_monitor",
+        "precision_gate_source": "Comparison/results/tbg_registry_spectral_loss/status.json:precision_gate",
+        "precision_gate_status": "passed"
+      },
+      "checkpoint_sha256": "9eb7a80961690d5524fc3241c309b63b931c3c108cff550216c6c851cdb9bdea",
+      "epc_evaluation_structures": [
+        {
+          "label": "graphene_primitive_cell_equilibrium",
+          "path": "materials/graphene/RUN.fdf",
+          "sha256": "faf623f1bf7f3d9cf73b191d291c042f2aff43b828a8800119e2eaa8b5379494",
+          "used_in_protocols": [
+            "graphene_gamma_epc_v1"
+          ]
+        },
+        {
+          "label": "matbg_rigid_31_30_magic_angle",
+          "path": "materials/twisted_bilayer_graphene_1p084549deg/RUN.fdf",
+          "sha256": "41cc08c75b41b770100f146ca509b9db82b4596fa72c864e37d6e558cc90b099",
+          "used_in_protocols": [
+            "matbg_rigid_gamma_epc_v1",
+            "matbg_rigid_qneq0_epc_v1"
+          ]
+        }
+      ],
+      "known_holdout_manifests": [
+        {
+          "note": "the checkpoint's own held-out registry test set (lateral-registry probe grid); distinct from, and not to be confused with, the EPC evaluation structures below",
+          "path": "Comparison/datasets/tbg_registry_holdout_7x7/frozen_split_manifest.json",
+          "sha256": "83cecb2bf8b204d60ec55368ef8405715c1c5fb8891f9afe4f0c4a228d537578",
+          "split_field": "test"
+        }
+      ],
+      "known_training_manifests": [
+        {
+          "note": "the actual dataset run_tbg_registry_spectral_loss.py:split_paths() reads (DATASET = Comparison/datasets/tbg_md_plus_registry/n558); its train split has exactly 558 rows, matching training_plan.json:physical_train_samples=558 exactly (row-for-row: split_paths() computes physical_train_samples as len(train_paths) over this same manifest's train split). 474 of the 558 rows are MD-sourced (sample_id prefixed by their source MD stacking, not 'tbg_registry_grid_12x12__'); registry_mask in split_paths() identifies the other 84 as registry rows by the 'tbg_registry_grid_12x12__' sample_id prefix -- the same 84 rows already declared in the entry below via tbg_registry_grid_12x12/frozen_split_manifest.json, now doubly covered. Each MD row carries source_run/source_sample_id back to Comparison/datasets/tbg_pure_md_nested/n474 (itself traceable to Comparison/datasets/bilayer_graphene_{AA,AB,BA}_md200, which still holds raw MD_steps/md_temperature_blocks on disk) plus a full artifact_sha256 block (RUN.fdf, XV, HSX, TSHS, TSDE, ORB_INDX, STRUCT_OUT, metadata) per row.",
+          "path": "Comparison/datasets/tbg_md_plus_registry/n558/frozen_split_manifest.json",
+          "row_count_declared": 558,
+          "sha256": "0b66d175be7d9f86784b395bb2a214a30dac3d1391376c4fec4e434d99a0749d",
+          "split_field": "train"
+        },
+        {
+          "note": "matches training_plan.json:registry_samples=84; kept alongside the n558 manifest above as the original, narrower reference (the 84 rows it declares are a strict subset of the n558 manifest's 558 train rows)",
+          "path": "Comparison/datasets/tbg_registry_grid_12x12/frozen_split_manifest.json",
+          "row_count_declared": 84,
+          "sha256": "8b800ac1dd0fefdc0f9940699694f720a34177aeccc644a7505c0f73f0e766a6",
+          "split_field": "train"
+        }
+      ],
+      "structural_family_note": "The checkpoint's known training/holdout data is lateral-registry-probe bilayer graphene (commensurate AA/AB/BA stacking grids, small unit cells) plus an MD component (bilayer graphene AA/AB/BA stacking, ~200-step trajectories at multiple temperature blocks; see Comparison/datasets/tbg_pure_md_nested/n474 and its source bilayer_graphene_{AA,AB,BA}_md200 datasets). The EPC evaluation structures are a pristine graphene primitive cell (2 atoms) and a rigid (31,30) magic-angle twisted-bilayer supercell (11164 atoms) -- a different structural family by atom count and stacking construction alone. audit_epc_lineage.py verifies this claim by geometry comparison rather than accepting this note as sufficient.",
+      "training_provenance_gap": "Previously: training_plan.json declares physical_train_samples=558 drawn from MD trajectories, and no row-level manifest for that MD-sourced portion had been located. Resolved 2026-09-04: Comparison/datasets/tbg_md_plus_registry/n558/frozen_split_manifest.json is the exact dataset run_tbg_registry_spectral_loss.py:split_paths() reads to build train_paths (DATASET points at this directory); its train split has exactly 558 rows (474 MD-sourced + 84 registry-sourced, matching physical_train_samples=558/registry_samples=84 precisely), each with structure paths, artifact sha256 hashes and source_run/source_sample_id lineage back to the raw MD trajectory datasets, which are still present on disk. See known_training_manifests above.",
+      "training_provenance_incomplete": false,
+      "upstream_checkpoint": {
+        "path": "Comparison/results/tbg_registry_50_50/training/checkpoints/best-epoch=242-step=03402.ckpt",
+        "relationship": "spectral-best checkpoint is fine-tuned from this base checkpoint (training_plan.json:source_checkpoint); its own training lineage is not re-traced by this document and is declared unknown to audit_epc_lineage.py"
+      },
+      "used_by": [
+        "Comparison/scripts/run_graphene_gamma_epc_paths.py (graph2mat_jvp, graph2mat_frozen paths, DEFAULT_CHECKPOINT)",
+        "Comparison/scripts/benchmark_matbg_synthetic_displacements.py (DEFAULT_CHECKPOINT)",
+        "Comparison/scripts/certify_relaxed_geometry_transferability.py (DEFAULT_CHECKPOINT)",
+        "Comparison/scripts/run_ab_bilayer_epc_paths.py (DEFAULT_CHECKPOINT)",
+        "Comparison/scripts/quantify_checkpoint_derivative_error.py (DEFAULT_CHECKPOINT)"
+      ]
+    }
+  ],
+  "content_sha256": "57ebecbd89c99aa90fbcc88958b29bf7ec0602c994201c5d432bbfa986b3f234",
+  "frozen_before_commit": {
+    "commit": "508725342d52b2fccb61bdf8418393ad9f612e32",
+    "commit_date": "2026-08-29T23:58:26+02:00",
+    "note": "This document was authored at working-tree state descending from this commit. It consolidates protocol files that were themselves frozen (see each source_protocols[].sha256 and generated_at) at or before this commit, and it records the checkpoint/structure sha256 values it read at authoring time. Any later change to a referenced checkpoint, manifest or structure file will change its sha256 and audit_epc_lineage.py will report the reference as stale rather than silently re-trusting it."
+  },
+  "generated_at": "2026-09-07T17:32:44Z",
+  "holdout_semantics": {
+    "calibration": "may be inspected freely while setting tolerances; never itself a reported result",
+    "result": "the pre-registered experiment; evaluated last and never used to set a tolerance",
+    "source": "definitions as used verbatim in the per-protocol 'splits' blocks referenced below",
+    "validation": "used once, after tolerances are frozen, to test whether they transfer; this and 'result' together are the holdout set"
+  },
+  "prospective_qualification_v2": {
+    "GO_4_evidence": "Comparison/results/epc/gamma_epc/graphene/go4_verdict.json",
+    "GO_4_status": "NO_GO",
+    "backend": {
+      "effective": "cuda:0",
+      "precision": "float64",
+      "requested": "cuda",
+      "source": "Comparison/results/epc/preflight/graph2mat_jvp_runtime.json"
+    },
+    "blinding_status": "prospective_unblinded",
+    "claim_declared": {
+      "energy_gauge": "certified vacuum gauge H(R)-c_vacuum(R)S(R) (docs/epc_overnight_remediation_20260905.md)",
+      "excluded_labels": [
+        "physical_epc",
+        "projected_KS_EPC",
+        "full_KS_EPC"
+      ],
+      "observable": "validated_covariant_PAO_matrix_derivative (D_QH); Delta_out explicitly UNQUANTIFIED",
+      "target_population": "graphene primitive cell, Gamma-point E2g phonon doublet",
+      "type": "OOD_by_structural_family (graphene primitive cell vs. bilayer-stacking training/holdout families) evaluated as interpolation within the fixed PROD-SZ basis"
+    },
+    "cohort": "400 k points from the certified graphene TSHS grid already used by the GO-2 and reference_basis_convergence gates; no new sampling is required for the derivative-level claim.",
+    "delta_out_status": "UNQUANTIFIED",
+    "deltas_and_convergence": "5-point FD/Richardson stencil in PROD-SZ; see delta_plateau_topology_certification and reference_basis_convergence gate artifacts under Comparison/results/epc/.",
+    "final_state": "NO_GO_LINEAGE",
+    "final_state_reason": "route_evaluation blocks opening a valid confirmatory final_test under this document: the executable route is ineligible and the eligible route was not started. This does not change GO-4, delta_out_closure or any already-produced gate artifact; it only records why no new confirmatory label may be generated for the covariant PAO matrix derivative claim yet.",
+    "historical_selection_status": "CONTAMINATED",
+    "lineage_component_grouping": "Reuses check_geometry_leakage.py (already shared by audit_epc_lineage.py, the graph2mat/DeepH benchmark gate, and Comparison/scripts/ops/audit_geometry_independence.py) for exact/near-duplicate and rotation/translation-invariant geometry comparison. No new grouping/cache/campaign infrastructure was added for this document.",
+    "primary_metric": "delta_g = C_f^dagger (Delta_G2M - Delta_SIESTA) C_i per electronic block, normalized by the preregistered tau_model reference scale -- never a global Frobenius norm converted to a percent of g (see docs/epc_go4_graphene_gamma_verdict.md section 4).",
+    "purpose": "Prospective declaration required by the E-F_001 covariant-PAO-response task before any confirmatory label is generated or opened. Registers the claim scope, the sealing gap, and why the only currently-executable route cannot open a validly blinded final_test -- rather than silently reusing the historical (contaminated) selection as if it were fresh.",
+    "route_evaluation": {
+      "clean_reselection": {
+        "eligible": true,
+        "reason": "Requires training from scratch with train/selection_validation/threshold_calibration/final_test splits separated by lineage. Out of scope for this document: no retraining, no orchestrator attempt, and no reordering of the 12 surviving snapshots was performed or authorized here.",
+        "status": "not_initiated"
+      },
+      "consequence": "No route currently supports a validly blinded prospective confirmatory claim for the graphene-Gamma checkpoint response. The only executable route (legacy_fixed_candidate) is ineligible on its own stated precondition; clean_reselection is eligible but not started.",
+      "legacy_fixed_candidate": {
+        "checkpoint_id": "tbg_registry_spectral_loss/spectral-best-epoch=247-step=03472",
+        "eligible": false,
+        "evidence": "Comparison/results/epc/checkpoint_lineage_exclusion/checkpoint_lineage_exclusion.json",
+        "reason": "The legacy route requires a holdout 'nunca fue usado en entrenamiento, seleccion, calibracion o inspeccion'. This precondition is already checked by existing, already-running infrastructure: certify_checkpoint_lineage_and_exclusion.py marks both EPC evaluation structures previously_inspected=true and blind_holdout=false in Comparison/results/epc/checkpoint_lineage_exclusion/checkpoint_lineage_exclusion.json (PREVIOUSLY_INSPECTED registry: graphene_primitive_cell_equilibrium opened repeatedly by certify_basis_response.py, run_epc_convergence_sweeps.py and quantify_checkpoint_derivative_error.py while tolerances were being set; matbg_rigid_31_30_magic_angle opened by benchmark_matbg_synthetic_displacements.py and certify_matbg_phonon_provider.py). Inspection already happened, so the no-prior-inspection precondition fails regardless of geometry-leakage status, and the script's own blind_holdout_reason already states this cannot be relabelled a blind holdout."
+      },
+      "selected_route": "none"
+    },
+    "sealing": {
+      "commit": "508725342d52b2fccb61bdf8418393ad9f612e32",
+      "commit_date": "2026-08-29T23:58:26+02:00",
+      "external_custody": false,
+      "mechanism_available": "frozen_before_commit (local git commit reference only)",
+      "note": "A locally-created commit hash does not demonstrate blinding: no signed remote commit, independent timestamp authority or third-party escrow exists in this repository for this artifact. Per policy this keeps blinding_status=prospective_unblinded and confirmatory results NO_GO regardless of any individual gate's numeric outcome."
+    },
+    "secondary_metrics": [
+      "singular values of D_QH per k-point",
+      "worst electronic block (measured worst r=2.41 against tau_model=2.84, docs/epc_go4_graphene_gamma_verdict.md)",
+      "per-lineage-component confidence intervals"
+    ],
+    "single_opening_policy": "evaluate_epc_metrics.py rejects a protocol whose hash does not reproduce frozen_content_sha256 and does not re-adjudicate a candidate against the same cohort after a failure (docs/epc_go4_graphene_gamma_verdict.md section 7); this document adds no second adjudicator.",
+    "ticket": "E-F_001"
+  },
+  "purpose": "The scientific audit of E-F_001 found preregistration/holdout controls scattered across per-protocol JSON files with no single frozen declaration of the holdout set and no checkpoint-lineage record at all. This document consolidates the holdout declarations already frozen in Comparison/results/epc/preregistration/**/*.json (by reference and sha256, not by copying their content) and adds the checkpoint-lineage declaration those files were missing. It is the --preregistration input audit_epc_lineage.py reads.",
+  "relationship_to_v1": "Adds the prospective_qualification_v2 block required before opening any confirmatory label for E-F_001's validated_covariant_PAO_matrix_derivative claim. Does not rewrite, delete or re-hash any v1 source_protocols/checkpoint_lineage entry: those remain the frozen historical input already read by already-produced artifacts (e.g. Comparison/results/epc/gamma_epc/graphene/go4_verdict.json). docs/epc_preregistration_v1.json is kept unmodified on disk as that historical record.",
+  "schema": "epc_preregistration_v2",
+  "source_protocols": [
+    {
+      "gate": "GO-4",
+      "generated_at": "2026-09-02T09:08:16.550735+00:00",
+      "holdout": {
+        "calibration": {
+          "directions": [
+            "atom0000_x",
+            "translation_x"
+          ],
+          "fc_ranges": [
+            "sc1x1x1",
+            "sc3x3x1"
+          ],
+          "k_labels": [
+            "gamma",
+            "M"
+          ],
+          "purpose": "fix the FD floors, the delta plateau and the transfer factor. May be inspected freely; nothing measured here is a result."
+        },
+        "declared": true,
+        "disjoint_in": "(direction, k) pairs and directions",
+        "result": {
+          "directions": [
+            "e2g_bond_longitudinal",
+            "e2g_bond_transverse"
+          ],
+          "fc_ranges": [
+            "sc5x5x1"
+          ],
+          "k_labels": [
+            "k_generic_1",
+            "K"
+          ],
+          "purpose": "the pre-registered experiment. Evaluated last, and never used to set, widen or justify a tolerance."
+        },
+        "validation": {
+          "directions": [
+            "random_seed0"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "k_generic_2"
+          ],
+          "purpose": "test whether the calibrated bound transfers to a direction and a k that took part in no fit. Used once, after the tolerances are frozen."
+        }
+      },
+      "path": "Comparison/results/epc/preregistration/graphene/epc_graphene_gamma_protocol.json",
+      "protocol_id": "graphene_gamma_epc_v1",
+      "ready_to_execute": false,
+      "schema": "epc_preregistration_v1",
+      "sha256": "7fc2f05efce73a296b26969e97794276c38c41d62f8f88b06cccb25c2312f526",
+      "ticket": "C19-C20 / E-F_001-S23"
+    },
+    {
+      "gate": "GO-9 pre-registration (Gamma branch); execution additionally requires GO-8a and GO-1..GO-6",
+      "generated_at": "2026-09-03T11:13:59.731009+00:00",
+      "holdout": {
+        "calibration": {
+          "directions": [
+            "translation_x"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "gamma",
+            "M"
+          ],
+          "purpose": "fix FD floors and the delta plateau once a real measurement exists. May be inspected freely; nothing measured here is a result."
+        },
+        "declared": true,
+        "disjoint_in": "(direction, k) pairs and directions",
+        "result": {
+          "directions": [
+            "breathing_like",
+            "shear_like_x",
+            "optical_like"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "k_generic_1",
+            "K"
+          ],
+          "purpose": "the pre-registered experiment: the three candidate Gamma sectors S37/D06 already benchmarked for cost, now the target of a physical validation once GO-8a closes. Evaluated last, never used to set a tolerance."
+        },
+        "validation": {
+          "directions": [
+            "random_seed0"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "k_generic_2"
+          ],
+          "purpose": "test whether a calibrated bound transfers to a direction and a k that took part in no fit. Used once, after tolerances are frozen."
+        }
+      },
+      "path": "Comparison/results/epc/preregistration/matbg/epc_matbg_rigid_gamma_protocol.json",
+      "protocol_id": "matbg_rigid_gamma_epc_v1",
+      "ready_to_execute": false,
+      "schema": "epc_preregistration_v1",
+      "sha256": "500ee41b8aed612919d3e54cf1204e7add457bb8480a3b4cbc9c5af79af67b05",
+      "ticket": "E-F_001-S41"
+    },
+    {
+      "gate": "GO-9 pre-registration (q != 0 branch); execution additionally requires GO-1..GO-6, GO-8a and GO-8b",
+      "generated_at": "2026-09-03T11:47:53.281040+00:00",
+      "holdout": {
+        "calibration": {
+          "directions": [
+            "translation_x"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "gamma"
+          ],
+          "purpose": "fix FD floors and the delta plateau once a real measurement exists. May be inspected freely; nothing measured here is a result.",
+          "q_labels": [
+            "q_generic_1"
+          ]
+        },
+        "declared": true,
+        "disjoint_in": "(direction, k, q) triples and directions",
+        "result": {
+          "directions": [
+            "breathing_like",
+            "shear_like_x",
+            "optical_like"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "k_generic_1"
+          ],
+          "purpose": "the pre-registered non-Gamma experiment: the K-point candidate, target of a physical validation once GO-8a and GO-8b both close. Evaluated last, never used to set a tolerance.",
+          "q_labels": [
+            "K"
+          ]
+        },
+        "validation": {
+          "directions": [
+            "random_seed0"
+          ],
+          "fc_ranges": [],
+          "k_labels": [
+            "k_generic_2"
+          ],
+          "purpose": "route-mechanics cross-check: Q-C kernel-table contraction vs Q-B per-q phase-aware response must agree at machine precision on the real Graph2Mat JVP (S40's own route_mechanics_suite), independent of any physical claim.",
+          "q_labels": [
+            "q_generic_1"
+          ]
+        }
+      },
+      "path": "Comparison/results/epc/preregistration/matbg/epc_matbg_rigid_qneq0_protocol.json",
+      "protocol_id": "matbg_rigid_qneq0_epc_v1",
+      "ready_to_execute": false,
+      "schema": "epc_preregistration_v1",
+      "sha256": "97aa17789fd1ca12d17e6877d16c78bfb65c212910b29265e5e55023dce8a2f1",
+      "ticket": "E-F_001-S44"
+    },
+    {
+      "gate": "GO-10 pre-registration; execution additionally requires GO-1..GO-9 (gamma branch) or GO-1..GO-9 plus GO-8b (qneq0 branch), applied to the relaxed geometry's own artifacts",
+      "generated_at": "2026-09-03T15:43:51.775113+00:00",
+      "holdout": {
+        "declared": false,
+        "reason": "source protocol has no 'splits' section yet; this stage's holdout set is not declared and must not be treated as independent"
+      },
+      "path": "Comparison/results/epc/preregistration/matbg/epc_matbg_relaxed_protocol.json",
+      "protocol_id": "matbg_relaxed_epc_v1",
+      "ready_to_execute": false,
+      "schema": "epc_preregistration_v1",
+      "sha256": "cf94e8190f61fead6c10c5abb52fed4dc3f488abc5cb8d8067a67433a9e0e8ab",
+      "ticket": "E-F_001-S50"
+    },
+    {
+      "gate": "Fase-12 convergence-protocol pre-registration; execution additionally requires a GO-9-certified g_set (either branch) or GO-10",
+      "generated_at": "2026-09-03T16:01:37.893841+00:00",
+      "holdout": {
+        "declared": false,
+        "reason": "source protocol has no 'splits' section yet; this stage's holdout set is not declared and must not be treated as independent"
+      },
+      "path": "Comparison/results/epc/preregistration/matbg/epc_integrated_observables_convergence_protocol.json",
+      "protocol_id": "integrated_observables_convergence_v1",
+      "ready_to_execute": false,
+      "schema": "epc_preregistration_v1",
+      "sha256": "8ae4545ccc682226c5c28c3ecc1f5e453ccf66e275769cb9b82407d39bab2ed6",
+      "ticket": "E-F_001-S53"
+    },
+    {
+      "gate": "Fase-12 convergence-protocol pre-registration for the relaxed geometry; execution additionally requires a relaxed g_set on either branch (S51/run_matbg_relaxed_epc), which itself requires GO-10 (S47/decide_matbg_relaxation_provider, read live)",
+      "generated_at": "2026-09-03T16:14:11.929089+00:00",
+      "holdout": {
+        "declared": false,
+        "reason": "source protocol has no 'splits' section yet; this stage's holdout set is not declared and must not be treated as independent"
+      },
+      "path": "Comparison/results/epc/preregistration/matbg/epc_relaxed_integrated_observables_convergence_protocol.json",
+      "protocol_id": "relaxed_integrated_observables_convergence_v1",
+      "ready_to_execute": false,
+      "schema": "epc_preregistration_v1",
+      "sha256": "f7782bc2457ff767e4e1b3ce4aab1da81c1a222a2f9c7356926d448a2b9db94f",
+      "ticket": "E-F_001-S55"
+    }
+  ],
+  "supersedes": null,
+  "title": "E-F_001 EPC roadmap: consolidated preregistration, holdout, checkpoint-lineage and prospective covariant-PAO-derivative qualification declaration"
+}
