@@ -23,12 +23,10 @@ md:
   thermostat: none
   write_md_history: true
   temperature_blocks: []
-  basis_size: SZP
+  # basis_size/energy_shift/mesh_cutoff/xc_functional/xc_authors removed:
+  # run_fdf_template above is authoritative and always wins (render_run_fdf
+  # in shared/siesta_run_fdf.py); these disagreed with the real RUN.fdf.
   basis_type: split
-  energy_shift: 0.275 eV
-  mesh_cutoff: 250 Ry
-  xc_functional: LDA
-  xc_authors: PZ
   max_scf_iterations: 200
   solution_method: diagon
   dm_mixing_weight: 0.02
