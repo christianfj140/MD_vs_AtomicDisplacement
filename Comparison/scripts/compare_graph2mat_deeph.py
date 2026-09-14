@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from deeph_fair_utils import read_json, run_git_commit, write_csv_rows, write_json
+from g2m_deeph_metrics import mean, number, weighted_sample_rows
 
 
 METRICS = [
@@ -22,6 +23,16 @@ METRICS = [
     "dos_mae_500_fermi_window",
 ]
 
+# Matrix-sourced metrics fall back to the sparse (union) equivalent when a run
+# produced no dense k-point matrix rows at all -- same convention as the
+# canonical h_mae_eV_mean in g2m_deeph_metrics.py, so a sparse-only run reports
+# the same number here as it would there instead of silently going to NaN.
+SPARSE_FALLBACK_COLUMN = {
+    "h_mae_eV": "mae_union_eV",
+    "h_rmse_eV": "rmse_union_eV",
+    "relative_frobenius": "relative_frobenius_union",
+}
+
 
 def read_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
@@ -30,22 +41,10 @@ def read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def number(value: Any) -> float:
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return math.nan
-    return result if math.isfinite(result) else math.nan
-
-
-def mean(values: list[float]) -> float:
-    clean = [value for value in values if math.isfinite(value)]
-    return sum(clean) / len(clean) if clean else math.nan
-
-
 def summarize_method(method: str, result_dir: Path, metrics_root: Path | None = None) -> dict[str, Any]:
     metrics_root = metrics_root or result_dir / "metrics"
-    matrix_rows = [row for row in read_rows(metrics_root / "kpoint_matrix_metrics.csv") if row.get("row_type") == "weighted_sample"]
+    matrix_rows = weighted_sample_rows(metrics_root)
+    sparse_rows = read_rows(metrics_root / "sparse_metrics.csv")
     spectral_rows = read_rows(metrics_root / "kpoint_spectral_metrics.csv")
     dos_rows = read_rows(metrics_root / "kpoint_dos_metrics.csv")
     manifest = read_json(metrics_root / "manifest.json")
@@ -68,7 +67,11 @@ def summarize_method(method: str, result_dir: Path, metrics_root: Path | None = 
         "dos_mae_500_fermi_window": dos_rows,
     }
     for metric in METRICS:
-        summary[f"{metric}_mean"] = mean([number(row.get(metric)) for row in source_map[metric]])
+        values = [number(row.get(metric)) for row in source_map[metric]]
+        fallback_column = SPARSE_FALLBACK_COLUMN.get(metric)
+        if not values and fallback_column:
+            values = [number(row.get(fallback_column)) for row in sparse_rows]
+        summary[f"{metric}_mean"] = mean(values)
     return summary
 
 
