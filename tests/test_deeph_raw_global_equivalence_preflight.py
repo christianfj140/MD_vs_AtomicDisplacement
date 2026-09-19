@@ -258,6 +258,25 @@ class DeepHRawGlobalEquivalencePreflightNumericTests(unittest.TestCase):
         self.assertTrue(diagnostics["s_positive_definite"])
         self.assertFalse(diagnostics["s_condition_acceptable"])
 
+    def test_explicit_hermitization_removes_only_the_tiny_antihermitian_part(self) -> None:
+        assert np is not None
+        h = np.asarray([[0.0, 1.0 + 2e-10j], [1.0, 0.0]], dtype=np.complex128)
+        diagnostics = preflight.generalized_eigenproblem_diagnostics(
+            h,
+            np.eye(2),
+            hermiticity_tolerance=1e-10,
+            min_overlap_eigenvalue=1e-10,
+            max_overlap_condition=1e12,
+            residual_tolerance=1e-8,
+            normalization_tolerance=1e-8,
+            hermitize=True,
+        )
+
+        self.assertTrue(diagnostics["valid"])
+        self.assertGreater(diagnostics["h_hermiticity_relative_before"], 0.0)
+        self.assertLess(diagnostics["h_hermitization_correction_relative"], 5e-10)
+        self.assertEqual(diagnostics["h_hermiticity_relative"], 0.0)
+
     def test_siesta_orbital_mapping_signs_and_energy_shift_pass(self) -> None:
         assert np is not None
         shift_eV = 2.5
@@ -371,6 +390,15 @@ class DeepHRawGlobalEquivalencePreflightNumericTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "failed")
         self.assertTrue(result.diagnostic_only)
         self.assertFalse(result.metric_fields()["deeph_raw_global_equivalence_proven"])
+
+    def test_sub_tolerance_support_noise_does_not_fail_equivalence(self) -> None:
+        self.write_processed(scale=1.0 + 1e-8)
+
+        manifest = self.run_preflight()
+        evidence = json.loads((self.predictions / "raw_global_equivalence_evidence.json").read_text())
+
+        self.assertEqual(manifest["status"], "proven")
+        self.assertEqual(evidence["checks"]["sparse_support"]["status"], "pass")
 
     def test_missing_overlap_fails(self) -> None:
         self.write_processed(include_overlap=False)

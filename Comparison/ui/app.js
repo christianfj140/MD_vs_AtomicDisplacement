@@ -1041,6 +1041,7 @@ async function pollLogs() {
   await pollG2MDeepHLogs();
   await pollMixingE2ELogs();
   await pollMixingTerminalStatus();
+  await pollDatasetDesign();
   updateVenvCommandPreview();
 }
 
@@ -1086,6 +1087,242 @@ async function pollMixingTerminalStatus() {
       status.error ? `error=${status.error}` : "",
     ].filter(Boolean).join(" | "),
   );
+}
+
+async function pollDatasetDesign() {
+  const status = await request("/api/dataset-design/status");
+  const dot = document.getElementById("dd-status-dot");
+  const text = document.getElementById("dd-status-text");
+  if (dot) {
+    dot.classList.toggle("running", Boolean(status.running));
+    dot.classList.toggle("error", status.returncode != null && status.returncode !== 0);
+  }
+  if (text) text.textContent = statusText(status);
+
+  const requestedSince = state.datasetDesignLogOffset || 0;
+  const payload = await request(`/api/dataset-design/logs?since=${requestedSince}&limit=${LOG_POLL_LIMIT}`);
+  if (Number.isFinite(payload.offset) && payload.offset < requestedSince) {
+    state.datasetDesignLogOffset = 0;
+    return pollDatasetDesign();
+  }
+  state.datasetDesignLogOffset = payload.offset;
+  if (payload.lines?.length) {
+    const node = document.getElementById("dd-log");
+    if (node) {
+      if (!state.datasetDesignLogStarted) {
+        node.textContent = "";
+        state.datasetDesignLogStarted = true;
+      }
+      node.textContent += payload.lines.join("");
+      node.scrollTop = node.scrollHeight;
+    }
+  }
+  if (!status.running && state.datasetDesignWasRunning) {
+    ddLoadResults().catch((error) => showToast(error.message));
+  }
+  state.datasetDesignWasRunning = status.running;
+
+  await pollS9CampaignResults();
+  await pollMdSimilarity();
+}
+
+async function pollS9CampaignResults() {
+  const payload = await request("/api/dataset-design/s9-campaigns");
+  const progress = document.getElementById("dd-s9-campaign-progress");
+  if (progress) {
+    progress.textContent = payload.available
+      ? `w90: ${payload.w90.done}/${payload.w90.n_total} · 6x6: ${payload.sixxsix.done}/${payload.sixxsix.n_total}`
+      : "Sin datos todavia.";
+  }
+  ddRenderTableRows(payload.w90?.rows, "dd-s9-campaign-w90-head", "dd-s9-campaign-w90-body", "Sin datos todavia.");
+  ddRenderTableRows(payload.sixxsix?.rows, "dd-s9-campaign-6x6-head", "dd-s9-campaign-6x6-body", "Sin datos todavia.");
+  await ddS9RenderCampaignChart(payload.w90?.rows || [], payload.sixxsix?.rows || []);
+  await ddS9RenderCampaignRelFrobChart(payload.w90?.rows || [], payload.sixxsix?.rows || []);
+  await ddS9RenderCampaignLearningCurve(payload.w90?.rows || [], payload.sixxsix?.rows || []);
+  await ddS9RenderCampaignCost(payload.w90?.rows || [], payload.sixxsix?.rows || []);
+}
+
+const DD_S9_CAMPAIGN_FAMILY_COLORS = { sobol_sparse: "#2ca02c", random_cartesian: "#1f77b4", latin_hypercube: "#7f7f7f" };
+
+function ddS9CampaignFamilyTraces(rows, variant, symbol, valueKey, valueFn, unitLabel) {
+  const traces = [];
+  const families = Array.from(new Set(rows.map((row) => row.family))).sort();
+  for (const family of families) {
+    const subset = rows.filter((row) => row.family === family && row[valueKey] != null);
+    if (!subset.length) continue;
+    traces.push({
+      x: subset.map((row) => row.rank), y: subset.map((row) => valueFn(row[valueKey])),
+      text: subset.map((row) => `${row.combo_tag} (dim ${row.dim}, R${row.domain_ang}, d${row.density})`),
+      mode: "markers", type: "scatter", name: `${family} (${variant})`,
+      marker: { color: DD_S9_CAMPAIGN_FAMILY_COLORS[family] || "#000000", symbol, size: 7 },
+      hovertemplate: `%{text}<br>${unitLabel} %{y:.3f}<extra>${family} (${variant})</extra>`,
+    });
+  }
+  return traces;
+}
+
+async function ddS9RenderCampaignChart(w90Rows, sixxsixRows) {
+  const host = document.getElementById("dd-s9-campaign-chart");
+  if (!host) return;
+  if (!w90Rows.length && !sixxsixRows.length) {
+    host.innerHTML = '<p class="field-help">Sin datos todavia.</p>';
+    return;
+  }
+  await ensurePlotlyLoaded();
+  const traces = [
+    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "H_MAE_meV", (v) => v, "H-MAE meV"),
+    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "H_MAE_meV", (v) => v, "H-MAE meV"),
+  ];
+  await window.Plotly.newPlot(host, traces, {
+    title: "S9 campana (600 epocas): H-MAE por combo, w90 vs 6x6 (todos los 80)",
+    xaxis: { title: "rank (combo, mismo orden en ambas campanas)" },
+    yaxis: { title: "H-MAE (meV, log scale)", type: "log" },
+    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 480, legend: { orientation: "h" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderCampaignRelFrobChart(w90Rows, sixxsixRows) {
+  const host = document.getElementById("dd-s9-campaign-relfrob-chart");
+  if (!host) return;
+  if (!w90Rows.length && !sixxsixRows.length) {
+    host.innerHTML = '<p class="field-help">Sin datos todavia.</p>';
+    return;
+  }
+  await ensurePlotlyLoaded();
+  const traces = [
+    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "rel_Frob", (v) => v * 100, "rel. Frobenius %"),
+    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "rel_Frob", (v) => v * 100, "rel. Frobenius %"),
+  ];
+  await window.Plotly.newPlot(host, traces, {
+    title: "S9 campana (600 epocas): Relative Frobenius por combo, w90 vs 6x6 (todos los 80)",
+    xaxis: { title: "rank (combo, mismo orden en ambas campanas)" },
+    yaxis: { title: "Relative Frobenius (%)" },
+    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 480, legend: { orientation: "h" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+function ddS9CampaignStatsByDensity(rows) {
+  const byFamilyDensity = new Map();
+  for (const row of rows) {
+    if (row.H_MAE_meV == null || row.density == null || row.family == null) continue;
+    const key = `${row.family}|${row.density}`;
+    if (!byFamilyDensity.has(key)) byFamilyDensity.set(key, []);
+    byFamilyDensity.get(key).push(row.H_MAE_meV);
+  }
+  const out = [];
+  for (const [key, values] of byFamilyDensity) {
+    const [family, density] = key.split("|");
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const std = Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length);
+    out.push({ family, density: Number(density), mean, std, n: values.length });
+  }
+  return out;
+}
+
+async function ddS9RenderCampaignLearningCurve(w90Rows, sixxsixRows) {
+  const host = document.getElementById("dd-s9-campaign-learning-curve-chart");
+  if (!host) return;
+  if (!w90Rows.length && !sixxsixRows.length) {
+    host.innerHTML = '<p class="field-help">Sin datos todavia.</p>';
+    return;
+  }
+  await ensurePlotlyLoaded();
+  const traces = [];
+  const addVariantTraces = (rows, variant, symbol, dash) => {
+    const stats = ddS9CampaignStatsByDensity(rows);
+    const families = Array.from(new Set(stats.map((s) => s.family))).sort();
+    for (const family of families) {
+      const points = stats.filter((s) => s.family === family).sort((a, b) => a.density - b.density);
+      if (!points.length) continue;
+      traces.push({
+        x: points.map((p) => p.density), y: points.map((p) => p.mean),
+        error_y: { type: "data", array: points.map((p) => p.std), visible: true },
+        mode: "lines+markers", type: "scatter", name: `${family} (${variant})`,
+        line: { color: DD_S9_CAMPAIGN_FAMILY_COLORS[family] || "#000000", dash },
+        marker: { symbol, size: 9 },
+        hovertemplate: `density %{x}<br>H-MAE %{y:.2f} meV<extra>${family} (${variant})</extra>`,
+      });
+    }
+  };
+  addVariantTraces(w90Rows, "w90", "circle", "solid");
+  addVariantTraces(sixxsixRows, "6x6", "square", "dash");
+  await window.Plotly.newPlot(host, traces, {
+    title: "Learning curves: H-MAE vs N_train (density), por familia (mean +/- std)",
+    xaxis: { title: "N_train (density)" },
+    yaxis: { title: "H-MAE (meV, log scale)", type: "log" },
+    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 420, legend: { orientation: "h" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderCampaignCost(w90Rows, sixxsixRows) {
+  const host = document.getElementById("dd-s9-campaign-cost-chart");
+  if (!host) return;
+  if (!w90Rows.length && !sixxsixRows.length) {
+    host.innerHTML = '<p class="field-help">Sin datos todavia.</p>';
+    return;
+  }
+  await ensurePlotlyLoaded();
+  const traces = [];
+  const addScatter = (rows, variant, symbol) => {
+    const points = rows.filter((row) => row.H_MAE_meV != null && row.density != null);
+    if (!points.length) return;
+    traces.push({
+      x: points.map((p) => p.density), y: points.map((p) => p.H_MAE_meV),
+      text: points.map((p) => `${p.combo_tag} (${p.family})`),
+      mode: "markers", type: "scatter", name: `${variant} (puntos)`,
+      marker: { color: "#cccccc", symbol, size: 7 },
+      hovertemplate: `%{text}<br>N_train %{x}<br>H-MAE %{y:.2f} meV<extra>${variant}</extra>`,
+    });
+    const byDensity = new Map();
+    for (const p of points) {
+      if (!byDensity.has(p.density)) byDensity.set(p.density, Infinity);
+      byDensity.set(p.density, Math.min(byDensity.get(p.density), p.H_MAE_meV));
+    }
+    const densities = Array.from(byDensity.keys()).sort((a, b) => a - b);
+    traces.push({
+      x: densities, y: densities.map((d) => byDensity.get(d)),
+      mode: "lines+markers", type: "scatter", name: `${variant} frontier`,
+      line: { color: variant === "w90" ? "#1f77b4" : "#d62728" }, marker: { symbol, size: 9 },
+      hovertemplate: `N_train %{x}<br>best H-MAE %{y:.2f} meV<extra>${variant} frontier</extra>`,
+    });
+  };
+  addScatter(w90Rows, "w90", "circle");
+  addScatter(sixxsixRows, "6x6", "square");
+  await window.Plotly.newPlot(host, traces, {
+    title: "Accuracy vs computational cost: H-MAE vs N_train, todos los puntos + frontera",
+    xaxis: { title: "Unique training points (N_train = density)" },
+    yaxis: { title: "H-MAE (meV, log scale)", type: "log" },
+    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 420, legend: { orientation: "h" },
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function pollMdSimilarity() {
+  const payload = await request("/api/dataset-design/md-similarity");
+  const rows = payload.rows || [];
+  await ddRenderMdSimilarityScatter("dd-md-sim-corr-chart", rows, "D_amp", "D_corr", 1,
+    "MD-similarity por familia", "D_amp (Wasserstein-1 / MD RMS)", "D_corr (distancia a la correlacion de MD)");
+  await ddRenderMdSimilarityScatter("dd-md-sim-relfrob-chart", rows, "D_corr", "rel_Frob_mean", 100,
+    "D_corr vs Relative Frobenius", "D_corr (distancia a la correlacion de MD)", "Relative Frobenius (%)");
+}
+
+async function ddRenderMdSimilarityScatter(hostId, rows, xKey, yKey, yScale, title, xTitle, yTitle) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  const points = rows.filter((row) => row[xKey] != null && row[yKey] != null);
+  if (!points.length) {
+    host.innerHTML = '<p class="field-help">Sin datos todavia (corre dataset_design_w90_001_md_similarity.py).</p>';
+    return;
+  }
+  await ensurePlotlyLoaded();
+  await window.Plotly.newPlot(host, [{
+    x: points.map((p) => p[xKey]), y: points.map((p) => p[yKey] * yScale),
+    text: points.map((p) => p.family), mode: "markers+text", type: "scatter",
+    textposition: "top center", marker: { size: 12, color: DD_S9_CAMPAIGN_FAMILY_COLORS[points[0]?.family] ? points.map((p) => DD_S9_CAMPAIGN_FAMILY_COLORS[p.family] || "#000") : "#1f77b4" },
+    hovertemplate: `%{text}<br>${xTitle} %{x:.3f}<br>${yTitle} %{y:.2f}<extra></extra>`,
+  }], {
+    title, xaxis: { title: xTitle }, yaxis: { title: yTitle },
+    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 380,
+  }, { displayModeBar: false, responsive: true });
 }
 
 function inputValue(id) {
@@ -16642,6 +16879,856 @@ async function loadEpcMatbg() {
   renderEpcMatbg(await request("/api/epc/matbg"));
 }
 
+// ===== Dataset Design (DATASET-DESIGN-W90-001-S8) =====
+
+function ddRenderOptionGroup(container, prefix, values, defaults) {
+  if (!container) return;
+  container.innerHTML = "";
+  for (const value of values) {
+    const label = document.createElement("label");
+    label.className = "toggle-field inline-toggle";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = `${prefix}${value}`;
+    input.checked = defaults.includes(value);
+    const span = document.createElement("span");
+    span.textContent = String(value);
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" "));
+    label.appendChild(span);
+    container.appendChild(label);
+  }
+}
+
+async function loadDatasetDesignOptions() {
+  const payload = await request("/api/dataset-design/options");
+  const defaults = payload.defaults || {};
+  ddRenderOptionGroup(
+    document.getElementById("dd-sampler-options"), "dd-sampler-",
+    payload.samplers || [], defaults.samplers || [],
+  );
+  ddRenderOptionGroup(
+    document.getElementById("dd-dim-options"), "dd-dim-",
+    payload.dimensionalities || [], defaults.dimensionalities || [],
+  );
+  ddRenderOptionGroup(
+    document.getElementById("dd-amp-options"), "dd-amp-",
+    payload.amplitudes_ang || [], defaults.amplitudes_ang || [],
+  );
+  // S9-S4/S9-S5 Pilot/Full domain knob -- canonical source (S2), not user-run-dependent.
+  ddRenderOptionGroup(
+    document.getElementById("dd-domain-options"), "dd-domain-",
+    payload.r_train_max_levels_ang || [], [],
+  );
+}
+
+function ddCsvList(id) {
+  return inputValue(id).split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function ddCheckedValues(prefix) {
+  return Array.from(document.querySelectorAll(`[id^="${prefix}"]`))
+    .filter((node) => node.checked)
+    .map((node) => node.id.slice(prefix.length));
+}
+
+function ddActiveAtomPolicy() {
+  const policy = document.getElementById("dd-active-policy")?.value || "central_atom";
+  const centerIndex = Number(document.getElementById("dd-center-index")?.value || 0);
+  if (policy === "central_atom") return { k: 1, pair_mode: "bonded", center_index: centerIndex };
+  if (policy === "neighbour_shell") return { k: 2, pair_mode: "bonded", center_index: centerIndex };
+  if (policy === "dispersed") return { k: 2, pair_mode: "arbitrary", center_index: centerIndex };
+  const k = Math.max(1, Number(document.getElementById("dd-k")?.value || 1));
+  return { k, pair_mode: "bonded", center_index: centerIndex };
+}
+
+function ddCollectParams() {
+  const policy = ddActiveAtomPolicy();
+  return {
+    material: document.getElementById("dd-material")?.value || "w90",
+    samplers: ddCheckedValues("dd-sampler-"),
+    dimensionalities: ddCheckedValues("dd-dim-"),
+    amplitudes_ang: ddCheckedValues("dd-amp-").map(Number),
+    k: policy.k,
+    pair_mode: policy.pair_mode,
+    center_index: policy.center_index,
+    seeds: ddCsvList("dd-seeds").map(Number),
+    n_train_values: ddCsvList("dd-n-train").map(Number),
+    models: ddCheckedValues("dd-model-"),
+    domains: ddCheckedValues("dd-domain-").map(Number),
+    densities: ddCheckedValues("dd-density-").map(Number),
+  };
+}
+
+function ddRenderTableRows(rows, headId, bodyId, emptyMessage) {
+  const head = document.getElementById(headId);
+  const body = document.getElementById(bodyId);
+  if (!head || !body) return;
+  if (!rows || !rows.length) {
+    head.innerHTML = "";
+    body.innerHTML = `<tr><td class="muted-text">${escapeHtml(emptyMessage)}</td></tr>`;
+    return;
+  }
+  const columns = Object.keys(rows[0]);
+  head.innerHTML = `<tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}</tr>`;
+  body.innerHTML = rows.map((row) => `<tr>${columns.map((col) => `<td>${escapeHtml(row[col])}</td>`).join("")}</tr>`).join("");
+}
+
+function ddRenderEstimate(payload) {
+  const summary = document.getElementById("dd-estimate-summary");
+  if (summary) {
+    summary.classList.remove("muted-text");
+    summary.innerHTML = `
+      <div class="result-pill"><strong>${escapeHtml(payload.dataset_points_estimate)}</strong><span>Dataset points (SIESTA cost)</span></div>
+      <div class="result-pill"><strong>${escapeHtml(payload.training_runs_estimate)}</strong><span>Training runs (sampler &times; dim &times; N_train &times; seeds &times; models)</span></div>
+    `;
+  }
+  const warning = document.getElementById("dd-explosion-warning");
+  if (warning) {
+    if (payload.explosion_warning) {
+      warning.textContent = payload.explosion_warning;
+      warning.className = "field-alert";
+    } else {
+      warning.textContent = "";
+      warning.className = "field-alert hidden";
+    }
+  }
+  const preview = document.getElementById("dd-active-preview");
+  if (preview) {
+    const active = payload.active_atom_preview || {};
+    preview.classList.remove("muted-text");
+    preview.innerHTML = `
+      <div class="result-pill"><strong>${escapeHtml(active.n_atoms_total)}</strong><span>Atoms total (material=${escapeHtml(payload.material)})</span></div>
+      <div class="result-pill"><strong>${escapeHtml((active.active_atom_indices || []).join(", "))}</strong><span>Active atom indices (k=${escapeHtml(active.k)})</span></div>
+    `;
+  }
+  const combosBody = document.getElementById("dd-combinations");
+  if (combosBody && payload.combinations?.length) {
+    combosBody.innerHTML = payload.combinations.map((combo) => `<tr>
+      <td>${escapeHtml(combo.sampler)}</td><td>${escapeHtml(combo.dimensionality)}</td>
+      <td>${escapeHtml(combo.n_configs_per_seed)}</td><td>${escapeHtml(combo.seed_multiplier)}</td>
+      <td>${escapeHtml(combo.n_configs_total)}</td>
+    </tr>`).join("");
+  } else if (combosBody) {
+    combosBody.innerHTML = '<tr><td colspan="5" class="muted-text">No combinations selected.</td></tr>';
+  }
+  const skipped = document.getElementById("dd-skipped");
+  if (skipped) {
+    const items = payload.skipped_combinations || [];
+    skipped.textContent = items.length
+      ? `Skipped: ${items.map((item) => `${item.sampler}/${item.dimensionality} (${item.reason})`).join("; ")}`
+      : "";
+  }
+}
+
+async function ddEstimate() {
+  const payload = await request("/api/dataset-design/estimate", {
+    method: "POST",
+    body: JSON.stringify(ddCollectParams()),
+  });
+  ddRenderEstimate(payload);
+  return payload;
+}
+
+function ddRenderResults(payload) {
+  if (payload.estimate) ddRenderEstimate(payload.estimate);
+  ddRenderTableRows(payload.results_table, "dd-results-head", "dd-results-body", "No results yet.");
+  ddRenderTableRows(payload.pareto_table, "dd-pareto-head", "dd-pareto-body", "No Pareto table yet.");
+  const figures = document.getElementById("dd-figures");
+  if (figures) {
+    const names = payload.figures || [];
+    figures.classList.toggle("muted-text", names.length === 0);
+    figures.innerHTML = names.length
+      ? names.map((name) => `<figure><img src="/api/dataset-design/figure?name=${encodeURIComponent(name)}" alt="${escapeHtml(name)}" loading="lazy" /><figcaption>${escapeHtml(name)}</figcaption></figure>`).join("")
+      : "No figures yet.";
+  }
+  const conclusion = document.getElementById("dd-conclusion");
+  if (conclusion) conclusion.textContent = payload.conclusions_markdown || "No conclusions yet.";
+}
+
+async function ddLoadResults() {
+  ddRenderResults(await request("/api/dataset-design/results"));
+}
+
+async function ddRun() {
+  const mode = document.getElementById("dd-mode")?.value || "smoke";
+  const params = { ...ddCollectParams(), mode };
+  if (mode === "smoke") {
+    const payload = await request("/api/dataset-design/run", { method: "POST", body: JSON.stringify(params) });
+    ddRenderEstimate(payload.estimate);
+    ddRenderTableRows(payload.results_table, "dd-results-head", "dd-results-body", "No results yet.");
+    showToast(payload.note || "Smoke run complete");
+    return;
+  }
+  if (mode === "reuse_existing") {
+    ddRenderResults(await request("/api/dataset-design/run", { method: "POST", body: JSON.stringify(params) }));
+    showToast("Loaded existing S4/S7 artifacts");
+    return;
+  }
+  state.datasetDesignLogStarted = false;
+  await request("/api/dataset-design/run", { method: "POST", body: JSON.stringify(params) });
+  showToast(`Dataset Design ${mode} started`);
+}
+
+async function ddStop() {
+  await request("/api/dataset-design/stop", { method: "POST", body: "{}" });
+  showToast("Stop requested");
+}
+
+// ===== Dataset Design S9-S6: 7-panel view over real S9-S3/S9-S4/S9-S5 results =====
+
+const ddS9 = {
+  filters: { family: [], dim: [], k: [], domain: [], density: [], seed: [], n_train: [] },
+  payload: null,
+  optionsRendered: false,
+};
+
+const DD_S9_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"];
+
+function ddS9TargetMeV() {
+  return Math.max(0, Number(document.getElementById("dd-s9-target-mev")?.value || 0));
+}
+
+function ddS9FocusRows(rows) {
+  const dim = document.getElementById("dd-s9-focus-dim")?.value;
+  const k = Number(document.getElementById("dd-s9-focus-k")?.value);
+  return rows.filter((row) => (!dim || row.dim === dim) && (!k || row.k === k));
+}
+
+function ddS9DomainLabel(family, domain) {
+  return family === "angular_shell" ? `@${domain} Å (fixed shell)` : `≤${domain} Å`;
+}
+
+function ddS9MeanStd(values) {
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return { mean, std: Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length) };
+}
+
+function ddS9MinimumChoices(points) {
+  const target = ddS9TargetMeV();
+  const groups = new Map();
+  for (const point of ddS9FocusRows(points)) {
+    const key = `${point.family}|${point.domain}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(point);
+  }
+  const choices = new Map();
+  for (const [key, candidates] of groups) {
+    const reached = candidates.filter((point) => point.H_MAE_mean * 1000 <= target)
+      .sort((a, b) => a.N_train - b.N_train || (a.siesta_cost ?? Infinity) - (b.siesta_cost ?? Infinity) || a.H_MAE_mean - b.H_MAE_mean);
+    const fallback = [...candidates].sort((a, b) => a.H_MAE_mean - b.H_MAE_mean || (a.siesta_cost ?? Infinity) - (b.siesta_cost ?? Infinity));
+    choices.set(key, { reached: reached[0] || null, representative: reached[0] || fallback[0] });
+  }
+  return choices;
+}
+
+function ddS9DesignSeries(points, designIds) {
+  const groups = new Map();
+  for (const point of ddS9FocusRows(points)) {
+    if (designIds && !designIds.has(point.design_id)) continue;
+    if (!groups.has(point.design_id)) groups.set(point.design_id, []);
+    groups.get(point.design_id).push(point);
+  }
+  return Array.from(groups.entries()).map(([designId, values]) => ({
+    design_id: designId,
+    family: values[0].family,
+    domain: values[0].domain,
+    density: values[0].density,
+    points: values.sort((a, b) => a.N_train - b.N_train),
+  }));
+}
+
+function ddS9QueryString() {
+  const params = new URLSearchParams();
+  const keyMap = { family: "family", dim: "dim", k: "k", domain: "domain", density: "density", seed: "seed", n_train: "n_train" };
+  for (const [key, values] of Object.entries(ddS9.filters)) {
+    for (const value of values) params.append(keyMap[key], value);
+  }
+  return params.toString();
+}
+
+function ddS9RenderFilterGroup(containerId, values, filterKey) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const checkedBefore = new Set(ddS9.filters[filterKey].map(String));
+  container.innerHTML = "";
+  for (const value of values) {
+    const label = document.createElement("label");
+    label.className = "toggle-field inline-toggle";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = String(value);
+    input.checked = checkedBefore.has(String(value));
+    input.addEventListener("change", () => {
+      ddS9.filters[filterKey] = Array.from(container.querySelectorAll("input:checked")).map((n) => n.value);
+      if ((filterKey === "dim" || filterKey === "k") && ddS9.filters[filterKey].length === 1) {
+        const focus = document.getElementById(filterKey === "dim" ? "dd-s9-focus-dim" : "dd-s9-focus-k");
+        if (focus) focus.value = ddS9.filters[filterKey][0];
+      }
+      ddS9LoadPanels().catch((error) => showToast(error.message));
+    });
+    const span = document.createElement("span");
+    span.textContent = String(value);
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(" "));
+    label.appendChild(span);
+    container.appendChild(label);
+  }
+}
+
+function ddS9ClearFilters() {
+  ddS9.filters = { family: [], dim: [], k: [], domain: [], density: [], seed: [], n_train: [] };
+  document.querySelectorAll('[id^="dd-s9-filter-"] input[type="checkbox"]').forEach((input) => { input.checked = false; });
+  ddS9LoadPanels().catch((error) => showToast(error.message));
+}
+
+async function ddS9RenderMinimumSnapshots(points) {
+  const host = document.getElementById("dd-s9-minimum-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const target = ddS9TargetMeV();
+  const candidates = ddS9FocusRows(points);
+  const families = Array.from(new Set(candidates.map((row) => row.family))).sort();
+  const domains = Array.from(new Set(candidates.map((row) => row.domain))).sort((a, b) => a - b);
+  if (!families.length || !domains.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay resultados para esta faceta.</p>';
+    return;
+  }
+  const choices = ddS9MinimumChoices(points);
+  const best = families.map((family) => domains.map((domain) => choices.get(`${family}|${domain}`)?.reached || null));
+  const annotations = [];
+  best.forEach((row, familyIndex) => row.forEach((cell, domainIndex) => annotations.push({
+    x: domains[domainIndex], y: families[familyIndex], xref: "x", yref: "y", showarrow: false,
+    text: cell ? `N=${cell.N_train}` : "not reached", font: { color: cell ? "#111827" : "#6b7280", size: 12 },
+  })));
+  await window.Plotly.newPlot(host, [{
+    type: "heatmap", x: domains, y: families,
+    z: best.map((row) => row.map((cell) => cell?.siesta_cost ?? null)),
+    customdata: best.map((row) => row.map((cell) => cell ? [cell.N_train, cell.H_MAE_mean * 1000, cell.H_MAE_std * 1000, cell.design_id] : null)),
+    colorscale: "Viridis", colorbar: { title: "SIESTA<br>calculations" },
+    hovertemplate: "family %{y}<br>R %{x} Å<br>cost %{z}<br>N_min %{customdata[0]}<br>H-MAE %{customdata[1]:.2f} ± %{customdata[2]:.2f} meV<extra></extra>",
+  }], {
+    title: `Minimum observed N_train reaching ${target.toLocaleString()} meV`,
+    xaxis: { title: "R_train_max (Å) — angular_shell values are fixed @R" }, yaxis: { title: "Sampling family", automargin: true },
+    annotations, margin: { l: 130, r: 30, t: 50, b: 70 }, height: Math.max(580, families.length * 58),
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderPareto(rows) {
+  const host = document.getElementById("dd-s9-pareto-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  if (!rows.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay filas development_set (Pilot/Full) para los filtros actuales.</p>';
+    return;
+  }
+  const points = ddS9FocusRows(rows);
+  if (!points.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay puntos de coste para esta faceta.</p>';
+    return;
+  }
+  const families = Array.from(new Set(points.map((item) => item.family))).sort();
+  const domains = Array.from(new Set(points.map((item) => item.domain))).sort((a, b) => a - b);
+  const traces = [];
+  for (const family of families) for (const domain of domains) {
+    const subset = points.filter((point) => point.family === family && point.domain === domain);
+    if (!subset.length) continue;
+    traces.push({
+      x: subset.map((point) => point.siesta_cost), y: subset.map((point) => point.H_MAE_mean * 1000),
+      error_y: { type: "data", array: subset.map((point) => point.H_MAE_std * 1000), visible: true },
+      mode: "markers", type: "scatter", legendgroup: family,
+      name: `${family} · ${ddS9DomainLabel(family, domain)}`,
+      marker: { color: DD_S9_COLORS[families.indexOf(family) % DD_S9_COLORS.length], size: 9, symbol: ["circle", "square", "diamond", "triangle-up"][domains.indexOf(domain) % 4] },
+      text: subset.map((point) => `${point.design_id}<br>N=${point.N_train}, seeds=${point.n_seeds}`),
+      hovertemplate: "%{fullData.name}<br>%{text}<br>SIESTA calculations %{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>",
+    });
+  }
+  const sortedPoints = [...points].sort((a, b) => a.siesta_cost - b.siesta_cost || a.H_MAE_mean - b.H_MAE_mean);
+  const frontier = [];
+  let best = Infinity;
+  for (const point of sortedPoints) if (point.H_MAE_mean < best) { frontier.push(point); best = point.H_MAE_mean; }
+  traces.push({ x: frontier.map((point) => point.siesta_cost), y: frontier.map((point) => point.H_MAE_mean * 1000), mode: "lines", name: "Pareto frontier", line: { color: "#111827", width: 3 }, hoverinfo: "skip" });
+  await window.Plotly.newPlot(host, traces, {
+    title: "H-MAE vs unique SIESTA calculations (mean ± variability)",
+    xaxis: { title: "Unique SIESTA calculations" }, yaxis: { title: "H-MAE (meV)" },
+    shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: ddS9TargetMeV(), y1: ddS9TargetMeV(), line: { color: "#dc2626", dash: "dash" } }],
+    margin: { l: 70, r: 20, t: 50, b: 55 }, height: 580,
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderLearningCurves(points) {
+  const host = document.getElementById("dd-s9-learning-curves-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const isRelFrob = document.getElementById("dd-s9-lc-metric")?.value === "rel_frob";
+  const metricKey = isRelFrob ? "rel_Frob_mean" : "H_MAE_mean";
+  const stdKey = isRelFrob ? "rel_Frob_std" : "H_MAE_std";
+  const scale = isRelFrob ? 100 : 1000;
+  const unit = isRelFrob ? "%" : "meV";
+  const selectedDesigns = new Set(Array.from(ddS9MinimumChoices(points).values()).map((choice) => choice.representative?.design_id).filter(Boolean));
+  const series = ddS9DesignSeries(points, selectedDesigns)
+    .map((item) => ({ ...item, points: item.points.filter((point) => point[metricKey] != null) }))
+    .filter((item) => item.points.length);
+  if (!series.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = isRelFrob
+      ? '<p class="field-help">Relative Frobenius no está disponible para los diseños/filtros actuales (sólo Pilot lo calcula).</p>'
+      : '<p class="field-help">No hay curvas de aprendizaje para los filtros actuales.</p>';
+    return;
+  }
+  const families = Array.from(new Set(series.map((item) => item.family))).sort();
+  const domains = Array.from(new Set(series.map((item) => item.domain))).sort((a, b) => a - b);
+  const traces = series.map((item) => ({
+    x: item.points.map((point) => point.N_train), y: item.points.map((point) => point[metricKey] * scale),
+    error_y: { type: "data", array: item.points.map((point) => (point[stdKey] ?? 0) * scale), visible: true },
+    mode: "lines+markers", type: "scatter", legendgroup: item.family,
+    name: `${item.family} · ${ddS9DomainLabel(item.family, item.domain)} · density ${item.density}`,
+    line: { color: DD_S9_COLORS[families.indexOf(item.family) % DD_S9_COLORS.length], dash: ["solid", "dash", "dot", "dashdot"][domains.indexOf(item.domain) % 4] },
+    marker: { size: 9, symbol: ["circle", "square", "diamond", "triangle-up"][domains.indexOf(item.domain) % 4] },
+    text: item.points.map((point) => point.design_id),
+    hovertemplate: `%{text}<br>N_train %{x}<br>${isRelFrob ? "Relative Frobenius" : "H-MAE"} %{y:.2f} ± %{error_y.array:.2f} ${unit}<extra></extra>`,
+  }));
+  const shapes = isRelFrob ? [] : [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: ddS9TargetMeV(), y1: ddS9TargetMeV(), line: { color: "#dc2626", dash: "dash" } }];
+  await window.Plotly.newPlot(host, traces, {
+    title: `${isRelFrob ? "Relative Frobenius" : "H-MAE"} vs N_train (mean ± variability across available seeds)`,
+    xaxis: { title: "N_train", type: "log" }, yaxis: { title: `${isRelFrob ? "Relative Frobenius" : "H-MAE"} (${unit})` },
+    shapes,
+    margin: { l: 70, r: 20, t: 50, b: 55 }, height: 580,
+  }, { displayModeBar: false, responsive: true });
+}
+
+function ddS9PopulateDensityDomainSelect(domains) {
+  const select = document.getElementById("dd-s9-density-domain");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = domains.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)} &Aring;</option>`).join("");
+  if (domains.map(String).includes(previous)) select.value = previous;
+}
+
+async function ddS9RenderDensityCurves(rows) {
+  const host = document.getElementById("dd-s9-density-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const domainSelect = document.getElementById("dd-s9-density-domain");
+  const familySelect = document.getElementById("dd-s9-density-family");
+  const fixedDomain = domainSelect && domainSelect.value ? Number(domainSelect.value) : null;
+  const faceted = ddS9FocusRows(rows).filter((row) => row.stage === "pilot" && row.status === "ok" && row.H_MAE != null);
+  const families = Array.from(new Set(faceted.map((row) => row.family))).sort();
+  const previousFamily = familySelect?.value;
+  if (familySelect) {
+    familySelect.innerHTML = families.map((family) => `<option value="${escapeHtml(family)}">${escapeHtml(family)}</option>`).join("");
+    familySelect.value = families.includes(previousFamily) ? previousFamily : families[0];
+  }
+  const family = familySelect?.value;
+  const subset = faceted.filter((row) => row.family === family && (fixedDomain == null || Math.abs(row.domain - fixedDomain) < 1e-9));
+  const byDensity = new Map();
+  for (const row of subset) {
+    if (!byDensity.has(row.density)) byDensity.set(row.density, []);
+    byDensity.get(row.density).push(row.H_MAE * 1000);
+  }
+  const x = Array.from(byDensity.keys()).sort((a, b) => a - b);
+  if (!x.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay puntos de densidad para esta familia, dominio y faceta.</p>';
+    return;
+  }
+  const stats = x.map((density) => ddS9MeanStd(byDensity.get(density)));
+  await window.Plotly.newPlot(host, [{
+    x, y: stats.map((value) => value.mean), error_y: { type: "data", array: stats.map((value) => value.std), visible: true },
+    mode: "lines+markers", type: "scatter", name: family,
+    hovertemplate: "density %{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>",
+  }], { title: `${family}: H-MAE vs family-specific density (R=${fixedDomain ?? "?"} Å)`, xaxis: { title: "Family-specific density / resolution" }, yaxis: { title: "H-MAE (meV)" }, margin: { l: 60, r: 20, t: 45, b: 55 }, height: 580 }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderDomainHeatmap(rows) {
+  const host = document.getElementById("dd-s9-domain-heatmap-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  if (!rows.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay domain_generalization.csv (S9-S5) para los filtros actuales -- corre Full para poblar este panel.</p>';
+    return;
+  }
+  const familySelect = document.getElementById("dd-s9-heatmap-family");
+  const nSelect = document.getElementById("dd-s9-heatmap-n");
+  const densitySelect = document.getElementById("dd-s9-heatmap-density");
+  const samplerSeedSelect = document.getElementById("dd-s9-heatmap-sampler-seed");
+  const metric = document.getElementById("dd-s9-heatmap-metric")?.value || "mean";
+  const faceted = ddS9FocusRows(rows);
+  if (!faceted.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay generalización para esta combinación de dim y k.</p>';
+    return;
+  }
+  const setOptions = (select, values, fallback) => {
+    if (!select) return fallback;
+    const previous = select.value;
+    select.innerHTML = values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+    select.value = values.map(String).includes(previous) ? previous : String(fallback);
+    return select.value;
+  };
+  const families = Array.from(new Set(faceted.map((row) => row.family))).sort();
+  const family = setOptions(familySelect, families, families[0]);
+  const familyRows = faceted.filter((row) => row.family === family);
+  const nValues = Array.from(new Set(familyRows.map((row) => row.N_train))).sort((a, b) => a - b);
+  const nTrain = Number(setOptions(nSelect, nValues, nValues.at(-1)));
+  const nRows = familyRows.filter((row) => row.N_train === nTrain);
+  const densities = Array.from(new Set(nRows.map((row) => row.density))).sort((a, b) => a - b);
+  const density = Number(setOptions(densitySelect, densities, densities[0]));
+  const densityRows = nRows.filter((row) => row.density === density);
+  const samplerSeeds = Array.from(new Set(densityRows.map((row) => String(row.sampler_seed)))).sort();
+  const samplerSeed = setOptions(samplerSeedSelect, samplerSeeds, samplerSeeds[0]);
+  const focused = densityRows.filter((row) => String(row.sampler_seed) === samplerSeed);
+  if (!focused.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay generalización para esta combinación de dim y k.</p>';
+    return;
+  }
+  const amplitudes = Array.from(new Set(focused.map((r) => r.test_amplitude))).sort((a, b) => a - b);
+  const domains = Array.from(new Set(focused.map((r) => r.R_train_max_ang))).sort((a, b) => a - b);
+  const cellFor = (domain, amplitude) => focused.filter((r) => r.R_train_max_ang === domain && r.test_amplitude === amplitude);
+  const z = domains.map((domain) => amplitudes.map((amplitude) => {
+    const cell = cellFor(domain, amplitude);
+    if (!cell.length) return null;
+    const stats = ddS9MeanStd(cell.map((row) => row.H_MAE * 1000));
+    return metric === "std" ? stats.std : stats.mean;
+  }));
+  const regime = domains.map((domain) => amplitudes.map((amplitude) => {
+    if (family === "angular_shell") return Math.abs(amplitude - domain) < 1e-9 ? "shell @R" : "outside shell";
+    if (Math.abs(amplitude - domain) < 1e-9) return "training edge";
+    return amplitude < domain ? "interpolation" : "extrapolation";
+  }));
+  await window.Plotly.newPlot(
+    host,
+    [{
+      type: "heatmap", x: amplitudes, y: domains.map((domain) => ddS9DomainLabel(family, domain)), z,
+      colorscale: metric === "std" ? "Blues" : "YlOrRd", colorbar: { title: metric === "std" ? "std (meV)" : "mean (meV)" },
+      text: regime, texttemplate: "%{text}", hovertemplate: "training %{y}<br>test amplitude %{x} Å<br>value %{z:.2f} meV<br>%{text}<extra></extra>",
+    }],
+    { title: `${metric === "std" ? "Training-seed variability" : "Mean H-MAE"}: ${family}, N=${nTrain}, density=${density}, sampler=${samplerSeed}`, xaxis: { title: "Test amplitude (Å)" }, yaxis: { title: family === "angular_shell" ? "Fixed training shell @R" : "Training range ≤R" }, margin: { l: 130, r: 20, t: 50, b: 55 }, height: 580 },
+    { displayModeBar: false, responsive: true },
+  );
+}
+
+function ddS9RenderMatchedComparison(rows) {
+  const head = document.getElementById("dd-s9-matched-head");
+  const body = document.getElementById("dd-s9-matched-body");
+  if (!head || !body) return;
+  const ok = rows.filter((r) => r.status === "ok" && r.H_MAE != null);
+  if (!ok.length) {
+    head.innerHTML = "";
+    body.innerHTML = '<tr><td class="muted-text">No hay filas emparejables para los filtros actuales.</td></tr>';
+    return;
+  }
+  const families = Array.from(new Set(ok.map((r) => r.family))).sort();
+  const groups = new Map();
+  for (const row of ok) {
+    const key = `${row.N_train}|${row.domain}|${row.dim}|${row.k}`;
+    if (!groups.has(key)) groups.set(key, { N_train: row.N_train, domain: row.domain, dim: row.dim, k: row.k, byFamily: new Map() });
+    const entry = groups.get(key);
+    if (!entry.byFamily.has(row.family)) entry.byFamily.set(row.family, []);
+    entry.byFamily.get(row.family).push(row.H_MAE);
+  }
+  head.innerHTML = `<tr><th>N_train</th><th>domain (Å)</th><th>dim</th><th>k</th>${families.map((f) => `<th>${escapeHtml(f)} (meV)</th>`).join("")}</tr>`;
+  body.innerHTML = Array.from(groups.values()).map((g) => `<tr>
+    <td>${escapeHtml(g.N_train)}</td><td>${escapeHtml(g.domain)}</td><td>${escapeHtml(g.dim)}</td><td>${escapeHtml(g.k)}</td>
+    ${families.map((f) => {
+      const values = g.byFamily.get(f);
+      if (!values) return "<td>&mdash;</td>";
+      const mean = (values.reduce((a, b) => a + b, 0) / values.length) * 1000;
+      return `<td>${mean.toFixed(2)}</td>`;
+    }).join("")}
+  </tr>`).join("");
+}
+
+function ddS9PopulatePositionDesignSelect(designs) {
+  const select = document.getElementById("dd-s9-position-design");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = designs.map((d) => `<option value="${escapeHtml(d.design_id)}">${escapeHtml(d.design_id)}</option>`).join("");
+  if (designs.some((d) => d.design_id === previous)) select.value = previous;
+}
+
+async function ddS9RenderPositionDiagnostics(designs) {
+  const select = document.getElementById("dd-s9-position-design");
+  const statsHost = document.getElementById("dd-s9-position-stats");
+  const radialHost = document.getElementById("dd-s9-radial-chart");
+  const angularHost = document.getElementById("dd-s9-angular-chart");
+  if (!select || !radialHost || !angularHost) return;
+  await ensurePlotlyLoaded();
+  if (!designs.length) {
+    window.Plotly.purge(radialHost);
+    window.Plotly.purge(angularHost);
+    radialHost.innerHTML = '<p class="field-help">Sin designs para los filtros actuales.</p>';
+    angularHost.innerHTML = "";
+    if (statsHost) { statsHost.classList.add("muted-text"); statsHost.innerHTML = ""; }
+    return;
+  }
+  const design = designs.find((d) => d.design_id === select.value) || designs[0];
+  const radial = design.radial_histogram;
+  const angular = design.angular_histogram;
+  const radialCenters = radial.bin_edges_ang.slice(0, -1).map((edge, i) => (edge + radial.bin_edges_ang[i + 1]) / 2);
+  const angularCenters = angular.bin_edges_rad.slice(0, -1).map((edge, i) => (edge + angular.bin_edges_rad[i + 1]) / 2);
+  window.Plotly.newPlot(radialHost, [{ type: "bar", x: radialCenters, y: radial.counts }], { title: `Radial coverage: ${design.design_id}`, xaxis: { title: "Displacement radius (Å)" }, yaxis: { title: "count" }, margin: { l: 50, r: 10, t: 40, b: 50 }, height: 340 }, { displayModeBar: false, responsive: true });
+  window.Plotly.newPlot(angularHost, [{ type: "bar", x: angularCenters, y: angular.counts }], { title: `Angular coverage (${design.dim_category})`, xaxis: { title: "Angle (rad)" }, yaxis: { title: "count" }, margin: { l: 50, r: 10, t: 40, b: 50 }, height: 340 }, { displayModeBar: false, responsive: true });
+  if (statsHost) {
+    statsHost.classList.remove("muted-text");
+    statsHost.innerHTML = `
+      <div class="result-pill"><strong>${escapeHtml(design.family)}</strong><span>family (dim=${escapeHtml(design.dim)}, k=${escapeHtml(design.k)})</span></div>
+      <div class="result-pill"><strong>${escapeHtml(design.n_used)}</strong><span>n_used (points)</span></div>
+      <div class="result-pill"><strong>${Number(design.min_nearest_neighbor_distance_ang).toFixed(4)}</strong><span>min nearest-neighbor distance (Å)</span></div>
+      <div class="result-pill"><strong>${Number(design.covering_radius_ang).toFixed(4)}</strong><span>covering radius (Å)</span></div>
+      <div class="result-pill"><strong>${escapeHtml(design.envelope_check_passed)}</strong><span>envelope check passed</span></div>
+    `;
+  }
+}
+
+async function ddS9RenderCoverage(rows, designs) {
+  const host = document.getElementById("dd-s9-coverage-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const focusedRows = ddS9FocusRows(rows).filter((row) => row.status === "ok" && row.H_MAE != null);
+  const points = [];
+  for (const design of ddS9FocusRows(designs)) {
+    const values = focusedRows.filter((row) => row.design_id === design.design_id && row.N_train === design.n_used).map((row) => row.H_MAE * 1000);
+    if (!values.length || !design.r_train_max_ang) continue;
+    points.push({
+      ...design, error: ddS9MeanStd(values).mean,
+      covering: design.covering_radius_ang / design.r_train_max_ang,
+      nearest: design.min_nearest_neighbor_distance_ang / design.r_train_max_ang,
+    });
+  }
+  if (!points.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = '<p class="field-help">No hay diseños completos con error emparejado para esta faceta.</p>';
+    return;
+  }
+  const families = Array.from(new Set(points.map((point) => point.family))).sort();
+  const traces = [];
+  families.forEach((family, index) => {
+    const subset = points.filter((point) => point.family === family);
+    const common = { y: subset.map((point) => point.error), mode: "markers", type: "scatter", legendgroup: family, marker: { color: DD_S9_COLORS[index % DD_S9_COLORS.length], size: 9 }, text: subset.map((point) => point.design_id) };
+    traces.push({ ...common, x: subset.map((point) => point.covering), name: family, xaxis: "x", yaxis: "y", hovertemplate: "%{text}<br>covering radius / R %{x:.3f}<br>H-MAE %{y:.2f} meV<extra></extra>" });
+    traces.push({ ...common, x: subset.map((point) => point.nearest), name: family, showlegend: false, xaxis: "x2", yaxis: "y2", hovertemplate: "%{text}<br>min NN / R %{x:.3f}<br>H-MAE %{y:.2f} meV<extra></extra>" });
+  });
+  await window.Plotly.newPlot(host, traces, {
+    title: "Geometric coverage vs H-MAE (complete designs only)",
+    grid: { rows: 1, columns: 2, pattern: "independent" },
+    xaxis: { title: "Covering radius / R" }, yaxis: { title: "H-MAE (meV)" },
+    xaxis2: { title: "Minimum nearest-neighbour distance / R" }, yaxis2: { title: "H-MAE (meV)" },
+    margin: { l: 70, r: 20, t: 50, b: 65 }, height: 580,
+  }, { displayModeBar: false, responsive: true });
+}
+
+function ddS9PopulateLocalErrorSelect(points) {
+  const select = document.getElementById("dd-s9-local-design");
+  if (!select) return;
+  const previous = select.value;
+  const focused = ddS9FocusRows(points).filter((point) => point.local_error_available)
+    .sort((a, b) => a.family.localeCompare(b.family) || a.domain - b.domain || a.N_train - b.N_train);
+  select.innerHTML = focused.map((point) => {
+    const value = `${point.design_id}|${point.N_train}`;
+    return `<option value="${escapeHtml(value)}">${escapeHtml(point.family)} · ${escapeHtml(ddS9DomainLabel(point.family, point.domain))} · N=${escapeHtml(point.N_train)} · density=${escapeHtml(point.density)}</option>`;
+  }).join("");
+  if (focused.some((point) => `${point.design_id}|${point.N_train}` === previous)) select.value = previous;
+  if (!focused.length) select.innerHTML = '<option value="">No existing per-sample predictions for this facet</option>';
+}
+
+async function ddS9RenderLocalError() {
+  const host = document.getElementById("dd-s9-local-error-chart");
+  const status = document.getElementById("dd-s9-local-error-status");
+  const selection = document.getElementById("dd-s9-local-design")?.value;
+  if (!host) return;
+  if (!selection) {
+    window.Plotly?.purge(host);
+    host.innerHTML = '<p class="field-help">No hay predicciones por muestra para esta faceta.</p>';
+    if (status) status.textContent = "No disponible para esta faceta.";
+    return;
+  }
+  const separator = selection.lastIndexOf("|");
+  const designId = selection.slice(0, separator);
+  const nTrain = selection.slice(separator + 1);
+  if (status) status.textContent = "Leyendo predicciones por muestra existentes…";
+  const payload = await request(`/api/dataset-design/local-error?design_id=${encodeURIComponent(designId)}&n_train=${encodeURIComponent(nTrain)}`);
+  await ensurePlotlyLoaded();
+  if (!payload.available) {
+    window.Plotly.purge(host);
+    host.innerHTML = `<p class="field-help">${escapeHtml(payload.note || "No hay datos por muestra para esta selección.")}</p>`;
+    if (status) status.textContent = payload.note || "No disponible.";
+    return;
+  }
+  if (status) status.textContent = `${payload.rows.length} configuraciones de test; H-MAE promediado únicamente entre training seeds.`;
+  await window.Plotly.newPlot(host, [{
+    x: payload.rows.map((row) => row.nearest_training_distance_ang),
+    y: payload.rows.map((row) => row.H_MAE_mean * 1000),
+    error_y: { type: "data", array: payload.rows.map((row) => row.H_MAE_std * 1000), visible: true },
+    mode: "markers", type: "scatter",
+    marker: { size: 11, color: payload.rows.map((row) => row.test_amplitude), colorscale: "Viridis", colorbar: { title: "Test<br>amplitude (Å)" } },
+    text: payload.rows.map((row) => `${row.sample_id}${row.mode ? ` · ${row.mode}` : ""}`),
+    hovertemplate: "%{text}<br>nearest training distance %{x:.4f} Å<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>",
+  }], {
+    title: `${payload.family}, ${payload.dim}, k=${payload.k}, N=${payload.N_train}`,
+    xaxis: { title: "Distance to nearest training configuration (Å)" }, yaxis: { title: "Per-configuration H-MAE (meV)" },
+    margin: { l: 75, r: 30, t: 50, b: 65 }, height: 580,
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderPhysicalProbe(rows) {
+  const host = document.getElementById("dd-s9-physical-probe-chart");
+  if (!host) return;
+  await ensurePlotlyLoaded();
+  const k = Number(document.getElementById("dd-s9-focus-k")?.value || 1);
+  const focused = rows.filter((row) => row.k === k);
+  if (!focused.length) {
+    window.Plotly.purge(host);
+    host.innerHTML = `<p class="field-help">No hay probe físico para k=${escapeHtml(k)}.</p>`;
+    return;
+  }
+  const modes = Array.from(new Set(focused.map((row) => row.mode))).sort();
+  const traces = [];
+  modes.forEach((mode, index) => {
+    const subset = focused.filter((row) => row.mode === mode).sort((a, b) => a.amplitude_ang - b.amplitude_ang);
+    const common = { x: subset.map((row) => row.amplitude_ang), mode: "lines+markers", type: "scatter", legendgroup: mode, line: { color: DD_S9_COLORS[index % DD_S9_COLORS.length] } };
+    traces.push({ ...common, y: subset.map((row) => row.C_cancellation), name: mode, xaxis: "x", yaxis: "y" });
+    traces.push({ ...common, y: subset.map((row) => row.N_curvature), name: mode, showlegend: false, xaxis: "x2", yaxis: "y2" });
+    traces.push({ ...common, y: subset.map((row) => row["j_eff_drift_vs_0.01"] * 100), name: mode, showlegend: false, xaxis: "x3", yaxis: "y3" });
+  });
+  const shapes = ["x", "x2", "x3"].flatMap((xref) => [0.03, 0.05, 0.08, 0.12].map((value) => ({ type: "line", xref, yref: "paper", x0: value, x1: value, y0: 0, y1: 1, line: { color: "#9ca3af", dash: "dot", width: 1 } })));
+  await window.Plotly.newPlot(host, traces, {
+    title: `Physical regime probes (k=${k}; no imposed linear/non-linear threshold)`,
+    grid: { rows: 1, columns: 3, pattern: "independent" },
+    xaxis: { title: "Displacement (Å)" }, yaxis: { title: "C(r)" },
+    xaxis2: { title: "Displacement (Å)" }, yaxis2: { title: "N(r)" },
+    xaxis3: { title: "Displacement (Å)" }, yaxis3: { title: "J_eff drift from 0.01 Å (%)" },
+    shapes, margin: { l: 65, r: 20, t: 55, b: 65 }, height: 580,
+  }, { displayModeBar: false, responsive: true });
+}
+
+async function ddS9RenderAblation(ablation) {
+  const host = document.getElementById("dd-s9-ablation-status");
+  if (!host) return;
+  if (!ablation?.available) {
+    host.textContent = ablation?.note || "Data not available yet.";
+    return;
+  }
+  await ensurePlotlyLoaded();
+  const report = ablation.report || {};
+  const base = new Map((report.M_BASE?.per_sample || []).map((row) => [`${row.mode}|${row.amplitude_ang}`, row.H_MAE]));
+  const traces = [];
+  const models = Object.keys(report);
+  for (const [model, result] of Object.entries(report)) {
+    const rows = result.per_sample || [];
+    const modes = Array.from(new Set(rows.map((row) => row.mode))).sort();
+    modes.forEach((mode, modeIndex) => {
+      const subset = rows.filter((row) => row.mode === mode).sort((a, b) => a.amplitude_ang - b.amplitude_ang);
+      const line = { color: DD_S9_COLORS[models.indexOf(model) % DD_S9_COLORS.length], dash: ["solid", "dash", "dot"][modeIndex % 3] };
+      traces.push({ x: subset.map((row) => row.amplitude_ang), y: subset.map((row) => row.H_MAE * 1000), mode: "lines+markers", type: "scatter", name: `${model} · ${mode}`, legendgroup: model, line });
+      if (model !== "M_BASE") traces.push({ x: subset.map((row) => row.amplitude_ang), y: subset.map((row) => (row.H_MAE - base.get(`${row.mode}|${row.amplitude_ang}`)) * 1000), mode: "lines+markers", type: "scatter", name: `${model} − BASE · ${mode}`, xaxis: "x2", yaxis: "y2", showlegend: false, line });
+    });
+  }
+  const baseMean = ddS9MeanStd((report.M_BASE?.per_sample || []).map((row) => row.H_MAE)).mean;
+  for (const [model, result] of Object.entries(report).filter(([name]) => name !== "M_BASE")) {
+    traces.push({ x: [result.n_train - report.M_BASE.n_train], y: [(baseMean - ddS9MeanStd(result.per_sample.map((row) => row.H_MAE)).mean) * 1000], mode: "markers+text", type: "scatter", text: [model], textposition: "top center", name: model, xaxis: "x3", yaxis: "y3", showlegend: false });
+  }
+  await window.Plotly.newPlot(host, traces, {
+    title: "BASE / SPARSE / DENSE on the same held-out modes",
+    grid: { rows: 1, columns: 3, pattern: "independent" },
+    xaxis: { title: "Test displacement (Å)" }, yaxis: { title: "H-MAE (meV)" },
+    xaxis2: { title: "Test displacement (Å)" }, yaxis2: { title: "ΔH-MAE vs BASE (meV)" },
+    xaxis3: { title: "SIESTA calculations added" }, yaxis3: { title: "Mean improvement vs BASE (meV)" },
+    margin: { l: 65, r: 20, t: 55, b: 65 }, height: 580,
+  }, { displayModeBar: false, responsive: true });
+}
+
+function ddS9RenderAvailability(payload) {
+  const host = document.getElementById("dd-s9-availability");
+  if (!host) return;
+  if (!payload.available) {
+    host.textContent = payload.note || "No hay artefactos S9 todavia.";
+    return;
+  }
+  const summary = payload.design_manifest_summary;
+  host.textContent = summary
+    ? `S9-S3 manifest: ${summary.n_designs} designs; ${summary.n_excluded_invalid} excluded from analysis for leakage/incomplete SIESTA coverage (envelope_all_passed=${summary.envelope_all_passed}). ${payload.learning_curves.length} valid development_set rows (Pilot+Full) after filters.`
+    : `${payload.learning_curves.length} filas development_set (Pilot+Full) tras filtros.`;
+}
+
+async function ddS9LoadPanels() {
+  const query = ddS9QueryString();
+  const payload = await request(`/api/dataset-design/s9-panels${query ? `?${query}` : ""}`);
+  ddS9.payload = payload;
+  ddS9RenderAvailability(payload);
+  if (!payload.available) return payload;
+
+  const options = payload.filter_options;
+  ddS9RenderFilterGroup("dd-s9-filter-family", options.families, "family");
+  ddS9RenderFilterGroup("dd-s9-filter-dim", options.dims, "dim");
+  ddS9RenderFilterGroup("dd-s9-filter-k", options.k_values, "k");
+  ddS9RenderFilterGroup("dd-s9-filter-domain", options.domains, "domain");
+  ddS9RenderFilterGroup("dd-s9-filter-density", options.densities, "density");
+  ddS9RenderFilterGroup("dd-s9-filter-n-train", options.n_train_values, "n_train");
+  ddS9RenderFilterGroup("dd-s9-filter-seed", options.seeds, "seed");
+  ddS9PopulateDensityDomainSelect(options.domains);
+  ddS9PopulatePositionDesignSelect(payload.position_diagnostics);
+  const populateFocus = (id, values, label) => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const previous = select.value;
+    select.innerHTML = values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(label(value))}</option>`).join("");
+    if (values.map(String).includes(previous)) select.value = previous;
+  };
+  populateFocus("dd-s9-focus-dim", Array.from(new Set(payload.learning_curves.map((row) => row.dim))).sort(), (value) => value);
+  populateFocus("dd-s9-focus-k", Array.from(new Set(payload.learning_curves.map((row) => row.k))).sort(), (value) => `k=${value}`);
+  if (!ddS9.optionsRendered) {
+    // Density levels are family-specific (S9-S3 manifest), unlike the S2-canonical
+    // domain list above -- populate the Pilot/Full run panel's density checkboxes
+    // from the real values actually present, not a guessed range.
+    ddRenderOptionGroup(document.getElementById("dd-density-options"), "dd-density-", options.densities, []);
+    ddS9.optionsRendered = true;
+  }
+
+  await ddS9RenderMinimumSnapshots(payload.pareto);
+  await ddS9RenderLearningCurves(payload.pareto);
+  await ddS9RenderDensityCurves(payload.density_curves);
+  await ddS9RenderDomainHeatmap(payload.domain_heatmap);
+  await ddS9RenderPareto(payload.pareto);
+  ddS9RenderMatchedComparison(payload.matched_comparison);
+  await ddS9RenderCoverage(payload.learning_curves, payload.position_diagnostics);
+  ddS9PopulateLocalErrorSelect(payload.pareto);
+  await ddS9RenderLocalError();
+  await ddS9RenderPhysicalProbe(payload.physical_probe || []);
+  await ddS9RenderAblation(payload.ablation);
+  await ddS9RenderPositionDiagnostics(payload.position_diagnostics);
+  return payload;
+}
+
+async function ddS9RunPrecisionSelector() {
+  const threshold = Number(document.getElementById("dd-s9-precision-threshold")?.value || 0);
+  const filters = { families: ddS9.filters.family, dims: ddS9.filters.dim, k_values: ddS9.filters.k, domains: ddS9.filters.domain, densities: ddS9.filters.density };
+  const payload = await request("/api/dataset-design/precision-selector", {
+    method: "POST",
+    body: JSON.stringify({ threshold_h_mae: threshold, filters }),
+  });
+  const host = document.getElementById("dd-s9-precision-result");
+  if (!host) return payload;
+  host.classList.remove("muted-text");
+  if (payload.status === "reached") {
+    const d = payload.design;
+    host.innerHTML = `
+      <div class="result-pill"><strong>reached</strong><span>status (threshold=${escapeHtml(payload.threshold_h_mae)} eV)</span></div>
+      <div class="result-pill"><strong>${escapeHtml(d.design_id)}</strong><span>cheapest design (family=${escapeHtml(d.family)}, N_train=${escapeHtml(d.N_train)})</span></div>
+      <div class="result-pill"><strong>${escapeHtml(d.siesta_cost)}</strong><span>unique SIESTA cost</span></div>
+      <div class="result-pill"><strong>${d.H_MAE_mean.toFixed(4)} &plusmn; ${d.H_MAE_std.toFixed(4)}</strong><span>H-MAE mean &plusmn; std (${escapeHtml(d.n_seeds)} seeds)</span></div>
+    `;
+  } else {
+    host.innerHTML = `<div class="result-pill"><strong>not_reached</strong><span>${escapeHtml(payload.note || "Ningun diseno entrenado cumple este umbral con los filtros actuales.")}</span></div>`;
+  }
+  return payload;
+}
+
 function setupTabs() {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -16688,6 +17775,9 @@ function setupTabs() {
         loadEpcScaling().catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "epc-matbg") {
         loadEpcMatbg().catch((error) => showToast(error.message));
+      } else if (tab.dataset.view === "dataset-design") {
+        ddLoadResults().catch((error) => showToast(error.message));
+        ddS9LoadPanels().catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "terminal") {
         renderTerminalView();
         Promise.all([pollMixingE2ELogs(), pollMixingTerminalStatus()])
@@ -16718,6 +17808,53 @@ function setupEvents() {
     loadEpcMatbg()
       .then(() => showToast("Artifacts EPC MATBG recargados"))
       .catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-estimate")?.addEventListener("click", () => {
+    ddEstimate().catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-run")?.addEventListener("click", () => {
+    ddRun().catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-stop")?.addEventListener("click", () => {
+    ddStop().catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-refresh")?.addEventListener("click", () => {
+    ddS9LoadPanels().then(() => showToast("S9 panels refreshed")).catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-clear-filters")?.addEventListener("click", () => {
+    ddS9ClearFilters();
+  });
+  document.getElementById("dd-s9-density-domain")?.addEventListener("change", () => {
+    if (ddS9.payload) ddS9RenderDensityCurves(ddS9.payload.density_curves).catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-density-family")?.addEventListener("change", () => {
+    if (ddS9.payload) ddS9RenderDensityCurves(ddS9.payload.density_curves).catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-position-design")?.addEventListener("change", () => {
+    if (ddS9.payload) ddS9RenderPositionDiagnostics(ddS9.payload.position_diagnostics).catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-target-mev")?.addEventListener("change", () => {
+    if (!ddS9.payload) return;
+    Promise.all([
+      ddS9RenderMinimumSnapshots(ddS9.payload.pareto),
+      ddS9RenderLearningCurves(ddS9.payload.pareto),
+      ddS9RenderPareto(ddS9.payload.pareto),
+    ]).catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-lc-metric")?.addEventListener("change", () => {
+    if (ddS9.payload) ddS9RenderLearningCurves(ddS9.payload.pareto).catch((error) => showToast(error.message));
+  });
+  for (const id of ["dd-s9-focus-dim", "dd-s9-focus-k"]) document.getElementById(id)?.addEventListener("change", () => {
+    if (ddS9.payload) ddS9LoadPanels().catch((error) => showToast(error.message));
+  });
+  for (const id of ["dd-s9-heatmap-family", "dd-s9-heatmap-n", "dd-s9-heatmap-density", "dd-s9-heatmap-sampler-seed", "dd-s9-heatmap-metric"]) document.getElementById(id)?.addEventListener("change", () => {
+    if (ddS9.payload) ddS9RenderDomainHeatmap(ddS9.payload.domain_heatmap).catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-local-design")?.addEventListener("change", () => {
+    ddS9RenderLocalError().catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-s9-local-refresh")?.addEventListener("click", () => {
+    ddS9RenderLocalError().catch((error) => showToast(error.message));
   });
   document.getElementById("refresh-results").addEventListener("click", () => {
     Promise.all([loadResults(), loadDatasetTargets()])
@@ -17119,6 +18256,7 @@ async function boot() {
     renderMaterialValidation({ ok: false, message: error.message });
   }
   await loadFcConfig();
+  await loadDatasetDesignOptions();
   updateDatasetPreview();
   updateExperimentModePanels();
   renderHyperparameterSweepPreview();

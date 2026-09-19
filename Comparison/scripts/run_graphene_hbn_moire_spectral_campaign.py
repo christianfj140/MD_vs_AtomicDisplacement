@@ -37,6 +37,7 @@ from run_deeph_sparse_spectrum import run as run_sparse_spectrum  # noqa: E402
 
 DEFAULT_CONFIG = REPO_ROOT / "Comparison/config/graphene_hbn_magic_angle_spectral_campaign.json"
 DEFAULT_ROOT = REPO_ROOT / "Comparison/results/graphene_hbn_magic_angle_spectral"
+DEFAULT_TRAINING_PAYLOAD = REPO_ROOT / "Comparison/config/bilayer_graphene_hbn_AA_md30_payload.json"
 MUTATING_ACTIONS = {
     "generate-training-data",
     "train",
@@ -228,7 +229,7 @@ def legacy_inventory(root: Path) -> dict[str, Any]:
     return payload
 
 
-def plan(config: dict[str, Any], root: Path) -> dict[str, Any]:
+def plan(config: dict[str, Any], root: Path, config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     target = config["target"]
     stages = [
@@ -268,8 +269,8 @@ def plan(config: dict[str, Any], root: Path) -> dict[str, Any]:
         "forbidden": ["S=I", "dense large-cell solve", "target MAE", "target Frobenius"],
         "legacy": legacy,
         "environment_inventory": str(root / "environment_inventory.json"),
-        "config": str(DEFAULT_CONFIG),
-        "config_sha256": sha256(DEFAULT_CONFIG),
+        "config": str(config_path),
+        "config_sha256": sha256(config_path),
         "created_at": now(),
     }
     write_json(root / "campaign_manifest.json", payload)
@@ -510,7 +511,7 @@ def generate_training_data(config: dict[str, Any], root: Path, *, resume: bool) 
 
 def training_payload(config: dict[str, Any], root: Path, size: int) -> dict[str, Any]:
     seeds = active_model_seeds(config)
-    payload = read_json(REPO_ROOT / "Comparison/config/bilayer_graphene_hbn_AA_md30_payload.json")
+    payload = read_json(resolve_path(config.get("training_payload") or DEFAULT_TRAINING_PAYLOAD))
     payload.pop("dataset_sweep", None)
     payload.pop("overwrite_datasets", None)
     # Mixed registry datasets keep each source SystemLabel; paths come from the frozen manifest.
@@ -1544,7 +1545,7 @@ def main() -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     if args.action == "plan":
-        result = plan(config, root)
+        result = plan(config, root, config_path)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
 

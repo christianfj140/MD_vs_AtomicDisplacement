@@ -113,6 +113,9 @@ def prepare_holdout() -> None:
 
 
 def run_gate(checkpoints: list[Path], output: Path = OUTPUT) -> dict:
+    if len(checkpoints) != 1:
+        raise ValueError("Gate requires exactly one checkpoint selected by validation before test evaluation.")
+    selected = checkpoints[0].name
     python = str(REPO / ".venv/bin/python")
     evaluator = str(REPO / "Comparison/scripts/evaluate_checkpoint_spectral_metrics.py")
     basis = str(DATASET / "material_basis/*.ion.xml")
@@ -142,6 +145,8 @@ def run_gate(checkpoints: list[Path], output: Path = OUTPUT) -> dict:
     )
 
     report = json.loads((test_root / "checkpoint_spectral_metrics_test.json").read_text(encoding="utf-8"))
+    if set(report["checkpoints"]) != {selected}:
+        raise ValueError(f"Test report must contain only the validation-selected checkpoint: {selected}")
     scores: dict[str, float] = {}
     for name, payload in report["checkpoints"].items():
         offset = report["frozen_offsets_eV"][name]
@@ -155,12 +160,11 @@ def run_gate(checkpoints: list[Path], output: Path = OUTPUT) -> dict:
             + offset**2
             for row in rows
         ])))
-    winner = min(scores, key=scores.get)
     result = {
-        "status": "passed" if scores[winner] < GATE_EV else "failed",
+        "status": "passed" if scores[selected] < GATE_EV else "failed",
         "threshold_eV": GATE_EV,
-        "checkpoint": winner,
-        "score_eV": scores[winner],
+        "checkpoint": selected,
+        "score_eV": scores[selected],
         "all_scores_eV": scores,
         "validation_report": str(validation_report),
         "test_report": str(test_root / "checkpoint_spectral_metrics_test.json"),
@@ -290,8 +294,9 @@ def train(args: argparse.Namespace) -> list[Path]:
         datamodule=datamodule,
         ckpt_path=str(resume_checkpoint) if args.resume and resume_checkpoint.is_file() else None,
     )
-    paths = [Path(checkpoint.best_model_path), checkpoint_dir / "last.ckpt"]
-    if not paths[0].is_file() or not paths[1].is_file():
+    # ModelCheckpoint fixes identity using val_loss; holdout never selects it.
+    paths = [Path(checkpoint.best_model_path)]
+    if not paths[0].is_file():
         raise RuntimeError(f"Fine-tuning produced incomplete checkpoints: {paths}")
     return paths
 

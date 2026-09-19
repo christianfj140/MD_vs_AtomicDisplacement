@@ -423,6 +423,7 @@ def _process_siesta_reference_sample(
     siesta_command: str,
     overwrite: bool,
     skip_if_exists: bool,
+    require_positive_provenance_for_reuse: bool,
     siesta_shell: bool,
 ) -> dict[str, Any]:
     sample_id = structure_dir.name
@@ -440,7 +441,10 @@ def _process_siesta_reference_sample(
                 error="missing_structure_run_fdf",
                 source_dataset_root=resolved_source_dataset_root,
             )
-        existing_selection = choose_reference_matrix(reference_dir)
+        existing_selection = choose_reference_matrix(
+            reference_dir,
+            require_positive_provenance=require_positive_provenance_for_reuse,
+        )
         if existing_selection.ok and skip_if_exists and not overwrite:
             # Compare against the CURRENT stencil fdf, not the copy stored next
             # to the existing reference (which may be internally consistent but stale).
@@ -562,6 +566,7 @@ def run_derivative_siesta_references(
     siesta_command: str = "siesta",
     overwrite: bool = False,
     skip_if_exists: bool = True,
+    require_positive_provenance_for_reuse: bool = True,
     diagnostic_only: bool = False,
     workers: int = 1,
     max_samples: int | None = None,
@@ -593,6 +598,7 @@ def run_derivative_siesta_references(
                 siesta_command=siesta_command,
                 overwrite=overwrite,
                 skip_if_exists=skip_if_exists,
+                require_positive_provenance_for_reuse=require_positive_provenance_for_reuse,
                 siesta_shell=siesta_shell,
             )
             for structure_dir in structures
@@ -609,6 +615,7 @@ def run_derivative_siesta_references(
                     siesta_command=siesta_command,
                     overwrite=overwrite,
                     skip_if_exists=skip_if_exists,
+                    require_positive_provenance_for_reuse=require_positive_provenance_for_reuse,
                     siesta_shell=siesta_shell,
                 )
                 for structure_dir in structures
@@ -627,6 +634,7 @@ def run_derivative_siesta_references(
         "siesta_command": siesta_command if existing_reference_root is None else "",
         "overwrite": overwrite,
         "skip_if_exists": skip_if_exists,
+        "require_positive_provenance_for_reuse": require_positive_provenance_for_reuse,
         "diagnostic_only": diagnostic_only,
         "workers": validated_workers,
         "parallel_execution_enabled": validated_workers > 1,

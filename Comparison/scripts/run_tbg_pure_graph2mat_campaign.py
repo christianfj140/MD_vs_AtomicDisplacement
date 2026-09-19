@@ -19,9 +19,12 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = Path(__file__).resolve().parent
-ROOT = REPO / "Comparison/results/tbg_pure_graph2mat"
-DATASET = REPO / "Comparison/datasets/tbg_pure_md_nested/n474"
-BASE_PAYLOAD = REPO / "Comparison/config/tbg_pure_n30_train_payload.json"
+DEFAULT_ROOT = REPO / "Comparison/results/tbg_pure_graph2mat"
+DEFAULT_DATASET = REPO / "Comparison/datasets/tbg_pure_md_nested/n474"
+DEFAULT_BASE_PAYLOAD = REPO / "Comparison/config/tbg_pure_n30_train_payload.json"
+ROOT = DEFAULT_ROOT
+DATASET = DEFAULT_DATASET
+BASE_PAYLOAD = DEFAULT_BASE_PAYLOAD
 TARGET_FDF = REPO / "materials/twisted_bilayer_graphene_1p084549deg/RUN.fdf"
 PYTHON = REPO / ".venv/bin/python"
 GATE_EV = 0.010
@@ -50,6 +53,11 @@ def read_json(path: Path) -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def resolve_path(path: Path) -> Path:
+    path = path.expanduser()
+    return path.resolve() if path.is_absolute() else (REPO / path).resolve()
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -105,27 +113,28 @@ def run(command: list[str], name: str, *, env: dict[str, str] | None = None) -> 
         raise RuntimeError(f"{name} failed with return code {completed.returncode}")
 
 
-def training_payload() -> Path:
+def training_payload(training_size: int = 474) -> Path:
     path = ROOT / "training/control/payload.json"
     payload = read_json(BASE_PAYLOAD)
     payload.update(
         {
-            "description": "Pure TBG Graph2Mat only, n_train=474, seed 0; DeepH excluded.",
+            "description": f"Pure TBG Graph2Mat only, n_train={training_size}, seed 0; DeepH excluded.",
             "dataset_root": str(DATASET),
-            "output_root": str(ROOT / "training/n474"),
-            "run_id": "tbg_pure_n474",
+            "output_root": str(ROOT / "training" / f"n{training_size}"),
+            "run_id": f"tbg_pure_n{training_size}",
             "reuse_run_root": True,
             "resume_training_sweep": True,
         }
     )
     manual = payload["training_sweep"]["manual_runs"][0]
-    manual.update({"id": "g2m_tbg_n474_seed0", "config_id": "g2m_tbg_n474_seed0"})
+    run_id = f"g2m_tbg_n{training_size}_seed0"
+    manual.update({"id": run_id, "config_id": run_id})
     payload["training_sweep"].update({"max_runs": 1, "manual_runs": [manual]})
     write_json(path, payload)
     return path
 
 
-def train() -> Path:
+def train(training_size: int = 474) -> Path:
     control = ROOT / "training/control"
     runner_status = read_json(control / "status.json").get("status", {})
     if runner_status.get("returncode") != 0:
@@ -133,15 +142,16 @@ def train() -> Path:
             [
                 str(PYTHON),
                 str(SCRIPTS / "run_g2m_deeph_payload_once.py"),
-                str(training_payload()),
+                str(training_payload(training_size)),
                 "--status-json",
                 str(control / "status.json"),
                 "--manifest-json",
                 str(control / "runner_manifest.json"),
             ],
-            "train_n474",
+            f"train_n{training_size}",
         )
-    checkpoints = ROOT / "training/n474/tbg_pure_n474/sweep/graph2mat/n474/g2m_tbg_n474_seed0/graph2mat/training/lightning_logs/my_first_model/version_0/checkpoints"
+    run_id = f"g2m_tbg_n{training_size}_seed0"
+    checkpoints = ROOT / "training" / f"n{training_size}" / f"tbg_pure_n{training_size}" / "sweep" / "graph2mat" / f"n{training_size}" / run_id / "graph2mat/training/lightning_logs/my_first_model/version_0/checkpoints"
     if not list(checkpoints.glob("best-*.ckpt")):
         raise RuntimeError(f"No Graph2Mat checkpoint found in {checkpoints}")
     return checkpoints
@@ -776,11 +786,14 @@ def publish_summary(  # noqa: PLR0913
     )
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--precision-gate", type=Path)
     parser.add_argument("--training-size", type=int, default=474)
+    parser.add_argument("--dataset", type=Path, help="Validated training dataset (default: historical n<training-size> path).")
+    parser.add_argument("--base-payload", type=Path, default=DEFAULT_BASE_PAYLOAD)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--dos-tier", choices=tuple(DOS_TIERS), default="8x8",
                         help="Which DOS calculation the summary publishes to the UI.")
     parser.add_argument(
@@ -789,7 +802,19 @@ def main() -> int:
         "raw-derivative stage (reuses this campaign's own checkpoint/H/S; no SIESTA, no eigensolve).",
     )
     parser.add_argument("--epc-backend", default="cuda", choices=("cpu", "cuda"))
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def configure_campaign_paths(args: argparse.Namespace) -> None:
+    global ROOT, DATASET, BASE_PAYLOAD
+    ROOT = resolve_path(args.output_root)
+    DATASET = resolve_path(args.dataset or Path(f"Comparison/datasets/tbg_pure_md_nested/n{args.training_size}"))
+    BASE_PAYLOAD = resolve_path(args.base_payload)
+
+
+def main() -> int:
+    args = parse_args()
+    configure_campaign_paths(args)
     ROOT.mkdir(parents=True, exist_ok=True)
     try:
         update_status("starting")
@@ -807,7 +832,7 @@ def main() -> int:
                 precision_gate=gate,
             )
         else:
-            checkpoints = train()
+            checkpoints = train(args.training_size)
             checkpoint = evaluate_gate(checkpoints)
             if checkpoint is None:
                 return 0

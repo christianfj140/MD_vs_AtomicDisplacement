@@ -37,6 +37,7 @@
           <button class="tab" data-view="epc-scaling" data-icon="EPC">EPC precision</button>
           <button class="tab" data-view="epc-gamma" data-icon="EPC">EPC graphene &#915;</button>
           <button class="tab" data-view="epc-matbg" data-icon="EPC">EPC MATBG</button>
+          <button class="tab" data-view="dataset-design" data-icon="DD">Dataset Design</button>
           <button class="tab" data-view="terminal" data-icon="TM">Terminal</button>
           <button class="tab" data-view="performance" data-icon="PF">Rendimiento</button>
           <button class="tab" data-view="api" data-icon="API">API</button>
@@ -2776,6 +2777,170 @@
           </section>
         </section>
 
+        <section id="view-dataset-design" class="view">
+          <header class="content-header">
+            <div>
+              <p class="eyebrow">DATASET-DESIGN-W90-001 &middot; S8</p>
+              <h2>Dataset Design</h2>
+              <p class="field-help">
+                Selecciona material, familia de sampler, dimensionalidad, amplitudes, atomos
+                activos, N_train, seeds y modelo; estima el numero de configuraciones antes de
+                ejecutar. Smoke/reuse-existing corren en el momento (sin SIESTA); Pilot/Full
+                lanzan el pipeline S3-S7 existente en segundo plano.
+              </p>
+            </div>
+            <div class="button-row">
+              <button id="dd-estimate" class="button secondary" type="button">Estimate</button>
+              <button id="dd-run" class="button primary" type="button">Run</button>
+              <button id="dd-stop" class="button danger" type="button">Stop</button>
+              <span class="inline-status">
+                <span id="dd-status-dot" class="status-dot"></span>
+                <span id="dd-status-text">Idle</span>
+              </span>
+            </div>
+          </header>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Configuracion</p>
+                <h3>Material, sampler, dimensionalidad, amplitudes</h3>
+              </div>
+            </div>
+            <div class="grid three split-grid">
+              <label class="field"><span>Material</span>
+                <select id="dd-material">
+                  <option value="w90" selected>W90 (graphene primitive, N=2)</option>
+                  <option value="5x5">graphene 5x5 (N=50)</option>
+                </select></label>
+              <label class="field"><span>Modo</span>
+                <select id="dd-mode">
+                  <option value="smoke" selected>Smoke (geometry-only, instantaneo)</option>
+                  <option value="reuse_existing">Reuse existing artifacts (S4/S7)</option>
+                  <option value="pilot">Pilot (SIESTA, background)</option>
+                  <option value="full">Full (S3-S7, background)</option>
+                </select></label>
+              <label class="field"><span>N_train values</span>
+                <input id="dd-n-train" type="text" value="16,32,64,128,256" />
+                <small>Lista separada por comas.</small></label>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field"><span>Sampler family</span>
+                <span class="checkbox-row" id="dd-sampler-options" role="group" aria-label="Sampler families"></span></label>
+              <label class="field"><span>Dimensionality</span>
+                <span class="checkbox-row" id="dd-dim-options" role="group" aria-label="Dimensionalities"></span></label>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field"><span>Amplitudes (&Aring;, 0.01-0.12)</span>
+                <span class="checkbox-row" id="dd-amp-options" role="group" aria-label="Amplitudes"></span></label>
+              <label class="field"><span>Modelo</span>
+                <span class="checkbox-row" role="group" aria-label="Models">
+                  <label class="toggle-field inline-toggle"><input id="dd-model-graph2mat" type="checkbox" checked /> <span>graph2mat</span></label>
+                  <label class="toggle-field inline-toggle" title="DeepH deferred to future task"><input id="dd-model-deeph" type="checkbox" disabled /> <span>deeph (deferred to future task)</span></label>
+                </span></label>
+            </div>
+            <div class="grid four split-grid">
+              <label class="field"><span>Active-atom policy</span>
+                <select id="dd-active-policy">
+                  <option value="central_atom" selected>Central atom (k=1)</option>
+                  <option value="neighbour_shell">Neighbour shell (k=2, bonded)</option>
+                  <option value="dispersed">Dispersed pair (k=2, farthest)</option>
+                  <option value="local_cluster">Local cluster (k&gt;2, not yet supported)</option>
+                </select></label>
+              <label class="field"><span>k (active atoms)</span>
+                <input id="dd-k" type="number" min="1" step="1" value="1" /></label>
+              <label class="field"><span>Center atom index</span>
+                <input id="dd-center-index" type="number" min="0" step="1" value="0" /></label>
+              <label class="field"><span>Seeds</span>
+                <input id="dd-seeds" type="text" value="0,1,2" />
+                <small>Lista separada por comas; replicas de entrenamiento.</small></label>
+            </div>
+            <div class="grid two split-grid">
+              <label class="field"><span>R_train_max / domain (&Aring;, S9-S4/S9-S5 Pilot &amp; Full)</span>
+                <span class="checkbox-row" id="dd-domain-options" role="group" aria-label="R_train_max domains"></span></label>
+              <label class="field"><span>Density / resolution levels (S9-S4/S9-S5 Pilot &amp; Full)</span>
+                <span class="checkbox-row" id="dd-density-options" role="group" aria-label="Density levels"></span></label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Estimacion</p>
+                <h3>Configuraciones antes de ejecutar</h3>
+              </div>
+            </div>
+            <div id="dd-estimate-summary" class="result-list muted-text">Sin estimar todavia.</div>
+            <small id="dd-explosion-warning" class="field-alert hidden" role="alert"></small>
+            <div id="dd-active-preview" class="result-list muted-text"></div>
+            <div class="cleanup-table-wrap">
+              <table class="cleanup-table">
+                <thead><tr><th>Sampler</th><th>Dim</th><th>Configs/seed</th><th>&times; seeds</th><th>Total</th></tr></thead>
+                <tbody id="dd-combinations"></tbody>
+              </table>
+            </div>
+            <div id="dd-skipped" class="field-help"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Progreso</p>
+                <h3>Log de ejecucion (Pilot/Full)</h3>
+              </div>
+            </div>
+            <pre id="dd-log" class="log-output" role="log" aria-live="polite">Sin ejecucion todavia.</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">S9 &middot; en vivo</p>
+                <h3>Campanas cross-testing (w90 vs 6x6)</h3>
+              </div>
+              <span id="dd-s9-campaign-progress" class="field-help">Sin datos todavia.</span>
+            </div>
+            <div id="dd-s9-campaign-chart" class="plot-card full"></div>
+            <div id="dd-s9-campaign-relfrob-chart" class="plot-card full"></div>
+            <div id="dd-s9-campaign-learning-curve-chart" class="plot-card full"></div>
+            <div id="dd-s9-campaign-cost-chart" class="plot-card full"></div>
+            <div class="grid two split-grid">
+              <div>
+                <p class="eyebrow">w90</p>
+                <div class="cleanup-table-wrap dd-results-scroll">
+                  <table class="cleanup-table">
+                    <thead id="dd-s9-campaign-w90-head"></thead>
+                    <tbody id="dd-s9-campaign-w90-body"></tbody>
+                  </table>
+                </div>
+              </div>
+              <div>
+                <p class="eyebrow">6x6</p>
+                <div class="cleanup-table-wrap dd-results-scroll">
+                  <table class="cleanup-table">
+                    <thead id="dd-s9-campaign-6x6-head"></thead>
+                    <tbody id="dd-s9-campaign-6x6-body"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">MD-similarity &middot; pilot 5x5</p>
+                <h3>Cuanto se parecen los samplers a MD</h3>
+              </div>
+            </div>
+            <div class="grid two split-grid">
+              <div id="dd-md-sim-corr-chart" class="plot-card full"></div>
+              <div id="dd-md-sim-relfrob-chart" class="plot-card full"></div>
+            </div>
+          </section>
+
+        </section>
+
         <section id="view-api" class="view">
           <header class="content-header">
             <div>
@@ -2822,6 +2987,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260909-epc-deeph-charts"></script>
+    <script src="/app.js?v=20260918-s9-campaigns-chart"></script>
   </body>
 </html>

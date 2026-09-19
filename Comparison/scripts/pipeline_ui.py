@@ -28,6 +28,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,6 +60,13 @@ from material_provenance import (
 )
 from g2m_deeph_runner import Graph2MatDeepHBenchmarkRunner
 from plot_hamiltonian_derivative_metrics import build_derivative_plot_payload
+import w90_displacement_sampler_family as dataset_design_sampler
+import dataset_design_w90_001_s9_s2_envelope_and_coverage as dd_s9_s2
+import dataset_design_w90_001_s9_s3_design_generation as dd_s9_s3
+import dataset_design_w90_001_s9_s4_pilot_screening as dd_s9_s4
+import dataset_design_w90_001_s9_s5_pareto_training as dd_s9_s5
+import dataset_design_w90_001_s4_train_learning_curves as dd_s4
+import dataset_design_w90_001_s5_frozen_tests_generalization as dd_s5
 
 try:
     import pty
@@ -4627,6 +4635,1126 @@ def graph2mat_git_metadata(config: dict[str, Any]) -> dict[str, Any]:
     metadata = git_metadata_for_path(package_file.parent)
     metadata["package_file"] = str(package_file)
     return metadata
+
+
+# --------------------------------------------------------------------------
+# Dataset Design (DATASET-DESIGN-W90-001-S8): UI tab wiring for the sampler
+# family (S2), SIESTA pilot (S3) and learning-curve/pareto pipeline (S4-S7).
+# --------------------------------------------------------------------------
+
+DATASET_DESIGN_S4_ROOT = RESULTS_ROOT / "dataset_design_w90_001_s4"
+DATASET_DESIGN_S7_ROOT = RESULTS_ROOT / "dataset_design_w90_001_s7"
+DATASET_DESIGN_S7_FIGURES = DATASET_DESIGN_S7_ROOT / "figures"
+DATASET_DESIGN_S7_DOC = REPO_ROOT / "docs" / "dataset_design_w90_001_s7_pareto_and_conclusions.md"
+DATASET_DESIGN_SCRIPTS_DIR = COMPARISON_ROOT / "scripts"
+
+# Only materials with an actual FDF on disk are offered; 5x5/6x6 compatibility is
+# a property of dataset_design_sampler.compatibility_preview (no N==2 assumption
+# anywhere in the generator/estimator below), not a hardcoded material list.
+DATASET_DESIGN_MATERIALS: dict[str, Path] = {
+    "w90": dataset_design_sampler.GRAPHENE_PRIMITIVE_FDF,
+    "5x5": dataset_design_sampler.GRAPHENE_5X5_FDF,
+}
+DATASET_DESIGN_SEED_DEPENDENT_SAMPLERS = {"sobol_sparse", "random_cartesian"}
+# UI pre-checked defaults on first load -- presentational, not a scientific
+# definition, but kept explicit here so the frontend need not hardcode it.
+DATASET_DESIGN_UI_DEFAULTS = {
+    "samplers": ["axial_radial"],
+    "dimensionalities": ["2D_in"],
+    "amplitudes_ang": [0.01, 0.03, 0.05],
+}
+DATASET_DESIGN_EXPLOSION_DATASET_POINTS = 2000
+DATASET_DESIGN_EXPLOSION_TRAINING_RUNS = 200
+DATASET_DESIGN_SMOKE_MAX_ROWS = 64
+
+_DATASET_DESIGN_GEOMETRY_CACHE: dict[str, "dataset_design_sampler.Geometry"] = {}
+
+
+def dataset_design_geometry(material: str) -> "dataset_design_sampler.Geometry":
+    fdf_path = DATASET_DESIGN_MATERIALS.get(material)
+    if fdf_path is None:
+        raise RuntimeError(
+            f"Unknown Dataset Design material {material!r}; expected one of {sorted(DATASET_DESIGN_MATERIALS)}"
+        )
+    if material not in _DATASET_DESIGN_GEOMETRY_CACHE:
+        _DATASET_DESIGN_GEOMETRY_CACHE[material] = dataset_design_sampler.load_geometry(fdf_path)
+    return _DATASET_DESIGN_GEOMETRY_CACHE[material]
+
+
+def _dataset_design_generate_configs(
+    geometry: "dataset_design_sampler.Geometry",
+    sampler: str,
+    dim: str,
+    k: int,
+    amplitudes: list[float],
+    n_structures: int,
+    seed: int,
+    center_index: int,
+    pair_mode: str,
+) -> list["dataset_design_sampler.Configuration"]:
+    """Real (geometry-only, no SIESTA) config generation, reused for both estimate and smoke."""
+    if sampler == "axial_radial":
+        return dataset_design_sampler.generate_axial_radial(
+            geometry, k, dim, radii_ang=amplitudes, center_index=center_index, pair_mode=pair_mode
+        )
+    if sampler == "angular_shell":
+        configs: list[Any] = []
+        for amplitude in amplitudes:
+            configs.extend(
+                dataset_design_sampler.generate_angular_shell(
+                    geometry, k, dim, amplitude, center_index=center_index, pair_mode=pair_mode
+                )
+            )
+        return configs
+    if sampler == "local_pair_modes":
+        if k != 2:
+            raise ValueError("local_pair_modes requires k=2")
+        return dataset_design_sampler.generate_local_pair_modes(
+            geometry, dim, amplitudes_ang=amplitudes, center_index=center_index
+        )
+    if sampler == "sobol_sparse":
+        configs = []
+        for amplitude in amplitudes:
+            configs.extend(
+                dataset_design_sampler.generate_sobol_sparse(
+                    geometry, k, dim, amplitude, max_n=n_structures, seed=seed,
+                    center_index=center_index, pair_mode=pair_mode,
+                )
+            )
+        return configs
+    if sampler == "random_cartesian":
+        configs = []
+        for amplitude in amplitudes:
+            configs.extend(
+                dataset_design_sampler.generate_random_cartesian(
+                    geometry, k, dim, amplitude, n_structures, seed=seed,
+                    center_index=center_index, pair_mode=pair_mode,
+                )
+            )
+        return configs
+    if sampler == "MD":
+        # Design-time contract only (S2/S6 own MD frame generation); never fabricated here.
+        return []
+    raise ValueError(f"unknown sampler {sampler!r}; expected one of {dataset_design_sampler.SAMPLER_IDS}")
+
+
+def _dataset_design_parse_params(params: dict[str, Any]) -> dict[str, Any]:
+    amplitudes = sorted(
+        {round(float(a), 6) for a in (params.get("amplitudes_ang") or dataset_design_sampler.TRAIN_AMPLITUDES_ANG)}
+    )
+    n_train_values = [int(v) for v in (params.get("n_train_values") or [int(params.get("n_train", 32))])]
+    seeds = [int(s) for s in (params.get("seeds") or [0])]
+    return {
+        "material": str(params.get("material") or "w90"),
+        "samplers": list(params.get("samplers") or ["axial_radial"]),
+        "dimensionalities": list(params.get("dimensionalities") or ["2D_in"]),
+        "amplitudes_ang": amplitudes,
+        "k": int(params.get("k", 1)),
+        "seeds": seeds,
+        "n_train_values": n_train_values,
+        "models": list(params.get("models") or ["graph2mat"]),
+        "center_index": int(params.get("center_index", 0)),
+        "pair_mode": str(params.get("pair_mode", "bonded")),
+    }
+
+
+def dataset_design_estimate_payload(raw_params: dict[str, Any]) -> dict[str, Any]:
+    """Real (not guessed) config-count estimate: calls the same generators the runs use."""
+    params = _dataset_design_parse_params(raw_params)
+    geometry = dataset_design_geometry(params["material"])
+    active_preview = dataset_design_sampler.compatibility_preview(
+        geometry, params["k"], center_index=params["center_index"], pair_mode=params["pair_mode"]
+    )
+
+    n_structures = max(params["n_train_values"]) if params["n_train_values"] else 32
+    combinations: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    dataset_points = 0
+    for sampler in params["samplers"]:
+        for dim in params["dimensionalities"]:
+            try:
+                configs = _dataset_design_generate_configs(
+                    geometry, sampler, dim, params["k"], params["amplitudes_ang"],
+                    n_structures, params["seeds"][0], params["center_index"], params["pair_mode"],
+                )
+            except (ValueError, NotImplementedError) as exc:
+                skipped.append({"sampler": sampler, "dimensionality": dim, "reason": str(exc)})
+                continue
+            n_configs = len(configs)
+            seed_multiplier = len(params["seeds"]) if sampler in DATASET_DESIGN_SEED_DEPENDENT_SAMPLERS else 1
+            n_total = n_configs * seed_multiplier
+            combinations.append({
+                "sampler": sampler,
+                "dimensionality": dim,
+                "n_configs_per_seed": n_configs,
+                "seed_multiplier": seed_multiplier,
+                "n_configs_total": n_total,
+            })
+            dataset_points += n_total
+
+    training_runs = len(combinations) * len(params["n_train_values"]) * len(params["seeds"]) * len(params["models"])
+    warning = None
+    if (
+        dataset_points > DATASET_DESIGN_EXPLOSION_DATASET_POINTS
+        or training_runs > DATASET_DESIGN_EXPLOSION_TRAINING_RUNS
+    ):
+        warning = (
+            f"Estimated {dataset_points} dataset points and {training_runs} training runs, "
+            f"above the guardrail ({DATASET_DESIGN_EXPLOSION_DATASET_POINTS} dataset points / "
+            f"{DATASET_DESIGN_EXPLOSION_TRAINING_RUNS} training runs). Narrow the sampler, "
+            "dimensionality, amplitude or seed selection before running Pilot or Full."
+        )
+
+    return {
+        "material": params["material"],
+        "k": params["k"],
+        "active_atom_preview": active_preview,
+        "combinations": combinations,
+        "skipped_combinations": skipped,
+        "dataset_points_estimate": dataset_points,
+        "training_runs_estimate": training_runs,
+        "explosion_warning": warning,
+    }
+
+
+def dataset_design_run_smoke_payload(raw_params: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous, real (geometry-only) execution: no SIESTA, bounded row count."""
+    estimate = dataset_design_estimate_payload(raw_params)
+    params = _dataset_design_parse_params(raw_params)
+    geometry = dataset_design_geometry(params["material"])
+    n_structures = min(
+        max(params["n_train_values"]) if params["n_train_values"] else 8,
+        DATASET_DESIGN_SMOKE_MAX_ROWS,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for combo in estimate["combinations"]:
+        if len(rows) >= DATASET_DESIGN_SMOKE_MAX_ROWS:
+            break
+        configs = _dataset_design_generate_configs(
+            geometry, combo["sampler"], combo["dimensionality"], params["k"], params["amplitudes_ang"],
+            n_structures, params["seeds"][0], params["center_index"], params["pair_mode"],
+        )
+        for config in configs:
+            if len(rows) >= DATASET_DESIGN_SMOKE_MAX_ROWS:
+                break
+            meta = config.metadata
+            rows.append({
+                "family": meta["family"],
+                "dimensionality": meta["dimensionality"],
+                "amplitude_ang": meta["amplitude_ang"],
+                "k": meta["k"],
+                "rms_displacement_ang": meta["rms_displacement_ang"],
+                "participation_ratio": meta["participation_ratio"],
+                "connected": meta["connected"],
+            })
+
+    return {
+        "mode": "smoke",
+        "estimate": estimate,
+        "results_table": rows,
+        "note": "Smoke mode samples geometry only (no SIESTA); real displacement metadata, bounded row count.",
+    }
+
+
+DATASET_DESIGN_S9_CHAIN_LOGS = RESULTS_ROOT / "dataset_design_w90_001_s9_chain_logs"
+DATASET_DESIGN_S9_CAMPAIGN_COMBOS = DATASET_DESIGN_S9_CHAIN_LOGS / "crosstesting_campaign_80combos.json"
+DATASET_DESIGN_S9_W90_CAMPAIGN_SUMMARY = DATASET_DESIGN_S9_CHAIN_LOGS / "w90_campaign_summary.json"
+DATASET_DESIGN_S9_6X6_CAMPAIGN_SUMMARY = DATASET_DESIGN_S9_CHAIN_LOGS / "6x6_campaign_summary.json"
+DATASET_DESIGN_S9_6X6_CAMPAIGN_LOG = DATASET_DESIGN_S9_CHAIN_LOGS / "6x6_campaign_run.log"
+DATASET_DESIGN_MD_SIMILARITY_CSV = RESULTS_ROOT / "dataset_design_w90_001_md_similarity" / "md_similarity.csv"
+
+
+def dataset_design_md_similarity_payload() -> dict[str, Any]:
+    if not DATASET_DESIGN_MD_SIMILARITY_CSV.exists():
+        return {"available": False, "rows": []}
+    with DATASET_DESIGN_MD_SIMILARITY_CSV.open(newline="", encoding="utf-8") as handle:
+        rows = []
+        for row in csv.DictReader(handle):
+            rows.append({
+                "family": row["family"],
+                "D_amp": _dd_s9_float(row["D_amp"]),
+                "D_corr": _dd_s9_float(row["D_corr"]),
+                "H_MAE_mean": _dd_s9_float(row["H_MAE_mean"]),
+                "rel_Frob_mean": _dd_s9_float(row["rel_Frob_mean"]),
+            })
+    return {"available": bool(rows), "rows": rows}
+
+
+def _dd_s9_campaign_rows(summary_path: Path) -> list[dict[str, Any]]:
+    if not summary_path.exists():
+        return []
+    try:
+        rows = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def _dd_s9_campaign_rows_from_log(log_path: Path) -> list[dict[str, Any]]:
+    """Fallback for a running campaign whose process predates the SUMMARY_PATH
+    checkpoint write (or hasn't finished a batch yet): each completed combo is
+    also printed as one JSON line to its run log, so reconstruct rows from that."""
+    if not log_path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "combo_tag" not in entry or "done" not in entry:
+                continue
+            rows.append(entry)
+    except OSError:
+        return []
+    return rows
+
+
+def _dd_s9_campaign_combo_lookups() -> tuple[dict[int, dict[str, Any]], dict[str, dict[str, Any]]]:
+    if not DATASET_DESIGN_S9_CAMPAIGN_COMBOS.exists():
+        return {}, {}
+    try:
+        combos = json.loads(DATASET_DESIGN_S9_CAMPAIGN_COMBOS.read_text(encoding="utf-8"))["combos"]
+    except (json.JSONDecodeError, OSError, KeyError):
+        return {}, {}
+    by_rank = {c["rank"]: c for c in combos}
+    by_tag = {f"{c['family']}__{c['dim']}__R{c['domain_ang']}__d{c['density']}": c for c in combos}
+    return by_rank, by_tag
+
+
+def dataset_design_s9_campaign_payload() -> dict[str, Any]:
+    """Live view of the w90 and 6x6 cross-testing campaigns (dataset_design_w90_001_s9_crosstesting_campaign_{w90,6x6}.py).
+
+    Both scripts checkpoint their SUMMARY_PATH after every completed combo, so this
+    just re-reads those JSON files on every call -- safe to poll while a campaign runs.
+    ``density`` (the shared "N_train" axis for both variants) and the real combo
+    ``rank`` are joined in from the single ``crosstesting_campaign_80combos.json``
+    -- the 6x6 log-fallback rows only carry ``combo_tag``, never ``rank``, and
+    completion order (``done``) is not the same as combo rank under parallel=2.
+    """
+    by_rank, by_tag = _dd_s9_campaign_combo_lookups()
+    n_total = len(by_rank)
+
+    def _combo_for(row: dict[str, Any], design_id_key: str) -> dict[str, Any] | None:
+        rank = row.get("rank")
+        if rank in by_rank:
+            return by_rank[rank]
+        return by_tag.get(row.get(design_id_key) or row.get("combo_tag"))
+
+    def _variant(summary_path: Path, design_id_key: str, log_fallback: Path | None = None) -> dict[str, Any]:
+        rows = _dd_s9_campaign_rows(summary_path)
+        if not rows and log_fallback is not None:
+            rows = _dd_s9_campaign_rows_from_log(log_fallback)
+        ok_rows = [r for r in rows if "error" not in r]
+        table = []
+        for r in ok_rows:
+            combo = _combo_for(r, design_id_key)
+            table.append({
+                "rank": combo["rank"] if combo else r.get("rank"),
+                "combo_tag": r.get(design_id_key) or r.get("combo_tag"),
+                "family": combo["family"] if combo else None,
+                "dim": combo["dim"] if combo else None,
+                "domain_ang": combo["domain_ang"] if combo else None,
+                "density": combo["density"] if combo else None,
+                "H_MAE_meV": r.get("H_MAE_meV") if r.get("H_MAE_meV") is not None else r.get("report", {}).get("H_MAE_meV"),
+                "rel_Frob": (r.get("metrics_eV") or r.get("report", {}).get("metrics_eV") or {}).get("rel_Frob"),
+                "w90_H_MAE_meV": r.get("w90_H_MAE_meV"),
+                "train_seconds": r.get("train_seconds") or r.get("elapsed_seconds"),
+            })
+        table.sort(key=lambda r: r["rank"] or 0)
+        return {"done": len(table), "n_total": n_total, "rows": table}
+
+    w90 = _variant(DATASET_DESIGN_S9_W90_CAMPAIGN_SUMMARY, "design_id")
+    sixxsix = _variant(DATASET_DESIGN_S9_6X6_CAMPAIGN_SUMMARY, "combo_tag", log_fallback=DATASET_DESIGN_S9_6X6_CAMPAIGN_LOG)
+    return {
+        "available": bool(w90["rows"] or sixxsix["rows"]),
+        "w90": w90,
+        "sixxsix": sixxsix,
+    }
+
+
+def dataset_design_results_payload() -> dict[str, Any]:
+    """Reuse-existing-mode payload: reads S4/S7 artifacts verbatim, never recomputes them."""
+    payload: dict[str, Any] = {"available": False}
+    learning_curves_path = DATASET_DESIGN_S4_ROOT / "learning_curves.csv"
+    if learning_curves_path.exists():
+        with learning_curves_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        payload["results_table"] = rows[:500]
+        payload["results_table_total_rows"] = len(rows)
+        payload["available"] = True
+
+    pareto_path = DATASET_DESIGN_S7_ROOT / "pareto_table.csv"
+    if pareto_path.exists():
+        with pareto_path.open(newline="", encoding="utf-8") as handle:
+            payload["pareto_table"] = list(csv.DictReader(handle))
+        payload["available"] = True
+
+    summary_path = DATASET_DESIGN_S7_ROOT / "s7_summary.json"
+    if summary_path.exists():
+        payload["s7_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    if DATASET_DESIGN_S7_FIGURES.exists():
+        payload["figures"] = sorted(p.name for p in DATASET_DESIGN_S7_FIGURES.glob("*.png"))
+
+    if DATASET_DESIGN_S7_DOC.exists():
+        payload["conclusions_markdown"] = DATASET_DESIGN_S7_DOC.read_text(encoding="utf-8")
+
+    return payload
+
+
+def dataset_design_options_payload() -> dict[str, Any]:
+    """Scientific option catalog for the Dataset Design tab, read from the single
+    canonical source (dataset_design_sampler) so the frontend renders its
+    sampler/dimensionality/amplitude checkboxes instead of hardcoding them."""
+    return {
+        "samplers": list(dataset_design_sampler.SAMPLER_IDS),
+        "dimensionalities": list(dataset_design_sampler.DIMENSIONALITIES),
+        "amplitudes_ang": list(dataset_design_sampler.ALL_AMPLITUDES_ANG),
+        "defaults": DATASET_DESIGN_UI_DEFAULTS,
+        # S9-S2's frozen envelope: the only R_train_max/density knobs Pilot/Full (S9-S4/S9-S5)
+        # actually understand -- distinct from the S1-S8 amplitudes_ang list above.
+        "r_train_max_levels_ang": list(dd_s9_s2.R_TRAIN_MAX_LEVELS_ANG),
+        "density_note": "Density (points per design) is family-specific; see /api/dataset-design/s9-panels filter_options.density_levels for the values actually present in the S9-S3 manifest.",
+        "deeph_status": "deferred to future task",
+    }
+
+
+# --------------------------------------------------------------------------
+# Dataset Design S9-S6: 7-panel UI over the real S9-S3/S9-S4/S9-S5 artifacts.
+#
+# S9-S4 (Pilot, N in {8,16,32,64}) and S9-S5 (Full, N in {128,256}) already
+# ran for real -- see Comparison/results/dataset_design_w90_001_s9_s4 and
+# _s9_s5 -- and are the only lineage with per-design_id traceability
+# (checkpoint/split_id/geometry_hash). The older S8 "final acceptance"
+# mirror at the repo root (run_metrics.csv etc.) reuses the pre-S9-S1
+# family/dim/k pipeline and has no design_id; it is intentionally NOT read
+# here.
+# --------------------------------------------------------------------------
+
+DATASET_DESIGN_S9_S3_ROOT = RESULTS_ROOT / "dataset_design_w90_001_s9_s3"
+DATASET_DESIGN_S9_S4_ROOT = RESULTS_ROOT / "dataset_design_w90_001_s9_s4"
+DATASET_DESIGN_S9_S5_ROOT = RESULTS_ROOT / "dataset_design_w90_001_s9_s5"
+DATASET_DESIGN_S9_S3_MANIFEST = DATASET_DESIGN_S9_S3_ROOT / "design_manifest.json"
+DATASET_DESIGN_S9_K1_PROBE = RESULTS_ROOT / "dataset_design_w90_001_s9_ood012_probe" / "ood012_probe_report.json"
+DATASET_DESIGN_S9_K2_PROBE = RESULTS_ROOT / "dataset_design_w90_001_s9_ood012_k2_probe" / "k2_probe_report.json"
+DATASET_DESIGN_S9_ABLATION_REPORT = RESULTS_ROOT / "dataset_design_w90_001_s9_ood012_k2_ablation" / "ablation_report.json"
+
+DATASET_DESIGN_DEVELOPMENT_SET = dd_s9_s4.DEVELOPMENT_SET_NAME
+
+
+def _dd_s9_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dd_s9_int(value: Any) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dd_s9_read_csv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def dataset_design_s9_design_manifest() -> dict[str, Any] | None:
+    if not DATASET_DESIGN_S9_S3_MANIFEST.exists():
+        return None
+    return json.loads(DATASET_DESIGN_S9_S3_MANIFEST.read_text(encoding="utf-8"))
+
+
+def dataset_design_s9_manifest_by_id() -> dict[str, dict[str, Any]]:
+    manifest = dataset_design_s9_design_manifest()
+    if not manifest:
+        return {}
+    return {entry["design_id"]: entry for entry in manifest.get("designs", [])}
+
+
+def _dd_s9_valid_design(entry: dict[str, Any]) -> bool:
+    return bool(entry) and entry.get("envelope_check_passed", True) \
+        and not entry.get("n_overlap_with_frozen_or_validation", 0) \
+        and entry.get("n_reused_from_existing_siesta") == entry.get("n_used")
+
+
+def dataset_design_s9_run_metrics_rows() -> list[dict[str, Any]]:
+    """S9-S4 pilot rows (N in 8/16/32/64) + S9-S5 full rows (N in 128/256),
+    normalized to one schema. Real files only -- returns [] when neither
+    stage has been run yet (never fabricated)."""
+
+    manifest_by_id = dataset_design_s9_manifest_by_id()
+    rows: list[dict[str, Any]] = []
+
+    for row in _dd_s9_read_csv(DATASET_DESIGN_S9_S4_ROOT / "run_metrics.csv"):
+        manifest_entry = manifest_by_id.get(row["design_id"], {})
+        if not _dd_s9_valid_design(manifest_entry):
+            continue
+        rows.append({
+            "stage": "pilot",
+            "design_id": row["design_id"],
+            "family": row["family"],
+            "dim": row["dim"],
+            "k": _dd_s9_int(row["k"]),
+            "N_train": _dd_s9_int(row["N_train"]),
+            "domain": _dd_s9_float(row["domain"]),
+            "density": _dd_s9_int(row["density"]),
+            "seed": _dd_s9_int(row["seed"]),
+            "test_amplitude": row["test_amplitude"],
+            "ood_status": row["ood_status"],
+            "H_MAE": _dd_s9_float(row["H_MAE"]),
+            "H_RMSE": _dd_s9_float(row["H_RMSE"]),
+            # Relative Frobenius error (||H_pred - H_ref||_F / ||H_ref||_F): only
+            # S4's run_metrics.csv carries this column today (S5's pareto_table.csv
+            # does not), so it's None for "full"-stage rows below -- real data only.
+            "rel_Frob": _dd_s9_float(row.get("rel_Frob")),
+            "status": row["status"],
+            "split_id": row["split_id"],
+            "checkpoint": row["checkpoint"],
+            "backend": row["backend"],
+            "siesta_cost": _dd_s9_int(row["siesta_cost"]),
+            "n_used": manifest_entry.get("n_used"),
+            "geometry_hash": manifest_entry.get("geometry_hash"),
+            "dominance": None,
+        })
+
+    for row in _dd_s9_read_csv(DATASET_DESIGN_S9_S5_ROOT / "pareto_table.csv"):
+        manifest_entry = manifest_by_id.get(row["design_id"], {})
+        if not _dd_s9_valid_design(manifest_entry):
+            continue
+        rows.append({
+            "stage": "full",
+            "design_id": row["design_id"],
+            "family": row["family"],
+            "dim": row["dim"],
+            "k": _dd_s9_int(row["k"]),
+            "N_train": _dd_s9_int(row["N_train"]),
+            "domain": _dd_s9_float(row["domain_r_train_max_ang"]),
+            "density": manifest_entry.get("density_level"),
+            "seed": _dd_s9_int(row["seed"]),
+            "test_amplitude": row["test_amplitude"],
+            "ood_status": row["ood_status"],
+            "H_MAE": _dd_s9_float(row["H_MAE"]),
+            "H_RMSE": _dd_s9_float(row["H_RMSE"]),
+            "rel_Frob": None,
+            "status": row["status"],
+            "split_id": row["split_id"],
+            "checkpoint": row["checkpoint"],
+            "backend": row["backend"],
+            "siesta_cost": _dd_s9_int(row["cost_siesta_unique"]),
+            "n_used": manifest_entry.get("n_used"),
+            "geometry_hash": manifest_entry.get("geometry_hash"),
+            "dominance": row["dominance"],
+        })
+
+    return rows
+
+
+def dataset_design_s9_domain_generalization_rows() -> list[dict[str, Any]]:
+    """S9-S5's own domain_generalization.csv (R_train_max_ang x test_amplitude,
+    real trained models only) -- distinct from S5's older frozen-test CSV of
+    the same purpose but a different (family/dim/k) schema."""
+
+    manifest_by_id = dataset_design_s9_manifest_by_id()
+    rows = []
+    for row in _dd_s9_read_csv(DATASET_DESIGN_S9_S5_ROOT / "domain_generalization.csv"):
+        design = manifest_by_id.get(row["design_id"], {})
+        if not _dd_s9_valid_design(design):
+            continue
+        domain = _dd_s9_float(row["R_train_max_ang"])
+        rows.append({
+            "design_id": row["design_id"],
+            "family": row["family"],
+            "dim": design.get("dim"),
+            "k": _dd_s9_int(design.get("k")),
+            "density": _dd_s9_int(design.get("density_level")),
+            "sampler_seed": (design.get("seeds") or {}).get("sampler"),
+            "N_train": _dd_s9_int(row["N_train"]),
+            "seed": _dd_s9_int(row["seed"]),
+            "domain": domain,
+            "R_train_max_ang": domain,
+            "test_amplitude": _dd_s9_float(row["test_amplitude"]),
+            "H_MAE": _dd_s9_float(row["H_MAE"]),
+            "ood_flag": str(row["ood_flag"]).strip().lower() in ("true", "1", "yes"),
+            "split_id": row["split_id"],
+        })
+    return rows
+
+
+def dataset_design_s9_physical_probe_rows() -> list[dict[str, Any]]:
+    """Normalize the two already-computed probe reports for the three-panel UI."""
+
+    rows = []
+    if DATASET_DESIGN_S9_K1_PROBE.exists():
+        report = json.loads(DATASET_DESIGN_S9_K1_PROBE.read_text(encoding="utf-8"))
+        axis_names = {(1.0, 0.0, 0.0): "x", (0.0, 1.0, 0.0): "y", (0.0, 0.0, 1.0): "z"}
+        for row in report.get("k1", []):
+            rows.append({
+                "k": 1,
+                "mode": axis_names.get(tuple(row.get("axis", [])), str(row.get("axis"))),
+                "amplitude_ang": row.get("amplitude_ang"),
+                "C_cancellation": row.get("C_cancellation"),
+                "N_curvature": row.get("N_curvature"),
+                "j_eff_drift_vs_0.01": row.get("j_eff_drift_vs_0.01", 0.0),
+            })
+    if DATASET_DESIGN_S9_K2_PROBE.exists():
+        report = json.loads(DATASET_DESIGN_S9_K2_PROBE.read_text(encoding="utf-8"))
+        for row in report.get("pair_modes", []):
+            rows.append({
+                "k": 2,
+                "mode": row.get("mode"),
+                "amplitude_ang": row.get("amplitude_ang"),
+                "C_cancellation": row.get("C_cancellation"),
+                "N_curvature": row.get("N_curvature"),
+                "j_eff_drift_vs_0.01": row.get("j_eff_drift_vs_0.01", 0.0),
+            })
+    return rows
+
+
+@lru_cache(maxsize=32)
+def dataset_design_s9_local_error_payload(design_id: str, n_train: int) -> dict[str, Any]:
+    """Per-test-sample error and nearest-training distance from existing artifacts only."""
+
+    import numpy as np
+
+    design = dataset_design_s9_manifest_by_id().get(design_id)
+    if not design:
+        return {"available": False, "note": f"Unknown design_id: {design_id}", "rows": []}
+    if not _dd_s9_valid_design(design):
+        return {"available": False, "note": "Design excluded: leakage or incomplete SIESTA coverage.", "rows": []}
+
+    family, dim, k = design["family"], design["dim"], int(design["k"])
+    prefix = f"{family}__{dim}__k{k}__n{n_train}__seed"
+    manifests: list[tuple[Path, Path]] = []
+    for root in (DATASET_DESIGN_S9_S4_ROOT, DATASET_DESIGN_S9_S5_ROOT):
+        for path in root.glob(f"evaluations/*/{prefix}*/prediction/prediction_manifest.csv"):
+            rows = _dd_s9_read_csv(path)
+            if rows and design_id in rows[0].get("model_checkpoint", ""):
+                manifests.append((root, path))
+    if not manifests:
+        return {"available": False, "note": "No existing per-sample predictions match this design and N_train.", "rows": []}
+
+    geometry = dataset_design_sampler.load_graphene_primitive()
+    sampler_seed = (design.get("seeds") or {}).get("sampler")
+    seed = sampler_seed if isinstance(sampler_seed, int) else 0
+    resolution = n_train if any(root == DATASET_DESIGN_S9_S5_ROOT for root, _ in manifests) else int(design["density_level"])
+    configs = dd_s9_s5.unique_configs_at_resolution(geometry, design, resolution, seed)
+    base_positions = np.asarray(geometry.positions_ang, dtype=float)
+    train_displacements = [dd_s9_s3.absolute_positions(geometry, config) - base_positions for config in configs]
+
+    grouped: dict[tuple[str, float, str | None], list[float]] = defaultdict(list)
+    distances: dict[tuple[str, float, str | None], float] = {}
+    reference_cache: dict[Path, Any] = {}
+    for _root, manifest_path in manifests:
+        for row in _dd_s9_read_csv(manifest_path):
+            metadata_path = Path(row["metadata_path"])
+            prediction_path = Path(row["prediction_path"])
+            reference_path = Path(row["hamiltonian_path"])
+            structure_path = Path(row["structure_path"])
+            if not all(path.exists() for path in (metadata_path, prediction_path, reference_path, structure_path)):
+                continue
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if int(metadata.get("k", -1)) != k or metadata.get("dimensionality") != dim:
+                continue
+            amplitude = float(metadata["amplitude_ang"])
+            mode = metadata.get("mode")
+            key = (row["sample_id"], amplitude, mode)
+            try:
+                if reference_path not in reference_cache:
+                    reference_cache[reference_path] = dd_s4.gamma_hk(reference_path)
+                reference = reference_cache[reference_path]
+                prediction = dd_s4.gamma_hk(prediction_path)
+                grouped[key].append(float(np.mean(np.abs(prediction - reference))))
+                if key not in distances:
+                    test_displacement = dd_s5._positions_from_run_fdf(structure_path) - base_positions
+                    distances[key] = min(float(np.linalg.norm(test_displacement - train)) for train in train_displacements)
+            except Exception:
+                continue
+
+    rows = []
+    for (sample_id, amplitude, mode), values in grouped.items():
+        mean = sum(values) / len(values)
+        std = (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+        rows.append({
+            "sample_id": sample_id,
+            "test_amplitude": amplitude,
+            "mode": mode,
+            "nearest_training_distance_ang": distances[(sample_id, amplitude, mode)],
+            "H_MAE_mean": mean,
+            "H_MAE_std": std,
+            "n_seeds": len(values),
+        })
+    rows.sort(key=lambda row: (row["test_amplitude"], row["mode"] or "", row["sample_id"]))
+    return {
+        "available": bool(rows),
+        "design_id": design_id,
+        "N_train": n_train,
+        "family": family,
+        "dim": dim,
+        "k": k,
+        "rows": rows,
+        "note": None if rows else "Prediction files exist, but no matching per-sample matrices could be read.",
+    }
+
+
+def dataset_design_s9_local_error_keys() -> set[tuple[str, int]]:
+    """Existing (design_id, N_train) pairs with readable per-sample predictions."""
+
+    keys: set[tuple[str, int]] = set()
+    seen_runs: set[tuple[Path, str]] = set()
+    for root in (DATASET_DESIGN_S9_S4_ROOT, DATASET_DESIGN_S9_S5_ROOT):
+        for path in (root / "evaluations").glob("*/*/prediction/prediction_manifest.csv"):
+            run_name = path.parents[1].name
+            if (root, run_name) in seen_runs:
+                continue
+            seen_runs.add((root, run_name))
+            match = re.search(r"__n(\d+)__seed", run_name)
+            rows = _dd_s9_read_csv(path)
+            if not match or not rows:
+                continue
+            checkpoint = Path(rows[0].get("model_checkpoint", ""))
+            if len(checkpoint.parents) < 3:
+                continue
+            design_id = re.sub(r"__seed\d+$", "", checkpoint.parents[2].name)
+            keys.add((design_id, int(match.group(1))))
+    return keys
+
+
+def _dd_s9_matches(value: Any, allowed: list[Any] | None) -> bool:
+    if not allowed:
+        return True
+    if isinstance(value, float):
+        return any(abs(value - float(a)) < 1e-9 for a in allowed if a is not None)
+    return value in allowed
+
+
+def dataset_design_s9_apply_filters(rows: list[dict[str, Any]], filters: dict[str, Any]) -> list[dict[str, Any]]:
+    families = filters.get("families") or None
+    dims = filters.get("dims") or None
+    k_values = [int(v) for v in filters.get("k_values") or []] or None
+    domains = [float(v) for v in filters.get("domains") or []] or None
+    densities = [int(v) for v in filters.get("densities") or []] or None
+    seeds = [int(v) for v in filters.get("seeds") or []] or None
+    n_train_values = [int(v) for v in filters.get("n_train_values") or []] or None
+    return [
+        row for row in rows
+        if _dd_s9_matches(row.get("family"), families)
+        and _dd_s9_matches(row.get("dim"), dims)
+        and _dd_s9_matches(row.get("k"), k_values)
+        and _dd_s9_matches(row.get("domain"), domains)
+        and _dd_s9_matches(row.get("density"), densities)
+        and _dd_s9_matches(row.get("seed"), seeds)
+        and _dd_s9_matches(row.get("N_train"), n_train_values)
+    ]
+
+
+def dataset_design_s9_filter_options(rows: list[dict[str, Any]], manifest: dict[str, Any] | None) -> dict[str, Any]:
+    def _sorted_unique(values: Any) -> list[Any]:
+        return sorted({v for v in values if v is not None})
+
+    designs = (manifest or {}).get("designs", [])
+    return {
+        "families": _sorted_unique(row["family"] for row in rows),
+        "dims": _sorted_unique(row["dim"] for row in rows),
+        "k_values": _sorted_unique(row["k"] for row in rows),
+        "domains": _sorted_unique(row["domain"] for row in rows),
+        "densities": _sorted_unique(row["density"] for row in rows),
+        "seeds": _sorted_unique(row["seed"] for row in rows),
+        "n_train_values": _sorted_unique(row["N_train"] for row in rows),
+        "test_amplitudes": _sorted_unique(row["test_amplitude"] for row in rows),
+        "manifest_families": _sorted_unique(entry["family"] for entry in designs),
+        "manifest_dims": _sorted_unique(entry["dim"] for entry in designs),
+    }
+
+
+def dataset_design_s9_pareto_rows(development_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One real point per (design_id, N_train), averaged only over training seeds."""
+
+    groups: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in development_rows:
+        if row["status"] == "ok" and row["H_MAE"] is not None:
+            groups[(row["design_id"], row["N_train"])].append(row)
+
+    out = []
+    for (design_id, n_train), rows in groups.items():
+        first = rows[0]
+        maes = [row["H_MAE"] for row in rows]
+        mean = sum(maes) / len(maes)
+        std = (sum((value - mean) ** 2 for value in maes) / len(maes)) ** 0.5
+        rel_values = [row["rel_Frob"] for row in rows if row.get("rel_Frob") is not None]
+        rel_mean = sum(rel_values) / len(rel_values) if rel_values else None
+        rel_std = (
+            (sum((value - rel_mean) ** 2 for value in rel_values) / len(rel_values)) ** 0.5
+            if rel_values else None
+        )
+        out.append({
+            **first,
+            "design_id": design_id,
+            "N_train": n_train,
+            "H_MAE_mean": mean,
+            "H_MAE_std": std,
+            "rel_Frob_mean": rel_mean,
+            "rel_Frob_std": rel_std,
+            "n_seeds": len(rows),
+            "seeds": sorted(row["seed"] for row in rows),
+        })
+
+    for facet in {(row["dim"], row["k"]) for row in out}:
+        facet_rows = [row for row in out if (row["dim"], row["k"]) == facet]
+        scores = {
+            f"{row['design_id']}@N{row['N_train']}": (row["H_MAE_mean"], row["siesta_cost"] or 0)
+            for row in facet_rows
+        }
+        dominated = dd_s9_s4.flag_pareto_dominated(scores)
+        for row in facet_rows:
+            row["pareto_dominated"] = f"{row['design_id']}@N{row['N_train']}" in dominated
+    out.sort(key=lambda row: (row["siesta_cost"] or 0, row["H_MAE_mean"]))
+    return out
+
+
+def dataset_design_s9_position_diagnostics(manifest: dict[str, Any] | None, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    if not manifest:
+        return []
+    families = filters.get("families") or None
+    dims = filters.get("dims") or None
+    k_values = [int(v) for v in filters.get("k_values") or []] or None
+    domains = [float(v) for v in filters.get("domains") or []] or None
+    densities = [int(v) for v in filters.get("densities") or []] or None
+    out = []
+    for entry in manifest.get("designs", []):
+        if not _dd_s9_valid_design(entry):
+            continue
+        if not _dd_s9_matches(entry["family"], families):
+            continue
+        if not _dd_s9_matches(entry["dim"], dims):
+            continue
+        if not _dd_s9_matches(int(entry["k"]), k_values):
+            continue
+        if not _dd_s9_matches(float(entry["r_train_max_ang"]), domains):
+            continue
+        if not _dd_s9_matches(int(entry["density_level"]), densities):
+            continue
+        out.append({
+            "design_id": entry["design_id"],
+            "family": entry["family"],
+            "dim": entry["dim"],
+            "dim_category": entry["dim"][:2],  # "1D_in"/"1D_z" -> "1D", "2D_in" -> "2D", "3D" -> "3D"
+            "k": entry["k"],
+            "r_train_max_ang": entry["r_train_max_ang"],
+            "density_level": entry["density_level"],
+            "n_used": entry["n_used"],
+            "geometry_hash": entry["geometry_hash"],
+            "envelope_check_passed": entry["envelope_check_passed"],
+            "min_nearest_neighbor_distance_ang": entry["diagnostics"]["min_nearest_neighbor_distance_ang"],
+            "covering_radius_ang": entry["diagnostics"]["covering_radius_ang"],
+            "radial_histogram": entry["diagnostics"]["radial_histogram"],
+            "angular_histogram": entry["diagnostics"]["angular_histogram"],
+        })
+    return out
+
+
+def dataset_design_s9_panels_payload(raw_filters: dict[str, Any]) -> dict[str, Any]:
+    manifest = dataset_design_s9_design_manifest()
+    all_rows = dataset_design_s9_run_metrics_rows()
+    if not all_rows and not manifest:
+        return {
+            "available": False,
+            "note": "No S9-S3/S9-S4/S9-S5 artifacts on disk yet -- run Pilot then Full to populate this tab.",
+        }
+
+    filters = {
+        "families": raw_filters.get("families") or [],
+        "dims": raw_filters.get("dims") or [],
+        "k_values": raw_filters.get("k_values") or [],
+        "domains": raw_filters.get("domains") or [],
+        "densities": raw_filters.get("densities") or [],
+        "seeds": raw_filters.get("seeds") or [],
+        "n_train_values": raw_filters.get("n_train_values") or [],
+    }
+    filtered_rows = dataset_design_s9_apply_filters(all_rows, filters)
+    development_rows = [row for row in filtered_rows if row["test_amplitude"] == DATASET_DESIGN_DEVELOPMENT_SET]
+    generalization_rows = [row for row in filtered_rows if row["test_amplitude"] != DATASET_DESIGN_DEVELOPMENT_SET]
+    pareto_rows = dataset_design_s9_pareto_rows(development_rows)
+    local_error_keys = dataset_design_s9_local_error_keys()
+    for row in pareto_rows:
+        row["local_error_available"] = (row["design_id"], row["N_train"]) in local_error_keys
+
+    return {
+        "available": True,
+        "filters_applied": filters,
+        "filter_options": dataset_design_s9_filter_options(all_rows, manifest),
+        "design_manifest_summary": None if not manifest else {
+            "n_designs": manifest.get("n_designs"),
+            "leakage_free": manifest.get("leakage_free"),
+            "envelope_all_passed": manifest.get("envelope_all_passed"),
+            "n_excluded_invalid": sum(not _dd_s9_valid_design(entry) for entry in manifest.get("designs", [])),
+        },
+        # Panel 1: learning curves (H_MAE vs N_train), development-set rows only.
+        "learning_curves": development_rows,
+        # Panel 2: density curves (H_MAE vs density/resolution at fixed domain) -- same
+        # rows, frontend pivots on 'density' at a user-fixed 'domain'.
+        "density_curves": development_rows,
+        # Panel 3: domain-generalization heatmap (R_train_max vs test_amplitude, OOD-shaded).
+        "domain_heatmap": dataset_design_s9_apply_filters(dataset_design_s9_domain_generalization_rows(), filters),
+        # Panel 4: Pareto (H_MAE vs unique SIESTA cost), traceable points.
+        "pareto": pareto_rows,
+        # Panel 5: matched sampler comparison -- raw rows, frontend groups by (N_train, domain, dim, k).
+        "matched_comparison": development_rows,
+        # Panel 6: position diagnostics (radial/angular coverage, nearest-neighbor, covering radius).
+        "position_diagnostics": dataset_design_s9_position_diagnostics(manifest, filters),
+        "physical_probe": dataset_design_s9_physical_probe_rows(),
+        "ablation": {
+            "available": DATASET_DESIGN_S9_ABLATION_REPORT.exists(),
+            "report": (
+                json.loads(DATASET_DESIGN_S9_ABLATION_REPORT.read_text(encoding="utf-8"))
+                if DATASET_DESIGN_S9_ABLATION_REPORT.exists() else None
+            ),
+            "note": (
+                None if DATASET_DESIGN_S9_ABLATION_REPORT.exists()
+                else "Data not available yet: BASE/SPARSE/DENSE has not been trained."
+            ),
+        },
+        "local_error": {
+            "available": any(row["local_error_available"] for row in pareto_rows),
+            "note": "Choose a trained (design_id, N_train) to read its existing per-sample predictions.",
+        },
+        # Generalization rows (test_amplitude != development_set) kept available for drill-down.
+        "generalization_rows": generalization_rows,
+    }
+
+
+def dataset_design_s9_precision_selector_payload(threshold_h_mae: float, raw_filters: dict[str, Any]) -> dict[str, Any]:
+    """Cheapest (design_id, N_train) whose mean development-set H_MAE across its
+    trained seeds meets ``threshold_h_mae``, with the seed-to-seed spread as its
+    uncertainty. Real trained rows only; returns status='not_reached' (not a
+    guess) when nothing in the filtered set qualifies."""
+
+    filters = {
+        "families": raw_filters.get("families") or [],
+        "dims": raw_filters.get("dims") or [],
+        "k_values": raw_filters.get("k_values") or [],
+        "domains": raw_filters.get("domains") or [],
+        "densities": raw_filters.get("densities") or [],
+        "n_train_values": raw_filters.get("n_train_values") or [],
+    }
+    all_rows = dataset_design_s9_run_metrics_rows()
+    development_rows = dataset_design_s9_apply_filters(
+        [row for row in all_rows if row["test_amplitude"] == DATASET_DESIGN_DEVELOPMENT_SET and row["status"] == "ok"
+         and row["H_MAE"] is not None],
+        filters,
+    )
+
+    groups: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for row in development_rows:
+        groups[(row["design_id"], row["N_train"])].append(row)
+
+    candidates = []
+    for (design_id, n_train), group_rows in groups.items():
+        maes = [row["H_MAE"] for row in group_rows]
+        mean_mae = sum(maes) / len(maes)
+        std_mae = (sum((m - mean_mae) ** 2 for m in maes) / len(maes)) ** 0.5 if len(maes) > 1 else 0.0
+        first = group_rows[0]
+        candidates.append({
+            "design_id": design_id,
+            "family": first["family"],
+            "dim": first["dim"],
+            "k": first["k"],
+            "domain": first["domain"],
+            "density": first["density"],
+            "N_train": n_train,
+            "siesta_cost": first["siesta_cost"],
+            "n_used": first.get("n_used"),
+            "n_seeds": len(group_rows),
+            "seeds": sorted(row["seed"] for row in group_rows),
+            "H_MAE_mean": mean_mae,
+            "H_MAE_std": std_mae,
+            "reaches_threshold": mean_mae <= threshold_h_mae,
+        })
+    candidates.sort(key=lambda c: (c["siesta_cost"] if c["siesta_cost"] is not None else 0, c["H_MAE_mean"]))
+
+    reaching = [c for c in candidates if c["reaches_threshold"]]
+    best = reaching[0] if reaching else None
+    return {
+        "threshold_h_mae": threshold_h_mae,
+        "status": "reached" if best is not None else "not_reached",
+        "design": best,
+        "uncertainty": None if best is None else {"std_h_mae": best["H_MAE_std"], "n_seeds": best["n_seeds"]},
+        "ranked_candidates": candidates[:50],
+        "note": None if best is not None else (
+            "No trained (design, N_train) in the current filter meets this threshold on the development set."
+            if candidates else "No trained rows match the current filters."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------
+# Dataset Design S9-S6: Pilot/Full command builders -- pure functions (no
+# subprocess) so they're directly testable, and the single place that turns
+# UI filter selections into the S9-S4/S9-S5 CLI flags those scripts already
+# expose (families/dims/k/r_train_max/density for S9-S4; +n_levels/seeds,
+# already present, for S9-S5).
+# --------------------------------------------------------------------------
+
+
+def dataset_design_s9_pilot_command(params: dict[str, Any], *, python: Path) -> list[str]:
+    command = [str(python), str(DATASET_DESIGN_SCRIPTS_DIR / "dataset_design_w90_001_s9_s4_pilot_screening.py")]
+    if params.get("samplers"):
+        command += ["--families", ",".join(str(v) for v in params["samplers"])]
+    if params.get("dimensionalities"):
+        command += ["--dims", ",".join(str(v) for v in params["dimensionalities"])]
+    if params.get("k") is not None:
+        command += ["--k-values", str(params["k"])]
+    if params.get("domains"):
+        command += ["--r-train-max", ",".join(str(v) for v in params["domains"])]
+    if params.get("densities"):
+        command += ["--density-levels", ",".join(str(v) for v in params["densities"])]
+    if params.get("seeds"):
+        command += ["--seeds", ",".join(str(v) for v in params["seeds"])]
+    max_samples = params.get("max_samples")
+    if max_samples:
+        command += ["--max-designs", str(int(max_samples))]
+    return command
+
+
+def dataset_design_s9_full_command(params: dict[str, Any], *, python: Path) -> list[str]:
+    command = [str(python), str(DATASET_DESIGN_SCRIPTS_DIR / "dataset_design_w90_001_s9_s5_pareto_training.py")]
+    if params.get("samplers"):
+        command += ["--families", ",".join(str(v) for v in params["samplers"])]
+    if params.get("dimensionalities"):
+        command += ["--dims", ",".join(str(v) for v in params["dimensionalities"])]
+    if params.get("k") is not None:
+        command += ["--k-values", str(params["k"])]
+    if params.get("domains"):
+        command += ["--r-train-max", ",".join(str(v) for v in params["domains"])]
+    if params.get("n_train_values"):
+        # dataset_design_w90_001_s9_s5's --n-levels/--seeds are argparse nargs="+"
+        # (space-separated), unlike S9-S4's comma-separated --families/--dims/etc.
+        command += ["--n-levels", *[str(v) for v in params["n_train_values"]]]
+    if params.get("seeds"):
+        command += ["--seeds", *[str(v) for v in params["seeds"]]]
+    max_samples = params.get("max_samples")
+    if max_samples:
+        command += ["--max-designs", str(int(max_samples))]
+    return command
+
+
+class DatasetDesignRunner:
+    """Launches the S9-S4 (pilot)/S9-S5 (full) CLI scripts as one background job.
+
+    DATASET-DESIGN-W90-001-S9-S6: Pilot = dataset_design_w90_001_s9_s4_pilot_screening.py
+    (N in {8,16,32,64}, real-SIESTA-backed manifest cells only); Full =
+    dataset_design_w90_001_s9_s5_pareto_training.py (N in {128,256} by default, or the
+    UI's n_train_values). Both scripts already expose --families/--dims/--k-values/
+    --r-train-max(/--density-levels for pilot)/--seeds CLI flags; dataset_design_s9_pilot_command
+    / dataset_design_s9_full_command turn the UI's selected params into those flags so
+    Pilot/Full respect the same sampler/dim/k/domain/density/N/seed selection the
+    estimator and Smoke mode already did.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._process: subprocess.Popen[str] | None = None
+        self._logs: list[str] = []
+        self._started_at: float | None = None
+        self._finished_at: float | None = None
+        self._returncode: int | None = None
+        self._command: list[str] | None = None
+        self._mode: str | None = None
+
+    def start(self, *, mode: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if mode not in ("pilot", "full"):
+            raise RuntimeError(f"unsupported Dataset Design run mode {mode!r}; expected 'pilot' or 'full'")
+        python = DEFAULT_VENV_PYTHON if DEFAULT_VENV_PYTHON.exists() else Path(sys.executable)
+        params = params or {}
+        args = (
+            dataset_design_s9_pilot_command(params, python=python) if mode == "pilot"
+            else dataset_design_s9_full_command(params, python=python)
+        )
+        shell_command = shlex.join(args)
+
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise RuntimeError("Dataset Design run already in progress.")
+            self._mode = mode
+            self._command = ["bash", "-lc", shell_command]
+            self._logs = [f"[UI] Dataset Design ({mode}): {shell_command}\n"]
+            self._started_at = time.time()
+            self._finished_at = None
+            self._returncode = None
+            self._process = subprocess.Popen(
+                self._command,
+                cwd=REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+            process = self._process
+            self._logs.append(f"[UI] PID: {process.pid}\n")
+        threading.Thread(target=self._collect_output, args=(process,), daemon=True).start()
+        return self.status()
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            process = self._process
+            if process is None or process.poll() is not None:
+                return self.status()
+            process.terminate()
+            self._logs.append("\n[UI] Stop requested.\n")
+        return self.status()
+
+    def _collect_output(self, process: subprocess.Popen[str]) -> None:
+        returncode = stream_process_output(process, lambda line: self._append_log(line), label="DatasetDesign")
+        with self._lock:
+            self._returncode = returncode
+            self._finished_at = time.time()
+            if self._process is process:
+                self._process = None
+            elapsed = self._finished_at - (self._started_at or self._finished_at)
+            self._logs.append(
+                f"\n[UI] Dataset Design ({self._mode}) finished with code {returncode} "
+                f"in {format_duration(elapsed)}.\n"
+            )
+
+    def _append_log(self, line: str) -> None:
+        with self._lock:
+            self._logs.append(line)
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            running = self._process is not None and self._process.poll() is None
+            return {
+                "running": running,
+                "mode": self._mode,
+                "returncode": None if running else self._returncode,
+                "started_at": self._started_at,
+                "finished_at": self._finished_at,
+                "command": self._command,
+                "elapsed_seconds": None
+                if self._started_at is None
+                else (time.time() if running else self._finished_at or time.time()) - self._started_at,
+                "log_size": len(self._logs),
+            }
+
+    def logs(self, since: int = 0, limit: int | None = DEFAULT_LOG_RESPONSE_LIMIT) -> dict[str, Any]:
+        with self._lock:
+            payload = bounded_log_payload(self._logs, since=since, limit=limit)
+            payload["status"] = self.status()
+            return payload
+
+
+DATASET_DESIGN_RUNNER = DatasetDesignRunner()
 
 
 EPC_RESULTS_ROOT = RESULTS_ROOT / "epc"
@@ -19112,6 +20240,48 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
                 json_response(self, epc_matbg_payload())
             elif path == "/api/epc/integrated-observables":
                 json_response(self, epc_integrated_observables_payload())
+            elif path == "/api/dataset-design/options":
+                json_response(self, dataset_design_options_payload())
+            elif path == "/api/dataset-design/s9-panels":
+                query = parse_qs(parsed_url.query)
+                filters = {
+                    "families": query.get("family", []),
+                    "dims": query.get("dim", []),
+                    "k_values": query.get("k", []),
+                    "domains": query.get("domain", []),
+                    "densities": query.get("density", []),
+                    "seeds": query.get("seed", []),
+                    "n_train_values": query.get("n_train", []),
+                }
+                json_response(self, dataset_design_s9_panels_payload(filters))
+            elif path == "/api/dataset-design/local-error":
+                query = parse_qs(parsed_url.query)
+                design_id = str((query.get("design_id") or [""])[0]).strip()
+                if not design_id:
+                    raise RuntimeError("design_id is required")
+                n_train = parse_query_int(query, "n_train", 0, minimum=1)
+                json_response(self, dataset_design_s9_local_error_payload(design_id, n_train))
+            elif path == "/api/dataset-design/results":
+                json_response(self, dataset_design_results_payload())
+            elif path == "/api/dataset-design/s9-campaigns":
+                json_response(self, dataset_design_s9_campaign_payload())
+            elif path == "/api/dataset-design/md-similarity":
+                json_response(self, dataset_design_md_similarity_payload())
+            elif path == "/api/dataset-design/status":
+                json_response(self, DATASET_DESIGN_RUNNER.status())
+            elif path == "/api/dataset-design/logs":
+                query = parse_qs(parsed_url.query)
+                since = int(query.get("since", ["0"])[0])
+                limit = parse_query_int(
+                    query, "limit", DEFAULT_LOG_RESPONSE_LIMIT, minimum=1, maximum=MAX_LOG_RESPONSE_LIMIT,
+                )
+                json_response(self, DATASET_DESIGN_RUNNER.logs(since=since, limit=limit))
+            elif path == "/api/dataset-design/figure":
+                query = parse_qs(parsed_url.query)
+                name = str((query.get("name") or [""])[0] or "").strip()
+                if not name or "/" in name or "\\" in name:
+                    raise RuntimeError("name is required and must be a bare filename.")
+                self._serve_file(DATASET_DESIGN_S7_FIGURES / name, content_type="image/png")
             elif path == "/api/mixing-e2e/status":
                 json_response(self, MIXING_E2E_RUNNER.status())
             elif path == "/api/mixing-e2e/logs":
@@ -19276,6 +20446,30 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
             elif path == "/api/mixing/launch":
                 payload = read_json_body(self)
                 json_response(self, MIXING_SWEEP_RUNNER.start(payload), status=HTTPStatus.ACCEPTED)
+            elif path == "/api/dataset-design/estimate":
+                payload = read_json_body(self)
+                json_response(self, dataset_design_estimate_payload(payload))
+            elif path == "/api/dataset-design/precision-selector":
+                payload = read_json_body(self)
+                threshold = float(payload.get("threshold_h_mae"))
+                json_response(self, dataset_design_s9_precision_selector_payload(threshold, payload.get("filters") or {}))
+            elif path == "/api/dataset-design/run":
+                payload = read_json_body(self)
+                mode = str(payload.get("mode") or "smoke")
+                if mode == "smoke":
+                    json_response(self, dataset_design_run_smoke_payload(payload))
+                elif mode == "reuse_existing":
+                    json_response(self, dataset_design_results_payload())
+                elif mode in ("pilot", "full"):
+                    json_response(
+                        self,
+                        DATASET_DESIGN_RUNNER.start(mode=mode, params=payload),
+                        status=HTTPStatus.ACCEPTED,
+                    )
+                else:
+                    raise RuntimeError(f"unknown Dataset Design mode {mode!r}")
+            elif path == "/api/dataset-design/stop":
+                json_response(self, DATASET_DESIGN_RUNNER.stop(), status=HTTPStatus.ACCEPTED)
             elif path == "/api/cross-testing/plan":
                 payload = read_json_body(self)
                 json_response(self, cross_testing_plan_payload(payload))
@@ -19646,7 +20840,7 @@ class ComparisonUIHandler(BaseHTTPRequestHandler):
         body = path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
-        if path.suffix in {".html", ".css", ".js"}:
+        if path.suffix in {".html", ".css", ".js", ".png"}:
             self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

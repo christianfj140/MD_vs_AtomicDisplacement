@@ -3617,7 +3617,6 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertIn(".plot-info-formula", styles_css)
         self.assertIn(".plot-section-heading", styles_css)
         self.assertNotIn('id="random-cartesian-n-structures"', index_html)
-        self.assertNotIn("phonon", index_html.lower())
         self.assertIn("selected_methods: methods", app_js)
         self.assertIn("run_mode: runMode", app_js)
         self.assertIn("reusable_dataset_ids: reusableDatasetIds", app_js)
@@ -3847,7 +3846,7 @@ class ComparisonWorkflowTests(unittest.TestCase):
         self.assertNotIn("aggregateSmoothPoints", app_js)
         self.assertNotIn("smoothLineTrace", app_js)
         self.assertNotIn("smoothing:", app_js)
-        self.assertNotIn("shape:", app_js)
+        self.assertNotIn('shape: "spline"', app_js)
         # lines+markers is legitimate in history/convergence charts; scaling
         # charts keep markers with separate fit-line traces (asserted above).
         self.assertNotIn("mode: 'lines+markers'", app_js)

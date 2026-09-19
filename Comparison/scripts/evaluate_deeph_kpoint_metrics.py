@@ -294,7 +294,7 @@ def evaluate_sample(args: argparse.Namespace, sample, rows: dict[str, list[dict[
             "n_orbitals": per_k_matrix[0]["n_orbitals"],
             "n_entries": per_k_matrix[0]["n_entries"],
             "h_mae_eV": weighted_metric_mean(per_k_matrix, "h_mae_eV"),
-            "h_rmse_eV": weighted_metric_mean(per_k_matrix, "h_rmse_eV"),
+            "h_rmse_eV": weighted_metric_rmse(per_k_matrix, "h_rmse_eV"),
             "relative_frobenius": weighted_metric_mean(per_k_matrix, "relative_frobenius"),
             "hermiticity_ref": weighted_metric_mean(per_k_matrix, "hermiticity_ref"),
             "hermiticity_pred": weighted_metric_mean(per_k_matrix, "hermiticity_pred"),

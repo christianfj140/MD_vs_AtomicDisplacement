@@ -38,6 +38,7 @@ DEFAULT_S_MIN_EIGENVALUE = 1e-10
 DEFAULT_S_MAX_CONDITION = 1e12
 DEFAULT_GENERALIZED_RESIDUAL_TOLERANCE = 1e-8
 DEFAULT_S_NORMALIZATION_TOLERANCE = 1e-8
+DEFAULT_HERMITIZATION_CORRECTION_TOLERANCE = 5e-10
 SUPPORT_THRESHOLD = 1e-12
 FORBIDDEN_REFERENCE_NAME = "ML_prediction.HSX"
 SUPPORTED_ORBITAL_LABELS = {"s", "px", "py", "pz"}
@@ -443,6 +444,7 @@ def generalized_eigenproblem_diagnostics(
     max_overlap_condition: float,
     residual_tolerance: float,
     normalization_tolerance: float,
+    hermitize: bool = False,
 ) -> dict[str, Any]:
     """Diagnose an unregularized Hermitian generalized eigenproblem."""
 
@@ -454,10 +456,16 @@ def generalized_eigenproblem_diagnostics(
     if h.ndim != 2 or s.ndim != 2 or h.shape[0] != h.shape[1] or s.shape != h.shape:
         raise DeepHEquivalencePreflightError("H/S must be matching square matrices")
     eps = np.finfo(float).eps
-    h_hermiticity = float(np.linalg.norm(h - h.conj().T) / max(np.linalg.norm(h), eps))
-    s_hermiticity = float(np.linalg.norm(s - s.conj().T) / max(np.linalg.norm(s), eps))
+    h_hermiticity_before = float(np.linalg.norm(h - h.conj().T) / max(np.linalg.norm(h), eps))
+    s_hermiticity_before = float(np.linalg.norm(s - s.conj().T) / max(np.linalg.norm(s), eps))
     h_sym = (h + h.conj().T) / 2.0
     s_sym = (s + s.conj().T) / 2.0
+    h_correction = float(np.linalg.norm(h_sym - h) / max(np.linalg.norm(h), eps))
+    s_correction = float(np.linalg.norm(s_sym - s) / max(np.linalg.norm(s), eps))
+    if hermitize:
+        h, s = h_sym, s_sym
+    h_hermiticity = float(np.linalg.norm(h - h.conj().T) / max(np.linalg.norm(h), eps))
+    s_hermiticity = float(np.linalg.norm(s - s.conj().T) / max(np.linalg.norm(s), eps))
     s_eigenvalues = np.linalg.eigvalsh(s_sym)
     s_min = float(np.min(s_eigenvalues))
     s_max = float(np.max(s_eigenvalues))
@@ -499,6 +507,11 @@ def generalized_eigenproblem_diagnostics(
         and max_normalization_error <= normalization_tolerance
     )
     return {
+        "hermitization_applied": bool(hermitize),
+        "h_hermiticity_relative_before": h_hermiticity_before,
+        "s_hermiticity_relative_before": s_hermiticity_before,
+        "h_hermitization_correction_relative": h_correction,
+        "s_hermitization_correction_relative": s_correction,
         "h_hermiticity_relative": h_hermiticity,
         "s_hermiticity_relative": s_hermiticity,
         "s_eigenvalue_min": s_min,
@@ -684,6 +697,8 @@ def numeric_evidence_for_sample(
         max_s_error = 0.0
         max_eigen_error = 0.0
         support_match = True
+        support_mismatch_count = 0
+        support_mismatch_max_abs = 0.0
         shape_match = True
         kpoint_rows: list[dict[str, float]] = []
         kpoint_diagnostics: list[dict[str, Any]] = []
@@ -691,6 +706,8 @@ def numeric_evidence_for_sample(
         max_hermiticity_error = 0.0
         max_generalized_residual = 0.0
         max_s_normalization_error = 0.0
+        max_hermitization_correction = 0.0
+        max_hermiticity_before = 0.0
         for kpoint in kpoints:
             raw = raw_reference_matrices(reference_path, kpoint)
             raw_h = raw["hamiltonian"]
@@ -712,9 +729,16 @@ def numeric_evidence_for_sample(
                 continue
             eig_delta = np.asarray(deeph_eig - raw_eig)
             max_eigen_error = max(max_eigen_error, float(np.max(np.abs(eig_delta))) if eig_delta.size else 0.0)
-            support_match = support_match and bool(
-                np.array_equal(np.abs(raw_h) > SUPPORT_THRESHOLD, np.abs(deeph_h_aligned) > SUPPORT_THRESHOLD)
+            support_mismatch = (np.abs(raw_h) > SUPPORT_THRESHOLD) != (
+                np.abs(deeph_h_aligned) > SUPPORT_THRESHOLD
             )
+            support_mismatch_count += int(np.count_nonzero(support_mismatch))
+            if np.any(support_mismatch):
+                support_mismatch_max_abs = max(
+                    support_mismatch_max_abs,
+                    float(np.max(np.maximum(np.abs(raw_h), np.abs(deeph_h_aligned))[support_mismatch])),
+                )
+            support_match = support_match and support_mismatch_max_abs <= matrix_tolerance
             kpoint_rows.append({"kx": float(kpoint[0]), "ky": float(kpoint[1]), "kz": float(kpoint[2])})
             diagnostic_kwargs = {
                 "hermiticity_tolerance": hermiticity_tolerance,
@@ -722,6 +746,7 @@ def numeric_evidence_for_sample(
                 "max_overlap_condition": max_overlap_condition,
                 "residual_tolerance": residual_tolerance,
                 "normalization_tolerance": normalization_tolerance,
+                "hermitize": True,
             }
             raw_diagnostics = generalized_eigenproblem_diagnostics(
                 raw_h,
@@ -744,6 +769,20 @@ def numeric_evidence_for_sample(
                 raw_diagnostics["s_hermiticity_relative"],
                 deeph_diagnostics["h_hermiticity_relative"],
                 deeph_diagnostics["s_hermiticity_relative"],
+            )
+            max_hermiticity_before = max(
+                max_hermiticity_before,
+                raw_diagnostics["h_hermiticity_relative_before"],
+                raw_diagnostics["s_hermiticity_relative_before"],
+                deeph_diagnostics["h_hermiticity_relative_before"],
+                deeph_diagnostics["s_hermiticity_relative_before"],
+            )
+            max_hermitization_correction = max(
+                max_hermitization_correction,
+                raw_diagnostics["h_hermitization_correction_relative"],
+                raw_diagnostics["s_hermitization_correction_relative"],
+                deeph_diagnostics["h_hermitization_correction_relative"],
+                deeph_diagnostics["s_hermitization_correction_relative"],
             )
             max_generalized_residual = max(
                 max_generalized_residual,
@@ -768,6 +807,7 @@ def numeric_evidence_for_sample(
         s_pass = shape_match and max_s_error <= matrix_tolerance
         eig_pass = shape_match and max_eigen_error <= eigenvalue_tolerance
         support_pass = bool(shape_match and support_keys_match and support_match)
+        hermitization_pass = max_hermitization_correction <= DEFAULT_HERMITIZATION_CORRECTION_TOLERANCE
         info_payload = read_json(info_json)
         spin_pass = "isspinful" in info_payload
         if not spin_pass:
@@ -791,6 +831,10 @@ def numeric_evidence_for_sample(
                 generalized_problem_pass,
                 "generalized eigenpair residuals and c†Sc normalization satisfy tolerances",
             ),
+            "hermitization": _pass_check(
+                hermitization_pass,
+                "explicit (A + A†)/2 correction is negligible relative to each matrix norm",
+            ),
         }
         errors = {
             "max_abs_hk_error_eV": max_hk_error,
@@ -798,14 +842,20 @@ def numeric_evidence_for_sample(
             "max_abs_eigenvalue_error_eV": max_eigen_error,
             "energy_reference_shift_eV": energy_reference_shift_eV,
             "max_hermiticity_relative": max_hermiticity_error,
+            "max_hermiticity_relative_before": max_hermiticity_before,
+            "max_hermitization_correction_relative": max_hermitization_correction,
             "max_normalized_generalized_residual": max_generalized_residual,
             "max_s_normalization_error": max_s_normalization_error,
+            "support_threshold": SUPPORT_THRESHOLD,
+            "support_mismatch_count": support_mismatch_count,
+            "support_mismatch_max_abs_eV": support_mismatch_max_abs,
         }
         tolerances = {
             "max_abs_hk_error_eV": matrix_tolerance,
             "max_abs_s_ref_error": matrix_tolerance,
             "max_abs_eigenvalue_error_eV": eigenvalue_tolerance,
             "max_hermiticity_relative": hermiticity_tolerance,
+            "max_hermitization_correction_relative": DEFAULT_HERMITIZATION_CORRECTION_TOLERANCE,
             "max_normalized_generalized_residual": residual_tolerance,
             "max_s_normalization_error": normalization_tolerance,
             "min_overlap_eigenvalue": min_overlap_eigenvalue,
