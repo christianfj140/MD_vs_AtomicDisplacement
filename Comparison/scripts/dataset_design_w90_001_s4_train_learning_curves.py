@@ -391,10 +391,17 @@ def build_graph2mat_config(
         # Matches Comparison/results/ml_vs_siesta_cross_structure_sweep/*/graph2mat/
         # pipeline_config.yaml's callbacks verbatim (monitor=val_loss, mode=min,
         # min_delta=0.0, strict=true) so max_epochs acts as a cap, not a fixed budget.
+        # ModelCheckpoint keeps only the best-val_loss checkpoint: without it
+        # Lightning's default callback saves the *last* epoch, i.e. best+patience
+        # epochs, whose val_loss was measured 23-44% worse on the S9 campaigns.
         trainer["callbacks"] = [
             {"class_path": "EarlyStopping", "init_args": {
                 "monitor": "val_loss", "mode": "min", "patience": int(early_stopping_patience),
                 "min_delta": 0.0, "strict": True,
+            }},
+            {"class_path": "ModelCheckpoint", "init_args": {
+                "monitor": "val_loss", "mode": "min", "save_top_k": 1,
+                "filename": "best-epoch{epoch}-step{step}",
             }},
         ]
     trainer["logger"] = {
@@ -457,7 +464,10 @@ TORCH_COMPAT_DIR = REPO_ROOT / "scripts" / "torch_serialization_compat"
 
 
 def run_graph2mat_training(config_path: Path, run_dir: Path) -> Path:
-    """Invoke the real ``graph2mat`` CLI trainer; return the newest checkpoint written.
+    """Invoke the real ``graph2mat`` CLI trainer; return the best-val_loss checkpoint.
+
+    ``best-*.ckpt`` (ModelCheckpoint, only written when early stopping is
+    configured) wins; otherwise the newest checkpoint written.
 
     The bare ``graph2mat`` CLI is a separate process, so the e3nn/PyTorch
     checkpoint-loading safe-globals fix (S1 §4 --
@@ -483,7 +493,8 @@ def run_graph2mat_training(config_path: Path, run_dir: Path) -> Path:
         )
     if completed.returncode != 0:
         raise RuntimeError(f"graph2mat training failed (rc={completed.returncode}); see {log_path}")
-    checkpoints = sorted(run_dir.rglob("*.ckpt"), key=lambda p: p.stat().st_mtime)
+    checkpoints = sorted(run_dir.rglob("best-*.ckpt"), key=lambda p: p.stat().st_mtime)
+    checkpoints = checkpoints or sorted(run_dir.rglob("*.ckpt"), key=lambda p: p.stat().st_mtime)
     if not checkpoints:
         raise RuntimeError(f"graph2mat training produced no checkpoint under {run_dir}")
     return checkpoints[-1]
