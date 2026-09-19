@@ -237,3 +237,40 @@ Se detiene la campaña (sin métodos nuevos) si ocurre cualquiera: N=32 dentro d
 semillas; Sobol y random indistinguibles; un único diseño domina la frontera;
 el error restante parece arquitectónico. Mezcla diseñado+MD, FPS, committee,
 fonones y active learning quedan fuera de esta campaña.
+
+## Desviaciones
+
+- **2026-09-19 (§3, al construir el desarrollo; antes de cualquier selección o entrenamiento).** En los 6 estratos nuevos
+  de `common_dev_6x6_v1`, LHS sortea una amplitud por estructura, así que la
+  «primera estructura» a R=0.12 cayó en 0.059 Å (fuera del estrato). Se aplica
+  la misma regla que a las candidatas existentes: el menor índice (de las 8 de
+  semilla 999) cuya amplitud real cae en el estrato, calculado desde la
+  configuración antes de lanzar SIESTA. Afecta a una estructura
+  (`cdev6x6__latin_hypercube__3D__R0.12__seed999__004`).
+
+- **2026-09-19 (§9, al construir la partición MD; antes de cualquier
+  entrenamiento MD).** La «semilla» de los bloques MD no cambia las velocidades
+  iniciales de SIESTA (`MD.InitialTemperature`): los 410 bloques de
+  `Comparison/datasets/graphene_w90_*` son copias de solo 6 trayectorias
+  deterministas (una por T; 134–138 copias idénticas a 150/300/450 K,
+  verificado por hash de geometría en t = 6, 50, 150 y 199 fs). «Un frame por
+  trayectoria» ya no garantiza independencia, así que se aplica la regla del
+  propio plan (8.2): **bloques temporales dentro de cada trayectoria**.
+  Trayectorias: 150 K (300 fs), 300 K (900 fs), 450 K (300 fs); frames con
+  paso de 6 fs (cruce por cero de la autocorrelación) desde t = 6 fs. Por
+  trayectoria: bloque inicial → entrenamiento, después validación (8 frames) y
+  al final test (5/6/5), con un paso de hueco entre bloques. Pool de
+  entrenamiento: round-robin 150→300→450 K en orden temporal, de modo que el
+  prefijo N equivale a correr cada trayectoria hasta su último frame usado
+  (coste = t_max + 1 pasos por trayectoria). Rangos: train t ≤ 132 fs,
+  validación 216–258 fs (810–852 a 300 K), test 270–294 fs (864–894 a 300 K).
+  Todos los frames MD tienen amplitud real ≤ 0.025 Å, por debajo del dominio
+  diseñado más pequeño (0.03 Å).
+
+- **2026-09-19 (§8, al bloquear los finalistas de `w90`; antes de cualquier
+  entrenamiento de confirmación).** La primera implementación de «el siguiente
+  punto de la frontera de Pareto de otra receta» tomaba el punto *más barato*
+  de la frontera (N=4, 94.6 meV), que no es el siguiente sino el extremo
+  opuesto. Se corrige a lo que dice el texto: el vecino inmediato por debajo
+  del finalista de precisión en coste (en `w90`: random 3D, N=8, 76.1 meV).
+  `finalists.json` de `w90` se regeneró con la regla corregida.

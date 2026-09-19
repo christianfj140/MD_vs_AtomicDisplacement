@@ -563,11 +563,22 @@ def gamma_hk(matrix_path: Path) -> Any:
     return np.asarray(hamiltonian.Hk(k=[0.0, 0.0, 0.0], format="array"))
 
 
-def gamma_eigenvalues(matrix_path: Path) -> Any:
+def gamma_eigenvalues(matrix_path: Path, overlap_path: Path | None = None) -> Any:
+    """Gamma eigenvalues; ``overlap_path`` supplies S when ``matrix_path`` lacks the real one.
+
+    Graph2Mat's h_only predictions are written with S = identity, so their
+    eigenvalues must be solved against the reference (DFT) overlap -- S is
+    fixed by geometry + basis, never predicted.
+    """
+
+    import scipy.linalg
     import sisl
 
     hamiltonian = sisl.get_sile(str(matrix_path)).read_hamiltonian()
-    return hamiltonian.eigh(k=[0.0, 0.0, 0.0])
+    if overlap_path is None:
+        return hamiltonian.eigh(k=[0.0, 0.0, 0.0])
+    overlap = sisl.get_sile(str(overlap_path)).read_hamiltonian().Sk(k=[0.0, 0.0, 0.0], format="array")
+    return scipy.linalg.eigh(hamiltonian.Hk(k=[0.0, 0.0, 0.0], format="array"), overlap, eigvals_only=True)
 
 
 def fermi_level_ev(matrix_path: Path) -> float:
@@ -605,7 +616,7 @@ def compute_validation_metrics(
         rel_frob.append(float(np.linalg.norm(error) / ref_norm) if ref_norm else float("nan"))
         hermiticity.append(float(np.max(np.abs(h_pred - h_pred.conj().T))))
 
-        eig_pred = gamma_eigenvalues(predicted_path)
+        eig_pred = gamma_eigenvalues(predicted_path, sample.reference_matrix)
         eig_ref = gamma_eigenvalues(sample.reference_matrix)
         # Reference E_F: predicted matrices are ML output, not SIESTA state,
         # so they carry no independent Fermi level to read.

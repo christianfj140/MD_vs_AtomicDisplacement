@@ -64,6 +64,17 @@ def test_finalists_precision_efficient_alternative():
     assert finalists[2]["N_star_candidate"] == 64  # r1: E(32)=60 > 1.05*55
 
 
+def test_efficient_falls_back_to_next_pareto_point():
+    curves = {
+        "r1": _recipe("r1", "random_cartesian", "1D_in", 0.08, {4: 130, 8: 97, 16: 115, 32: 79, 64: 61}),
+        "s1": _recipe("s1", "sobol_sparse", "2D_in", 0.08, {4: 94, 8: 82, 16: 85, 32: 132, 64: 80}),
+        "r2": _recipe("r2", "random_cartesian", "3D", 0.08, {4: 95, 8: 76, 16: 94, 32: 92, 64: 70}),
+    }
+    efficient = c.choose_finalists(curves, None)[1]
+    # nothing within 5% of 61 -> the frontier neighbour below r1@64, not the cheapest point s1@4
+    assert (efficient["recipe_id"], efficient["N_star_candidate"]) == ("r2", 8)
+
+
 def test_confirmation_rules():
     ok = c.confirm_n_star([51.0, 52.0, 50.5], [50.0, 50.5, 49.8], True)
     assert ok["confirmed"]
