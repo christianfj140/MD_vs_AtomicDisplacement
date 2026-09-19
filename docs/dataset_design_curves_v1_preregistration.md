@@ -279,3 +279,12 @@ fonones y active learning quedan fuera de esta campaña.
   del finalista de precisión es 64, así que «N* del mejor diseñado y 64» dejaría
   un solo tamaño. Se usa como segundo tamaño el N* confirmado del finalista
   eficiente (mismo presupuesto del plan: 2 tamaños × 3 semillas).
+
+- **2026-09-19 (§11, después de abrir el test de `w90`).** Se añade un segundo
+  intervalo a las diferencias emparejadas: bootstrap que remuestrea también las
+  3 semillas de cada brazo, además de las estructuras. El intervalo
+  pre-registrado (solo estructuras, errores promediados sobre semillas) se sigue
+  reportando sin cambios. El nuevo es más conservador y se añadió porque la sd
+  entre semillas (~20 meV en `w90`) es del mismo orden que las diferencias; no
+  cambia ninguna regla de selección y ninguna conclusión se apoya en él para
+  ser más favorable.
