@@ -196,7 +196,7 @@ def structure_metrics(sample: s4.Sample, predicted_root: Path, *, window_ev: flo
     ref_norm = float(np.linalg.norm(h_ref))
     eig_pred = s4.gamma_eigenvalues(predicted, sample.reference_matrix)
     eig_ref = s4.gamma_eigenvalues(sample.reference_matrix)
-    mask = np.abs(eig_ref - s4.fermi_level_ev(sample.reference_matrix)) <= window_ev
+    mask = np.abs(eig_ref) <= window_ev  # sisl-read H is H - E_F*S: E_F is the energy zero
     return {
         "sample_id": sample.sample_id,
         "H_MAE_meV": 1e3 * float(np.mean(np.abs(error))),
@@ -880,31 +880,38 @@ def run_job(job: dict[str, Any], accelerator: str, concurrency: int) -> dict[str
 
 
 def cmd_rescore_val(args: argparse.Namespace) -> int:
-    """Fix the Gamma spectral column of results scored before predictions used the reference S.
+    """Recompute the spectral columns of every validation evaluation (spectral_v2).
 
-    Only ``spectral_err_meV`` is replaced; H-MAE and the other H metrics (the
-    decision inputs) are left exactly as first computed.
+    v2 = eigenvalues of the predicted H against the reference S, window centred
+    at E_F (= 0 for sisl-read H), plus k-path bands and DOS for the Phase 10.4
+    H-MAE <-> spectra relation. H-MAE and the other H metrics (the decision
+    inputs) are left exactly as first computed.
     """
 
-    accelerator = s4.torch_backend_preflight()["effective_backend"]
+    accelerator = "cpu" if args.cpu else s4.torch_backend_preflight()["effective_backend"]
     for system in SYSTEMS:
         for path in sorted((OUT / "runs" / system).glob("*/result.json")):
             result = read_json(path)
-            if result.get("spectral_ref_S"):
+            if result.get("spectral_v2"):
                 continue
             samples = val_samples(result)
             out_dir = path.parent / "val_eval_rescore"
             predicted_root = predict(Path(result["checkpoint"]), samples, out_dir, accelerator)
-            fixed = {sample.sample_id: structure_metrics(sample, predicted_root)["spectral_err_meV"] for sample in samples}
+            fixed = {}
+            for sample in samples:
+                predicted = predicted_root / sample.sample_id / "ML_prediction.HSX"
+                fixed[sample.sample_id] = {"spectral_err_meV": structure_metrics(sample, predicted_root)["spectral_err_meV"],
+                                           **band_dos_metrics(sample, predicted, system)}
             rows = read_csv(path.parent / "val_eval" / "per_structure_metrics.csv")
             for row in rows:
-                row["spectral_err_meV"] = fixed[row["sample_id"]]
+                row.update(fixed[row["sample_id"]])
             write_csv(path.parent / "val_eval" / "per_structure_metrics.csv", rows)
             shutil.rmtree(out_dir, ignore_errors=True)
-            result["val_metrics"]["spectral_err_meV"] = float(np.nanmean(list(fixed.values())))
-            result["spectral_ref_S"] = True
+            for key in ("spectral_err_meV", "band_rmse_meV", "dos_rel_L1"):
+                result["val_metrics"][key] = float(np.nanmean([v[key] for v in fixed.values()]))
+            result["spectral_v2"] = True
             write_json(path, result)
-            print("rescored", result["job_id"], round(result["val_metrics"]["spectral_err_meV"], 1), flush=True)
+            print("rescored", system, result["job_id"], round(result["val_metrics"]["band_rmse_meV"], 1), flush=True)
     return 0
 
 
@@ -944,14 +951,24 @@ def md_jobs(system: str) -> list[dict[str, Any]]:
             for n in n_star for seed in (0, 1, 2)]
 
 
-STAGES = {"curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs}
+def n12_jobs(system: str) -> list[dict[str, Any]]:
+    """Pre-registered N=12 point, only for recipes whose seed-0 curve triggered the rule."""
+
+    needed = read_json(OUT / "finalists.json")["systems"][system]["n12_needed_for"]
+    selection = read_json(OUT / "selection_manifest.json")["systems"][system]["curve_recipes"]
+    pools = read_json(OUT / f"pools_{system}.json")
+    return [make_job(system, recipe, pools[recipe["recipe_id"]]["samples"], 12, 0, "n12")
+            for recipe in selection if recipe["recipe_id"] in needed]
+
+
+STAGES = {"curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs}
 
 
 def cmd_train(args: argparse.Namespace) -> int:
     accelerator = s4.torch_backend_preflight()["effective_backend"]
     failures = 0
     for system in args.systems:
-        jobs = [job for job in STAGES[args.stage](system) if not result_path(job).exists()]
+        jobs = [job for stage in args.stage for job in STAGES[stage](system) if not result_path(job).exists()]
         parallel = args.parallel or PARALLEL[system]
         print(json.dumps({"stage": args.stage, "system": system, "pending": len(jobs), "parallel": parallel}), flush=True)
         # Largest N first: the long jobs start early and the tail packs better.
@@ -1315,7 +1332,7 @@ def band_dos_metrics(sample: s4.Sample, predicted: Path, system: str) -> dict[st
 
     h_pred = sisl.get_sile(str(predicted)).read_hamiltonian()
     h_ref = sisl.get_sile(str(sample.reference_matrix)).read_hamiltonian()
-    e_fermi = s4.fermi_level_ev(sample.reference_matrix)
+    e_fermi = 0.0  # sisl-read H is H - E_F*S: E_F is already the energy zero
     import scipy.linalg
 
     def eig_pred_at(k: Any) -> np.ndarray:  # predicted H with the reference S (predictions carry S = 1)
@@ -1510,7 +1527,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             seed0 = table[(table["system"] == system) & (table["recipe_id"] == recipe["recipe_id"]) & (table["training_seed"] == 0)]
             curve = seed0.groupby("N")["H_MAE_meV"].mean().to_dict()
             dev = finalists[system]["curves"][recipe["recipe_id"]]["E"]
-            for n in NS:
+            n12 = [r for r in load_results(system) if r["recipe_id"] == recipe["recipe_id"] and r["stage"] == "n12"]
+            if n12:
+                dev = dict(dev) | {"12": n12[0]["val_metrics"]["H_MAE_meV"]}
+            for n in sorted(curve):
                 curve_rows.append({"system": system, "recipe_id": recipe["recipe_id"], "role": recipe["role"],
                                    "family": recipe["family"], "dim": recipe["dim"], "R": recipe["R"], "N": n,
                                    "E_dev_meV": dev[str(n)], "E_final_meV": curve.get(n)})
@@ -1563,9 +1583,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             if read_json(path.parents[1] / "result.json")["val"] == "dev":
                 dev_rows.append(pd.read_csv(path).assign(system=system))
     dev_all = pd.concat(dev_rows)
+    # Per structure, over every model's dev evaluation: how much band / DOS error per meV of H-MAE.
     margin_input = {system: {
-        "spearman_H_MAE_vs_spectral": float(g["H_MAE_meV"].corr(g["spectral_err_meV"], method="spearman")),
-        "spectral_err_meV_per_meV_H_MAE_median": float((g["spectral_err_meV"] / g["H_MAE_meV"]).median()),
+        "n_structure_evaluations": int(len(g)),
+        "spearman_H_MAE_vs_band_rmse": float(g["H_MAE_meV"].corr(g["band_rmse_meV"], method="spearman")),
+        "spearman_H_MAE_vs_dos_rel_L1": float(g["H_MAE_meV"].corr(g["dos_rel_L1"], method="spearman")),
+        "band_rmse_meV_per_meV_H_MAE_median": float((g["band_rmse_meV"] / g["H_MAE_meV"]).median()),
+        "band_rmse_meV_quartiles": [float(q) for q in g["band_rmse_meV"].quantile([0.25, 0.5, 0.75])],
     } for system, g in dev_all.groupby("system")}
 
     # ---- Pareto (Phase 11) ---------------------------------------------------------------------
@@ -1781,7 +1805,7 @@ def main() -> int:
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     sub.add_parser("md-split")
     p = sub.add_parser("train")
-    p.add_argument("--stage", choices=sorted(STAGES), required=True)
+    p.add_argument("--stage", choices=sorted(STAGES), nargs="+", required=True)
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     p.add_argument("--parallel", type=int, default=None)
     p = sub.add_parser("finalists")
@@ -1794,7 +1818,8 @@ def main() -> int:
     p.add_argument("--parallel", type=int, default=3)
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     sub.add_parser("analyze")
-    sub.add_parser("rescore-val")
+    p = sub.add_parser("rescore-val")
+    p.add_argument("--cpu", action="store_true", help="predict on CPU (GPU busy with training)")
     args = parser.parse_args()
     return {"inventory": cmd_inventory, "dev6x6": cmd_dev6x6, "reeval": cmd_reeval, "select": cmd_select,
             "md-split": cmd_md_split, "train": cmd_train, "finalists": cmd_finalists,

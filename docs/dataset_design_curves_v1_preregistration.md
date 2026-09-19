@@ -288,3 +288,17 @@ fonones y active learning quedan fuera de esta campaña.
   entre semillas (~20 meV en `w90`) es del mismo orden que las diferencias; no
   cambia ninguna regla de selección y ninguna conclusión se apoya en él para
   ser más favorable.
+
+- **2026-09-19 (§2, métricas secundarias; errores de cálculo, no de diseño).**
+  (a) Los HSX predichos (`h_only`) llevan S = identidad: los autovalores
+  predichos se resuelven ahora con la S de referencia. (b) `sisl` ya devuelve
+  H − E_F·S (E_F = 0; punto de Dirac a ±0.08 eV) y la ventana espectral restaba
+  otra vez E_F (−5.7 eV): se centra en 0. Ambos errores venían de
+  `s4.compute_validation_metrics` y afectaban solo a error espectral, bandas y
+  DOS, nunca a H-MAE ni a ninguna regla de selección. En `w90` no hay estados
+  en Γ a ±2 eV de E_F (el cono está en K), así que ahí el error espectral en Γ
+  queda vacío y se usan las bandas a lo largo de Γ–K–M–Γ. El test final de
+  `w90` se volvió a evaluar con los mismos checkpoints congelados solo para
+  corregir estas métricas (el H-MAE por estructura se comprueba idéntico).
+  Para relacionar H-MAE con bandas/DOS en desarrollo (§11) se calculan bandas y
+  DOS de desarrollo para todos los modelos, no solo para los finalistas.

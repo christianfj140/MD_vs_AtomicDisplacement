@@ -581,17 +581,6 @@ def gamma_eigenvalues(matrix_path: Path, overlap_path: Path | None = None) -> An
     return scipy.linalg.eigh(hamiltonian.Hk(k=[0.0, 0.0, 0.0], format="array"), overlap, eigvals_only=True)
 
 
-def fermi_level_ev(matrix_path: Path) -> float:
-    """Reuses ``run_epc_siesta_reference.fermi_level_ev``'s sisl call; 0.0 if unreadable."""
-
-    import sisl
-
-    try:
-        return float(sisl.get_sile(str(matrix_path)).read_fermi_level())
-    except Exception:  # noqa: BLE001 - matches fermi_level_ev's own fail-soft contract
-        return 0.0
-
-
 def compute_validation_metrics(
     val_samples: list[Sample],
     predicted_root: Path,
@@ -618,10 +607,10 @@ def compute_validation_metrics(
 
         eig_pred = gamma_eigenvalues(predicted_path, sample.reference_matrix)
         eig_ref = gamma_eigenvalues(sample.reference_matrix)
-        # Reference E_F: predicted matrices are ML output, not SIESTA state,
-        # so they carry no independent Fermi level to read.
-        e_fermi = fermi_level_ev(sample.reference_matrix)
-        window_mask = np.abs(eig_ref - e_fermi) <= spectral_window_ev
+        # sisl's read_hamiltonian() already returns H - E_F*S (energy zero at E_F),
+        # so the window is centred at 0; subtracting read_fermi_level() again would
+        # centre it ~5.7 eV below E_F (the moire "double subtraction" bug).
+        window_mask = np.abs(eig_ref) <= spectral_window_ev
         if np.any(window_mask):
             spectral.append(float(np.sqrt(np.mean((eig_pred[window_mask] - eig_ref[window_mask]) ** 2))))
 
