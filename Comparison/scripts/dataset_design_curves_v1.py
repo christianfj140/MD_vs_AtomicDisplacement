@@ -207,10 +207,22 @@ def structure_metrics(sample: s4.Sample, predicted_root: Path, *, window_ev: flo
     }
 
 
-def evaluate(checkpoint: Path, samples: list[s4.Sample], out_dir: Path, accelerator: str) -> list[dict[str, Any]]:
+def predict(checkpoint: Path, samples: list[s4.Sample], out_dir: Path, accelerator: str) -> Path:
+    """s4.run_prediction; retried on CPU when the shared GPU is out of memory."""
+
     manifest = out_dir / "manifest.csv"
     s4.write_val_manifest(manifest, samples)
-    predicted_root = s4.run_prediction(checkpoint, manifest, out_dir, accelerator)
+    try:
+        return s4.run_prediction(checkpoint, manifest, out_dir, accelerator)
+    except RuntimeError:
+        if accelerator == "cpu":
+            raise
+        shutil.rmtree(out_dir / "predicted_hamiltonians", ignore_errors=True)
+        return s4.run_prediction(checkpoint, manifest, out_dir, "cpu")
+
+
+def evaluate(checkpoint: Path, samples: list[s4.Sample], out_dir: Path, accelerator: str) -> list[dict[str, Any]]:
+    predicted_root = predict(checkpoint, samples, out_dir, accelerator)
     rows = [row for row in (structure_metrics(sample, predicted_root) for sample in samples) if row]
     if len(rows) != len(samples):
         raise RuntimeError(f"only {len(rows)}/{len(samples)} predictions under {predicted_root}")
@@ -834,16 +846,22 @@ def result_path(job: dict[str, Any]) -> Path:
 
 def run_job(job: dict[str, Any], accelerator: str, concurrency: int) -> dict[str, Any]:
     run_dir = OUT / "runs" / job["system"] / job["job_id"]
+    done_marker = run_dir / "train_done.json"
     if result_path(job).exists():
         return read_json(result_path(job))
-    if run_dir.exists():  # partial run from an interrupted launch: start clean, never mix checkpoints
-        shutil.rmtree(run_dir)
     train = [sample_from_dict(row) for row in job["train"]]
     val = val_samples(job)
     assert len(train) == job["N"] and len({row["hash"] for row in job["train"]}) == job["N"]
-    config = s4.build_graph2mat_config(run_dir, train, val, run_name=job["job_id"], accelerator=accelerator,
-                                       training_seed=job["training_seed"], **TRAIN_KW)
-    checkpoint, seconds, peak = run_training(config, run_dir)
+    if done_marker.exists():  # training finished, only the evaluation failed: never retrain
+        done = read_json(done_marker)
+        checkpoint, seconds, peak = Path(done["checkpoint"]), done["seconds"], done["peak"]
+    else:
+        if run_dir.exists():  # interrupted training: start clean, never mix checkpoints
+            shutil.rmtree(run_dir)
+        config = s4.build_graph2mat_config(run_dir, train, val, run_name=job["job_id"], accelerator=accelerator,
+                                           training_seed=job["training_seed"], **TRAIN_KW)
+        checkpoint, seconds, peak = run_training(config, run_dir)
+        write_json(done_marker, {"checkpoint": str(checkpoint), "seconds": seconds, "peak": peak})
     epochs = tensorboard_epochs(run_dir, checkpoint)
     rows = evaluate(checkpoint, val, run_dir / "val_eval", accelerator)
     result = {key: value for key, value in job.items() if key != "train"} | {
@@ -876,9 +894,7 @@ def cmd_rescore_val(args: argparse.Namespace) -> int:
                 continue
             samples = val_samples(result)
             out_dir = path.parent / "val_eval_rescore"
-            manifest = out_dir / "manifest.csv"
-            s4.write_val_manifest(manifest, samples)
-            predicted_root = s4.run_prediction(Path(result["checkpoint"]), manifest, out_dir, accelerator)
+            predicted_root = predict(Path(result["checkpoint"]), samples, out_dir, accelerator)
             fixed = {sample.sample_id: structure_metrics(sample, predicted_root)["spectral_err_meV"] for sample in samples}
             rows = read_csv(path.parent / "val_eval" / "per_structure_metrics.csv")
             for row in rows:
@@ -922,7 +938,7 @@ def md_jobs(system: str) -> list[dict[str, Any]]:
         return []
     split = read_json(OUT / "md_split_w90.json")
     n_star = read_json(OUT / "finalists.json")["systems"]["w90"]["md_sizes"]
-    recipe = {"recipe_id": "md_iid_w90", "family": "MD", "dim": "3D", "k": 2, "R": split["R_train_md"],
+    recipe = {"recipe_id": "md_w90", "family": "MD", "dim": "3D", "k": 2, "R": split["R_train_md"],
               "sampler_seed": None, "pool_hash": split["pool_hash"]}
     return [make_job("w90", recipe, split["train_pool"], n, seed, "md", val="md_validation")
             for n in n_star for seed in (0, 1, 2)]
@@ -1158,8 +1174,9 @@ def cmd_confirm(args: argparse.Namespace) -> int:
                 print(f"{system} {finalist['recipe_id']}: N*={n} not confirmed -> escalate to {next_n}")
         if all(f.get("confirmation", {}).get("confirmed") for f in block["finalists"]):
             block["confirmed"] = True
-            precision = next(f for f in block["finalists"] if f["role"] == "precision")
-            block["md_sizes"] = sorted({precision["N_star_candidate"], 64})
+            # MD at the confirmed N* of the precision and efficient finalists, and at 64.
+            block["md_sizes"] = sorted({f["N_star_candidate"] for f in block["finalists"]
+                                        if f["role"] in ("precision", "efficient")} | {64})
     write_json(OUT / "finalists.json", payload)
     for system in payload["systems"]:
         for f in payload["systems"][system]["finalists"]:
@@ -1199,38 +1216,61 @@ def final_test_configs(system: str) -> list[tuple[str, Any, dict[str, Any]]]:
     return entries
 
 
-def frozen_models() -> list[dict[str, Any]]:
-    models = []
-    for system in SYSTEMS:
-        for result in load_results(system):
-            models.append({key: result.get(key) for key in (
-                "system", "stage", "recipe_id", "family", "dim", "k", "R_train", "N", "training_seed", "job_id",
-                "checkpoint", "checkpoint_sha256", "siesta_cpu_h_train", "gpu_h", "peak_gpu_mib", "best_epoch",
-                "final_epoch", "train_max_real_amplitude_ang", "concurrent_jobs")})
-    return models
+def frozen_models(system: str) -> list[dict[str, Any]]:
+    return [{key: result.get(key) for key in (
+        "system", "stage", "recipe_id", "family", "dim", "k", "R_train", "N", "training_seed", "job_id",
+        "checkpoint", "checkpoint_sha256", "siesta_cpu_h_train", "gpu_h", "peak_gpu_mib", "best_epoch",
+        "final_epoch", "train_max_real_amplitude_ang", "concurrent_jobs")} for result in load_results(system)]
+
+
+def all_frozen_models() -> list[dict[str, Any]]:
+    return [m for block in read_json(OUT / "frozen_models.json")["systems"].values() for m in block["models"]]
+
+
+def md_relabel_check(md_split: dict[str, Any], workers: int) -> list[dict[str, Any]]:
+    """Re-run 4 MD test frames as SIESTA single points: is the MD label the synthetic label?"""
+
+    geometry = sampler.load_graphene_primitive()
+    base = base_positions("w90")
+    entries = []
+    for row in md_split["test"][:4]:
+        positions = np.asarray(s5._positions_from_run_fdf(Path(row["run_fdf"])))
+        displacements = {i: tuple((positions[i] - base[i]).tolist()) for i in range(len(base))}
+        metadata = sampler.build_metadata(geometry, sampler.select_active_atoms(geometry, 2), displacements,
+                                          family="md_relabel", dim="3D", amplitude_ang=row["real_amplitude_ang"])
+        entries.append((f"relabel__{row['sample_id']}", sampler.Configuration("md_relabel", displacements, metadata)))
+    root = label_structures(entries, OUT / "md_relabel_check", sampler.GRAPHENE_PRIMITIVE_FDF, workers)
+    checks = []
+    for (sample_id, _), row in zip(entries, md_split["test"][:4]):
+        h_md = s4.gamma_hk(Path(row["reference_matrix"]))
+        h_sp = s4.gamma_hk(root / sample_id / "graphene.TSHS")
+        checks.append({"frame": row["sample_id"], "max_abs_dH_meV": 1e3 * float(np.abs(h_md - h_sp).max()),
+                       "mean_abs_dH_meV": 1e3 * float(np.abs(h_md - h_sp).mean())})
+    return checks
 
 
 def cmd_final_test(args: argparse.Namespace) -> int:
     finalists = read_json(OUT / "finalists.json")["systems"]
-    if not all(block.get("confirmed") for block in finalists.values()):
-        raise SystemExit("Phase 7 not confirmed: the final test is only created after freezing N* and seeds")
-    md_done = [r for r in load_results("w90") if r["stage"] == "md"]
-    if len(md_done) != 3 * len(finalists["w90"]["md_sizes"]):
-        raise SystemExit("MD baseline not trained yet: freeze requires it")
-    frozen_path = OUT / "frozen_models.json"
-    if not frozen_path.exists():
-        write_json(frozen_path, {"frozen_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "models": frozen_models()})
-    for model in read_json(frozen_path)["models"]:
-        if sha256_file(Path(model["checkpoint"])) != model["checkpoint_sha256"]:
-            raise SystemExit(f"checkpoint changed after freeze: {model['checkpoint']}")
-
-    manifest_path = OUT / "final_test_manifest.json"
-    if manifest_path.exists():
-        print(f"{manifest_path} exists (frozen)")
-        return 0
-    manifest: dict[str, Any] = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "systems": {}}
+    frozen_path, manifest_path = OUT / "frozen_models.json", OUT / "final_test_manifest.json"
+    frozen = read_json(frozen_path) if frozen_path.exists() else {"systems": {}}
+    manifest = read_json(manifest_path) if manifest_path.exists() else {"systems": {}}
     md_split = read_json(OUT / "md_split_w90.json")
-    for system in SYSTEMS:
+    for system in args.systems:
+        if system in manifest["systems"]:
+            print(f"{system}: final test already frozen")
+            continue
+        if not finalists.get(system, {}).get("confirmed"):
+            raise SystemExit(f"{system}: Phase 7 not confirmed; the final test comes after freezing N* and seeds")
+        if system == "w90" and len([r for r in load_results("w90") if r["stage"] == "md"]) != 3 * len(finalists["w90"]["md_sizes"]):
+            raise SystemExit("w90: MD baseline not trained yet; freeze requires it")
+        # 1. Freeze the models (checkpoint hashes) before the test exists.
+        if system not in frozen["systems"]:
+            frozen["systems"][system] = {"frozen_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "models": frozen_models(system)}
+            write_json(frozen_path, frozen)
+        for model in frozen["systems"][system]["models"]:
+            if sha256_file(Path(model["checkpoint"])) != model["checkpoint_sha256"]:
+                raise SystemExit(f"checkpoint changed after freeze: {model['checkpoint']}")
+        # 2. Build + label the pre-registered test.
         entries = final_test_configs(system)
         material = sampler.GRAPHENE_PRIMITIVE_FDF if system == "w90" else sampler.GRAPHENE_6X6_FDF
         reference_root = label_structures([(sid, cfg) for sid, cfg, _ in entries], OUT / f"final_test_{system}",
@@ -1252,30 +1292,14 @@ def cmd_final_test(args: argparse.Namespace) -> int:
             taken |= {r["hash"] for name in ("validation", "train_pool") for r in md_split[name]}
         hashes = [row["hash"] for row in rows]
         assert len(set(hashes)) == len(hashes) and not set(hashes) & taken
-        manifest["systems"][system] = {"n": len(rows), "n_new_siesta": len(entries),
-                                       "test_hash": ids_hash(sorted(hashes)), "samples": rows}
-
-    # Label equivalence check: re-run 4 MD test frames as SIESTA single points.
-    base = base_positions("w90")
-    check_entries = []
-    for row in md_split["test"][:4]:
-        positions = np.asarray(s5._positions_from_run_fdf(Path(row["run_fdf"])))
-        displacements = {i: tuple((positions[i] - base[i]).tolist()) for i in range(len(base))}
-        active = sampler.select_active_atoms(sampler.load_graphene_primitive(), 2)
-        metadata = sampler.build_metadata(sampler.load_graphene_primitive(), active, displacements, family="md_relabel",
-                                          dim="3D", amplitude_ang=row["real_amplitude_ang"])
-        check_entries.append((f"relabel__{row['sample_id']}", sampler.Configuration("md_relabel", displacements, metadata)))
-    relabel_root = label_structures(check_entries, OUT / "md_relabel_check", sampler.GRAPHENE_PRIMITIVE_FDF, args.workers)
-    relabel = []
-    for (sample_id, _), row in zip(check_entries, md_split["test"][:4]):
-        h_md = s4.gamma_hk(Path(row["reference_matrix"]))
-        h_sp = s4.gamma_hk(relabel_root / sample_id / "graphene.TSHS")
-        relabel.append({"frame": row["sample_id"], "max_abs_dH_meV": 1e3 * float(np.abs(h_md - h_sp).max()),
-                        "mean_abs_dH_meV": 1e3 * float(np.abs(h_md - h_sp).mean())})
-    manifest["md_label_equivalence_check"] = relabel
-    write_json(manifest_path, manifest)
-    print(json.dumps({s: {"n": b["n"], "new_siesta": b["n_new_siesta"]} for s, b in manifest["systems"].items()}))
-    print(json.dumps(relabel, indent=1))
+        block = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "n": len(rows), "n_new_siesta": len(entries),
+                 "test_hash": ids_hash(sorted(hashes)), "samples": rows}
+        if system == "w90":
+            block["md_label_equivalence_check"] = md_relabel_check(md_split, args.workers)
+        manifest["systems"][system] = block
+        write_json(manifest_path, manifest)
+        print(json.dumps({system: {"n": block["n"], "new_siesta": block["n_new_siesta"],
+                                   "md_relabel": block.get("md_label_equivalence_check")}}, indent=1))
     return 0
 
 
@@ -1318,7 +1342,7 @@ def cmd_evaluate_final(args: argparse.Namespace) -> int:
     accelerator = s4.torch_backend_preflight()["effective_backend"]
     manifest = read_json(OUT / "final_test_manifest.json")
     finalists = read_json(OUT / "finalists.json")["systems"]
-    models = read_json(OUT / "frozen_models.json")["models"]
+    models = [m for m in all_frozen_models() if m["system"] in args.systems]
 
     def _one(model: dict[str, Any]) -> str:
         system = model["system"]
@@ -1328,9 +1352,7 @@ def cmd_evaluate_final(args: argparse.Namespace) -> int:
         samples = [sample_from_dict(row) for row in manifest["systems"][system]["samples"]]
         finalist_ids = {f["recipe_id"] for f in finalists[system]["finalists"]}
         spectral = model["recipe_id"] in finalist_ids or model["stage"] == "md"
-        run_manifest = out_dir / "manifest.csv"
-        s4.write_val_manifest(run_manifest, samples)
-        predicted_root = s4.run_prediction(Path(model["checkpoint"]), run_manifest, out_dir, accelerator)
+        predicted_root = predict(Path(model["checkpoint"]), samples, out_dir, accelerator)
         rows = []
         for sample in samples:
             row = structure_metrics(sample, predicted_root)
@@ -1369,7 +1391,7 @@ def final_long_table() -> Any:
                                     "real_A": row["real_amplitude_ang"], "test_dim": row["dim"], "test_k": row["k"]}
                  for block in manifest["systems"].values() for row in block["samples"]}
     frames = []
-    for model in read_json(OUT / "frozen_models.json")["models"]:
+    for model in all_frozen_models():
         rows = pd.read_csv(OUT / "runs" / model["system"] / model["job_id"] / "final_test" / "per_structure_metrics.csv")
         for key in ("system", "stage", "recipe_id", "family", "dim", "R_train", "N", "training_seed", "job_id",
                     "siesta_cpu_h_train", "gpu_h", "peak_gpu_mib", "best_epoch", "final_epoch",
@@ -1394,20 +1416,36 @@ def paired(table: Any, key_a: tuple[str, int], key_b: tuple[str, int], system: s
     """Seed-averaged per-structure errors of two configs, paired over the same structures."""
 
     sub = table[table["system"] == system] if subset is None else subset
-    def per_structure(recipe: str, n: int) -> Any:
-        rows = sub[(sub["recipe_id"] == recipe) & (sub["N"] == n)]
-        return rows.groupby("sample_id")["H_MAE_meV"].mean(), rows["training_seed"].nunique()
 
-    ea, seeds_a = per_structure(*key_a)
-    eb, seeds_b = per_structure(*key_b)
-    common = ea.index.intersection(eb.index)
-    d = (ea[common] - eb[common]).to_numpy()
+    def seed_by_structure(recipe: str, n: int) -> Any:
+        rows = sub[(sub["recipe_id"] == recipe) & (sub["N"] == n)]
+        return rows.pivot_table(index="training_seed", columns="sample_id", values="H_MAE_meV")
+
+    ma, mb = seed_by_structure(*key_a), seed_by_structure(*key_b)
+    common = ma.columns.intersection(mb.columns)
+    a, b = ma[common].to_numpy(), mb[common].to_numpy()
+    d = a.mean(axis=0) - b.mean(axis=0)
     low, high = bootstrap_mean_ci(d)
+    # Seeds + structures: resample the seeds of each arm and the structures (training noise included).
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    pick_a = a[rng.integers(0, len(a), (BOOTSTRAP_B, len(a)))].mean(axis=1)
+    pick_b = b[rng.integers(0, len(b), (BOOTSTRAP_B, len(b)))].mean(axis=1)
+    cols = rng.integers(0, len(common), (BOOTSTRAP_B, len(common)))
+    boot = np.take_along_axis(pick_a - pick_b, cols, axis=1).mean(axis=1)
     return {"system": system, "A": f"{key_a[0]}@N{key_a[1]}", "B": f"{key_b[0]}@N{key_b[1]}",
-            "seeds_A": int(seeds_a), "seeds_B": int(seeds_b), "n_structures": int(len(d)),
-            "E_A": float(ea[common].mean()), "E_B": float(eb[common].mean()), "mean_d": float(d.mean()),
+            "seeds_A": len(a), "seeds_B": len(b), "n_structures": int(len(d)),
+            "E_A": float(a.mean()), "E_B": float(b.mean()), "mean_d": float(d.mean()),
             "ci95_low": low, "ci95_high": high, "upper95_one_sided": bootstrap_mean_ci(d, one_sided_upper=True)[1],
-            "rel_diff": float(d.mean() / eb[common].mean()), "_d": d, "_ids": list(common)}
+            "ci95_seeds_structs_low": float(np.percentile(boot, 2.5)),
+            "ci95_seeds_structs_high": float(np.percentile(boot, 97.5)),
+            "upper95_seeds_structs": float(np.percentile(boot, 95)),
+            "rel_diff": float(d.mean() / b.mean()), "_d": d, "_ids": list(common)}
+
+
+def markdown_table(frame: Any) -> str:
+    cells = [[("" if value is None or value != value else str(value)) for value in row] for row in frame.itertuples(index=False)]
+    lines = ["| " + " | ".join(frame.columns) + " |", "|" + "---|" * len(frame.columns)]
+    return "\n".join(lines + ["| " + " | ".join(row) + " |" for row in cells]) + "\n"
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -1415,6 +1453,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker
     import pandas as pd
 
     plt.rcParams.update({"font.size": 10, "axes.spines.top": False, "axes.spines.right": False,
@@ -1424,6 +1463,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     fig_dir = OUT / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     table = final_long_table()
+    systems = [s for s in SYSTEMS if s in set(table["system"])]
     table.to_csv(OUT / "final_per_structure_long.csv", index=False)
     finalists = read_json(OUT / "finalists.json")["systems"]
     selection = read_json(OUT / "selection_manifest.json")["systems"]
@@ -1465,7 +1505,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # ---- learning curves on the final test (seed 0) ----------------------------------------------
     curve_rows = []
-    for system in SYSTEMS:
+    for system in systems:
         for recipe in selection[system]["curve_recipes"]:
             seed0 = table[(table["system"] == system) & (table["recipe_id"] == recipe["recipe_id"]) & (table["training_seed"] == 0)]
             curve = seed0.groupby("N")["H_MAE_meV"].mean().to_dict()
@@ -1482,7 +1522,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # ---- paired comparisons (Phase 10) --------------------------------------------------------
     comparisons = []
-    for system in SYSTEMS:
+    for system in systems:
         fins = finalists[system]["finalists"]
         for f in fins:
             if f["N_star_candidate"] != 64:
@@ -1493,11 +1533,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                 for f in fins:
                     if f["N_star_candidate"] == n or n == 64:
                         comparisons.append({"comparison": f"designed ({f['role']}) vs MD, N={n}",
-                                            **paired(table, (f["recipe_id"], n), ("md_iid_w90", n), system)})
+                                            **paired(table, (f["recipe_id"], n), ("md_w90", n), system)})
                         for origin in ("synthetic", "md"):
                             sub = table[(table["system"] == system) & (table["origin"] == origin)]
                             comparisons.append({"comparison": f"designed ({f['role']}) vs MD, N={n}, {origin} test only",
-                                                **paired(table, (f["recipe_id"], n), ("md_iid_w90", n), system, sub)})
+                                                **paired(table, (f["recipe_id"], n), ("md_w90", n), system, sub)})
         # Sobol vs random: per N, family mean over its 3 curve recipes (seed 0), paired per structure.
         seed0 = table[(table["system"] == system) & (table["stage"] == "curve") & (table["training_seed"] == 0)]
         for n in NS:
@@ -1518,7 +1558,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     # ---- dev: H-MAE vs Gamma spectral error (input for a future non-inferiority margin) --------
     dev_rows = []
-    for system in SYSTEMS:
+    for system in systems:
         for path in (OUT / "runs" / system).glob("*/val_eval/per_structure_metrics.csv"):
             if read_json(path.parents[1] / "result.json")["val"] == "dev":
                 dev_rows.append(pd.read_csv(path).assign(system=system))
@@ -1531,25 +1571,22 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # ---- Pareto (Phase 11) ---------------------------------------------------------------------
     pareto_points = []
     for c in configs:
-        stage_rows = table[(table["system"] == c["system"]) & (table["recipe_id"] == c["recipe_id"]) & (table["N"] == c["N"])]
         new_siesta = 0.0  # every training label already existed (curves, LHS, confirmation, MD)
         pareto_points.append({**{k: c[k] for k in ("system", "recipe_id", "family", "N", "H_MAE_meV", "siesta_cpu_h")},
                               "cost_reproducible_h": c["siesta_cpu_h"] + c["gpu_h_mean"],
-                              "cost_incremental_h": new_siesta + c["gpu_h_mean"] * stage_rows["training_seed"].nunique(),
+                              "cost_incremental_h": new_siesta + c["gpu_h_mean"],
                               "E": c["H_MAE_meV"]})
+    for cost in ("siesta_cpu_h", "cost_reproducible_h", "cost_incremental_h"):
+        front = {(p["system"], p["recipe_id"], p["N"]) for system in systems
+                 for p in pareto_front([q for q in pareto_points if q["system"] == system], cost=cost)}
+        for point in pareto_points:
+            point[f"pareto_{cost}"] = (point["system"], point["recipe_id"], point["N"]) in front
     pareto_df = pd.DataFrame(pareto_points)
-    for system in SYSTEMS:
-        for cost in ("siesta_cpu_h", "cost_reproducible_h", "cost_incremental_h"):
-            pts = [p for p in pareto_points if p["system"] == system]
-            front = {(p["recipe_id"], p["N"]) for p in pareto_front(pts, cost=cost)}
-            pareto_df.loc[pareto_df["system"] == system, f"pareto_{cost}"] = [
-                (r, n) in front for r, n in zip(pareto_df[pareto_df["system"] == system]["recipe_id"],
-                                                pareto_df[pareto_df["system"] == system]["N"])]
     pareto_df.to_csv(OUT / "pareto_points.csv", index=False)
 
     # ---- Figure 1: learning curves ------------------------------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    for ax, system in zip(axes, SYSTEMS):
+    fig, axes = plt.subplots(1, len(systems), figsize=(5.5 * len(systems), 4.2), squeeze=False)
+    for ax, system in zip(axes[0], systems):
         for recipe in selection[system]["curve_recipes"]:
             rows = [r for r in curve_rows if r["system"] == system and r["recipe_id"] == recipe["recipe_id"]]
             ax.plot([r["N"] for r in rows], [r["E_final_meV"] for r in rows], ROLE_STYLE[recipe["role"]],
@@ -1567,28 +1604,32 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             ax.errorbar(64 * 0.94, lhs["H_MAE_meV"], yerr=[[lhs["H_MAE_meV"] - min(lhs["seed_values"])],
                                                            [max(lhs["seed_values"]) - lhs["H_MAE_meV"]]],
                         fmt="^", color=COLORS["latin_hypercube"], ms=8, capsize=3, label="LHS N=64 (3 seeds)")
-        md = [by_config[k] for k in by_config if k[0] == system and k[1] == "md_iid_w90"]
+        md = [by_config[k] for k in by_config if k[0] == system and k[1] == "md_w90"]
         if md:
             ax.errorbar([c["N"] for c in md], [c["H_MAE_meV"] for c in md],
                         yerr=[[c["H_MAE_meV"] - min(c["seed_values"]) for c in md],
                               [max(c["seed_values"]) - c["H_MAE_meV"] for c in md]],
                         fmt="D", color=COLORS["MD"], ms=7, capsize=3, label="MD (3 seeds)")
         ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+        ax.yaxis.set_minor_formatter(matplotlib.ticker.ScalarFormatter())
+        ax.tick_params(axis="y", which="minor", labelsize=7)
         ax.set_xticks(NS, [str(n) for n in NS])
         ax.set_xlabel("N estructuras de entrenamiento")
         ax.set_ylabel("H-MAE test final (meV)")
         ax.set_title(f"{system}" + ("  (48 sintéticas + 16 MD)" if system == "w90" else "  (48 sintéticas)"))
-        ax.legend(fontsize=7, frameon=False)
-    fig.suptitle("Figura 1 — Curvas de aprendizaje (semilla 0; barras = rango de 3 semillas en finalistas)")
+        ax.legend(fontsize=7, frameon=False, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.18))
+    fig.suptitle("Fig. 1 — Curvas de aprendizaje (test final; semilla 0, barras = rango de 3 semillas)")
     fig.tight_layout()
-    fig.savefig(fig_dir / "fig1_learning_curves.png")
+    fig.savefig(fig_dir / "fig1_learning_curves.png", bbox_inches="tight")
     plt.close(fig)
 
     # ---- Figure 2: Pareto ---------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-    for col, system in enumerate(SYSTEMS):
-        for row, (cost, label) in enumerate((("siesta_cpu_h", "CPU·h SIESTA (reproducible)"),
-                                             ("cost_incremental_h", "coste incremental: GPU·h nuevas (SIESTA nuevo = 0)"))):
+    fig, axes = plt.subplots(2, len(systems), figsize=(5.5 * len(systems), 8), squeeze=False)
+    for col, system in enumerate(systems):
+        for row, (cost, label) in enumerate((("siesta_cpu_h", "CPU·h SIESTA de las etiquetas de entrenamiento (reproducible)"),
+                                             ("cost_incremental_h", "coste incremental: GPU·h por modelo (SIESTA nuevo = 0)"))):
             ax = axes[row][col]
             pts = pareto_df[pareto_df["system"] == system]
             for family, group in pts.groupby("family"):
@@ -1603,9 +1644,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             ax.set_ylabel("H-MAE test final (meV)")
             ax.set_title(system)
             ax.legend(fontsize=7, frameon=False)
-    fig.suptitle("Figura 2 — Frontera coste–precisión")
+    fig.suptitle("Fig. 2 — Frontera coste–precisión (media de semillas cuando hay 3)")
     fig.tight_layout()
-    fig.savefig(fig_dir / "fig2_pareto.png")
+    fig.savefig(fig_dir / "fig2_pareto.png", bbox_inches="tight")
     plt.close(fig)
 
     # ---- Figure 3: designed vs MD, paired per structure (w90) ----------------------------------
@@ -1621,27 +1662,31 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                        label="estructura sintética" if i == 0 else None)
             ax.scatter(c["_d"][is_md], i + jitter[is_md], s=18, marker="D", color="#52514e", alpha=0.7,
                        label="frame MD" if i == 0 else None)
+            ax.errorbar(c["mean_d"], i, xerr=[[c["mean_d"] - c["ci95_seeds_structs_low"]],
+                                              [c["ci95_seeds_structs_high"] - c["mean_d"]]],
+                        fmt="none", ecolor="#0b0b0b", capsize=3, lw=1)
             ax.errorbar(c["mean_d"], i, xerr=[[c["mean_d"] - c["ci95_low"]], [c["ci95_high"] - c["mean_d"]]],
-                        fmt="o", color="#0b0b0b", ms=7, capsize=4, lw=2)
-            ax.annotate(f"Δ={c['mean_d']:+.1f} meV [{c['ci95_low']:+.1f}, {c['ci95_high']:+.1f}]", (c["ci95_high"], i),
-                        xytext=(6, 6), textcoords="offset points", fontsize=8)
+                        fmt="o", color="#0b0b0b", ms=7, capsize=0, lw=3)
+            ax.text(1.02, i, f"Δ = {c['mean_d']:+.1f} meV\nestr. [{c['ci95_low']:+.1f}, {c['ci95_high']:+.1f}]\n"
+                    f"sem.+estr. [{c['ci95_seeds_structs_low']:+.1f}, {c['ci95_seeds_structs_high']:+.1f}]",
+                    transform=ax.get_yaxis_transform(), va="center", fontsize=8)
         ax.axvline(0, color="#8a8984", lw=1)
         ax.set_yticks(range(len(md_pairs)), [c["comparison"].replace("designed ", "diseñado ") for c in md_pairs], fontsize=8)
         ax.set_xlabel("d_i = E_diseñado − E_MD por estructura (meV; media de 3 semillas)")
-        ax.set_title("Figura 3 — Diseñado frente a MD (w90), diferencias emparejadas; negativo = diseñado mejor\n"
-                     "IC 95% bootstrap sobre estructuras; sin margen de no inferioridad fijado")
+        ax.set_title("Fig. 3 — Diseñado − MD por estructura (w90); negativo = diseñado mejor\n"
+                     "barra gruesa: IC95 sobre estructuras; fina: IC95 sobre semillas y estructuras", fontsize=10)
         ax.legend(fontsize=8, frameon=False, loc="lower left")
         fig.tight_layout()
-        fig.savefig(fig_dir / "fig3_designed_vs_md.png")
+        fig.savefig(fig_dir / "fig3_designed_vs_md.png", bbox_inches="tight")
         plt.close(fig)
 
     # ---- Figure 4: generalisation heatmap -------------------------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
-    for ax, system in zip(axes, SYSTEMS):
+    fig, axes = plt.subplots(1, len(systems), figsize=(6 * len(systems), 4.6), squeeze=False)
+    for ax, system in zip(axes[0], systems):
         keep = [(r["recipe_id"], 64) for r in selection[system]["curve_recipes"]]
         keep.append((selection[system]["lhs_recipe"]["recipe_id"], 64))
         if system == "w90":
-            keep.append(("md_iid_w90", 64))
+            keep.append(("md_w90", 64))
         sub = table[(table["system"] == system) & (table["origin"] == "synthetic")]
         rows, labels = [], []
         for recipe, n in sorted(keep, key=lambda k: float(sub[sub["recipe_id"] == k[0]]["R_train"].iloc[0])):
@@ -1660,21 +1705,21 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         ax.set_xlabel("amplitud del test A (Å)")
         ax.set_title(f"{system} (N=64; media de semillas disponibles)")
         fig.colorbar(image, ax=ax, label="H-MAE (meV)")
-    fig.suptitle("Figura 4 — Generalización: dominio de entrenamiento frente a amplitud del test")
+    fig.suptitle("Fig. 4 — Generalización: dominio de entrenamiento × amplitud del test")
     fig.tight_layout()
-    fig.savefig(fig_dir / "fig4_generalization_heatmap.png")
+    fig.savefig(fig_dir / "fig4_generalization_heatmap.png", bbox_inches="tight")
     plt.close(fig)
 
     # ---- Figure 5: seed stability of the finalists ----------------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-    for ax, system in zip(axes, SYSTEMS):
+    fig, axes = plt.subplots(1, len(systems), figsize=(5.5 * len(systems), 4), squeeze=False)
+    for ax, system in zip(axes[0], systems):
         entries = []
         for f in finalists[system]["finalists"]:
             for n in sorted({f["N_star_candidate"], 64}):
                 entries.append((f"{f['role']}\n{LABELS[f['family']]} N={n}", f["family"], by_config[(system, f["recipe_id"], n)]))
         if system == "w90":
             for n in finalists["w90"]["md_sizes"]:
-                entries.append((f"MD\nN={n}", "MD", by_config[("w90", "md_iid_w90", n)]))
+                entries.append((f"MD\nN={n}", "MD", by_config[("w90", "md_w90", n)]))
         for i, (label, family, c) in enumerate(entries):
             ax.scatter([i] * len(c["seed_values"]), c["seed_values"], color=COLORS[family], marker=MARKERS[family], s=30, zorder=3)
             ax.errorbar(i + 0.2, c["H_MAE_meV"], yerr=[[c["H_MAE_meV"] - c["ci95"][0]], [c["ci95"][1] - c["H_MAE_meV"]]],
@@ -1682,21 +1727,21 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         ax.set_xticks(range(len(entries)), [e[0] for e in entries], fontsize=7)
         ax.set_ylabel("H-MAE test final (meV)")
         ax.set_title(system)
-    fig.suptitle("Figura 5 — Estabilidad entre semillas (puntos = semillas; barra = media e IC 95% sobre estructuras)")
+    fig.suptitle("Fig. 5 — Estabilidad entre semillas (puntos = semillas; barra = media e IC95 sobre estructuras)", fontsize=10)
     fig.tight_layout()
-    fig.savefig(fig_dir / "fig5_seed_stability.png")
+    fig.savefig(fig_dir / "fig5_seed_stability.png", bbox_inches="tight")
     plt.close(fig)
 
     # ---- final table ---------------------------------------------------------------------------
     md_diff = {c["comparison"]: c for c in comparisons}
     table_rows = []
-    for system in SYSTEMS:
+    for system in systems:
         wanted = []
         for f in finalists[system]["finalists"]:
             wanted += [(f["recipe_id"], n, f["role"]) for n in sorted({f["N_star_candidate"], 64})]
         wanted.append((selection[system]["lhs_recipe"]["recipe_id"], 64, "LHS"))
         if system == "w90":
-            wanted += [("md_iid_w90", n, "MD baseline") for n in finalists["w90"]["md_sizes"]]
+            wanted += [("md_w90", n, "MD baseline") for n in finalists["w90"]["md_sizes"]]
         for recipe, n, role in dict.fromkeys(wanted):
             c = by_config[(system, recipe, n)]
             diff = next((v for k, v in md_diff.items() if system == "w90" and f"N={n}" in k and "test only" not in k
@@ -1713,13 +1758,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             })
     final_table = pd.DataFrame(table_rows)
     final_table.to_csv(OUT / "final_table.csv", index=False)
-    (OUT / "final_table.md").write_text(final_table.to_markdown(index=False) + "\n", encoding="utf-8")
+    (OUT / "final_table.md").write_text(markdown_table(final_table), encoding="utf-8")
     write_json(OUT / "analysis_summary.json", {
         "configs": configs, "comparisons": [{k: v for k, v in c.items() if not k.startswith("_")} for c in comparisons],
         "margin_input_dev": margin_input, "final_test": {s: b["n"] for s, b in read_json(OUT / "final_test_manifest.json")["systems"].items()},
-        "md_label_equivalence_check": read_json(OUT / "final_test_manifest.json")["md_label_equivalence_check"],
+        "md_label_equivalence_check": read_json(OUT / "final_test_manifest.json")["systems"]["w90"]["md_label_equivalence_check"],
     })
-    print(final_table.to_markdown(index=False))
+    print(markdown_table(final_table))
     print(comparisons_df.to_string())
     return 0
 
@@ -1744,8 +1789,10 @@ def main() -> int:
     sub.add_parser("confirm")
     p = sub.add_parser("final-test")
     p.add_argument("--workers", type=int, default=6)
+    p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     p = sub.add_parser("evaluate-final")
     p.add_argument("--parallel", type=int, default=3)
+    p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     sub.add_parser("analyze")
     sub.add_parser("rescore-val")
     args = parser.parse_args()

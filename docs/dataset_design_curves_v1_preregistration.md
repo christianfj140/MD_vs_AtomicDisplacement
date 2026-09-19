@@ -274,3 +274,8 @@ fonones y active learning quedan fuera de esta campaña.
   opuesto. Se corrige a lo que dice el texto: el vecino inmediato por debajo
   del finalista de precisión en coste (en `w90`: random 3D, N=8, 76.1 meV).
   `finalists.json` de `w90` se regeneró con la regla corregida.
+
+- **2026-09-19 (§9, tamaños MD; antes de entrenar MD).** En `w90` el N* confirmado
+  del finalista de precisión es 64, así que «N* del mejor diseñado y 64» dejaría
+  un solo tamaño. Se usa como segundo tamaño el N* confirmado del finalista
+  eficiente (mismo presupuesto del plan: 2 tamaños × 3 semillas).
