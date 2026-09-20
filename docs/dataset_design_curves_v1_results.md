@@ -30,10 +30,11 @@ los elementos de H(Γ) corresponden a pares lejanos y son casi nulos.
    y el mismo dataset dan 61, 101 y 76 meV en desarrollo). Con 2 átomos por
    estructura hacen falta muchas más estructuras para el mismo número de
    entornos.
-3. **El dataset diseñado no es peor que MD, y sobre estructuras sintéticas es
-   claramente mejor.** Ver §5. Pero con solo 3 semillas el intervalo de la
-   comparación se solapa con cero para uno de los tres finalistas, así que
-   **no se afirma equivalencia ni superioridad**.
+3. **El mejor dataset diseñado supera a MD, y ahora con 10 semillas es
+   concluyente**: −28.7 meV [−45.7, −14.5] sobre el test completo (§11.1). La
+   ventaja está fuera del dominio de la MD; sobre los propios frames MD
+   empatan. Ojo: eso vale para la receta **estable** (random 3D R=0.08); la otra
+   finalista colapsa en 1 de cada 10 semillas y no supera a MD.
 4. **Sobol y random son indistinguibles** a igual coste: la diferencia cambia de
    signo con N (§6).
 5. **La cobertura del dominio importa mucho más que N o que la familia.** Una
@@ -41,6 +42,13 @@ los elementos de H(Γ) corresponden a pares lejanos y son casi nulos.
    ~80 meV de una 3D, con el mismo N y el mismo coste (§7).
 6. **Los resultados previos del repositorio estaban sesgados por dos
    convenciones y un error de checkpoint** que ya están corregidos (§2).
+7. **El error residual no viene de los datos, ni de la etiqueta, ni del tamaño
+   del modelo** (§11.3, §11.4): la etiqueta SIESTA es reproducible a 0.01 meV y
+   doblar el ancho del modelo no mejora nada. Queda el sesgo inductivo de la
+   arquitectura, que es donde hay que invertir.
+8. **El ruido entre semillas es nuestro, no de la física**: un schedule cosine
+   de learning rate reduce la dispersión 5× en `6x6` y fp32 la reduce 2.6× en
+   `w90`, sin cambiar la media (§11.2).
 
 ---
 
@@ -153,6 +161,11 @@ claridad; sobre los propios frames MD —que son territorio del modelo MD— los
 dos empatan dentro de la incertidumbre de semillas. **No se fija margen de no
 inferioridad** (el plan lo prohíbe sin una tolerancia física declarada), así
 que no se usa la palabra «no inferior».
+
+**Esta tabla es la pre-registrada, con 3 semillas. §11.1 la repite con 10 y
+cambia el veredicto por receta**: con 10 semillas la diferencia del finalista
+eficiente se confirma (−28.7 meV, intervalo bajo cero incluso remuestreando
+semillas) y la del finalista de precisión desaparece.
 
 El motivo físico del empate en frames MD y de la ventaja global está en §7: los
 frames MD de este repositorio solo cubren amplitudes ≤0.025 Å, mientras que el
@@ -326,7 +339,89 @@ en `w90`.
 7. **¿Qué configuraciones forman la frontera de Pareto?** §5c y
    `fig2_pareto.png`.
 
-## 11. Figuras
+## 11. Seguimiento (2026-09-20): semillas, receta, suelo y capacidad
+
+Cuatro experimentos posteriores al test congelado. Ninguno cambia una regla de
+selección; los tres primeros aumentan la precisión de lo ya reportado y el
+cuarto diagnostica el techo.
+
+### 11.1 Diez semillas: quién gana a MD y quién no
+
+Con 10 semillas por configuración (en lugar de 3), sobre el mismo test:
+
+| Comparación (N=64) | Δ vs MD | IC estructuras | IC semillas+estructuras |
+|---|---:|---|---|
+| eficiente (random 3D R0.08), test completo | **−28.7** | [−38.3, −20.2] | **[−45.7, −14.5]** |
+| … solo sintéticas (0.02–0.12 Å) | −36.1 | [−48.1, −25.3] | [−56.7, −19.5] |
+| … solo frames MD | −6.3 | [−8.7, −4.3] | [−14.7, +1.7] |
+| precisión (random 1D_in R0.08), test completo | +3.8 | [−7.9, +14.5] | [−26.5, +42.4] |
+
+Dos conclusiones que con 3 semillas no se podían sacar:
+
+1. La receta **estable** supera a MD con el intervalo por debajo de cero incluso
+   remuestreando semillas. La ventaja está **fuera del dominio de la MD**: en los
+   propios frames MD empatan.
+2. La receta llamada «de precisión» **no supera a MD**. Sus 10 semillas en
+   desarrollo son 61, 101, 76, **233**, 78, 97, 100, 81, 76, 84 meV: una de cada
+   diez colapsa. Su ventaja anterior era un artefacto de haber sorteado 3
+   semillas buenas.
+
+Consecuencia práctica: una receta debe reportarse **con su dispersión entre
+semillas**, no con su mejor ejecución. El orden de mérito cambia al hacerlo.
+
+### 11.2 El ruido entre semillas es de la receta de entrenamiento, y se arregla
+
+Ablación sobre el finalista de precisión, N=64, 3 semillas por variante
+(media ± sd en desarrollo):
+
+| Variante | `w90` | `6x6` |
+|---|---|---|
+| baseline (la congelada) | 79.4 ± 20.4 | 6.22 ± 1.67 |
+| máx. épocas 1200 | 89.8 ± 17.8 | 6.35 ± 1.27 |
+| cosine LR | 87.1 ± 23.0 | 6.42 ± **0.31** |
+| cosine + 1200 épocas | 82.5 ± 10.2 | 6.13 ± 0.73 |
+| fp32 (en `6x6` no cabe en 32 GB) | 82.1 ± **7.9** | — |
+
+La media no mejora; **la dispersión cae 2.6× (`w90`, fp32) y 5× (`6x6`,
+cosine)**, y ninguna de las 12 ejecuciones con variante colapsó. Para cualquier
+campaña futura: schedule cosine siempre, y fp32 donde quepa. Es reproducibilidad
+gratis, y es justo lo que impedía concluir en §11.1.
+
+`StochasticWeightAveraging` no es utilizable: Lightning copia el modelo y el
+módulo de graph2mat no es serializable («cannot pickle 'module' object»).
+
+### 11.3 El suelo no es la etiqueta
+
+Reetiquetando 8 estructuras por sistema con `DM.Tolerance` 1e-6 en vez de 1e-4:
+
+| Sistema | MAE de etiqueta (mediana) | máximo |
+|---|---:|---:|
+| `w90` | 0.011 meV | 0.39 meV |
+| `6x6` | 0.0024 meV | 0.66 meV |
+
+La etiqueta SIESTA es reproducible a ~0.01 meV, **tres o cuatro órdenes de
+magnitud por debajo del error de los modelos** (6 y 80 meV). La convergencia
+SCF no limita nada.
+
+### 11.4 El techo tampoco es el ancho del modelo
+
+Doblando `hidden_irreps` (48→96) a datos fijos:
+
+| | base | 2× ancho |
+|---|---:|---:|
+| `w90` N=8 | 97.2 | 97.1 |
+| `w90` N=64 | 81.3 | 86.7 |
+| `6x6` N=64 | 7.09 | 7.49 |
+
+Ninguna mejora (el `6x6` ancho llegó a 30.8 GB de VRAM). Con §11.3 y la
+saturación de `6x6` en N=4, quedan descartados los datos, la etiqueta y el
+ancho. La hipótesis viva es el **sesgo inductivo**: campo receptivo
+(`num_interactions`, porque el radio de corte lo fija la base `.ion.xml` y no es
+un parámetro) y resolución angular (`max_ell`). Esa prueba está lanzada.
+
+---
+
+## 12. Figuras
 
 | Figura | Qué responde |
 |---|---|

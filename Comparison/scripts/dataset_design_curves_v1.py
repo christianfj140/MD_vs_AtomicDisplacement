@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
@@ -825,13 +826,28 @@ def run_training(config_path: Path, run_dir: Path) -> tuple[Path, float, int]:
 
 
 def make_job(system: str, recipe: dict[str, Any], train_rows: list[dict[str, Any]], n: int, seed: int,
-             stage: str, val: str = "dev") -> dict[str, Any]:
+             stage: str, val: str = "dev", tag: str = "", patch: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "system": system, "stage": stage, "recipe_id": recipe["recipe_id"], "family": recipe["family"],
         "dim": recipe["dim"], "k": recipe["k"], "R_train": recipe["R"], "sampler_seed": recipe.get("sampler_seed"),
         "pool_hash": recipe.get("pool_hash"), "N": n, "training_seed": seed, "val": val,
-        "job_id": f"{recipe['recipe_id']}__N{n}__ts{seed}", "train": train_rows[:n],
+        "job_id": f"{recipe['recipe_id']}__N{n}__ts{seed}{tag}", "train": train_rows[:n],
+        "config_patch": patch or {},
     }
+
+
+def apply_config_patch(config_path: Path, patch: dict[str, Any]) -> None:
+    """Overlay training-recipe variations (epochs, precision, model width, callbacks, scheduler)."""
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    for key, value in patch.items():
+        if key == "extra_callbacks":
+            config["trainer"]["callbacks"] = config["trainer"].get("callbacks", []) + value
+        elif isinstance(value, dict) and isinstance(config.get(key), dict):
+            config[key].update(value)
+        else:
+            config[key] = value
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 
 def val_samples(job: dict[str, Any]) -> list[s4.Sample]:
@@ -860,6 +876,8 @@ def run_job(job: dict[str, Any], accelerator: str, concurrency: int) -> dict[str
             shutil.rmtree(run_dir)
         config = s4.build_graph2mat_config(run_dir, train, val, run_name=job["job_id"], accelerator=accelerator,
                                            training_seed=job["training_seed"], **TRAIN_KW)
+        if job.get("config_patch"):
+            apply_config_patch(config, job["config_patch"])
         checkpoint, seconds, peak = run_training(config, run_dir)
         write_json(done_marker, {"checkpoint": str(checkpoint), "seconds": seconds, "peak": peak})
     epochs = tensorboard_epochs(run_dir, checkpoint)
@@ -868,6 +886,7 @@ def run_job(job: dict[str, Any], accelerator: str, concurrency: int) -> dict[str
         "train_ids_hash": ids_hash([row["sample_id"] for row in job["train"]]),
         "train_geometry_hash": ids_hash([row["hash"] for row in job["train"]]),
         "train_max_real_amplitude_ang": max(row["real_amplitude_ang"] for row in job["train"]),
+        "config_patch": job.get("config_patch", {}),
         "checkpoint": str(checkpoint), "checkpoint_sha256": sha256_file(checkpoint),
         "checkpoint_policy": "best_val_loss (ModelCheckpoint save_top_k=1)",
         "checkpoint_epoch": checkpoint_epoch(checkpoint), **epochs,
@@ -961,7 +980,111 @@ def n12_jobs(system: str) -> list[dict[str, Any]]:
             for recipe in selection if recipe["recipe_id"] in needed]
 
 
-STAGES = {"curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs}
+# --------------------------------------------------------------------------
+# Follow-up (overnight): seeds, training-recipe ablation, model capacity
+# --------------------------------------------------------------------------
+
+EXTRA_SEEDS = (3, 4, 5, 6, 7, 8, 9)
+
+# Each variant is a patch over the frozen training recipe of section 4 of the
+# pre-registration. "baseline" is not listed: seeds 0-2 of it already exist.
+def _cosine(t_max: int) -> dict[str, Any]:
+    return {"class_path": "torch.optim.lr_scheduler.CosineAnnealingLR",
+            "init_args": {"T_max": t_max, "eta_min": 1e-5}}
+
+
+# StochasticWeightAveraging is not usable here: Lightning deep-copies the model and
+# graph2mat's module holds a module reference ("cannot pickle 'module' object").
+ABLATION_VARIANTS: dict[str, dict[str, Any]] = {
+    "ep1200": {"trainer": {"max_epochs": 1200}},
+    "cosine": {"lr_scheduler": _cosine(600)},
+    "cosine1200": {"trainer": {"max_epochs": 1200}, "lr_scheduler": _cosine(1200)},
+    "fp32": {"trainer": {"precision": "32-true"}},  # w90 only: in 6x6 it would not fit in 32 GB
+}
+# Wider model at fixed data: if the error drops, the ceiling is the model, not N.
+CAPACITY_VARIANTS: dict[str, dict[str, Any]] = {
+    "wide": {"model": {"hidden_irreps": "96x0e + 96x1o + 96x2e + 96x3o"}},
+}
+CAPACITY_SIZES = {"w90": (8, 64), "6x6": (4, 64)}
+CAPACITY_SEEDS = (0, 1)
+
+
+def _finalist(system: str, role: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    finalist = next(f for f in read_json(OUT / "finalists.json")["systems"][system]["finalists"]
+                    if f["role"] == role)
+    return finalist, read_json(OUT / f"pools_{system}.json")[finalist["recipe_id"]]["samples"]
+
+
+def seed_jobs(system: str) -> list[dict[str, Any]]:
+    """Extra seeds where the headline claim lives: designed vs MD at N=64 (w90 only)."""
+
+    if system != "w90":
+        return []
+    jobs = []
+    for role in ("precision", "efficient"):
+        finalist, pool = _finalist(system, role)
+        jobs += [make_job(system, finalist, pool, 64, seed, "seeds") for seed in EXTRA_SEEDS]
+    split = read_json(OUT / "md_split_w90.json")
+    md_recipe = {"recipe_id": "md_w90", "family": "MD", "dim": "3D", "k": 2, "R": split["R_train_md"],
+                 "sampler_seed": None, "pool_hash": split["pool_hash"]}
+    jobs += [make_job(system, md_recipe, split["train_pool"], 64, seed, "seeds", val="md_validation")
+             for seed in EXTRA_SEEDS]
+    return jobs
+
+
+def ablation_jobs(system: str) -> list[dict[str, Any]]:
+    """One representative recipe per system (the precision finalist), N=64, 3 seeds per variant."""
+
+    finalist, pool = _finalist(system, "precision")
+    return [make_job(system, finalist, pool, 64, seed, "ablation", tag=f"__{name}", patch=patch)
+            for name, patch in ABLATION_VARIANTS.items() for seed in (0, 1, 2)
+            if not (name == "fp32" and system == "6x6")]
+
+
+def capacity_jobs(system: str) -> list[dict[str, Any]]:
+    finalist, pool = _finalist(system, "precision")
+    return [make_job(system, finalist, pool, n, seed, "capacity", tag=f"__{name}", patch=patch)
+            for name, patch in CAPACITY_VARIANTS.items()
+            for n in CAPACITY_SIZES[system] for seed in CAPACITY_SEEDS]
+
+
+# Inductive-bias probe: the edge cutoff is fixed by the basis (.ion.xml radii, not a CLI
+# knob), so the receptive field can only grow through interaction layers. max_ell is the
+# angular-resolution axis. All of these run with the cosine schedule -- it cut the seed sd
+# 5x in 6x6, which is what makes a 2-3 seed diagnostic readable at all. 6x6 runs at
+# batch 16 (depth raises VRAM; the wide model already peaked at 30.8 GB) together with a
+# matched batch-16 control, so only the architecture differs.
+DEPTH_VARIANTS: dict[str, dict[str, Any]] = {
+    "cos_depth4": {"model": {"num_interactions": 4}},
+    "cos_depth5": {"model": {"num_interactions": 5}},
+    "cos_ell4": {"model": {"max_ell": 4}},
+}
+DEPTH_SEEDS = {"w90": (0, 1, 2), "6x6": (0, 1)}
+DEPTH_SIZES = {"w90": (64,), "6x6": (64, 4)}
+
+
+def depth_jobs(system: str) -> list[dict[str, Any]]:
+    finalist, pool = _finalist(system, "precision")
+    patches: dict[str, dict[str, Any]] = {}
+    if system == "6x6":  # matched control: same batch, same schedule, stock architecture
+        patches["cos_b16"] = {}
+    # num_interactions=5 costs ~62 s/epoch on 6x6 (10 h per run): w90 only.
+    patches |= {k: v for k, v in DEPTH_VARIANTS.items() if not (k == "cos_depth5" and system == "6x6")}
+    jobs = []
+    for name, variant in patches.items():
+        patch = {"lr_scheduler": _cosine(600)}
+        for key, value in variant.items():
+            patch[key] = dict(patch.get(key, {}), **value)
+        if system == "6x6":
+            patch["data"] = {"batch_size": 16}
+        for n in DEPTH_SIZES[system]:
+            jobs += [make_job(system, finalist, pool, n, seed, "depth", tag=f"__{name}", patch=patch)
+                     for seed in DEPTH_SEEDS[system]]
+    return jobs
+
+
+STAGES = {"curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs,
+          "seeds": seed_jobs, "ablation": ablation_jobs, "capacity": capacity_jobs, "depth": depth_jobs}
 
 
 def cmd_train(args: argparse.Namespace) -> int:
@@ -1469,6 +1592,56 @@ def markdown_table(frame: Any) -> str:
     return "\n".join(lines + ["| " + " | ".join(row) + " |" for row in cells]) + "\n"
 
 
+def cmd_label_noise(args: argparse.Namespace) -> int:
+    """How reproducible is the SIESTA label itself? Re-run structures with a tighter DM tolerance.
+
+    The difference between the campaign label (DM.Tolerance 1e-4) and a tight one
+    is the floor no model can beat: if H-MAE is already there, more data cannot help.
+    """
+
+    manifest = read_json(OUT / "final_test_manifest.json")["systems"]
+    rows: list[dict[str, Any]] = []
+    for system in args.systems:
+        samples = [r for r in manifest[system]["samples"] if r.get("origin") == "synthetic"][: args.n]
+        root = OUT / f"label_noise_{system}"
+        structures = root / "structures"
+        for row in samples:
+            out_dir = structures / f"tight__{row['sample_id']}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            text = Path(row["run_fdf"]).read_text(encoding="utf-8")
+            if "DM.Tolerance" not in text:
+                raise RuntimeError(f"{row['run_fdf']} has no DM.Tolerance to tighten")
+            text = re.sub(r"DM\.Tolerance\s+\S+", f"DM.Tolerance           {args.tolerance}", text)
+            (out_dir / "RUN.fdf").write_text(text, encoding="utf-8")
+        reference_root = Path(c6.run_derivative_siesta_references(
+            stencil_root=root, source_dataset_root=REPO_ROOT / "materials/graphene",
+            siesta_command=c6.pilot.DEFAULT_SIESTA_COMMAND, workers=args.workers,
+            require_positive_provenance_for_reuse=False, diagnostic_only=True,
+        )["output_reference_root"])
+        label = "graphene" if system == "w90" else "graphene_6x6"
+        for row in samples:
+            tight = reference_root / f"tight__{row['sample_id']}" / f"{label}.TSHS"
+            if not tight.exists():
+                rows.append({"system": system, "sample_id": row["sample_id"], "status": "siesta_failed"})
+                continue
+            h_loose, h_tight = s4.gamma_hk(Path(row["reference_matrix"])), s4.gamma_hk(tight)
+            rows.append({"system": system, "sample_id": row["sample_id"], "status": "ok",
+                         "amplitude_ang": row["amplitude_ang"],
+                         "label_MAE_meV": 1e3 * float(np.mean(np.abs(h_tight - h_loose))),
+                         "label_max_meV": 1e3 * float(np.max(np.abs(h_tight - h_loose)))})
+    write_csv(OUT / "label_noise.csv", rows)
+    summary = {system: {
+        "tolerance_tight": args.tolerance, "n": len([r for r in rows if r["system"] == system and r["status"] == "ok"]),
+        "label_MAE_meV_median": float(np.median([r["label_MAE_meV"] for r in rows
+                                                 if r["system"] == system and r["status"] == "ok"])),
+        "label_max_meV_max": float(np.max([r["label_max_meV"] for r in rows
+                                           if r["system"] == system and r["status"] == "ok"])),
+    } for system in args.systems}
+    write_json(OUT / "label_noise.json", summary)
+    print(json.dumps(summary, indent=1))
+    return 0
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     import matplotlib
 
@@ -1826,6 +1999,11 @@ def main() -> int:
     p.add_argument("--parallel", type=int, default=3)
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     sub.add_parser("analyze")
+    p = sub.add_parser("label-noise")
+    p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
+    p.add_argument("--n", type=int, default=8)
+    p.add_argument("--tolerance", default="1.d-6")
+    p.add_argument("--workers", type=int, default=6)
     p = sub.add_parser("rescore-val")
     p.add_argument("--cpu", action="store_true", help="predict on CPU (GPU busy with training)")
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
@@ -1834,7 +2012,7 @@ def main() -> int:
             "md-split": cmd_md_split, "train": cmd_train, "finalists": cmd_finalists,
             "confirm": cmd_confirm, "final-test": cmd_final_test,
             "evaluate-final": cmd_evaluate_final, "analyze": cmd_analyze,
-            "rescore-val": cmd_rescore_val}[args.cmd](args)
+            "rescore-val": cmd_rescore_val, "label-noise": cmd_label_noise}[args.cmd](args)
 
 
 if __name__ == "__main__":
