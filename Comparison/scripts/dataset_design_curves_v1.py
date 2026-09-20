@@ -889,7 +889,7 @@ def cmd_rescore_val(args: argparse.Namespace) -> int:
     """
 
     accelerator = "cpu" if args.cpu else s4.torch_backend_preflight()["effective_backend"]
-    for system in SYSTEMS:
+    for system in args.systems:
         for path in sorted((OUT / "runs" / system).glob("*/result.json")):
             result = read_json(path)
             if result.get("spectral_v2"):
@@ -1367,8 +1367,12 @@ def cmd_evaluate_final(args: argparse.Namespace) -> int:
         if (out_dir / "per_structure_metrics.csv").exists():
             return model["job_id"]
         samples = [sample_from_dict(row) for row in manifest["systems"][system]["samples"]]
-        finalist_ids = {f["recipe_id"] for f in finalists[system]["finalists"]}
-        spectral = model["recipe_id"] in finalist_ids or model["stage"] == "md"
+        # Bands/DOS only for the rows of the final table: finalists/LHS/MD at the sizes reported.
+        reported = {(f["recipe_id"], n) for f in finalists[system]["finalists"]
+                    for n in {f["N_star_candidate"], 64}}
+        reported |= {(read_json(OUT / "selection_manifest.json")["systems"][system]["lhs_recipe"]["recipe_id"], 64)}
+        reported |= {("md_w90", n) for n in finalists.get("w90", {}).get("md_sizes", [])}
+        spectral = (model["recipe_id"], model["N"]) in reported
         predicted_root = predict(Path(model["checkpoint"]), samples, out_dir, accelerator)
         rows = []
         for sample in samples:
@@ -1560,14 +1564,18 @@ def cmd_analyze(args: argparse.Namespace) -> int:
                                                 **paired(table, (f["recipe_id"], n), ("md_w90", n), system, sub)})
         # Sobol vs random: per N, family mean over its 3 curve recipes (seed 0), paired per structure.
         seed0 = table[(table["system"] == system) & (table["stage"] == "curve") & (table["training_seed"] == 0)]
-        for n in NS:
-            fam = seed0[seed0["N"] == n].groupby(["family", "sample_id"])["H_MAE_meV"].mean().unstack(0)
-            d = (fam["sobol_sparse"] - fam["random_cartesian"]).to_numpy()
-            low, high = bootstrap_mean_ci(d)
-            comparisons.append({"comparison": f"Sobol - random (mean of 3 recipes each), N={n}", "system": system,
-                                "n_structures": len(d), "E_A": float(fam["sobol_sparse"].mean()),
-                                "E_B": float(fam["random_cartesian"].mean()), "mean_d": float(d.mean()),
-                                "ci95_low": low, "ci95_high": high, "rel_diff": float(d.mean() / fam["random_cartesian"].mean())})
+        roles = {r["recipe_id"]: r["role"] for r in selection[system]["curve_recipes"]}
+        for subset, label in ((set(roles), "3 recipes each"), ({r for r, v in roles.items() if v in "AB"}, "A+B only")):
+            for n in NS:
+                rows = seed0[(seed0["N"] == n) & (seed0["recipe_id"].isin(subset))]
+                fam = rows.groupby(["family", "sample_id"])["H_MAE_meV"].mean().unstack(0)
+                d = (fam["sobol_sparse"] - fam["random_cartesian"]).to_numpy()
+                low, high = bootstrap_mean_ci(d)
+                comparisons.append({"comparison": f"Sobol - random (mean, {label}), N={n}", "system": system,
+                                    "n_structures": len(d), "E_A": float(fam["sobol_sparse"].mean()),
+                                    "E_B": float(fam["random_cartesian"].mean()), "mean_d": float(d.mean()),
+                                    "ci95_low": low, "ci95_high": high,
+                                    "rel_diff": float(d.mean() / fam["random_cartesian"].mean())})
     comparisons_df = pd.DataFrame([{k: v for k, v in c.items() if not k.startswith("_")} for c in comparisons])
     comparisons_df.to_csv(OUT / "paired_comparisons.csv", index=False)
 
@@ -1820,6 +1828,7 @@ def main() -> int:
     sub.add_parser("analyze")
     p = sub.add_parser("rescore-val")
     p.add_argument("--cpu", action="store_true", help="predict on CPU (GPU busy with training)")
+    p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     args = parser.parse_args()
     return {"inventory": cmd_inventory, "dev6x6": cmd_dev6x6, "reeval": cmd_reeval, "select": cmd_select,
             "md-split": cmd_md_split, "train": cmd_train, "finalists": cmd_finalists,
