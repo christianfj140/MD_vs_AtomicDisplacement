@@ -42,10 +42,11 @@ los elementos de H(Γ) corresponden a pares lejanos y son casi nulos.
    ~80 meV de una 3D, con el mismo N y el mismo coste (§7).
 6. **Los resultados previos del repositorio estaban sesgados por dos
    convenciones y un error de checkpoint** que ya están corregidos (§2).
-7. **El error residual no viene de los datos, ni de la etiqueta, ni del tamaño
-   del modelo** (§11.3, §11.4): la etiqueta SIESTA es reproducible a 0.01 meV y
-   doblar el ancho del modelo no mejora nada. Queda el sesgo inductivo de la
-   arquitectura, que es donde hay que invertir.
+7. **El error residual no viene de los datos, ni de la etiqueta, ni del modelo**
+   (§11.3–§11.6): etiqueta reproducible a 0.01 meV; doblar el ancho, añadir una
+   capa o subir `max_ell` no mejoran nada. Los siguientes sospechosos son la
+   función de pérdida, el radio de la base y la dependencia de E_F con la
+   estructura (§11.6).
 8. **El ruido entre semillas es nuestro, no de la física**: un schedule cosine
    de learning rate reduce la dispersión 5× en `6x6` y fp32 la reduce 2.6× en
    `w90`, sin cambiar la media (§11.2).
@@ -413,11 +414,56 @@ Doblando `hidden_irreps` (48→96) a datos fijos:
 | `w90` N=64 | 81.3 | 86.7 |
 | `6x6` N=64 | 7.09 | 7.49 |
 
-Ninguna mejora (el `6x6` ancho llegó a 30.8 GB de VRAM). Con §11.3 y la
-saturación de `6x6` en N=4, quedan descartados los datos, la etiqueta y el
-ancho. La hipótesis viva es el **sesgo inductivo**: campo receptivo
-(`num_interactions`, porque el radio de corte lo fija la base `.ion.xml` y no es
-un parámetro) y resolución angular (`max_ell`). Esa prueba está lanzada.
+Ninguna mejora (el `6x6` ancho llegó a 30.8 GB de VRAM).
+
+### 11.5 Tampoco es la profundidad ni la resolución angular
+
+Campo receptivo y resolución angular, a datos fijos y con schedule cosine (el
+radio de corte lo fijan los radios del `.ion.xml`, no es un parámetro, así que
+el campo receptivo solo crece por capas). Control y variante con el mismo batch
+y el mismo schedule:
+
+| | control | profundidad 4 | Δ (IC95 Welch) |
+|---|---|---|---|
+| `w90` N=64 | 79.5 ± 15.6 (n=7) | 77.7 ± 5.8 (n=7) | −1.9 [−14.2, +10.4] |
+| `6x6` N=64 | 5.55 ± 2.06 (n=5) | 6.24 ± 0.65 (n=5) | +0.7 [−1.2, +2.6] |
+| `6x6` N=4 | 7.22 ± 1.18 (n=5) | 7.57 ± 0.86 (n=5) | +0.4 [−0.9, +1.6] |
+
+`num_interactions=5` rompe la optimización (`w90`: 152 ± 115 meV, una ejecución
+en 285) y `max_ell=4` no aporta (`w90` 80.2 ± 14.0; `6x6` 6.97 ± 0.21).
+
+**Ninguna intervención de arquitectura mejora la precisión.** Con 2–3 semillas
+la profundidad 4 parecía dar −15 %; con 5–7 semillas el efecto desaparece y los
+controles bajan (6.16→5.55 en `6x6`, 87.1→79.5 en `w90`): era regresión a la
+media. Lo que sí es consistente en los tres casos es que la cuarta capa
+**reduce la dispersión entre semillas** (15.6→5.8, 2.06→0.65, 1.18→0.86), igual
+que el schedule cosine: mejora la reproducibilidad, no el error.
+
+### 11.6 Dónde queda el techo
+
+Resumen del diagnóstico, todo medido:
+
+| Candidato | Veredicto | Evidencia |
+|---|---|---|
+| Cantidad de datos | descartado en `6x6` | curva plana N=4…64 con 3 semillas (§1) |
+| Calidad de la etiqueta | descartado | 0.01 meV, 3–4 órdenes por debajo (§11.3) |
+| Ancho del modelo | descartado | 2× ancho, sin mejora (§11.4) |
+| Profundidad / `max_ell` | descartado | §11.5 |
+| Receta de entrenamiento | afecta a la **varianza**, no a la media | §11.2, §11.5 |
+
+Lo que queda sin probar, por orden de plausibilidad: (a) la **función de
+pérdida** (`block_type_mae` pesa todos los bloques por igual, y en `6x6` la
+mayoría son pares lejanos casi nulos); (b) el **radio de la base** (`.ion.xml`),
+que fija el grafo y no se puede ampliar sin regenerar las etiquetas; (c) que el
+objetivo aprendido sea `H − E_F·S`, donde **E_F depende de la estructura**, de
+modo que el modelo tiene que predecir una magnitud global a partir de entornos
+locales. (c) es contrastable a bajo coste: reentrenar sobre `H` sin desplazar
+y comparar.
+
+Dos efectos "prometedores" se evaporaron al añadir semillas en esta campaña (la
+ventaja del finalista de precisión sobre MD, §11.1, y la profundidad 4). **Con
+esta arquitectura y este ruido, 3 semillas no bastan para afirmar nada**: es el
+resultado metodológico más transferible de todo el trabajo.
 
 ---
 

@@ -1083,8 +1083,29 @@ def depth_jobs(system: str) -> list[dict[str, Any]]:
     return jobs
 
 
+def depth_confirm_jobs(system: str) -> list[dict[str, Any]]:
+    """More seeds for the only variant that helped (one extra interaction layer) and its control."""
+
+    finalist, pool = _finalist(system, "precision")
+    seeds = {"w90": (3, 4, 5, 6), "6x6": (2, 3, 4)}[system]
+    variants = {"cos_depth4": {"model": {"num_interactions": 4}}}
+    variants["cosine" if system == "w90" else "cos_b16"] = {}
+    jobs = []
+    for name, variant in variants.items():
+        patch: dict[str, Any] = {"lr_scheduler": _cosine(600)}
+        patch |= {key: dict(value) for key, value in variant.items()}
+        stage = "ablation" if name == "cosine" else "depth"
+        if system == "6x6":
+            patch["data"] = {"batch_size": 16}
+        for n in DEPTH_SIZES[system]:
+            jobs += [make_job(system, finalist, pool, n, seed, stage, tag=f"__{name}", patch=patch)
+                     for seed in seeds]
+    return [job for job in jobs if not (system == "w90" and job["N"] != 64)]
+
+
 STAGES = {"curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs,
-          "seeds": seed_jobs, "ablation": ablation_jobs, "capacity": capacity_jobs, "depth": depth_jobs}
+          "seeds": seed_jobs, "ablation": ablation_jobs, "capacity": capacity_jobs, "depth": depth_jobs,
+          "depth_confirm": depth_confirm_jobs}
 
 
 def cmd_train(args: argparse.Namespace) -> int:
