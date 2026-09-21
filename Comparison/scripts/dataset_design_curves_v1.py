@@ -1103,7 +1103,90 @@ def depth_confirm_jobs(system: str) -> list[dict[str, Any]]:
     return [job for job in jobs if not (system == "w90" and job["N"] != 64)]
 
 
-STAGES = {"curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs,
+# block_type_mae averages per block type, so the many near-zero far-pair blocks weigh
+# as much as the bonded ones. These alternatives weight by magnitude instead.
+LOSS_VARIANTS = {"loss_elemmse": "graph2mat.metrics.elementwise_mse",
+                 "loss_blockmse": "graph2mat.metrics.block_type_mse"}
+LOSS_SEEDS = {"w90": (0, 1, 2, 3, 4, 5, 6), "6x6": (0, 1, 2, 3, 4)}
+
+
+def loss_jobs(system: str) -> list[dict[str, Any]]:
+    """Same recipe and schedule as the cosine control; only the loss changes."""
+
+    finalist, pool = _finalist(system, "precision")
+    jobs = []
+    for name, loss in LOSS_VARIANTS.items():
+        patch: dict[str, Any] = {"lr_scheduler": _cosine(600), "model": {"loss": loss}}
+        if system == "6x6":
+            patch["data"] = {"batch_size": 16}
+        jobs += [make_job(system, finalist, pool, 64, seed, "loss", tag=f"__{name}", patch=patch)
+                 for seed in LOSS_SEEDS[system]]
+    return jobs
+
+
+def loss_long_jobs(system: str) -> list[dict[str, Any]]:
+    """Fair rerun of the loss comparison: the alternatives were still improving at epoch 596/600."""
+
+    if system != "6x6":
+        return []
+    finalist, pool = _finalist(system, "precision")
+    jobs = []
+    for name, loss in (("long_blockmae", "graph2mat.metrics.block_type_mae"),
+                       ("long_elemmse", "graph2mat.metrics.elementwise_mse")):
+        patch = {"lr_scheduler": _cosine(2000), "trainer": {"max_epochs": 2000},
+                 "model": {"loss": loss}, "data": {"batch_size": 16}}
+        jobs += [make_job(system, finalist, pool, 64, seed, "loss_long", tag=f"__{name}", patch=patch)
+                 for seed in LOSS_SEEDS[system]]
+    return jobs
+
+
+def elemmse_patch(system: str, epochs: int = 2000) -> dict[str, Any]:
+    patch: dict[str, Any] = {"lr_scheduler": _cosine(epochs), "trainer": {"max_epochs": epochs},
+                             "model": {"loss": "graph2mat.metrics.elementwise_mse"}}
+    if system == "6x6":
+        patch["data"] = {"batch_size": 16}
+    return patch
+
+
+def curve_elemmse_jobs(system: str) -> list[dict[str, Any]]:
+    """Learning curve with the loss that actually works: is 6x6 still flat in N?
+
+    The N=4 saturation of the frozen campaign was measured with block_type_mae,
+    which averages per block type and drowns the signal in near-zero far-pair
+    blocks. N=64 already exists from the loss_long stage.
+    """
+
+    finalist, pool = _finalist(system, "precision")
+    sizes = (4, 8, 16, 32) if system == "6x6" else (64,)
+    return [make_job(system, finalist, pool, n, seed, "curve_elemmse", tag="__long_elemmse",
+                     patch=elemmse_patch(system))
+            for n in sizes for seed in (0, 1, 2) + ((3, 4) if system == "w90" else ())]
+
+
+def curve_steps_jobs(system: str) -> list[dict[str, Any]]:
+    """The curve at equal gradient steps, not equal epochs.
+
+    With batch 16 a 6x6 epoch is ceil(N/16) steps, so equal epochs gave N=64 four
+    times the updates of N=16 -- and the error drop sits exactly where the step
+    count rises. Here every size gets ~8000 steps and 2000 validation checks
+    (check_val_every_n_epoch scaled), so only the data differs.
+    """
+
+    if system != "6x6":
+        return []
+    finalist, pool = _finalist(system, "precision")
+    jobs = []
+    for n in (4, 8, 16, 32):
+        steps_per_epoch = max(1, -(-n // 16))
+        epochs = 8000 // steps_per_epoch
+        patch = elemmse_patch(system, epochs)
+        patch["trainer"] |= {"check_val_every_n_epoch": epochs // 2000}
+        jobs += [make_job(system, finalist, pool, n, seed, "curve_steps", tag="__steps8k", patch=patch)
+                 for seed in (0, 1, 2)]
+    return jobs
+
+
+STAGES = {"curve_steps": curve_steps_jobs, "loss": loss_jobs, "loss_long": loss_long_jobs, "curve_elemmse": curve_elemmse_jobs, "curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs,
           "seeds": seed_jobs, "ablation": ablation_jobs, "capacity": capacity_jobs, "depth": depth_jobs,
           "depth_confirm": depth_confirm_jobs}
 
@@ -1663,6 +1746,69 @@ def cmd_label_noise(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_efshift(args: argparse.Namespace) -> int:
+    """How much of the error is a per-structure global shift c*S (the E_F the label carries)?
+
+    sisl returns H - E_F*S and E_F moves with the displacement, so the model has to
+    predict a global quantity from local environments. If that is the bottleneck, the
+    residual H_pred - H_ref should be close to c*S for some scalar c, and c should
+    track the structure's own E_F.
+    """
+
+    import scipy.linalg
+
+    accelerator = "cpu" if args.cpu else s4.torch_backend_preflight()["effective_backend"]
+    rows: list[dict[str, Any]] = []
+    for job_id in args.jobs:
+        result = read_json(OUT / "runs" / args.system / job_id / "result.json")
+        samples = val_samples(result)
+        out_dir = OUT / "runs" / args.system / job_id / "efshift"
+        predicted_root = predict(Path(result["checkpoint"]), samples, out_dir, accelerator)
+        for sample in samples:
+            import sisl
+
+            predicted = predicted_root / sample.sample_id / "ML_prediction.HSX"
+            h_pred = s4.gamma_hk(predicted)
+            h_ref = s4.gamma_hk(sample.reference_matrix)
+            overlap = sisl.get_sile(str(sample.reference_matrix)).read_hamiltonian().Sk(k=[0.0, 0.0, 0.0], format="array")
+            residual = h_pred - h_ref
+            # least-squares scalar: c = <R, S> / <S, S>
+            c = float(np.real(np.vdot(overlap, residual) / np.vdot(overlap, overlap)))
+            corrected = residual - c * overlap
+            eig_ref = s4.gamma_eigenvalues(sample.reference_matrix)
+            eig_corr = scipy.linalg.eigh(h_pred - c * overlap, overlap, eigvals_only=True)
+            mask = np.abs(eig_ref) <= 2.0
+            rows.append({
+                "job_id": job_id, "sample_id": sample.sample_id,
+                "fermi_level_eV": float(sisl.get_sile(str(sample.reference_matrix)).read_fermi_level()),
+                "c_shift_meV": 1e3 * c,
+                "H_MAE_meV": 1e3 * float(np.mean(np.abs(residual))),
+                "H_MAE_after_shift_meV": 1e3 * float(np.mean(np.abs(corrected))),
+                "spectral_err_meV": 1e3 * float(np.sqrt(np.mean((s4.gamma_eigenvalues(predicted, sample.reference_matrix)[mask] - eig_ref[mask]) ** 2))) if mask.any() else float("nan"),
+                "spectral_err_after_shift_meV": 1e3 * float(np.sqrt(np.mean((eig_corr[mask] - eig_ref[mask]) ** 2))) if mask.any() else float("nan"),
+            })
+        shutil.rmtree(out_dir, ignore_errors=True)
+    write_csv(OUT / f"efshift_{args.system}.csv", rows)
+    before = np.array([r["H_MAE_meV"] for r in rows])
+    after = np.array([r["H_MAE_after_shift_meV"] for r in rows])
+    shift = np.array([r["c_shift_meV"] for r in rows])
+    fermi = np.array([r["fermi_level_eV"] for r in rows])
+    summary = {
+        "system": args.system, "jobs": args.jobs, "n_structures": len(rows),
+        "H_MAE_meV_mean": float(before.mean()), "H_MAE_after_shift_meV_mean": float(after.mean()),
+        "error_explained_by_global_shift_fraction": float(1 - after.mean() / before.mean()),
+        "c_shift_meV_mean": float(shift.mean()), "c_shift_meV_sd": float(shift.std(ddof=1)),
+        "corr_c_vs_fermi": float(np.corrcoef(shift, fermi)[0, 1]),
+        "fermi_level_eV_spread": float(fermi.max() - fermi.min()),
+    }
+    if not np.isnan([r["spectral_err_meV"] for r in rows]).all():
+        summary |= {"spectral_err_meV_mean": float(np.nanmean([r["spectral_err_meV"] for r in rows])),
+                    "spectral_err_after_shift_meV_mean": float(np.nanmean([r["spectral_err_after_shift_meV"] for r in rows]))}
+    write_json(OUT / f"efshift_{args.system}.json", summary)
+    print(json.dumps(summary, indent=1))
+    return 0
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     import matplotlib
 
@@ -2020,6 +2166,10 @@ def main() -> int:
     p.add_argument("--parallel", type=int, default=3)
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     sub.add_parser("analyze")
+    p = sub.add_parser("efshift")
+    p.add_argument("--system", required=True, choices=SYSTEMS)
+    p.add_argument("--jobs", nargs="+", required=True)
+    p.add_argument("--cpu", action="store_true")
     p = sub.add_parser("label-noise")
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
     p.add_argument("--n", type=int, default=8)
@@ -2033,7 +2183,8 @@ def main() -> int:
             "md-split": cmd_md_split, "train": cmd_train, "finalists": cmd_finalists,
             "confirm": cmd_confirm, "final-test": cmd_final_test,
             "evaluate-final": cmd_evaluate_final, "analyze": cmd_analyze,
-            "rescore-val": cmd_rescore_val, "label-noise": cmd_label_noise}[args.cmd](args)
+            "rescore-val": cmd_rescore_val, "label-noise": cmd_label_noise,
+            "efshift": cmd_efshift}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,9 @@ los elementos de H(Γ) corresponden a pares lejanos y son casi nulos.
    desde N=4: random 1D_in da 7.10 / 5.81 / 7.14 / 6.07 / 6.39 meV para
    N = 4, 8, 16, 32, 64 (sd entre semillas 0.45–1.94), y Sobol 3D da
    7.55 / 8.45 / 11.55 / 8.04 / 7.79. Cada estructura de 72 átomos aporta 72
-   entornos desplazados; cuatro estructuras ya saturan el modelo.
+   entornos desplazados; cuatro estructuras ya saturan el modelo. **Con la
+   receta corregida de §11.9 la curva sigue plana pero a 2 meV en vez de 6**
+   (§11.7–§11.8).
 2. **En `w90` (celda de 2 átomos) pasa lo contrario:** N=64 es el mejor punto de
    todas las recetas y la variabilidad entre semillas es enorme (la misma receta
    y el mismo dataset dan 61, 101 y 76 meV en desarrollo). Con 2 átomos por
@@ -464,6 +466,73 @@ Dos efectos "prometedores" se evaporaron al añadir semillas en esta campaña (l
 ventaja del finalista de precisión sobre MD, §11.1, y la profundidad 4). **Con
 esta arquitectura y este ruido, 3 semillas no bastan para afirmar nada**: es el
 resultado metodológico más transferible de todo el trabajo.
+
+### 11.7 Sí era la función de pérdida: 3× menos error en `6x6`
+
+`block_type_mae` promedia por tipo de bloque, así que en una supercelda los
+miles de bloques de pares lejanos casi nulos pesan igual que los enlazantes.
+Cambiando a `elementwise_mse` (pesa por elemento) en el finalista de precisión
+de `6x6`, N=64:
+
+| Pérdida | H-MAE (meV) | mejor época |
+|---|---|---|
+| `block_type_mae`, 600 ép | 5.55 ± 2.06 (n=5) | 281 |
+| `block_type_mae`, 2000 ép | 5.29 ± 0.80 (n=5) | 241 |
+| **`elementwise_mse`, 2000 ép** | **2.00 ± 0.04 (n=5)** | 1211 |
+
+**Un factor 2.6 de mejora y la dispersión entre semillas dividida por 20.** Es
+la única intervención de toda la campaña que mueve el techo, después de
+descartar datos, etiqueta, ancho, profundidad y resolución angular.
+
+El primer intento con 600 épocas no lo vio: las pérdidas alternativas seguían
+mejorando en la época 596 de 600, mientras el control convergía en la 281. Con
+la receta congelada, la pérdida buena estaba estrangulada por el tope de épocas.
+
+En `w90` el efecto es menor y no concluyente (68.4 ± 21.2 frente a 79.5 ± 15.6,
+n=5/7), aunque una semilla llegó a 30.9 meV, menos de la mitad del mejor
+resultado de toda la campaña.
+
+### 11.8 La curva sigue plana, pero hay que medirla a pasos iguales
+
+Con la pérdida nueva, a **épocas** iguales la curva de `6x6` parecía tener
+pendiente (4.88 → 4.54 → 4.55 → 2.55 → 2.00 para N=4…64). No la tiene: con
+batch 16, una época son ⌈N/16⌉ pasos, así que N=64 recibía **4× más
+actualizaciones** que N=16, y la caída coincidía exactamente con el punto donde
+sube el número de pasos.
+
+Repitiendo con ~8000 pasos de gradiente y 2000 validaciones para todos los
+tamaños (`check_val_every_n_epoch` escalado), de modo que solo cambien los datos:
+
+| N | H-MAE (meV), 3 semillas | mejor época |
+|---|---|---|
+| 4 | 2.13 ± 0.28 | 4214 |
+| 8 | 1.94 ± 0.09 | 5344 |
+| 16 | 2.14 ± 0.26 | 4202 |
+| 32 | 2.04 ± 0.12 | 2560 |
+| 64 | 2.00 ± 0.04 | 1211 |
+
+**Plana dentro del ruido: 1.94–2.14 meV de N=4 a N=64.** La conclusión original
+(§1) se confirma y se refuerza: cuatro estructuras de 72 átomos bastan. Lo que
+cambia es el nivel, de ~6 a ~2 meV, y el motivo por el que antes parecía haber
+pendiente.
+
+**Aviso metodológico:** un presupuesto fijo en épocas confunde N con pasos de
+gradiente. Las curvas de §4 (y cualquier curva medida así) tienen ese sesgo —
+ahí es un factor 2 porque el batch era 32, no 4, pero conviene rehacerlas a
+pasos iguales antes de sacar conclusiones finas sobre la forma de la curva.
+
+### 11.9 Receta recomendada para futuras campañas
+
+De todo lo medido en §11:
+
+- pérdida `elementwise_mse` (no `block_type_mae`) — factor 2.6 en `6x6`;
+- schedule cosine de learning rate — sd entre semillas ÷5;
+- presupuesto en **pasos de gradiente**, no en épocas (~8000), con
+  `check_val_every_n_epoch` escalado;
+- fp32 donde quepa en memoria — sd ÷2.6 en `w90`;
+- **≥5 semillas** antes de afirmar cualquier diferencia;
+- N=4–8 estructuras de supercelda son suficientes: el coste de etiquetado baja
+  16× sin perder precisión.
 
 ---
 
