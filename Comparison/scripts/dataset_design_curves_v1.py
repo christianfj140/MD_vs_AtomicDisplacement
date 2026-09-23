@@ -1163,6 +1163,117 @@ def curve_elemmse_jobs(system: str) -> list[dict[str, Any]]:
             for n in sizes for seed in (0, 1, 2) + ((3, 4) if system == "w90" else ())]
 
 
+def no_early_stop_jobs(system: str) -> list[dict[str, Any]]:
+    """Paired w90 diagnostic: same five seeds, full 2000 epochs, best-val checkpoint."""
+    if system != "w90":
+        return []
+    jobs = curve_elemmse_jobs(system)
+    for job in jobs:
+        job["stage"] = "no_early_stop"
+        job["job_id"] += "__no_early_stop"
+        job["config_patch"]["trainer"]["callbacks"] = [
+            {"class_path": "ModelCheckpoint", "init_args": {
+                "monitor": "val_loss", "mode": "min", "save_top_k": 1,
+                "filename": "best-epoch{epoch}-step{step}",
+            }},
+        ]
+    return jobs
+
+
+def no_early_stop_4k_jobs(system: str) -> list[dict[str, Any]]:
+    """Repeat all five seeds with twice the budget and a matching cosine horizon."""
+    jobs = no_early_stop_jobs(system)
+    for job in jobs:
+        job["stage"] = "no_early_stop_4k"
+        job["job_id"] += "__4k"
+        job["config_patch"]["trainer"]["max_epochs"] = 4000
+        job["config_patch"]["lr_scheduler"] = _cosine(4000)
+    return jobs
+
+
+def coverage_4k_jobs(system: str) -> list[dict[str, Any]]:
+    """Matched-budget dataset comparison: 3D at two radii and MD, common dev."""
+    if system != "w90":
+        return []
+    recipe, pool = _finalist(system, "efficient")
+    expanded = read_json(OUT / "coverage_pool_w90_r012.json")
+    md = read_json(OUT / "md_split_w90.json")
+    md_recipe = {"recipe_id": "md_w90", "family": "MD", "dim": "3D", "k": 2,
+                 "R": md["R_train_md"], "sampler_seed": None, "pool_hash": md["pool_hash"]}
+    arms = ((recipe, pool), (expanded, expanded["samples"]), (md_recipe, md["train_pool"]))
+    return [make_job(system, recipe, rows, 64, template["training_seed"], "coverage_4k",
+                     tag="__coverage4k_commondev", patch=template["config_patch"])
+            for recipe, rows in arms for template in no_early_stop_4k_jobs(system)]
+
+
+def coverage_curve_jobs(system: str) -> list[dict[str, Any]]:
+    """Nested learning curve for the winning 3D R0.12 pool at 8000 updates."""
+    if system != "w90":
+        return []
+    recipe = read_json(OUT / "coverage_pool_w90_r012.json")
+    jobs = []
+    for n in (4, 8, 16, 32):
+        # batch_size=32: these sizes all make one update per epoch. Validate
+        # every two epochs to match N=64's 8000 updates / 4000 validations.
+        patch = elemmse_patch(system, 8000)
+        patch["trainer"] |= {"check_val_every_n_epoch": 2, "callbacks": [
+            {"class_path": "ModelCheckpoint", "init_args": {
+                "monitor": "val_loss", "mode": "min", "save_top_k": 1,
+                "filename": "best-epoch{epoch}-step{step}",
+            }},
+        ]}
+        jobs += [make_job(system, recipe, recipe["samples"], n, seed, "coverage_curve",
+                          tag="__steps8k", patch=patch) for seed in range(5)]
+    return jobs
+
+
+def fixed_update_elemmse_patch(system: str, n: int, updates: int = 8000,
+                               validations: int = 2000) -> dict[str, Any]:
+    """Elementwise-MSE schedule with the same updates and validations for every N."""
+
+    batch_size = 16 if system == "6x6" else 32
+    steps_per_epoch = max(1, -(-n // batch_size))
+    assert updates % steps_per_epoch == 0
+    epochs = updates // steps_per_epoch
+    assert epochs % validations == 0
+    patch = elemmse_patch(system, epochs)
+    patch["trainer"] |= {"check_val_every_n_epoch": epochs // validations, "callbacks": [
+        {"class_path": "ModelCheckpoint", "init_args": {
+            "monitor": "val_loss", "mode": "min", "save_top_k": 1,
+            "filename": "best-epoch{epoch}-step{step}",
+        }},
+    ]}
+    return patch
+
+
+def coverage_6x6_jobs(system: str) -> list[dict[str, Any]]:
+    """Matched 6x6 comparison at N=64: 1D R=.12, 3D R=.08 and 3D R=.12."""
+
+    if system != "6x6":
+        return []
+    one_d, one_d_pool = _finalist(system, "precision")
+    three_d, three_d_pool = _finalist(system, "efficient")
+    expanded = read_json(OUT / "coverage_pool_6x6_r012.json")
+    assert one_d["dim"] == "1D_in" and one_d["R"] == 0.12
+    assert three_d["dim"] == "3D" and three_d["R"] == 0.08
+    arms = ((one_d, one_d_pool), (three_d, three_d_pool), (expanded, expanded["samples"]))
+    return [make_job(system, recipe, rows, 64, seed, "coverage_6x6",
+                     tag="__coverage8k_full", patch=fixed_update_elemmse_patch(system, 64))
+            for recipe, rows in arms for seed in range(5)]
+
+
+def coverage_curve_6x6_jobs(system: str) -> list[dict[str, Any]]:
+    """Five-seed equal-update curve for the dev-selected 6x6 coverage winner."""
+
+    if system != "6x6":
+        return []
+    winner = read_json(OUT / "coverage_6x6_winner.json")
+    recipe, rows = winner["recipe"], winner["samples"]
+    return [make_job(system, recipe, rows, n, seed, "coverage_curve_6x6",
+                     tag="__coverage8k_full", patch=fixed_update_elemmse_patch(system, n))
+            for n in (4, 8, 16, 32) for seed in range(5)]
+
+
 def curve_steps_jobs(system: str) -> list[dict[str, Any]]:
     """The curve at equal gradient steps, not equal epochs.
 
@@ -1188,7 +1299,10 @@ def curve_steps_jobs(system: str) -> list[dict[str, Any]]:
 
 STAGES = {"curve_steps": curve_steps_jobs, "loss": loss_jobs, "loss_long": loss_long_jobs, "curve_elemmse": curve_elemmse_jobs, "curves": curve_jobs, "lhs": lhs_jobs, "confirm": confirm_jobs, "md": md_jobs, "n12": n12_jobs,
           "seeds": seed_jobs, "ablation": ablation_jobs, "capacity": capacity_jobs, "depth": depth_jobs,
-          "depth_confirm": depth_confirm_jobs}
+          "depth_confirm": depth_confirm_jobs, "no_early_stop": no_early_stop_jobs,
+          "no_early_stop_4k": no_early_stop_4k_jobs, "coverage_4k": coverage_4k_jobs,
+          "coverage_curve": coverage_curve_jobs, "coverage_6x6": coverage_6x6_jobs,
+          "coverage_curve_6x6": coverage_curve_6x6_jobs}
 
 
 def cmd_train(args: argparse.Namespace) -> int:
@@ -1586,10 +1700,18 @@ def cmd_evaluate_final(args: argparse.Namespace) -> int:
     accelerator = s4.torch_backend_preflight()["effective_backend"]
     manifest = read_json(OUT / "final_test_manifest.json")
     finalists = read_json(OUT / "finalists.json")["systems"]
-    models = [m for m in all_frozen_models() if m["system"] in args.systems]
+    if args.stages:
+        # Follow-up models stay separate from the original preregistered model list.
+        models = [m for system in args.systems for m in load_results(system) if m["stage"] in args.stages]
+        if not models:
+            raise SystemExit("No completed models found for the requested stages")
+    else:
+        models = [m for m in all_frozen_models() if m["system"] in args.systems]
 
     def _one(model: dict[str, Any]) -> str:
         system = model["system"]
+        if sha256_file(Path(model["checkpoint"])) != model["checkpoint_sha256"]:
+            raise RuntimeError(f"checkpoint changed: {model['job_id']}")
         out_dir = OUT / "runs" / system / model["job_id"] / "final_test"
         if (out_dir / "per_structure_metrics.csv").exists():
             return model["job_id"]
@@ -1599,7 +1721,7 @@ def cmd_evaluate_final(args: argparse.Namespace) -> int:
                     for n in {f["N_star_candidate"], 64}}
         reported |= {(read_json(OUT / "selection_manifest.json")["systems"][system]["lhs_recipe"]["recipe_id"], 64)}
         reported |= {("md_w90", n) for n in finalists.get("w90", {}).get("md_sizes", [])}
-        spectral = (model["recipe_id"], model["N"]) in reported
+        spectral = bool(args.stages) or (model["recipe_id"], model["N"]) in reported
         predicted_root = predict(Path(model["checkpoint"]), samples, out_dir, accelerator)
         rows = []
         for sample in samples:
@@ -2165,6 +2287,8 @@ def main() -> int:
     p = sub.add_parser("evaluate-final")
     p.add_argument("--parallel", type=int, default=3)
     p.add_argument("--systems", nargs="+", default=list(SYSTEMS), choices=SYSTEMS)
+    p.add_argument("--stages", nargs="+", choices=STAGES,
+                   help="Evaluate completed follow-up stages without changing the frozen model list")
     sub.add_parser("analyze")
     p = sub.add_parser("efshift")
     p.add_argument("--system", required=True, choices=SYSTEMS)

@@ -536,6 +536,37 @@ De todo lo medido en §11:
 
 ---
 
+### 11.10 Seguimiento w90: presupuesto de optimización y validación espectral
+
+La receta `elementwise_mse` sin parada temprana se ha comparado a 2000 y
+4000 épocas, cinco semillas por presupuesto y cosine adaptado al horizonte.
+Sobre el test común existente, H-MAE pasa de **50.74 ± 18.35 a 34.36 ± 3.98
+meV**, bandas de **58.13 ± 4.49 a 49.73 ± 10.23 meV**, y DOS L1 relativo de
+**10.80 ± 0.58 a 9.07 ± 1.51%**. ± es sd entre semillas. Las cinco mejoran
+las tres métricas globales; el tiempo medio pasa de 18.3 a 35.0 min/modelo.
+
+La mejora espectral es menor que la de H y la dispersión de bandas/DOS
+aumenta. En frames MD las bandas solo mejoran 6% en media (3/5 semillas),
+y a 0.12 Å todavía dan 157.88 meV. Es un seguimiento exploratorio sobre un
+test ya consultado, no una nueva confirmación independiente ni una comparación
+justa con el baseline MD entrenado con otra receta. Datos, protocolo, resultados
+por dominio y figura en [el informe de seguimiento](dataset_design_w90_early_stopping.md).
+
+### 11.11 Cobertura w90 con receta y presupuesto comunes
+
+Con `elementwise_mse`, 4000 épocas completas, desarrollo común y cinco semillas,
+el dataset **3D R=0.12** es el mejor punto probado: H-MAE 18.67 ± 3.90 meV,
+bandas 34.08 ± 8.95 meV y DOS L1 5.10 ± 1.40%, frente a 49.68 ± 11.30,
+133.97 ± 27.62 y 12.39 ± 2.72% para MD. Frente a 3D R=0.08, ampliar el dominio
+mejora H y DOS con IC95 bajo cero; la mejora media de bandas no queda resuelta.
+
+El resultado modifica la prioridad práctica: una vez estabilizado el
+entrenamiento, **cobertura tridimensional y amplitud** dominan la construcción
+del dataset `w90`. El pool R=0.12 costó 0.023 CPU·h de SIESTA, frente a 0.080
+del pool MD. Protocolo, cautelas, comparaciones emparejadas y tablas en
+[dataset_design_w90_coverage.md](dataset_design_w90_coverage.md). Se inicia la
+curva N=4…64 de esta receta a igual número de actualizaciones y cinco semillas.
+
 ## 12. Figuras
 
 | Figura | Qué responde |

@@ -1366,11 +1366,72 @@ pre {
 }
 
 .dataset-design-figures figure {
+  position: relative;
   margin: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-steel);
   padding: 8px;
+}
+
+.dd-plot-with-help {
+  position: relative;
+}
+
+.dd-figure-help {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 20;
+}
+
+.dd-figure-help summary {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  color: var(--accent);
+  box-shadow: 0 3px 12px rgb(15 23 42 / 18%);
+  cursor: pointer;
+  font-weight: 800;
+  list-style: none;
+}
+
+.dd-figure-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.dd-figure-help[open] summary {
+  background: var(--accent);
+  color: white;
+}
+
+.dd-figure-help-text {
+  position: absolute;
+  top: 38px;
+  right: 0;
+  width: min(340px, calc(100vw - 64px));
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 10px 28px rgb(15 23 42 / 20%);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dd-figure-help-text strong,
+.dd-figure-help-text span {
+  display: block;
+}
+
+.dd-figure-help-text span {
+  margin-top: 5px;
+  color: var(--muted);
 }
 
 .dataset-design-figures img {
@@ -1380,10 +1441,38 @@ pre {
   border-radius: calc(var(--radius) - 4px);
 }
 
+.dd-interactive-figure {
+  width: 100%;
+  min-height: 420px;
+}
+
 .dataset-design-figures figcaption {
   margin-top: 6px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.dd-followup-report {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-steel);
+  padding: 12px;
+}
+
+.dd-followup-report summary {
+  cursor: pointer;
+  color: var(--ink-strong);
+  font-weight: 700;
+}
+
+.dd-followup-report pre {
+  margin: 12px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1.55;
 }
 
 .result-pill {

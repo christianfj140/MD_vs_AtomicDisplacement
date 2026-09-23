@@ -212,6 +212,7 @@ def per_sample_errors(val_samples: list[s4.Sample], predicted_root: Path) -> lis
         rows.append({
             "sample_id": sample.sample_id, "mode": sample.sample_id.split("__")[1], "amplitude_ang": sample.amplitude_ang,
             "H_MAE": float(np.mean(np.abs(error))), "H_RMSE": float(np.sqrt(np.mean(np.abs(error) ** 2))),
+            "rel_Frob": float(np.linalg.norm(error) / np.linalg.norm(h_ref)),
         })
     return rows
 

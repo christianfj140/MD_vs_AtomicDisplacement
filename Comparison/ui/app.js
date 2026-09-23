@@ -682,6 +682,7 @@ const state = {
   datasetMinimumThresholdUserDefined: false,
   datasetMinimumPreviewCache: null,
   datasetMinimumViewRequestId: 0,
+  datasetDesignFollowupLastLoadAt: 0,
   g2mDeephPlotsInFlight: false,
   g2mDeephLastPlotRefreshAt: 0,
   g2mDeephLastDerivativeRefreshAt: 0,
@@ -1124,6 +1125,11 @@ async function pollDatasetDesign() {
 
   await pollS9CampaignResults();
   await pollMdSimilarity();
+  const datasetView = document.getElementById("view-dataset-design");
+  if (datasetView?.classList.contains("active") && Date.now() - state.datasetDesignFollowupLastLoadAt > 30_000) {
+    state.datasetDesignFollowupLastLoadAt = Date.now();
+    await ddLoadFollowup();
+  }
 }
 
 async function pollS9CampaignResults() {
@@ -1143,8 +1149,12 @@ async function pollS9CampaignResults() {
 }
 
 const DD_S9_CAMPAIGN_FAMILY_COLORS = { sobol_sparse: "#2ca02c", random_cartesian: "#1f77b4", latin_hypercube: "#7f7f7f" };
+const DD_H_COLOR = "#1f77b4";
+const DD_FROB_COLOR = "#d62728";
+const ddMetricAxis = (title, color, extra = {}) => ({ title: { text: title, font: { color }, standoff: 12 }, tickfont: { color }, linecolor: color, automargin: true, ...extra });
+const DD_LEGEND_BELOW = Object.freeze({ orientation: "h", x: 0, xanchor: "left", y: -0.32, yanchor: "top" });
 
-function ddS9CampaignFamilyTraces(rows, variant, symbol, valueKey, valueFn, unitLabel) {
+function ddS9CampaignFamilyTraces(rows, variant, symbol, valueKey, valueFn, unitLabel, color, yaxis = "y") {
   const traces = [];
   const families = Array.from(new Set(rows.map((row) => row.family))).sort();
   for (const family of families) {
@@ -1153,8 +1163,8 @@ function ddS9CampaignFamilyTraces(rows, variant, symbol, valueKey, valueFn, unit
     traces.push({
       x: subset.map((row) => row.rank), y: subset.map((row) => valueFn(row[valueKey])),
       text: subset.map((row) => `${row.combo_tag} (dim ${row.dim}, R${row.domain_ang}, d${row.density})`),
-      mode: "markers", type: "scatter", name: `${family} (${variant})`,
-      marker: { color: DD_S9_CAMPAIGN_FAMILY_COLORS[family] || "#000000", symbol, size: 7 },
+      mode: "markers", type: "scatter", name: `${family} (${variant}) · ${unitLabel}`, yaxis,
+      marker: { color, symbol, size: 7 },
       hovertemplate: `%{text}<br>${unitLabel} %{y:.3f}<extra>${family} (${variant})</extra>`,
     });
   }
@@ -1170,14 +1180,17 @@ async function ddS9RenderCampaignChart(w90Rows, sixxsixRows) {
   }
   await ensurePlotlyLoaded();
   const traces = [
-    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "H_MAE_meV", (v) => v, "H-MAE meV"),
-    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "H_MAE_meV", (v) => v, "H-MAE meV"),
+    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "rel_Frob", (v) => v * 100, "Frobenius %", DD_FROB_COLOR),
+    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "rel_Frob", (v) => v * 100, "Frobenius %", DD_FROB_COLOR),
+    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "H_MAE_meV", (v) => v, "H-MAE meV", DD_H_COLOR, "y2"),
+    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "H_MAE_meV", (v) => v, "H-MAE meV", DD_H_COLOR, "y2"),
   ];
   await window.Plotly.newPlot(host, traces, {
-    title: "S9 campana (600 epocas): H-MAE por combo, w90 vs 6x6 (todos los 80)",
+    title: "S9 campaña (600 épocas): precisión por combo, w90 vs 6x6",
     xaxis: { title: "rank (combo, mismo orden en ambas campanas)" },
-    yaxis: { title: "H-MAE (meV, log scale)", type: "log" },
-    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 480, legend: { orientation: "h" },
+    yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { type: "log" }),
+    yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { type: "log", overlaying: "y", side: "right" }),
+    margin: { l: 75, r: 75, t: 60, b: 155 }, height: 560, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -1190,24 +1203,24 @@ async function ddS9RenderCampaignRelFrobChart(w90Rows, sixxsixRows) {
   }
   await ensurePlotlyLoaded();
   const traces = [
-    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "rel_Frob", (v) => v * 100, "rel. Frobenius %"),
-    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "rel_Frob", (v) => v * 100, "rel. Frobenius %"),
+    ...ddS9CampaignFamilyTraces(w90Rows, "w90", "circle", "rel_Frob", (v) => v * 100, "rel. Frobenius %", DD_FROB_COLOR),
+    ...ddS9CampaignFamilyTraces(sixxsixRows, "6x6", "square", "rel_Frob", (v) => v * 100, "rel. Frobenius %", DD_FROB_COLOR),
   ];
   await window.Plotly.newPlot(host, traces, {
     title: "S9 campana (600 epocas): Relative Frobenius por combo, w90 vs 6x6 (todos los 80)",
     xaxis: { title: "rank (combo, mismo orden en ambas campanas)" },
     yaxis: { title: "Relative Frobenius (%)" },
-    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 480, legend: { orientation: "h" },
+    margin: { l: 70, r: 30, t: 60, b: 150 }, height: 540, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
-function ddS9CampaignStatsByDensity(rows) {
+function ddS9CampaignStatsByDensity(rows, valueKey, scale = 1) {
   const byFamilyDensity = new Map();
   for (const row of rows) {
-    if (row.H_MAE_meV == null || row.density == null || row.family == null) continue;
+    if (row[valueKey] == null || row.density == null || row.family == null) continue;
     const key = `${row.family}|${row.density}`;
     if (!byFamilyDensity.has(key)) byFamilyDensity.set(key, []);
-    byFamilyDensity.get(key).push(row.H_MAE_meV);
+    byFamilyDensity.get(key).push(row[valueKey] * scale);
   }
   const out = [];
   for (const [key, values] of byFamilyDensity) {
@@ -1228,8 +1241,8 @@ async function ddS9RenderCampaignLearningCurve(w90Rows, sixxsixRows) {
   }
   await ensurePlotlyLoaded();
   const traces = [];
-  const addVariantTraces = (rows, variant, symbol, dash) => {
-    const stats = ddS9CampaignStatsByDensity(rows);
+  const addVariantTraces = (rows, variant, symbol, dash, valueKey, scale, color, yaxis, metric, unit) => {
+    const stats = ddS9CampaignStatsByDensity(rows, valueKey, scale);
     const families = Array.from(new Set(stats.map((s) => s.family))).sort();
     for (const family of families) {
       const points = stats.filter((s) => s.family === family).sort((a, b) => a.density - b.density);
@@ -1237,20 +1250,23 @@ async function ddS9RenderCampaignLearningCurve(w90Rows, sixxsixRows) {
       traces.push({
         x: points.map((p) => p.density), y: points.map((p) => p.mean),
         error_y: { type: "data", array: points.map((p) => p.std), visible: true },
-        mode: "lines+markers", type: "scatter", name: `${family} (${variant})`,
-        line: { color: DD_S9_CAMPAIGN_FAMILY_COLORS[family] || "#000000", dash },
+        mode: "lines+markers", type: "scatter", name: `${family} (${variant}) · ${metric}`, yaxis,
+        line: { color, dash },
         marker: { symbol, size: 9 },
-        hovertemplate: `density %{x}<br>H-MAE %{y:.2f} meV<extra>${family} (${variant})</extra>`,
+        hovertemplate: `density %{x}<br>${metric} %{y:.2f} ${unit}<extra>${family} (${variant})</extra>`,
       });
     }
   };
-  addVariantTraces(w90Rows, "w90", "circle", "solid");
-  addVariantTraces(sixxsixRows, "6x6", "square", "dash");
+  for (const [rows, variant, symbol, dash] of [[w90Rows, "w90", "circle", "solid"], [sixxsixRows, "6x6", "square", "dash"]]) {
+    addVariantTraces(rows, variant, symbol, dash, "rel_Frob", 100, DD_FROB_COLOR, "y", "Frobenius", "%");
+    addVariantTraces(rows, variant, symbol, dash, "H_MAE_meV", 1, DD_H_COLOR, "y2", "H-MAE", "meV");
+  }
   await window.Plotly.newPlot(host, traces, {
-    title: "Learning curves: H-MAE vs N_train (density), por familia (mean +/- std)",
+    title: "Curvas de aprendizaje: H-MAE y Frobenius vs N_train",
     xaxis: { title: "N_train (density)" },
-    yaxis: { title: "H-MAE (meV, log scale)", type: "log" },
-    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 420, legend: { orientation: "h" },
+    yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { type: "log" }),
+    yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { type: "log", overlaying: "y", side: "right" }),
+    margin: { l: 75, r: 75, t: 60, b: 175 }, height: 560, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -1263,36 +1279,39 @@ async function ddS9RenderCampaignCost(w90Rows, sixxsixRows) {
   }
   await ensurePlotlyLoaded();
   const traces = [];
-  const addScatter = (rows, variant, symbol) => {
-    const points = rows.filter((row) => row.H_MAE_meV != null && row.density != null);
+  const addScatter = (rows, variant, symbol, valueKey, scale, color, yaxis, metric, unit) => {
+    const points = rows.filter((row) => row[valueKey] != null && row.density != null);
     if (!points.length) return;
     traces.push({
-      x: points.map((p) => p.density), y: points.map((p) => p.H_MAE_meV),
+      x: points.map((p) => p.density), y: points.map((p) => p[valueKey] * scale), yaxis,
       text: points.map((p) => `${p.combo_tag} (${p.family})`),
-      mode: "markers", type: "scatter", name: `${variant} (puntos)`,
-      marker: { color: "#cccccc", symbol, size: 7 },
-      hovertemplate: `%{text}<br>N_train %{x}<br>H-MAE %{y:.2f} meV<extra>${variant}</extra>`,
+      mode: "markers", type: "scatter", name: `${variant} · ${metric} (puntos)`,
+      marker: { color, opacity: 0.35, symbol, size: 7 },
+      hovertemplate: `%{text}<br>N_train %{x}<br>${metric} %{y:.2f} ${unit}<extra>${variant}</extra>`,
     });
     const byDensity = new Map();
     for (const p of points) {
       if (!byDensity.has(p.density)) byDensity.set(p.density, Infinity);
-      byDensity.set(p.density, Math.min(byDensity.get(p.density), p.H_MAE_meV));
+      byDensity.set(p.density, Math.min(byDensity.get(p.density), p[valueKey] * scale));
     }
     const densities = Array.from(byDensity.keys()).sort((a, b) => a - b);
     traces.push({
       x: densities, y: densities.map((d) => byDensity.get(d)),
-      mode: "lines+markers", type: "scatter", name: `${variant} frontier`,
-      line: { color: variant === "w90" ? "#1f77b4" : "#d62728" }, marker: { symbol, size: 9 },
-      hovertemplate: `N_train %{x}<br>best H-MAE %{y:.2f} meV<extra>${variant} frontier</extra>`,
+      mode: "lines+markers", type: "scatter", name: `${variant} · ${metric} frontera`, yaxis,
+      line: { color, dash: variant === "w90" ? "solid" : "dash" }, marker: { symbol, size: 9 },
+      hovertemplate: `N_train %{x}<br>best ${metric} %{y:.2f} ${unit}<extra>${variant} frontier</extra>`,
     });
   };
-  addScatter(w90Rows, "w90", "circle");
-  addScatter(sixxsixRows, "6x6", "square");
+  for (const [rows, variant, symbol] of [[w90Rows, "w90", "circle"], [sixxsixRows, "6x6", "square"]]) {
+    addScatter(rows, variant, symbol, "rel_Frob", 100, DD_FROB_COLOR, "y", "Frobenius", "%");
+    addScatter(rows, variant, symbol, "H_MAE_meV", 1, DD_H_COLOR, "y2", "H-MAE", "meV");
+  }
   await window.Plotly.newPlot(host, traces, {
-    title: "Accuracy vs computational cost: H-MAE vs N_train, todos los puntos + frontera",
+    title: "Precisión vs coste: H-MAE y Frobenius vs N_train",
     xaxis: { title: "Unique training points (N_train = density)" },
-    yaxis: { title: "H-MAE (meV, log scale)", type: "log" },
-    margin: { l: 60, r: 20, t: 45, b: 50 }, height: 420, legend: { orientation: "h" },
+    yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { type: "log" }),
+    yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { type: "log", overlaying: "y", side: "right" }),
+    margin: { l: 75, r: 75, t: 60, b: 175 }, height: 560, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -16974,6 +16993,55 @@ function ddRenderTableRows(rows, headId, bodyId, emptyMessage) {
   body.innerHTML = rows.map((row) => `<tr>${columns.map((col) => `<td>${escapeHtml(row[col])}</td>`).join("")}</tr>`).join("");
 }
 
+function ddFigureHelp(title, explanation) {
+  return `<details class="dd-figure-help">
+    <summary aria-label="Cómo interpretar ${escapeHtml(title)}" title="Cómo interpretar esta gráfica">i</summary>
+    <div class="dd-figure-help-text"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(explanation)}</span></div>
+  </details>`;
+}
+
+const DD_GRAPH_HELP = {
+  "dd-followup-training-plot": ["Diagnósticos 6×6", "Compara Frobenius relativo (rojo, izquierda) y H-MAE (azul, derecha) sobre validación. Menor es mejor; las barras son la desviación entre semillas."],
+  "dd-s9-campaign-chart": ["Precisión de la campaña S9", "Cada punto es una combinación de dataset: Frobenius relativo en rojo (izquierda) y H-MAE en azul (derecha). w90 y 6×6 deben compararse dentro de cada sistema."],
+  "dd-s9-campaign-relfrob-chart": ["Error relativo de Frobenius", "Mide el error global de la matriz H en porcentaje. Menor es mejor; úselo junto con H-MAE porque ponderan de forma distinta bloques grandes y pequeños."],
+  "dd-s9-campaign-learning-curve-chart": ["Curvas por densidad", "Muestra Frobenius relativo (rojo) y H-MAE (azul) frente al número de puntos de entrenamiento. Una meseta indica saturación; compare recetas al mismo N."],
+  "dd-s9-campaign-cost-chart": ["Precisión frente a coste", "La zona inferior izquierda combina menor error y menos datos. Se muestran fronteras para Frobenius relativo (rojo) y H-MAE (azul)."],
+  "dd-md-sim-corr-chart": ["Similitud geométrica con MD", "Ambos ejes son distancias respecto a MD. Los puntos más próximos a la esquina inferior izquierda reproducen mejor amplitudes y correlaciones de MD."],
+  "dd-md-sim-relfrob-chart": ["Similitud MD frente a error", "La esquina inferior izquierda es preferible: geometrías más parecidas a MD y menor error relativo. Una tendencia no demuestra causalidad, pero revela si la similitud ayuda."],
+  "dd-s9-minimum-chart": ["N mínimo observado", "Cada celda muestra el menor N que alcanza el error objetivo. Menor coste y menor N son mejores; “not reached” significa que ningún tamaño probado logró el umbral."],
+  "dd-s9-pareto-chart": ["Frontera de Pareto", "La esquina inferior izquierda es mejor. Los puntos de la frontera no pueden mejorar coste o error sin empeorar el otro."],
+  "dd-s9-learning-curves-chart": ["Curvas de aprendizaje", "Menor error es mejor. El codo señala el tamaño a partir del cual añadir configuraciones ofrece una mejora pequeña."],
+  "dd-s9-density-chart": ["Barrido de densidad", "Compara resoluciones de una misma familia y dominio. Busque el mínimo estable; barras solapadas indican que la diferencia no es robusta."],
+  "dd-s9-domain-heatmap-chart": ["Generalización por dominio", "Colores más fríos indican menor error. Las celdas con amplitud de test mayor que la entrenada son extrapolación y deben interpretarse con más cautela."],
+  "dd-s9-radial-chart": ["Cobertura radial", "Muestra cuántas configuraciones ocupan cada radio de desplazamiento. Huecos o acumulación excesiva revelan cobertura desigual."],
+  "dd-s9-angular-chart": ["Cobertura angular", "Muestra la distribución de direcciones desplazadas. Una cobertura amplia evita que el modelo aprenda sólo orientaciones privilegiadas."],
+  "dd-s9-coverage-chart": ["Cobertura geométrica frente a error", "Frobenius relativo aparece en rojo (izquierda) y H-MAE en azul (derecha). Radios normalizados pequeños suelen significar cobertura más densa; la gráfica muestra asociación, no causalidad."],
+  "dd-s9-local-error-chart": ["Error local", "Relaciona el error de cada configuración con su distancia al entrenamiento. Una pendiente ascendente indica pérdida de precisión al alejarse del dominio conocido."],
+  "dd-s9-physical-probe-chart": ["Sondas del régimen físico", "Busca cambios de cancelación, curvatura y deriva del acoplamiento con la amplitud. Cambios bruscos sugieren el límite del régimen bien representado."],
+};
+
+function ddInstallGraphHelp() {
+  for (const [id, [title, explanation]] of Object.entries(DD_GRAPH_HELP)) {
+    const host = document.getElementById(id);
+    if (!host || host.parentElement?.classList.contains("dd-plot-with-help")) continue;
+    const wrapper = document.createElement("div");
+    wrapper.className = `dd-plot-with-help${host.classList.contains("full") ? " full" : ""}`;
+    host.parentNode.insertBefore(wrapper, host);
+    wrapper.appendChild(host);
+    wrapper.insertAdjacentHTML("beforeend", ddFigureHelp(title, explanation));
+  }
+}
+
+function ddArchivedFigureExplanation(name) {
+  const key = String(name).toLowerCase();
+  if (key.includes("learning")) return "Error frente al tamaño del dataset. Menor es mejor; el codo de la curva señala el N con mejor compromiso coste–precisión.";
+  if (key.includes("pareto")) return "Coste frente a error. La zona inferior izquierda es mejor y la frontera contiene las soluciones no dominadas.";
+  if (key.includes("designed_vs_md")) return "Compara el dataset diseñado con MD por estructura. Una diferencia negativa favorece al dataset diseñado.";
+  if (key.includes("generalization")) return "Muestra cómo cambia el error dentro y fuera del dominio entrenado. Colores más fríos indican menor error.";
+  if (key.includes("seed")) return "Muestra la variabilidad entre semillas. Una dispersión pequeña implica mayor reproducibilidad.";
+  return "Resultado científico archivado. Consulte los ejes y unidades; para métricas de error, los valores menores son mejores.";
+}
+
 function ddRenderEstimate(payload) {
   const summary = document.getElementById("dd-estimate-summary");
   if (summary) {
@@ -17039,7 +17107,7 @@ function ddRenderResults(payload) {
     const names = payload.figures || [];
     figures.classList.toggle("muted-text", names.length === 0);
     figures.innerHTML = names.length
-      ? names.map((name) => `<figure><img src="/api/dataset-design/figure?name=${encodeURIComponent(name)}" alt="${escapeHtml(name)}" loading="lazy" /><figcaption>${escapeHtml(name)}</figcaption></figure>`).join("")
+      ? names.map((name) => `<figure>${ddFigureHelp(name, ddArchivedFigureExplanation(name))}<img src="/api/dataset-design/figure?name=${encodeURIComponent(name)}" alt="${escapeHtml(name)}" loading="lazy" /><figcaption>${escapeHtml(name)}</figcaption></figure>`).join("")
       : "No figures yet.";
   }
   const conclusion = document.getElementById("dd-conclusion");
@@ -17048,6 +17116,83 @@ function ddRenderResults(payload) {
 
 async function ddLoadResults() {
   ddRenderResults(await request("/api/dataset-design/results"));
+}
+
+async function ddRenderFollowup(payload) {
+  await ensurePlotlyLoaded();
+  const status = document.getElementById("dd-followup-status");
+  if (status) {
+    status.classList.toggle("muted-text", !payload.available);
+    status.innerHTML = (payload.status || []).map((row) => `
+      <div class="result-pill">
+        <strong>${escapeHtml(row.state)}</strong>
+        <span>${escapeHtml(row.study)}</span>
+      </div>`).join("") || "Sin resultados todavía.";
+  }
+  ddRenderTableRows(payload.training_table, "dd-followup-training-head", "dd-followup-training-body", "Diagnósticos todavía no disponibles.");
+  ddRenderTableRows(payload.budget_table, "dd-followup-budget-head", "dd-followup-budget-body", "Comparación de presupuesto todavía no disponible.");
+  const trainingPlot = document.getElementById("dd-followup-training-plot");
+  if (trainingPlot) {
+    const groups = new Map();
+    for (const row of payload.training_plot || []) {
+      if (!groups.has(row.study)) groups.set(row.study, []);
+      groups.get(row.study).push(row);
+    }
+    const traces = Array.from(groups.entries()).flatMap(([study, rows]) => {
+      rows.sort((a, b) => a.N - b.N || a.label.localeCompare(b.label));
+      const common = { type: "scatter", mode: "markers+lines", x: rows.map((row) => row.label),
+        text: rows.map((row) => `${row.n_seeds} semillas${row.provisional ? " · provisional" : ""}`) };
+      return [
+        { ...common, name: `${study} · Frobenius`, y: rows.map((row) => row.frob_mean), yaxis: "y",
+          error_y: { type: "data", array: rows.map((row) => row.frob_sd), visible: true }, line: { color: DD_FROB_COLOR }, marker: { color: DD_FROB_COLOR },
+          hovertemplate: "%{x}<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<br>%{text}<extra>%{fullData.name}</extra>" },
+        { ...common, name: `${study} · H-MAE`, y: rows.map((row) => row.h_mean), yaxis: "y2",
+          error_y: { type: "data", array: rows.map((row) => row.h_sd), visible: true }, line: { color: DD_H_COLOR }, marker: { color: DD_H_COLOR },
+          hovertemplate: "%{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<br>%{text}<extra>%{fullData.name}</extra>" },
+      ];
+    });
+    Plotly.react(trainingPlot, traces, {
+      title: "Diagnósticos 6×6 sobre validación",
+      yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { rangemode: "tozero" }),
+      yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { rangemode: "tozero", overlaying: "y", side: "right" }),
+      margin: { l: 75, r: 75, t: 60, b: 175 },
+      legend: DD_LEGEND_BELOW,
+    }, { responsive: true, displaylogo: false });
+  }
+  ddRenderTableRows(payload.campaign_table, "dd-followup-campaign-head", "dd-followup-campaign-body", "Campaña principal no disponible.");
+  ddRenderTableRows(payload.md_model_table, "dd-md-model-head", "dd-md-model-body", "Modelos MD todavía no disponibles.");
+  ddRenderTableRows(payload.md_cartesian_table, "dd-md-cartesian-head", "dd-md-cartesian-body", "Producto cartesiano MD todavía no disponible.");
+  ddRenderTableRows(payload.md_passfail_table, "dd-md-passfail-head", "dd-md-passfail-body", "Decisiones MD todavía no disponibles.");
+  ddRenderTableRows(payload.md_cost_table, "dd-md-cost-head", "dd-md-cost-body", "Costes MD todavía no disponibles.");
+  ddRenderTableRows(payload.md_minimum_table, "dd-md-minimum-head", "dd-md-minimum-body", "Mínimo MD todavía no disponible.");
+  ddRenderTableRows(payload.coverage_table, "dd-followup-coverage-head", "dd-followup-coverage-body", "Comparaciones todavía en cálculo.");
+  ddRenderTableRows(payload.curve_table, "dd-followup-curve-head", "dd-followup-curve-body", "Curvas todavía en cálculo.");
+
+  const figures = document.getElementById("dd-followup-figures");
+  if (figures) {
+    const rows = payload.figures || [];
+    figures.classList.toggle("muted-text", rows.length === 0);
+    figures.innerHTML = rows.length ? rows.map((row) => `<figure>
+      ${ddFigureHelp(row.title, row.caption)}
+      <div id="dd-followup-interactive-${escapeHtml(row.name)}" class="dd-interactive-figure" role="img" aria-label="${escapeHtml(row.title)}"></div>
+      <figcaption><strong>${escapeHtml(row.title)}</strong><br />${escapeHtml(row.caption)}</figcaption>
+    </figure>`).join("") : "Todavía no hay figuras.";
+    for (const row of rows) {
+      const host = document.getElementById(`dd-followup-interactive-${row.name}`);
+      if (!host) continue;
+      await window.Plotly.react(host, row.data || [], {
+        margin: { l: 70, r: 30, t: 70, b: 80 },
+        paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+        ...row.layout,
+      }, { responsive: true, displaylogo: false });
+    }
+  }
+  const report = document.getElementById("dd-followup-report");
+  if (report) report.textContent = payload.report_markdown || "El informe final todavía no está disponible.";
+}
+
+async function ddLoadFollowup() {
+  await ddRenderFollowup(await request("/api/dataset-design/followup"));
 }
 
 async function ddRun() {
@@ -17236,12 +17381,23 @@ async function ddS9RenderPareto(rows) {
   for (const family of families) for (const domain of domains) {
     const subset = points.filter((point) => point.family === family && point.domain === domain);
     if (!subset.length) continue;
+    const symbol = ["circle", "square", "diamond", "triangle-up"][domains.indexOf(domain) % 4];
+    const frob = subset.filter((point) => point.rel_Frob_mean != null);
+    if (frob.length) traces.push({
+      x: frob.map((point) => point.siesta_cost), y: frob.map((point) => point.rel_Frob_mean * 100),
+      error_y: { type: "data", array: frob.map((point) => (point.rel_Frob_std ?? 0) * 100), visible: true },
+      mode: "markers", type: "scatter", legendgroup: `${family}-frob`, yaxis: "y",
+      name: `${family} · ${ddS9DomainLabel(family, domain)} · Frobenius`,
+      marker: { color: DD_FROB_COLOR, size: 9, symbol },
+      text: frob.map((point) => `${point.design_id}<br>N=${point.N_train}, seeds=${point.n_seeds}`),
+      hovertemplate: "%{fullData.name}<br>%{text}<br>SIESTA calculations %{x}<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<extra></extra>",
+    });
     traces.push({
       x: subset.map((point) => point.siesta_cost), y: subset.map((point) => point.H_MAE_mean * 1000),
       error_y: { type: "data", array: subset.map((point) => point.H_MAE_std * 1000), visible: true },
-      mode: "markers", type: "scatter", legendgroup: family,
-      name: `${family} · ${ddS9DomainLabel(family, domain)}`,
-      marker: { color: DD_S9_COLORS[families.indexOf(family) % DD_S9_COLORS.length], size: 9, symbol: ["circle", "square", "diamond", "triangle-up"][domains.indexOf(domain) % 4] },
+      mode: "markers", type: "scatter", legendgroup: `${family}-h`, yaxis: "y2",
+      name: `${family} · ${ddS9DomainLabel(family, domain)} · H-MAE`,
+      marker: { color: DD_H_COLOR, size: 9, symbol },
       text: subset.map((point) => `${point.design_id}<br>N=${point.N_train}, seeds=${point.n_seeds}`),
       hovertemplate: "%{fullData.name}<br>%{text}<br>SIESTA calculations %{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>",
     });
@@ -17250,12 +17406,14 @@ async function ddS9RenderPareto(rows) {
   const frontier = [];
   let best = Infinity;
   for (const point of sortedPoints) if (point.H_MAE_mean < best) { frontier.push(point); best = point.H_MAE_mean; }
-  traces.push({ x: frontier.map((point) => point.siesta_cost), y: frontier.map((point) => point.H_MAE_mean * 1000), mode: "lines", name: "Pareto frontier", line: { color: "#111827", width: 3 }, hoverinfo: "skip" });
+  traces.push({ x: frontier.map((point) => point.siesta_cost), y: frontier.map((point) => point.H_MAE_mean * 1000), yaxis: "y2", mode: "lines", name: "Frontera Pareto H-MAE", line: { color: DD_H_COLOR, width: 3 }, hoverinfo: "skip" });
   await window.Plotly.newPlot(host, traces, {
-    title: "H-MAE vs unique SIESTA calculations (mean ± variability)",
-    xaxis: { title: "Unique SIESTA calculations" }, yaxis: { title: "H-MAE (meV)" },
-    shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: ddS9TargetMeV(), y1: ddS9TargetMeV(), line: { color: "#dc2626", dash: "dash" } }],
-    margin: { l: 70, r: 20, t: 50, b: 55 }, height: 580,
+    title: "Precisión vs cálculos SIESTA únicos (media ± variabilidad)",
+    xaxis: { title: "Unique SIESTA calculations" },
+    yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR),
+    yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { overlaying: "y", side: "right" }),
+    shapes: [{ type: "line", xref: "paper", yref: "y2", x0: 0, x1: 1, y0: ddS9TargetMeV(), y1: ddS9TargetMeV(), line: { color: DD_H_COLOR, dash: "dash" } }],
+    margin: { l: 75, r: 75, t: 60, b: 180 }, height: 660, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -17263,40 +17421,35 @@ async function ddS9RenderLearningCurves(points) {
   const host = document.getElementById("dd-s9-learning-curves-chart");
   if (!host) return;
   await ensurePlotlyLoaded();
-  const isRelFrob = document.getElementById("dd-s9-lc-metric")?.value === "rel_frob";
-  const metricKey = isRelFrob ? "rel_Frob_mean" : "H_MAE_mean";
-  const stdKey = isRelFrob ? "rel_Frob_std" : "H_MAE_std";
-  const scale = isRelFrob ? 100 : 1000;
-  const unit = isRelFrob ? "%" : "meV";
   const selectedDesigns = new Set(Array.from(ddS9MinimumChoices(points).values()).map((choice) => choice.representative?.design_id).filter(Boolean));
   const series = ddS9DesignSeries(points, selectedDesigns)
-    .map((item) => ({ ...item, points: item.points.filter((point) => point[metricKey] != null) }))
+    .map((item) => ({ ...item, points: item.points.filter((point) => point.H_MAE_mean != null) }))
     .filter((item) => item.points.length);
   if (!series.length) {
     window.Plotly.purge(host);
-    host.innerHTML = isRelFrob
-      ? '<p class="field-help">Relative Frobenius no está disponible para los diseños/filtros actuales (sólo Pilot lo calcula).</p>'
-      : '<p class="field-help">No hay curvas de aprendizaje para los filtros actuales.</p>';
+    host.innerHTML = '<p class="field-help">No hay curvas de aprendizaje para los filtros actuales.</p>';
     return;
   }
   const families = Array.from(new Set(series.map((item) => item.family))).sort();
   const domains = Array.from(new Set(series.map((item) => item.domain))).sort((a, b) => a - b);
-  const traces = series.map((item) => ({
-    x: item.points.map((point) => point.N_train), y: item.points.map((point) => point[metricKey] * scale),
-    error_y: { type: "data", array: item.points.map((point) => (point[stdKey] ?? 0) * scale), visible: true },
-    mode: "lines+markers", type: "scatter", legendgroup: item.family,
-    name: `${item.family} · ${ddS9DomainLabel(item.family, item.domain)} · density ${item.density}`,
-    line: { color: DD_S9_COLORS[families.indexOf(item.family) % DD_S9_COLORS.length], dash: ["solid", "dash", "dot", "dashdot"][domains.indexOf(item.domain) % 4] },
-    marker: { size: 9, symbol: ["circle", "square", "diamond", "triangle-up"][domains.indexOf(item.domain) % 4] },
-    text: item.points.map((point) => point.design_id),
-    hovertemplate: `%{text}<br>N_train %{x}<br>${isRelFrob ? "Relative Frobenius" : "H-MAE"} %{y:.2f} ± %{error_y.array:.2f} ${unit}<extra></extra>`,
-  }));
-  const shapes = isRelFrob ? [] : [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: ddS9TargetMeV(), y1: ddS9TargetMeV(), line: { color: "#dc2626", dash: "dash" } }];
+  const traces = series.flatMap((item) => {
+    const dash = ["solid", "dash", "dot", "dashdot"][domains.indexOf(item.domain) % 4];
+    const symbol = ["circle", "square", "diamond", "triangle-up"][domains.indexOf(item.domain) % 4];
+    const label = `${item.family} · ${ddS9DomainLabel(item.family, item.domain)} · density ${item.density}`;
+    const common = { x: item.points.map((point) => point.N_train), mode: "lines+markers", type: "scatter", marker: { size: 9, symbol }, text: item.points.map((point) => point.design_id) };
+    const out = [{ ...common, y: item.points.map((point) => point.H_MAE_mean * 1000), yaxis: "y2", name: `${label} · H-MAE`, line: { color: DD_H_COLOR, dash }, error_y: { type: "data", array: item.points.map((point) => (point.H_MAE_std ?? 0) * 1000), visible: true }, hovertemplate: "%{text}<br>N_train %{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>" }];
+    const frob = item.points.filter((point) => point.rel_Frob_mean != null);
+    if (frob.length) out.unshift({ ...common, x: frob.map((point) => point.N_train), y: frob.map((point) => point.rel_Frob_mean * 100), yaxis: "y", name: `${label} · Frobenius`, line: { color: DD_FROB_COLOR, dash }, text: frob.map((point) => point.design_id), error_y: { type: "data", array: frob.map((point) => (point.rel_Frob_std ?? 0) * 100), visible: true }, hovertemplate: "%{text}<br>N_train %{x}<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<extra></extra>" });
+    return out;
+  });
+  const shapes = [{ type: "line", xref: "paper", yref: "y2", x0: 0, x1: 1, y0: ddS9TargetMeV(), y1: ddS9TargetMeV(), line: { color: DD_H_COLOR, dash: "dash" } }];
   await window.Plotly.newPlot(host, traces, {
-    title: `${isRelFrob ? "Relative Frobenius" : "H-MAE"} vs N_train (mean ± variability across available seeds)`,
-    xaxis: { title: "N_train", type: "log" }, yaxis: { title: `${isRelFrob ? "Relative Frobenius" : "H-MAE"} (${unit})` },
+    title: "H-MAE y Frobenius relativo vs N_train",
+    xaxis: { title: "N_train", type: "log" },
+    yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR),
+    yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { overlaying: "y", side: "right" }),
     shapes,
-    margin: { l: 70, r: 20, t: 50, b: 55 }, height: 580,
+    margin: { l: 75, r: 75, t: 60, b: 210 }, height: 700, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -17326,8 +17479,9 @@ async function ddS9RenderDensityCurves(rows) {
   const subset = faceted.filter((row) => row.family === family && (fixedDomain == null || Math.abs(row.domain - fixedDomain) < 1e-9));
   const byDensity = new Map();
   for (const row of subset) {
-    if (!byDensity.has(row.density)) byDensity.set(row.density, []);
-    byDensity.get(row.density).push(row.H_MAE * 1000);
+    if (!byDensity.has(row.density)) byDensity.set(row.density, { h: [], frob: [] });
+    byDensity.get(row.density).h.push(row.H_MAE * 1000);
+    if (row.rel_Frob != null) byDensity.get(row.density).frob.push(row.rel_Frob * 100);
   }
   const x = Array.from(byDensity.keys()).sort((a, b) => a - b);
   if (!x.length) {
@@ -17335,12 +17489,16 @@ async function ddS9RenderDensityCurves(rows) {
     host.innerHTML = '<p class="field-help">No hay puntos de densidad para esta familia, dominio y faceta.</p>';
     return;
   }
-  const stats = x.map((density) => ddS9MeanStd(byDensity.get(density)));
-  await window.Plotly.newPlot(host, [{
-    x, y: stats.map((value) => value.mean), error_y: { type: "data", array: stats.map((value) => value.std), visible: true },
-    mode: "lines+markers", type: "scatter", name: family,
+  const hStats = x.map((density) => ddS9MeanStd(byDensity.get(density).h));
+  const frobX = x.filter((density) => byDensity.get(density).frob.length);
+  const frobStats = frobX.map((density) => ddS9MeanStd(byDensity.get(density).frob));
+  const traces = [{
+    x, y: hStats.map((value) => value.mean), yaxis: "y2", error_y: { type: "data", array: hStats.map((value) => value.std), visible: true },
+    mode: "lines+markers", type: "scatter", name: `${family} · H-MAE`, line: { color: DD_H_COLOR }, marker: { color: DD_H_COLOR },
     hovertemplate: "density %{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>",
-  }], { title: `${family}: H-MAE vs family-specific density (R=${fixedDomain ?? "?"} Å)`, xaxis: { title: "Family-specific density / resolution" }, yaxis: { title: "H-MAE (meV)" }, margin: { l: 60, r: 20, t: 45, b: 55 }, height: 580 }, { displayModeBar: false, responsive: true });
+  }];
+  if (frobX.length) traces.unshift({ x: frobX, y: frobStats.map((value) => value.mean), yaxis: "y", error_y: { type: "data", array: frobStats.map((value) => value.std), visible: true }, mode: "lines+markers", type: "scatter", name: `${family} · Frobenius`, line: { color: DD_FROB_COLOR }, marker: { color: DD_FROB_COLOR }, hovertemplate: "density %{x}<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<extra></extra>" });
+  await window.Plotly.newPlot(host, traces, { title: `${family}: precisión vs densidad (R=${fixedDomain ?? "?"} Å)`, xaxis: { title: "Family-specific density / resolution", automargin: true }, yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR), yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { overlaying: "y", side: "right" }), margin: { l: 75, r: 75, t: 60, b: 135 }, height: 620, legend: DD_LEGEND_BELOW }, { displayModeBar: false, responsive: true });
 }
 
 async function ddS9RenderDomainHeatmap(rows) {
@@ -17493,10 +17651,12 @@ async function ddS9RenderCoverage(rows, designs) {
   const focusedRows = ddS9FocusRows(rows).filter((row) => row.status === "ok" && row.H_MAE != null);
   const points = [];
   for (const design of ddS9FocusRows(designs)) {
-    const values = focusedRows.filter((row) => row.design_id === design.design_id && row.N_train === design.n_used).map((row) => row.H_MAE * 1000);
+    const matched = focusedRows.filter((row) => row.design_id === design.design_id && row.N_train === design.n_used);
+    const values = matched.map((row) => row.H_MAE * 1000);
+    const frob = matched.filter((row) => row.rel_Frob != null).map((row) => row.rel_Frob * 100);
     if (!values.length || !design.r_train_max_ang) continue;
     points.push({
-      ...design, error: ddS9MeanStd(values).mean,
+      ...design, error: ddS9MeanStd(values).mean, frob: frob.length ? ddS9MeanStd(frob).mean : null,
       covering: design.covering_radius_ang / design.r_train_max_ang,
       nearest: design.min_nearest_neighbor_distance_ang / design.r_train_max_ang,
     });
@@ -17510,16 +17670,24 @@ async function ddS9RenderCoverage(rows, designs) {
   const traces = [];
   families.forEach((family, index) => {
     const subset = points.filter((point) => point.family === family);
-    const common = { y: subset.map((point) => point.error), mode: "markers", type: "scatter", legendgroup: family, marker: { color: DD_S9_COLORS[index % DD_S9_COLORS.length], size: 9 }, text: subset.map((point) => point.design_id) };
-    traces.push({ ...common, x: subset.map((point) => point.covering), name: family, xaxis: "x", yaxis: "y", hovertemplate: "%{text}<br>covering radius / R %{x:.3f}<br>H-MAE %{y:.2f} meV<extra></extra>" });
-    traces.push({ ...common, x: subset.map((point) => point.nearest), name: family, showlegend: false, xaxis: "x2", yaxis: "y2", hovertemplate: "%{text}<br>min NN / R %{x:.3f}<br>H-MAE %{y:.2f} meV<extra></extra>" });
+    const symbol = ["circle", "square", "diamond", "triangle-up"][index % 4];
+    const hCommon = { y: subset.map((point) => point.error), mode: "markers", type: "scatter", marker: { color: DD_H_COLOR, symbol, size: 9 }, text: subset.map((point) => point.design_id) };
+    traces.push({ ...hCommon, x: subset.map((point) => point.covering), name: `${family} · H-MAE`, xaxis: "x", yaxis: "y3", hovertemplate: "%{text}<br>covering radius / R %{x:.3f}<br>H-MAE %{y:.2f} meV<extra></extra>" });
+    traces.push({ ...hCommon, x: subset.map((point) => point.nearest), name: `${family} · H-MAE`, showlegend: false, xaxis: "x2", yaxis: "y4", hovertemplate: "%{text}<br>min NN / R %{x:.3f}<br>H-MAE %{y:.2f} meV<extra></extra>" });
+    const withFrob = subset.filter((point) => point.frob != null);
+    const fCommon = { y: withFrob.map((point) => point.frob), mode: "markers", type: "scatter", marker: { color: DD_FROB_COLOR, symbol, size: 9 }, text: withFrob.map((point) => point.design_id) };
+    traces.push({ ...fCommon, x: withFrob.map((point) => point.covering), name: `${family} · Frobenius`, xaxis: "x", yaxis: "y", hovertemplate: "%{text}<br>covering radius / R %{x:.3f}<br>Frobenius %{y:.2f}%<extra></extra>" });
+    traces.push({ ...fCommon, x: withFrob.map((point) => point.nearest), name: `${family} · Frobenius`, showlegend: false, xaxis: "x2", yaxis: "y2", hovertemplate: "%{text}<br>min NN / R %{x:.3f}<br>Frobenius %{y:.2f}%<extra></extra>" });
   });
   await window.Plotly.newPlot(host, traces, {
-    title: "Geometric coverage vs H-MAE (complete designs only)",
-    grid: { rows: 1, columns: 2, pattern: "independent" },
-    xaxis: { title: "Covering radius / R" }, yaxis: { title: "H-MAE (meV)" },
-    xaxis2: { title: "Minimum nearest-neighbour distance / R" }, yaxis2: { title: "H-MAE (meV)" },
-    margin: { l: 70, r: 20, t: 50, b: 65 }, height: 580,
+    title: "Cobertura geométrica vs precisión (diseños completos)",
+    xaxis: { title: "Covering radius / R", domain: [0, 0.35], automargin: true },
+    yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { anchor: "x" }),
+    yaxis3: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { anchor: "x", overlaying: "y", side: "right" }),
+    xaxis2: { title: "Minimum nearest-neighbour distance / R", domain: [0.65, 1], automargin: true },
+    yaxis2: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { anchor: "x2" }),
+    yaxis4: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { anchor: "x2", overlaying: "y2", side: "right" }),
+    margin: { l: 85, r: 85, t: 60, b: 230 }, height: 760, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -17560,19 +17728,26 @@ async function ddS9RenderLocalError() {
     if (status) status.textContent = payload.note || "No disponible.";
     return;
   }
-  if (status) status.textContent = `${payload.rows.length} configuraciones de test; H-MAE promediado únicamente entre training seeds.`;
-  await window.Plotly.newPlot(host, [{
+  if (status) status.textContent = `${payload.rows.length} configuraciones de test; métricas promediadas únicamente entre training seeds.`;
+  const common = {
     x: payload.rows.map((row) => row.nearest_training_distance_ang),
+    mode: "markers", type: "scatter",
+    text: payload.rows.map((row) => `${row.sample_id}${row.mode ? ` · ${row.mode}` : ""}`),
+  };
+  const traces = [{ ...common,
     y: payload.rows.map((row) => row.H_MAE_mean * 1000),
     error_y: { type: "data", array: payload.rows.map((row) => row.H_MAE_std * 1000), visible: true },
-    mode: "markers", type: "scatter",
-    marker: { size: 11, color: payload.rows.map((row) => row.test_amplitude), colorscale: "Viridis", colorbar: { title: "Test<br>amplitude (Å)" } },
-    text: payload.rows.map((row) => `${row.sample_id}${row.mode ? ` · ${row.mode}` : ""}`),
+    yaxis: "y2", name: "H-MAE", marker: { size: 11, color: DD_H_COLOR },
     hovertemplate: "%{text}<br>nearest training distance %{x:.4f} Å<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra></extra>",
-  }], {
+  }];
+  const frobRows = payload.rows.filter((row) => row.rel_Frob_mean != null);
+  if (frobRows.length) traces.unshift({ ...common, x: frobRows.map((row) => row.nearest_training_distance_ang), y: frobRows.map((row) => row.rel_Frob_mean * 100), error_y: { type: "data", array: frobRows.map((row) => (row.rel_Frob_std ?? 0) * 100), visible: true }, yaxis: "y", name: "Frobenius relativo", marker: { size: 11, color: DD_FROB_COLOR }, text: frobRows.map((row) => `${row.sample_id}${row.mode ? ` · ${row.mode}` : ""}`), hovertemplate: "%{text}<br>nearest training distance %{x:.4f} Å<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<extra></extra>" });
+  await window.Plotly.newPlot(host, traces, {
     title: `${payload.family}, ${payload.dim}, k=${payload.k}, N=${payload.N_train}`,
-    xaxis: { title: "Distance to nearest training configuration (Å)" }, yaxis: { title: "Per-configuration H-MAE (meV)" },
-    margin: { l: 75, r: 30, t: 50, b: 65 }, height: 580,
+    xaxis: { title: "Distance to nearest training configuration (Å)" },
+    yaxis: ddMetricAxis("Frobenius relativo por configuración (%)", DD_FROB_COLOR),
+    yaxis2: ddMetricAxis("H-MAE por configuración (meV)", DD_H_COLOR, { overlaying: "y", side: "right" }),
+    margin: { l: 85, r: 85, t: 60, b: 135 }, height: 630, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -17603,7 +17778,7 @@ async function ddS9RenderPhysicalProbe(rows) {
     xaxis: { title: "Displacement (Å)" }, yaxis: { title: "C(r)" },
     xaxis2: { title: "Displacement (Å)" }, yaxis2: { title: "N(r)" },
     xaxis3: { title: "Displacement (Å)" }, yaxis3: { title: "J_eff drift from 0.01 Å (%)" },
-    shapes, margin: { l: 65, r: 20, t: 55, b: 65 }, height: 580,
+    shapes, margin: { l: 70, r: 30, t: 60, b: 135 }, height: 630, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -17625,7 +17800,8 @@ async function ddS9RenderAblation(ablation) {
     modes.forEach((mode, modeIndex) => {
       const subset = rows.filter((row) => row.mode === mode).sort((a, b) => a.amplitude_ang - b.amplitude_ang);
       const line = { color: DD_S9_COLORS[models.indexOf(model) % DD_S9_COLORS.length], dash: ["solid", "dash", "dot"][modeIndex % 3] };
-      traces.push({ x: subset.map((row) => row.amplitude_ang), y: subset.map((row) => row.H_MAE * 1000), mode: "lines+markers", type: "scatter", name: `${model} · ${mode}`, legendgroup: model, line });
+      traces.push({ x: subset.map((row) => row.amplitude_ang), y: subset.map((row) => row.H_MAE * 1000), yaxis: "y4", mode: "lines+markers", type: "scatter", name: `${model} · ${mode} · H-MAE`, legendgroup: `${model}-h`, line: { ...line, color: DD_H_COLOR } });
+      if (subset.some((row) => row.rel_Frob != null)) traces.push({ x: subset.map((row) => row.amplitude_ang), y: subset.map((row) => row.rel_Frob * 100), yaxis: "y", mode: "lines+markers", type: "scatter", name: `${model} · ${mode} · Frobenius`, legendgroup: `${model}-frob`, line: { ...line, color: DD_FROB_COLOR } });
       if (model !== "M_BASE") traces.push({ x: subset.map((row) => row.amplitude_ang), y: subset.map((row) => (row.H_MAE - base.get(`${row.mode}|${row.amplitude_ang}`)) * 1000), mode: "lines+markers", type: "scatter", name: `${model} − BASE · ${mode}`, xaxis: "x2", yaxis: "y2", showlegend: false, line });
     });
   }
@@ -17635,11 +17811,11 @@ async function ddS9RenderAblation(ablation) {
   }
   await window.Plotly.newPlot(host, traces, {
     title: "BASE / SPARSE / DENSE on the same held-out modes",
-    grid: { rows: 1, columns: 3, pattern: "independent" },
-    xaxis: { title: "Test displacement (Å)" }, yaxis: { title: "H-MAE (meV)" },
-    xaxis2: { title: "Test displacement (Å)" }, yaxis2: { title: "ΔH-MAE vs BASE (meV)" },
-    xaxis3: { title: "SIESTA calculations added" }, yaxis3: { title: "Mean improvement vs BASE (meV)" },
-    margin: { l: 65, r: 20, t: 55, b: 65 }, height: 580,
+    xaxis: { title: "Test displacement (Å)", domain: [0, 0.24], anchor: "y", automargin: true }, yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { anchor: "x" }),
+    yaxis4: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { anchor: "x", overlaying: "y", side: "right" }),
+    xaxis2: { title: "Test displacement (Å)", domain: [0.42, 0.66], anchor: "y2", automargin: true }, yaxis2: { title: { text: "ΔH-MAE vs BASE (meV)", standoff: 12 }, anchor: "x2", automargin: true },
+    xaxis3: { title: "SIESTA calculations added", domain: [0.78, 1], anchor: "y3", automargin: true }, yaxis3: { title: { text: "Mean improvement vs BASE (meV)", standoff: 12 }, anchor: "x3", automargin: true },
+    margin: { l: 85, r: 85, t: 60, b: 250 }, height: 780, legend: DD_LEGEND_BELOW,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -17777,6 +17953,7 @@ function setupTabs() {
         loadEpcMatbg().catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "dataset-design") {
         ddLoadResults().catch((error) => showToast(error.message));
+        ddLoadFollowup().catch((error) => showToast(error.message));
         ddS9LoadPanels().catch((error) => showToast(error.message));
       } else if (tab.dataset.view === "terminal") {
         renderTerminalView();
@@ -17817,6 +17994,9 @@ function setupEvents() {
   });
   document.getElementById("dd-stop")?.addEventListener("click", () => {
     ddStop().catch((error) => showToast(error.message));
+  });
+  document.getElementById("dd-followup-refresh")?.addEventListener("click", () => {
+    ddLoadFollowup().then(() => showToast("Resultados científicos actualizados")).catch((error) => showToast(error.message));
   });
   document.getElementById("dd-s9-refresh")?.addEventListener("click", () => {
     ddS9LoadPanels().then(() => showToast("S9 panels refreshed")).catch((error) => showToast(error.message));
@@ -18241,6 +18421,7 @@ async function boot() {
   setupMlVsSiesta();
   setupMixingDatasets();
   setupCrossTesting();
+  ddInstallGraphHelp();
   const venvActivateInput = document.getElementById("venv-activate-command");
   if (venvActivateInput && !String(venvActivateInput.value || "").trim()) {
     venvActivateInput.value = DEFAULT_VENV_ACTIVATE_COMMAND;

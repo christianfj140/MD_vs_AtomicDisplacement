@@ -2803,6 +2803,89 @@
           <section class="panel">
             <div class="panel-heading">
               <div>
+                <p class="eyebrow">Resultados científicos consolidados</p>
+                <h3>Frontera coste–precisión, cobertura y tamaño del dataset</h3>
+                <p class="field-help">Campaña principal y seguimientos w90/6×6. Las tablas y figuras se actualizan conforme terminan los cálculos.</p>
+              </div>
+              <button id="dd-followup-refresh" class="button secondary small" type="button">Actualizar resultados</button>
+            </div>
+            <div id="dd-followup-status" class="result-list muted-text">Cargando estado…</div>
+
+            <h4>Diagnósticos de entrenamiento 6×6 (validación)</h4>
+            <p class="field-help">Incluye el efecto de la función de pérdida y resultados provisionales. No confundir con el test final de las tablas siguientes.</p>
+            <div class="cleanup-table-wrap dd-results-scroll">
+              <table class="cleanup-table">
+                <thead id="dd-followup-training-head"></thead>
+                <tbody id="dd-followup-training-body"></tbody>
+              </table>
+            </div>
+            <div id="dd-followup-training-plot" class="plot-card"></div>
+
+            <h4>Presupuesto de entrenamiento w90 (test final)</h4>
+            <div class="cleanup-table-wrap dd-results-scroll">
+              <table class="cleanup-table">
+                <thead id="dd-followup-budget-head"></thead>
+                <tbody id="dd-followup-budget-body"></tbody>
+              </table>
+            </div>
+
+            <h4>Resultados principales de la campaña</h4>
+            <div class="cleanup-table-wrap dd-results-scroll">
+              <table class="cleanup-table">
+                <thead id="dd-followup-campaign-head"></thead>
+                <tbody id="dd-followup-campaign-body"></tbody>
+              </table>
+            </div>
+
+            <h4>Comparación de construcción del dataset</h4>
+            <div class="cleanup-table-wrap dd-results-scroll">
+              <table class="cleanup-table">
+                <thead id="dd-followup-coverage-head"></thead>
+                <tbody id="dd-followup-coverage-body"></tbody>
+              </table>
+            </div>
+
+            <h4>Curvas de aprendizaje a presupuesto común</h4>
+            <div class="cleanup-table-wrap dd-results-scroll">
+              <table class="cleanup-table">
+                <thead id="dd-followup-curve-head"></thead>
+                <tbody id="dd-followup-curve-body"></tbody>
+              </table>
+            </div>
+
+            <h4>Baseline MD 6×6 · resultados por modelo</h4>
+            <div class="cleanup-table-wrap dd-results-scroll"><table class="cleanup-table">
+              <thead id="dd-md-model-head"></thead><tbody id="dd-md-model-body"></tbody>
+            </table></div>
+
+            <h4>Baseline MD 6×6 · producto cartesiano y pass/fail</h4>
+            <div class="cleanup-table-wrap dd-results-scroll"><table class="cleanup-table">
+              <thead id="dd-md-cartesian-head"></thead><tbody id="dd-md-cartesian-body"></tbody>
+            </table></div>
+            <div class="cleanup-table-wrap dd-results-scroll"><table class="cleanup-table">
+              <thead id="dd-md-passfail-head"></thead><tbody id="dd-md-passfail-body"></tbody>
+            </table></div>
+
+            <h4>Baseline MD 6×6 · coste y mínimos</h4>
+            <div class="cleanup-table-wrap dd-results-scroll"><table class="cleanup-table">
+              <thead id="dd-md-cost-head"></thead><tbody id="dd-md-cost-body"></tbody>
+            </table></div>
+            <div class="cleanup-table-wrap dd-results-scroll"><table class="cleanup-table">
+              <thead id="dd-md-minimum-head"></thead><tbody id="dd-md-minimum-body"></tbody>
+            </table></div>
+
+            <h4>Gráficas relevantes</h4>
+            <div id="dd-followup-figures" class="dataset-design-figures muted-text">Todavía no hay figuras.</div>
+
+            <details class="dd-followup-report" open>
+              <summary>Informe para presentación</summary>
+              <pre id="dd-followup-report">El informe final se generará al terminar los cálculos.</pre>
+            </details>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
                 <p class="eyebrow">Configuracion</p>
                 <h3>Material, sampler, dimensionalidad, amplitudes</h3>
               </div>
@@ -2987,6 +3070,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=20260918-s9-campaigns-chart"></script>
+    <script src="/app.js?v=20260922-plotly-results"></script>
   </body>
 </html>
