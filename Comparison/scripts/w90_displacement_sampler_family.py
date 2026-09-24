@@ -48,6 +48,7 @@ DIMENSIONALITIES: tuple[str, ...] = ("1D_in", "1D_z", "2D_in", "3D")
 SAMPLER_IDS: tuple[str, ...] = (
     "axial_radial",
     "angular_shell",
+    "angular_shell_collective",
     "local_pair_modes",
     "sobol_sparse",
     "random_cartesian",
@@ -159,7 +160,7 @@ def pairwise_shell_rank(geometry: Geometry, i: int, j: int) -> int:
 
 
 # --------------------------------------------------------------------------
-# Active-atom selection (k independent of N; supports k=1, k=2)
+# Active-atom selection (k independent of N)
 # --------------------------------------------------------------------------
 
 
@@ -168,7 +169,7 @@ class ActiveAtomSelection:
     indices: tuple[int, ...]
     k: int
     connected: bool
-    shell_span: int  # 0 for k=1; neighbour-shell rank of the pair for k=2
+    shell_span: int  # 0 for k=1; pair shell for k=2; max bond-hop depth otherwise
     pair_distance_ang: float | None
 
 
@@ -182,6 +183,11 @@ def select_active_atoms(
 ) -> ActiveAtomSelection:
     """Select k active atoms without assuming N==2 (works for a 2-atom cell or an N>2 supercell)."""
 
+    n_atoms_total = geometry.n_atoms
+    if not 1 <= k <= n_atoms_total:
+        raise ValueError(f"k must be between 1 and {n_atoms_total}, got {k}")
+    if not 0 <= center_index < n_atoms_total:
+        raise ValueError(f"center_index must be between 0 and {n_atoms_total - 1}, got {center_index}")
     if k == 1:
         return ActiveAtomSelection((center_index,), 1, True, 0, None)
     if k == 2:
@@ -194,7 +200,6 @@ def select_active_atoms(
         rank = pairwise_shell_rank(geometry, center_index, partner)
         connected = bond_cutoff_ang[0] <= distance <= bond_cutoff_ang[1]
         return ActiveAtomSelection((center_index, partner), 2, connected, rank, distance)
-    n_atoms_total = len(geometry.positions_ang)
     if k == n_atoms_total:
         # "Move every atom" (e.g. a 6x6 supercell's independent-per-atom sampler
         # families -- sobol_sparse/random_cartesian/latin_hypercube all give each
@@ -202,10 +207,28 @@ def select_active_atoms(
         # not a rigid shift). connected/shell_span are pairwise-only concepts (k=2);
         # trivially True/0 here since there's no pair to (dis)connect.
         return ActiveAtomSelection(tuple(range(n_atoms_total)), n_atoms_total, True, 0, None)
-    raise NotImplementedError(
-        f"active-atom selection for k={k} (n_atoms_total={n_atoms_total}) is out of scope for "
-        "DATASET-DESIGN-W90-001-S2 (only k in {1, 2, n_atoms_total} supported)"
-    )
+    if pair_mode != "bonded":
+        raise ValueError("k > 2 requires pair_mode='bonded'")
+
+    # Deterministic breadth-first traversal of the periodic bond graph. Every
+    # prefix is therefore connected and nested in every larger-k selection.
+    lower, upper = bond_cutoff_ang
+    order, depth, queue = [center_index], {center_index: 0}, [center_index]
+    while queue:
+        atom = queue.pop(0)
+        neighbours = sorted(
+            (min_image_distance(geometry, atom, other), other)
+            for other in range(n_atoms_total)
+            if other not in depth and lower <= min_image_distance(geometry, atom, other) <= upper
+        )
+        for _distance, other in neighbours:
+            depth[other] = depth[atom] + 1
+            order.append(other)
+            queue.append(other)
+    if len(order) != n_atoms_total:
+        raise RuntimeError(f"bond graph is disconnected: reached {len(order)}/{n_atoms_total} atoms")
+    selected = tuple(order[:k])
+    return ActiveAtomSelection(selected, k, True, max(depth[index] for index in selected), None)
 
 
 # --------------------------------------------------------------------------
@@ -412,6 +435,39 @@ def generate_angular_shell(
             extra={"direction": direction.tolist(), "angle_index": angle_index},
         )
         configs.append(Configuration("angular_shell", displacements, metadata))
+    return configs
+
+
+def generate_angular_shell_collective(
+    geometry: Geometry,
+    radius_ang: float,
+    n_structures: int,
+    *,
+    seed: int = 0,
+) -> list[Configuration]:
+    """Move every atom by a fixed radius in antipodal pairs, with zero net shift."""
+
+    if geometry.n_atoms % 2:
+        raise ValueError("angular_shell_collective requires an even number of atoms")
+    active = select_active_atoms(geometry, geometry.n_atoms)
+    rng = np.random.default_rng(seed)
+    configs: list[Configuration] = []
+    for _ in range(n_structures):
+        directions = rng.normal(size=(geometry.n_atoms // 2, 3))
+        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+        directions = np.concatenate((directions, -directions))
+        directions = directions[rng.permutation(geometry.n_atoms)]
+        displacements = {index: tuple(radius_ang * directions[index]) for index in active.indices}
+        metadata = build_metadata(
+            geometry,
+            active,
+            displacements,
+            family="angular_shell_collective",
+            dim="3D",
+            amplitude_ang=radius_ang,
+            extra={"seed": seed, "antipodal_pairs": geometry.n_atoms // 2},
+        )
+        configs.append(Configuration("angular_shell_collective", displacements, metadata))
     return configs
 
 

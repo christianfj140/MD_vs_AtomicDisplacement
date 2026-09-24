@@ -146,6 +146,36 @@ def test_reuse_existing_reads_s4_s7_artifacts_verbatim():
     assert "conclusions_markdown" in payload
 
 
+def test_followup_real_figures_expose_all_methods_and_model_ids():
+    root = pipeline_ui.DATASET_DESIGN_CURVES_ROOT
+    if not (root / "label_budget_6x6/model_results.csv").exists():
+        pytest.skip("follow-up artifacts not present in this checkout")
+    figures = {figure["name"]: figure for figure in pipeline_ui.dataset_design_followup_payload()["figures"]}
+    assert "6x6_training_budget" in figures
+    assert "label_budget_h_mae_synthetic_test" in figures
+    assert "latin_hypercube" in str(figures["campaign_learning_6x6"])
+    assert figures["label_budget_h_mae_synthetic_test"]["data"][0]["customdata"][0][0].startswith("N4__V8")
+    assert figures["label_budget_h_mae_synthetic_test"]["data"][1]["customdata"][0][0].startswith("md__N4__V8")
+    assert figures["label_budget_h_mae"]["data"][0]["customdata"][0][0].startswith("synthetic__N4__V8")
+    assert figures["label_budget_test_reliability"]["data"][0]["customdata"][0][0].startswith("N4__V8")
+    assert {trace["name"] for trace in figures["md6x6_paired_difference"]["data"]} == {
+        "sobre MD-Test48", "sobre Test48 sintético"}
+    for name in ("w90_training_budget", "6x6_training_budget"):
+        budget = figures[name]
+        assert budget["layout"]["xaxis"]["tickvals"] == [4, 8, 16, 32, 64]
+        assert budget["layout"]["xaxis2"]["tickvals"] == [4, 8, 16, 32, 64]
+        assert budget["layout"]["yaxis2"]["overlaying"] == "y"
+        assert budget["layout"]["yaxis4"]["overlaying"] == "y3"
+        assert {trace["yaxis"] for trace in budget["data"]} == {"y", "y2", "y3", "y4"}
+    badge = next(item for item in figures["campaign_learning_6x6"]["layout"]["annotations"]
+                 if item["text"] == "<b>OBSOLETA</b>")
+    assert badge["font"] == {"size": 26, "color": "#000000"}
+    assert badge["bordercolor"] == "#000000" and badge["bgcolor"] == "#fecaca"
+    for current in ("w90_training_budget", "6x6_training_budget", "label_budget_h_mae",
+                    "label_budget_test_reliability"):
+        assert "OBSOLETA" not in str(figures[current]["layout"].get("annotations", []))
+
+
 def test_followup_payload_exposes_available_tables_figures_and_report(tmp_path, monkeypatch):
     root = tmp_path / "curves"
     summary = root / "w90_coverage_physics" / "summary.csv"
@@ -165,6 +195,8 @@ def test_followup_payload_exposes_available_tables_figures_and_report(tmp_path, 
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_CURVES_ROOT", root)
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_FOLLOWUP_REPORT", report)
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_LABEL_BUDGET_REPORT", budget_report)
+    monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_MD_BASELINE_ROOT", tmp_path / "missing-md")
+    monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_MD_BASELINE_REPORT", tmp_path / "missing-md-report.md")
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_FOLLOWUP_FIGURES",
                         {"result": (figure, "Resultado", "Descripción")})
 
@@ -200,3 +232,48 @@ def test_followup_payload_shows_6x6_loss_diagnostic(tmp_path, monkeypatch):
 
     assert payload["training_table"][0]["H-MAE validación (meV)"] == "2.00 ± 0.03"
     assert payload["training_table"][0]["Semillas"] == "5/5"
+
+
+def test_followup_figures_include_every_available_method(tmp_path, monkeypatch):
+    root = tmp_path / "curves"
+    root.mkdir()
+    (root / "final_configs.csv").write_text(
+        "system,recipe_id,family,N,n_seeds,H_MAE_meV,seed_sd,rel_Frob,band_rmse_meV,dos_rel_L1\n"
+        "6x6,sobol_sparse__3D__R0.08__d64,sobol_sparse,4,3,8,1,0.03,60,0.1\n"
+        "6x6,sobol_sparse__3D__R0.08__d64,sobol_sparse,64,3,6,1,0.02,50,0.09\n"
+        "6x6,random_cartesian__1D_in__R0.12__d64,random_cartesian,64,3,7,1,0.025,55,0.095\n"
+        "6x6,latin_hypercube__2D_in__R0.08__d64,latin_hypercube,64,3,9,1,0.04,70,0.12\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_CURVES_ROOT", root)
+
+    comparison = pipeline_ui._dd_metric_panels(
+        root / "missing.csv", "comparison", "comparison", "caption", "comparison", "6x6")
+    curve = pipeline_ui._dd_metric_panels(
+        root / "missing.csv", "curve", "curve", "caption", "curve", "6x6")
+
+    assert comparison is not None
+    assert set(comparison["layout"]["xaxis"]["categoryarray"]) == {
+        "Sobol 3D R=0.08 Å", "random 1D in R=0.12 Å", "LHS 2D in R=0.08 Å",
+    }
+    assert curve is not None
+    assert {trace["name"] for trace in curve["data"]} >= {
+        "Sobol 3D R=0.08 Å", "random 1D in R=0.12 Å", "LHS 2D in R=0.08 Å",
+    }
+    assert curve["data"][0]["x"] == [4, 64]
+
+
+def test_6x6_validation_diagnostics_include_curve_and_lhs_methods():
+    results = [
+        {"stage": "curve", "recipe_id": "random_cartesian__1D_in__R0.12__d64", "N": 64,
+         "val_metrics": {"H_MAE_meV": 2.0, "rel_Frob": 0.02}},
+        {"stage": "lhs", "recipe_id": "latin_hypercube__2D_in__R0.08__d64", "N": 64,
+         "val_metrics": {"H_MAE_meV": 3.0, "rel_Frob": 0.03}},
+    ]
+
+    _, plot = pipeline_ui._dataset_design_6x6_training(results)
+
+    assert {row["label"] for row in plot} == {
+        "random 1D in R=0.12 Å · block_type_mae · campaña original",
+        "LHS 2D in R=0.08 Å · block_type_mae · campaña original",
+    }

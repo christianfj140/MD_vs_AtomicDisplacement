@@ -17135,27 +17135,36 @@ async function ddRenderFollowup(payload) {
   if (trainingPlot) {
     const groups = new Map();
     for (const row of payload.training_plot || []) {
-      if (!groups.has(row.study)) groups.set(row.study, []);
-      groups.get(row.study).push(row);
+      const key = `${row.study}\u0000${row.label}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
     }
-    const traces = Array.from(groups.entries()).flatMap(([study, rows]) => {
-      rows.sort((a, b) => a.N - b.N || a.label.localeCompare(b.label));
-      const common = { type: "scatter", mode: "markers+lines", x: rows.map((row) => row.label),
-        text: rows.map((row) => `${row.n_seeds} semillas${row.provisional ? " · provisional" : ""}`) };
-      return [
-        { ...common, name: `${study} · Frobenius`, y: rows.map((row) => row.frob_mean), yaxis: "y",
-          error_y: { type: "data", array: rows.map((row) => row.frob_sd), visible: true }, line: { color: DD_FROB_COLOR }, marker: { color: DD_FROB_COLOR },
-          hovertemplate: "%{x}<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<br>%{text}<extra>%{fullData.name}</extra>" },
-        { ...common, name: `${study} · H-MAE`, y: rows.map((row) => row.h_mean), yaxis: "y2",
-          error_y: { type: "data", array: rows.map((row) => row.h_sd), visible: true }, line: { color: DD_H_COLOR }, marker: { color: DD_H_COLOR },
-          hovertemplate: "%{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<br>%{text}<extra>%{fullData.name}</extra>" },
-      ];
+    const palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#7f7f7f"];
+    const traces = Array.from(groups.entries()).sort(([left], [right]) => left.localeCompare(right)).flatMap(([key, rows], index) => {
+      rows.sort((a, b) => a.N - b.N);
+      const [study, label] = key.split("\u0000");
+      const color = palette[index % palette.length];
+      const common = { type: "scatter", mode: rows.length > 1 ? "lines+markers" : "markers",
+        x: rows.map((row) => row.N), legendgroup: key,
+        text: rows.map((row) => `${study}<br>${row.n_seeds} semillas${row.provisional ? " · provisional" : ""}`) };
+      const output = [{ ...common, name: label, y: rows.map((row) => row.h_mean), yaxis: "y2",
+        error_y: { type: "data", array: rows.map((row) => row.h_sd), visible: true },
+        line: { color }, marker: { color },
+        hovertemplate: "%{text}<br>N=%{x}<br>H-MAE %{y:.2f} ± %{error_y.array:.2f} meV<extra>%{fullData.name}</extra>" }];
+      if (rows.some((row) => row.frob_mean != null)) output.push({ ...common, name: `${label} · Frobenius`,
+        showlegend: false, y: rows.map((row) => row.frob_mean), yaxis: "y",
+        error_y: { type: "data", array: rows.map((row) => row.frob_sd), visible: true },
+        line: { color, dash: "dot" }, marker: { color, symbol: "diamond-open" },
+        hovertemplate: "%{text}<br>N=%{x}<br>Frobenius %{y:.2f} ± %{error_y.array:.2f}%<extra>%{fullData.name}</extra>" });
+      return output;
     });
+    const nValues = Array.from(new Set((payload.training_plot || []).map((row) => row.N))).sort((a, b) => a - b);
     Plotly.react(trainingPlot, traces, {
       title: "Diagnósticos 6×6 sobre validación",
+      xaxis: { title: "N de entrenamiento", type: "log", tickvals: nValues, ticktext: nValues.map(String), automargin: true },
       yaxis: ddMetricAxis("Frobenius relativo (%)", DD_FROB_COLOR, { rangemode: "tozero" }),
       yaxis2: ddMetricAxis("H-MAE (meV)", DD_H_COLOR, { rangemode: "tozero", overlaying: "y", side: "right" }),
-      margin: { l: 75, r: 75, t: 60, b: 175 },
+      margin: { l: 75, r: 75, t: 60, b: 210 },
       legend: DD_LEGEND_BELOW,
     }, { responsive: true, displaylogo: false });
   }
@@ -17406,7 +17415,7 @@ async function ddS9RenderPareto(rows) {
   const frontier = [];
   let best = Infinity;
   for (const point of sortedPoints) if (point.H_MAE_mean < best) { frontier.push(point); best = point.H_MAE_mean; }
-  traces.push({ x: frontier.map((point) => point.siesta_cost), y: frontier.map((point) => point.H_MAE_mean * 1000), yaxis: "y2", mode: "lines", name: "Frontera Pareto H-MAE", line: { color: DD_H_COLOR, width: 3 }, hoverinfo: "skip" });
+  traces.push({ x: frontier.map((point) => point.siesta_cost), y: frontier.map((point) => point.H_MAE_mean * 1000), yaxis: "y2", mode: "lines", name: "Frontera Pareto H-MAE", line: { color: "#0b0b0b", width: 3 }, hoverinfo: "skip" });
   await window.Plotly.newPlot(host, traces, {
     title: "Precisión vs cálculos SIESTA únicos (media ± variabilidad)",
     xaxis: { title: "Unique SIESTA calculations" },

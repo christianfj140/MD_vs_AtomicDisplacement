@@ -166,7 +166,7 @@ def test_select_active_atoms_k2_arbitrary_pair_is_disconnected(graphene_5x5):
 
 
 def test_select_active_atoms_k3_is_out_of_scope(graphene_primitive):
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         sampler.select_active_atoms(graphene_primitive, 3)
 
 
@@ -178,9 +178,11 @@ def test_select_active_atoms_k_equals_n_atoms_selects_every_atom(graphene_5x5):
     assert active.pair_distance_ang is None
 
 
-def test_select_active_atoms_k_between_2_and_n_atoms_is_still_out_of_scope(graphene_5x5):
-    with pytest.raises(NotImplementedError):
-        sampler.select_active_atoms(graphene_5x5, 5)
+def test_select_active_atoms_arbitrary_k_is_nested_connected(graphene_5x5):
+    selections = [sampler.select_active_atoms(graphene_5x5, k) for k in (2, 5, 12, 32, 50)]
+    assert all(selection.connected for selection in selections)
+    assert all(set(left.indices) < set(right.indices) for left, right in zip(selections, selections[1:]))
+    assert [selection.k for selection in selections] == [2, 5, 12, 32, 50]
 
 
 # --------------------------------------------------------------------------

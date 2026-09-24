@@ -67,6 +67,8 @@ ENV = os.environ | {
 _ACTIVE: dict[int, dict[str, Any]] = {}
 _ACTIVE_LOCK = threading.Lock()
 _COOL_SINCE: float | None = None
+_LAST_RESUME = 0.0
+_INCIDENT_ACTIVE = False
 
 
 def log(message: str, **fields: Any) -> None:
@@ -300,7 +302,34 @@ def _set_paused(item: dict[str, Any], paused: bool, reason: str, temperature: fl
 
 
 def reconcile_temperature() -> float | None:
-    return package_temperature()
+    global _COOL_SINCE, _LAST_RESUME, _INCIDENT_ACTIVE
+    temperature = package_temperature()
+    if temperature is None:
+        return None
+    now = time.monotonic()
+    with _ACTIVE_LOCK:
+        active = list(_ACTIVE.values())
+    if temperature >= 75:
+        if not _INCIDENT_ACTIVE:
+            log("thermal incident", package_c=temperature)
+        _INCIDENT_ACTIVE, _COOL_SINCE = True, None
+        for item in active:
+            _set_paused(item, True, "Package id 0 >= 75 C", temperature)
+    elif temperature >= 72:
+        _COOL_SINCE = None
+        for item in active:
+            _set_paused(item, True, "Package id 0 >= 72 C", temperature)
+    elif temperature < 63 and any(item["paused"] for item in active):
+        _COOL_SINCE = _COOL_SINCE or now
+        if now - _COOL_SINCE >= 120 and now - _LAST_RESUME >= 10:
+            item = next(item for item in active if item["paused"])
+            _set_paused(item, False, "Package id 0 cool for two minutes", temperature)
+            _LAST_RESUME = now
+            if not any(candidate["paused"] for candidate in active):
+                _INCIDENT_ACTIVE, _COOL_SINCE = False, None
+    elif temperature >= 63:
+        _COOL_SINCE = None
+    return temperature
 
 
 def prepare_run(run_dir: Path, fdf: str, initial_xv: Path, interval: int = 1) -> None:

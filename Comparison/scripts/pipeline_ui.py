@@ -4652,6 +4652,8 @@ DATASET_DESIGN_FOLLOWUP_REPORT = REPO_ROOT / "docs" / "dataset_design_followup_r
 DATASET_DESIGN_LABEL_BUDGET_REPORT = REPO_ROOT / "docs" / "dataset_design_label_budget_6x6.md"
 DATASET_DESIGN_MD_BASELINE_ROOT = DATASET_DESIGN_CURVES_ROOT / "md_label_budget_6x6"
 DATASET_DESIGN_MD_BASELINE_REPORT = REPO_ROOT / "docs" / "dataset_design_md_baseline_6x6.md"
+DATASET_DESIGN_METHOD_CROSSTEST_ROOT = DATASET_DESIGN_CURVES_ROOT / "method_amplitude_crosstest_6x6"
+DATASET_DESIGN_METHOD_CROSSTEST_REPORT = REPO_ROOT / "docs" / "dataset_design_method_amplitude_crosstest_6x6.md"
 DATASET_DESIGN_FOLLOWUP_FIGURES = {
     "campaign_learning_curves": (
         DATASET_DESIGN_CURVES_ROOT / "figures/fig1_learning_curves.png",
@@ -4763,6 +4765,12 @@ def _dataset_design_generate_configs(
                 )
             )
         return configs
+    if sampler == "angular_shell_collective":
+        if dim != "3D" or k != geometry.n_atoms:
+            return []
+        return [config for amplitude in amplitudes for config in
+                dataset_design_sampler.generate_angular_shell_collective(
+                    geometry, amplitude, n_structures, seed=seed)]
     if sampler == "local_pair_modes":
         if k != 2:
             raise ValueError("local_pair_modes requires k=2")
@@ -5068,11 +5076,21 @@ def dataset_design_results_payload() -> dict[str, Any]:
 def _dataset_design_recipe_label(recipe: str) -> str:
     if recipe == "md_w90":
         return "MD"
-    family = "Sobol" if recipe.startswith("sobol") else "random"
-    dim = "3D" if "__3D__" in recipe else "1D in-plane"
-    radius = "0.12" if ("r0.120" in recipe or "R0.12" in recipe) else (
-             "0.08" if ("r0.080" in recipe or "R0.08" in recipe) else "0.05")
-    return f"{family} {dim} R={radius} Å"
+    family = next((label for prefix, label in (
+        ("sobol_sparse", "Sobol"), ("random_cartesian", "random"),
+        ("latin_hypercube", "LHS"),
+    ) if recipe.startswith(prefix)), recipe.split("__", 1)[0])
+    parts = recipe.split("__")
+    dim = next((part for part in parts if part in {"1D_in", "1D_z", "2D_in", "3D"}), "")
+    radius = next((part[1:] for part in parts if re.fullmatch(r"[Rr]\d+(?:\.\d+)?", part)), "")
+    return " ".join(part for part in (family, dim.replace("_", " "), f"R={radius} Å" if radius else "") if part)
+
+
+def _dataset_design_recipe_sort_key(recipe: str) -> tuple[int, str]:
+    family = next((index for index, prefix in enumerate(
+        ("sobol_sparse", "random_cartesian", "latin_hypercube", "md_"))
+        if recipe.startswith(prefix)), 4)
+    return family, _dataset_design_recipe_label(recipe)
 
 
 def _dataset_design_followup_rows(path: Path, system: str, study: str) -> list[dict[str, Any]]:
@@ -5124,15 +5142,24 @@ def _dataset_design_6x6_training(results: list[dict[str, Any]]) -> tuple[list[di
         if h_mae is None or not math.isfinite(float(h_mae)):
             continue
         n = int(result.get("N", 64))
+        recipe = _dataset_design_recipe_label(result.get("recipe_id", ""))
         if stage == "loss_long":
             loss = result.get("config_patch", {}).get("model", {}).get("loss", "")
-            label = "elementwise_mse" if loss.endswith("elementwise_mse") else "block_type_mae (original)"
+            loss = "elementwise_mse" if loss.endswith("elementwise_mse") else "block_type_mae"
+            label = f"{recipe} · {loss}"
             key = ("Función de pérdida · 2000 épocas", label, n)
         elif stage == "curve_steps":
-            key = ("Curva exploratoria · 8000 updates", f"N={n}", n)
+            label = f"{recipe} · elementwise_mse · 8000 updates"
+            key = ("Presupuesto común por N", label, n)
+        elif stage == "curve_elemmse":
+            label = f"{recipe} · elementwise_mse · 2000 épocas"
+            key = ("Presupuesto común por N", label, n)
+        elif stage in {"curve", "lhs"}:
+            label = f"{recipe} · block_type_mae · campaña original"
+            key = ("Métodos finales · validación", label, n)
         elif stage == "coverage_6x6":
-            label = _dataset_design_recipe_label(result.get("recipe_id", ""))
-            key = ("Cobertura en curso (provisional)", label, n)
+            label = f"{recipe} · elementwise_mse · 8000 updates"
+            key = ("Cobertura final", label, n)
         elif stage in {"ablation", "capacity", "depth"}:
             marker = f"__ts{result.get('training_seed')}"
             variant = result.get("job_id", "").split(marker, 1)[-1].removeprefix("__").replace("_", " ")
@@ -5145,7 +5172,8 @@ def _dataset_design_6x6_training(results: list[dict[str, Any]]) -> tuple[list[di
             groups[key]["frob"].append(float(rel_frob) * 100)
 
     rows, plot = [], []
-    plotted = {"Función de pérdida · 2000 épocas", "Curva exploratoria · 8000 updates", "Cobertura en curso (provisional)"}
+    plotted = {"Función de pérdida · 2000 épocas", "Presupuesto común por N",
+               "Métodos finales · validación", "Cobertura final"}
     for (study, label, n), values in groups.items():
         h_values, f_values = values["h"], values["frob"]
         mean = sum(h_values) / len(h_values)
@@ -5162,7 +5190,7 @@ def _dataset_design_6x6_training(results: list[dict[str, Any]]) -> tuple[list[di
             "H-MAE validación (meV)": metric,
             "Frobenius relativo validación (%)": frob_metric,
             "Semillas": f"{len(h_values)}/{expected}",
-            "Estado": "provisional" if study.startswith("Cobertura") and len(h_values) < expected else "completo",
+            "Estado": "provisional" if len(h_values) < expected else "completo",
         })
         if study in plotted:
             plot.append({"study": study, "label": label, "N": n, "h_mean": mean, "h_sd": sd or 0.0,
@@ -5228,8 +5256,16 @@ def _dd_yaxis(title: str, color: str, **extra: Any) -> dict[str, Any]:
     }
 
 
-def _dd_metric_panels(path: Path, name: str, title: str, caption: str, mode: str) -> dict[str, Any] | None:
+def _dd_metric_panels(path: Path, name: str, title: str, caption: str, mode: str,
+                      system: str | None = None) -> dict[str, Any] | None:
     rows = _dd_csv(path)
+    campaign_rows = [row for row in _dd_csv(DATASET_DESIGN_CURVES_ROOT / "final_configs.csv")
+                     if row.get("system") == system]
+    if mode == "comparison":
+        campaign_rows = [row for row in campaign_rows if int(float(row["N"])) == 64]
+    campaign_rows.sort(key=lambda row: (_dataset_design_recipe_sort_key(row["recipe_id"]), int(float(row["N"]))))
+    if campaign_rows:
+        rows = campaign_rows
     if not rows:
         return None
     metrics = (
@@ -5245,7 +5281,7 @@ def _dd_metric_panels(path: Path, name: str, title: str, caption: str, mode: str
         suffix = "" if index == 0 else str(index + 1)
         xref, yref = f"x{suffix}", f"y{suffix}"
         layout[f"xaxis{suffix}"] = {"domain": list(domains[index]), "anchor": yref, "automargin": True,
-                                          "ticklabeloverflow": "hide past domain"}
+                                          "ticklabeloverflow": "allow"}
         layout.setdefault("annotations", []).append({
             "text": label, "xref": "paper", "yref": "paper", "x": sum(domains[index]) / 2,
             "y": 1.12, "showarrow": False, "font": {"size": 13},
@@ -5266,9 +5302,47 @@ def _dd_metric_panels(path: Path, name: str, title: str, caption: str, mode: str
             error = [float(row["sd_2k"]) * scale, float(row["sd_4k"]) * scale]
             trace = {"type": "scatter", "mode": "lines+markers", "x": x, "y": y,
                      "error_y": {"type": "data", "array": error, "visible": True}}
+            layout[xaxis] |= {"title": "Presupuesto de entrenamiento", "type": "category",
+                              "tickmode": "array", "tickvals": x, "ticktext": x,
+                              "tickangle": -20, "ticklabeloverflow": "allow"}
+        elif campaign_rows:
+            recipes = sorted({item["recipe_id"] for item in rows}, key=_dataset_design_recipe_sort_key)
+            for recipe_index, recipe in enumerate(recipes):
+                recipe_rows = sorted((item for item in rows if item["recipe_id"] == recipe),
+                                     key=lambda item: int(float(item["N"])))
+                x = [int(float(item["N"])) for item in recipe_rows]
+                if mode == "comparison":
+                    x = [_dataset_design_recipe_label(recipe)]
+                family = recipe_rows[0]["family"]
+                values = [float(item[metric]) * scale if item.get(metric) not in (None, "") else None
+                          for item in recipe_rows]
+                data.append({
+                    "type": "scatter", "mode": "lines+markers" if sum(value is not None for value in values) > 1 else "markers",
+                    "x": x, "y": values,
+                    "error_y": {"type": "data", "array": [float(item.get("seed_sd") or 0) * scale
+                                                                if metric == "H_MAE_meV" else 0 for item in recipe_rows],
+                                "visible": metric == "H_MAE_meV"},
+                    "xaxis": xref, "yaxis": yref, "name": _dataset_design_recipe_label(recipe),
+                    "legendgroup": recipe, "showlegend": metric == "rel_Frob",
+                    "line": {"color": DD_PLOT_COLORS.get(family, "#52514e"),
+                             "dash": ("solid", "dash", "dot", "dashdot")[recipe_index % 4]},
+                    "marker": {"size": 8, "color": DD_PLOT_COLORS.get(family, "#52514e")},
+                    "hovertemplate": f"%{{fullData.name}}<br>{label}: %{{y:.2f}}<br>x=%{{x}}<extra></extra>",
+                })
+            if mode == "curve":
+                all_n = sorted({int(float(item["N"])) for item in rows})
+                layout[xaxis] |= {"title": "N de entrenamiento", "type": "log", "tickvals": all_n,
+                                  "ticktext": [str(value) for value in all_n]}
+            else:
+                labels = [_dataset_design_recipe_label(recipe) for recipe in recipes]
+                layout[xaxis] |= {"title": "Método / receta", "type": "category", "tickangle": -30,
+                                  "tickmode": "array", "tickvals": labels, "ticktext": labels,
+                                  "categoryorder": "array", "categoryarray": labels}
+            continue
         else:
+            value_key = metric if campaign_rows else f"{metric}_mean"
             selected = [item for item in rows if item.get("domain", "all") == "all"
-                        and item.get(f"{metric}_mean") not in (None, "")]
+                        and item.get(value_key) not in (None, "")]
             if not selected:
                 continue
             if mode == "curve":
@@ -5278,60 +5352,122 @@ def _dd_metric_panels(path: Path, name: str, title: str, caption: str, mode: str
                 trace_type = "lines+markers"
             else:
                 x = [_dataset_design_recipe_label(item.get("recipe", "")) for item in selected]
-                layout[xaxis] |= {"tickangle": -25}
+                if campaign_rows:
+                    x = [_dataset_design_recipe_label(item["recipe_id"]) for item in selected]
+                layout[xaxis] |= {"title": "Método / receta", "type": "category", "tickangle": -25,
+                                  "tickmode": "array", "tickvals": x, "ticktext": x}
                 trace_type = "markers"
-            y = [float(item[f"{metric}_mean"]) * scale for item in selected]
-            error = [float(item.get(f"{metric}_sd") or 0) * scale for item in selected]
+            y = [float(item[value_key]) * scale for item in selected]
+            error = [float(item.get("seed_sd") if campaign_rows and metric == "H_MAE_meV"
+                                else item.get(f"{metric}_sd") or 0) * scale for item in selected]
             trace = {"type": "scatter", "mode": trace_type, "x": x, "y": y,
                      "error_y": {"type": "data", "array": error, "visible": True},
                      "text": [f"{item.get('n_seeds', '?')} semillas" for item in selected]}
+            if campaign_rows:
+                trace["marker"] = {"size": 9, "color": [DD_PLOT_COLORS.get(item["family"], "#52514e") for item in selected]}
         trace |= {"xaxis": xref, "yaxis": yref, "name": label,
-                  "showlegend": index == 0,
-                  "line": {"color": color}, "marker": {"size": 9, "color": color},
+                  "showlegend": mode == "budget" or index == 0,
+                  "line": {"color": color}, "marker": trace.get("marker", {"size": 9, "color": color}),
                   "hovertemplate": "%{x}<br>%{y:.2f} ± %{error_y.array:.2f}<br>%{text}<extra></extra>"}
         if mode == "budget":
+            trace["name"] = f"random 1D in R=0.080 Å · elementwise_mse · {label}"
             trace.pop("text", None)
             trace["hovertemplate"] = "%{x}<br>%{y:.2f} ± %{error_y.array:.2f}<extra></extra>"
         data.append(trace)
     return {"name": name, "title": title, "caption": caption, "kind": "plotly", "data": data, "layout": layout}
 
 
+def _dd_training_budget_figure(path: Path, name: str, title: str,
+                               method: str, test_label: str) -> dict[str, Any] | None:
+    rows = [row for row in _dd_csv(path) if row.get("domain", "all") == "all"]
+    rows.sort(key=lambda row: int(float(row["N"])))
+    if not rows:
+        return None
+    n_train = [int(float(row["N"])) for row in rows]
+    metrics = (
+        ("rel_Frob", "Frobenius relativo (%)", 100, "x", "y", DD_FROB_COLOR),
+        ("H_MAE_meV", "H-MAE (meV)", 1, "x", "y2", DD_H_COLOR),
+        ("band_rmse_meV", "Bandas RMSE (meV)", 1, "x2", "y3", "#7c3aed"),
+        ("dos_rel_L1", "DOS L1 (%)", 100, "x2", "y4", "#059669"),
+    )
+    data = []
+    for metric, label, scale, xref, yref, color in metrics:
+        data.append({
+            "type": "scatter", "mode": "lines+markers", "x": n_train,
+            "y": [float(row[f"{metric}_mean"]) * scale for row in rows],
+            "error_y": {"type": "data", "array": [float(row[f"{metric}_sd"]) * scale for row in rows],
+                        "visible": True},
+            "xaxis": xref, "yaxis": yref, "name": f"{method} · {label}",
+            "line": {"color": color}, "marker": {"color": color, "size": 8},
+            "customdata": [[row.get("n_seeds", "?")] for row in rows],
+            "hovertemplate": f"Ntrain=%{{x}}<br>{label}=%{{y:.2f}} ± %{{error_y.array:.2f}}"
+                             "<br>%{customdata[0]} semillas<extra>%{fullData.name}</extra>",
+        })
+    xaxis = {"title": "Ntrain", "type": "log", "tickvals": n_train,
+             "ticktext": [str(value) for value in n_train], "automargin": True}
+    return {
+        "name": name, "title": title,
+        "caption": (f"{method}. Evaluado para Ntrain={', '.join(map(str, n_train))}, con cinco semillas "
+                    f"y presupuesto común, sobre {test_label}. Cada panel usa dos ejes Y."),
+        "kind": "plotly", "data": data,
+        "layout": {
+            "title": title, "height": 540, "legend": DD_LEGEND_ABOVE,
+            "margin": {"l": 80, "r": 80, "t": 150, "b": 100},
+            "xaxis": {**xaxis, "domain": [0, .43], "anchor": "y"},
+            "xaxis2": {**xaxis, "domain": [.57, 1], "anchor": "y3"},
+            "yaxis": _dd_yaxis("Frobenius relativo (%)", DD_FROB_COLOR,
+                                anchor="x", rangemode="tozero"),
+            "yaxis2": _dd_yaxis("H-MAE (meV)", DD_H_COLOR, anchor="x",
+                                 overlaying="y", side="right", rangemode="tozero"),
+            "yaxis3": _dd_yaxis("Bandas RMSE (meV)", "#7c3aed",
+                                 anchor="x2", rangemode="tozero"),
+            "yaxis4": _dd_yaxis("DOS L1 (%)", "#059669", anchor="x2",
+                                 overlaying="y3", side="right", rangemode="tozero"),
+            "annotations": [
+                {"text": "Precisión matricial", "xref": "paper", "yref": "paper",
+                 "x": .215, "y": 1.1, "showarrow": False},
+                {"text": "Observables electrónicos", "xref": "paper", "yref": "paper",
+                 "x": .785, "y": 1.1, "showarrow": False},
+            ],
+        },
+    }
+
+
 def _dd_campaign_learning_figures() -> list[dict[str, Any]]:
-    rows = _dd_csv(DATASET_DESIGN_CURVES_ROOT / "learning_curves.csv")
-    configs = {(row["system"], row["recipe_id"], int(float(row["N"]))): row
-               for row in _dd_csv(DATASET_DESIGN_CURVES_ROOT / "final_configs.csv")}
+    rows = _dd_csv(DATASET_DESIGN_CURVES_ROOT / "final_configs.csv")
     figures = []
     for system in sorted({row.get("system", "") for row in rows} - {""}):
         data = []
-        recipes = sorted({row["recipe_id"] for row in rows if row.get("system") == system})
-        for recipe_index, recipe in enumerate(recipes):
+        recipes = sorted({row["recipe_id"] for row in rows if row.get("system") == system},
+                         key=_dataset_design_recipe_sort_key)
+        for recipe in recipes:
             selected = [row for row in rows if row.get("system") == system and row.get("recipe_id") == recipe]
             selected.sort(key=lambda row: int(float(row["N"])))
             if not selected:
                 continue
-            family, role = selected[0]["family"], selected[0].get("role", "")
-            label = f"{DD_PLOT_LABELS.get(family, family)} {role} · {selected[0]['dim']} R={selected[0]['R']}"
+            family, label = selected[0]["family"], _dataset_design_recipe_label(recipe)
+            color = DD_PLOT_COLORS.get(family, "#52514e")
             x = [int(float(row["N"])) for row in selected]
             data.append({
                 "type": "scatter", "mode": "lines+markers",
                 "x": x,
-                "y": [float(row["E_final_meV"]) for row in selected],
+                "y": [float(row["H_MAE_meV"]) for row in selected],
                 "name": f"{label} · H-MAE", "yaxis": "y2",
-                "line": {"color": DD_H_COLOR, "dash": ("solid", "dash", "dot", "dashdot")[recipe_index % 4]},
-                "customdata": [[float(row["E_dev_meV"])] for row in selected],
-                "hovertemplate": "N=%{x}<br>test %{y:.2f} meV<br>dev %{customdata[0]:.2f} meV<extra>%{fullData.name}</extra>",
+                "legendgroup": recipe, "line": {"color": color, "dash": "solid"},
+                "customdata": [[row.get("n_seeds", "?")] for row in selected],
+                "hovertemplate": "N=%{x}<br>test %{y:.2f} meV<br>%{customdata[0]} semillas<extra>%{fullData.name}</extra>",
             })
-            frob = [configs.get((system, recipe, n), {}).get("rel_Frob") for n in x]
+            frob = [row.get("rel_Frob") for row in selected]
             if any(value not in (None, "") for value in frob):
                 data.append({"type": "scatter", "mode": "lines+markers", "x": x,
                              "y": [float(value) * 100 if value not in (None, "") else None for value in frob],
                              "name": f"{label} · Frobenius", "yaxis": "y",
-                             "line": {"color": DD_FROB_COLOR, "dash": ("solid", "dash", "dot", "dashdot")[recipe_index % 4]},
+                             "legendgroup": recipe, "line": {"color": color, "dash": "dot"},
                              "hovertemplate": "N=%{x}<br>Frobenius relativo %{y:.2f}%<extra>%{fullData.name}</extra>"})
         if data:
             figures.append({
                 "name": f"campaign_learning_{system}", "title": f"Campaña principal: curva de aprendizaje {system}",
-                "caption": "H-MAE (azul, eje derecho) y Frobenius relativo (rojo, eje izquierdo) frente a N. Menor es mejor; una meseta señala saturación.",
+                "caption": "Todos los métodos evaluados en el test final. LHS y MD sólo tienen N=64; por eso aparecen como puntos, no como curvas.",
                 "kind": "plotly", "data": data,
                 "layout": {"title": f"Curvas de aprendizaje · {system}", "height": 500,
                            "xaxis": {"title": "N estructuras", "type": "log", "tickvals": [4, 8, 16, 32, 64], "automargin": True},
@@ -5372,7 +5508,7 @@ def _dd_campaign_pareto_figures() -> list[dict[str, Any]]:
             if front:
                 data.append({"type": "scatter", "mode": "lines", "name": "frontera de Pareto",
                              "x": [float(row[cost]) for row in front], "y": [float(row["E"]) for row in front], "yaxis": "y2",
-                             "line": {"color": DD_H_COLOR, "shape": "hv", "width": 3}, "hoverinfo": "skip"})
+                             "line": {"color": "#0b0b0b", "shape": "hv", "width": 3}, "hoverinfo": "skip"})
             figures.append({
                 "name": f"campaign_pareto_{system}_{cost}", "title": f"Pareto {system}: {cost_label}",
                 "caption": "H-MAE (azul, derecha) y Frobenius relativo (rojo, izquierda). La esquina inferior izquierda es mejor; la línea es la frontera de Pareto según H-MAE.",
@@ -5413,12 +5549,9 @@ def _dd_designed_vs_md_figure() -> dict[str, Any] | None:
 
 
 def _dd_generalization_figures() -> list[dict[str, Any]]:
-    selected = {}
-    for row in _dd_csv(DATASET_DESIGN_CURVES_ROOT / "final_table.csv"):
-        if int(float(row.get("N", 0))) != 64 or ": " not in row.get("Dataset", ""):
-            continue
-        role, recipe = row["Dataset"].split(": ", 1)
-        selected[(row["Sistema"], recipe)] = role
+    selected = {(row["system"], row["recipe_id"]): row["family"]
+                for row in _dd_csv(DATASET_DESIGN_CURVES_ROOT / "final_configs.csv")
+                if int(float(row.get("N", 0))) == 64}
     values: dict[tuple[str, str, float], list[float]] = defaultdict(list)
     for row in _dd_csv(DATASET_DESIGN_CURVES_ROOT / "final_per_structure_long.csv"):
         key = (row.get("system", ""), row.get("recipe_id", ""))
@@ -5427,16 +5560,19 @@ def _dd_generalization_figures() -> list[dict[str, Any]]:
             values[(key[0], key[1], amplitude)].append(error)
     figures = []
     for system in sorted({key[0] for key in selected}):
-        recipes = [key[1] for key in selected if key[0] == system]
+        recipes = sorted(key[1] for key in selected if key[0] == system)
         amplitudes = sorted({key[2] for key in values if key[0] == system})
         if not recipes or not amplitudes:
             continue
         z = [[sum(values.get((system, recipe, amplitude), [])) / len(values[(system, recipe, amplitude)])
               if values.get((system, recipe, amplitude)) else None for amplitude in amplitudes] for recipe in recipes]
-        labels = [f"{selected[(system, recipe)]}: {_dataset_design_recipe_label(recipe)}" for recipe in recipes]
+        labels = [_dataset_design_recipe_label(recipe) for recipe in recipes]
+        missing_note = (" LHS 3D no aparece en 6×6 porque sólo tiene validación histórica, "
+                        "no resultados sobre este test congelado.") if system == "6x6" else ""
         figures.append({
             "name": f"campaign_generalization_{system}", "title": f"Generalización por amplitud · {system}",
-            "caption": "H-MAE sobre estructuras sintéticas frente a amplitud del test. Colores más fríos son mejores; un aumento al superar el dominio entrenado señala extrapolación.",
+            "caption": ("Todos los métodos N=64 evaluados sobre este test sintético. Colores más fríos son mejores; "
+                        "un aumento al superar el dominio entrenado señala extrapolación." + missing_note),
             "kind": "plotly", "data": [{"type": "heatmap", "x": amplitudes, "y": labels, "z": z,
                                            "colorscale": "Blues", "colorbar": {"title": "H-MAE<br>(meV)"},
                                            "texttemplate": "%{z:.1f}",
@@ -5513,23 +5649,172 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
     models, cells = _dd_csv(root / "model_results.csv"), _dd_csv(root / "cartesian_results.csv")
     if not models or not cells:
         return []
+    for row in models:
+        metric_path = Path(row.get("final_test_csv", ""))
+        values = [value for item in _dd_csv(metric_path)
+                  if (value := _dd_float(item, "rel_Frob")) is not None]
+        if values:
+            row["rel_Frob"] = sum(values) / len(values)
+    md_root = DATASET_DESIGN_MD_BASELINE_ROOT
+    md_model_rows = _dd_csv(md_root / "model_results.csv")
+    md_models = [row for row in md_model_rows
+                 if row.get("evaluation_dataset") == "md" and int(row.get("training_seed", -1)) == 0]
+    md_frob: dict[str, list[float]] = {}
+    for row in _dd_csv(md_root / "per_structure_results.csv"):
+        if row.get("evaluation_dataset") == "md" and (value := _dd_float(row, "rel_Frob")) is not None:
+            md_frob.setdefault(row["model_id"], []).append(value)
+    for row in md_models:
+        if values := md_frob.get(row["model_id"]):
+            row["rel_Frob"] = sum(values) / len(values)
+    md_cells = _dd_csv(md_root / "cartesian_results.csv")
     train_sizes = sorted({int(row["N_train"]) for row in models})
     val_sizes = sorted({int(row["N_val"]) for row in models})
     test_sizes = sorted({int(row["N_test"]) for row in cells})
 
     by_model = {(int(row["N_train"]), int(row["N_val"])): row for row in models}
+    expected_pairs = {(n_train, n_val) for n_train in train_sizes for n_val in val_sizes}
+    common_lookups = {
+        source: {(int(row["N_train"]), int(row["N_val"])): row
+                 for row in md_models if row.get("training_dataset") == source}
+        for source in ("synthetic", "md")
+    }
+    common_available = all(set(lookup) == expected_pairs for lookup in common_lookups.values())
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    recipe = _dataset_design_recipe_label((manifest.get("recipe") or {}).get("recipe_id", ""))
+    training = manifest.get("training") or {}
+    protocol = (f"{recipe} · {str(training.get('loss', '')).rsplit('.', 1)[-1]} · "
+                f"{training.get('optimizer_updates', '?')} updates · seed 0").strip(" ·")
+
+    budget_data = []
+    budget_metrics = (("rel_Frob", "Frobenius relativo (%)", 100, "x", "y", DD_FROB_COLOR),
+                      ("H_MAE_meV", "H-MAE (meV)", 1, "x", "y2", DD_H_COLOR),
+                      ("band_rmse_meV", "Bandas RMSE (meV)", 1, "x2", "y3", "#7c3aed"),
+                      ("dos_rel_L1", "DOS L1 (%)", 100, "x2", "y4", "#059669"))
+    budget_layout = {"title": "6×6: presupuesto de entrenamiento", "height": 540,
+                     "legend": DD_LEGEND_ABOVE, "margin": {"l": 80, "r": 80, "t": 150, "b": 100},
+                     "xaxis": {"domain": [0, .43], "anchor": "y", "title": "Ntrain", "type": "log",
+                               "tickvals": train_sizes, "ticktext": [str(value) for value in train_sizes]},
+                     "xaxis2": {"domain": [.57, 1], "anchor": "y3", "title": "Ntrain", "type": "log",
+                                "tickvals": train_sizes, "ticktext": [str(value) for value in train_sizes]},
+                     "yaxis": _dd_yaxis("Frobenius relativo (%)", DD_FROB_COLOR, anchor="x", rangemode="tozero"),
+                     "yaxis2": _dd_yaxis("H-MAE (meV)", DD_H_COLOR, anchor="x", overlaying="y",
+                                          side="right", rangemode="tozero"),
+                     "yaxis3": _dd_yaxis("Bandas RMSE (meV)", "#7c3aed", anchor="x2", rangemode="tozero"),
+                     "yaxis4": _dd_yaxis("DOS L1 (%)", "#059669", anchor="x2", overlaying="y3",
+                                          side="right", rangemode="tozero"),
+                     "annotations": [
+                         {"text": "Precisión matricial", "xref": "paper", "yref": "paper",
+                          "x": .215, "y": 1.1, "showarrow": False},
+                         {"text": "Observables electrónicos", "xref": "paper", "yref": "paper",
+                          "x": .785, "y": 1.1, "showarrow": False},
+                     ]}
+    for metric, metric_label, scale, xref, yref, color in budget_metrics:
+        sources = (("Diseñado→MD", common_lookups["synthetic"], "solid", "circle"),
+                   ("MD→MD", common_lookups["md"], "dot", "diamond")) if common_available else (
+                   (recipe, by_model, "solid", "circle"),)
+        for source_label, lookup, dash, symbol in sources:
+            for val_index, n_val in enumerate(val_sizes):
+                selected = [lookup[(n_train, n_val)] for n_train in train_sizes]
+                budget_data.append({
+                    "type": "scatter", "mode": "lines+markers", "x": train_sizes,
+                    "y": [float(row[metric]) * scale for row in selected], "xaxis": xref, "yaxis": yref,
+                    "name": f"{source_label} · Nval={n_val} · {metric_label}",
+                    "legendgroup": f"{source_label} · Nval={n_val}", "showlegend": True,
+                    "line": {"color": color,
+                             "dash": ("solid", "dash", "dot")[val_index % 3] if dash == "solid" else dash},
+                    "marker": {"symbol": symbol}, "customdata": [[row["model_id"]] for row in selected],
+                    "hovertemplate": f"modelo %{{customdata[0]}}<br>Ntrain=%{{x}}<br>{metric_label}=%{{y:.3f}}<extra>%{{fullData.name}}</extra>",
+                })
+    budget_caption = ("Diseñado y MD evaluados sobre el mismo MD-Test48; el marcador distingue el origen y "
+                      "el patrón de línea distingue Nval. " if common_available else "")
+    budget = {
+        "name": "6x6_training_budget", "title": "6×6: presupuesto de entrenamiento",
+        "caption": f"{budget_caption}{protocol}. Dos paneles con doble eje Y para las cuatro métricas.",
+        "kind": "plotly", "data": budget_data, "layout": budget_layout,
+    }
+
+    heatmap_data = []
+    heatmap_layout = {"title": "H-MAE en Test48", "height": 480,
+                      "xaxis": {"title": "Ntrain", "type": "category"},
+                      "yaxis": {"title": "Nval", "type": "category"}}
+    heatmap_caption = f"{protocol}. H-MAE de cada modelo; el ID exacto aparece al pasar el cursor."
+    heatmap_sources = (("Diseñado", common_lookups["synthetic"]), ("MD", common_lookups["md"])) if common_available else (
+                       (recipe, by_model),)
+    common_h = [float(row["H_MAE_meV"]) for _, lookup in heatmap_sources for row in lookup.values()]
+    for index, (source_label, lookup) in enumerate(heatmap_sources):
+        suffix = "" if index == 0 else str(index + 1)
+        model_ids = [[lookup[(n_train, n_val)]["model_id"] for n_train in train_sizes] for n_val in val_sizes]
+        heatmap_data.append({"type": "heatmap", "x": train_sizes, "y": val_sizes,
+            "z": [[float(lookup[(n_train, n_val)]["H_MAE_meV"]) for n_train in train_sizes] for n_val in val_sizes],
+            "xaxis": f"x{suffix}", "yaxis": f"y{suffix}", "zmin": min(common_h), "zmax": max(common_h),
+            "colorscale": "Blues", "reversescale": True, "text": model_ids, "customdata": model_ids,
+            "texttemplate": "%{z:.3f}", "showscale": index == len(heatmap_sources) - 1,
+            "colorbar": {"title": "H-MAE<br>(meV)"},
+            "hovertemplate": f"{source_label}<br>modelo %{{customdata}}<br>Ntrain=%{{x}}<br>Nval=%{{y}}<br>H-MAE=%{{z:.3f}} meV<extra></extra>"})
+    if common_available:
+        heatmap_layout |= {
+            "xaxis": {"domain": [0, .46], "title": "Ntrain · diseñado", "type": "category"},
+            "yaxis": {"title": "Nval", "type": "category"},
+            "xaxis2": {"domain": [.54, 1], "title": "Ntrain · MD", "type": "category"},
+            "yaxis2": {"anchor": "x2", "title": "Nval", "type": "category"},
+        }
+        heatmap_caption = "Diseñado y MD evaluados sobre el mismo MD-Test48 y con una escala de color común."
     heatmap = {
         "name": "label_budget_h_mae", "title": "6×6: precisión frente a Ntrain y Nval",
-        "caption": "H-MAE de cada modelo sobre el mismo Test48. Menor es mejor; así se separa el efecto de añadir etiquetas de entrenamiento del de mejorar la selección por validación.",
+        "caption": heatmap_caption, "kind": "plotly", "data": heatmap_data, "layout": heatmap_layout,
+    }
+    original_model_ids = [[by_model[(n_train, n_val)]["model_id"] for n_train in train_sizes]
+                          for n_val in val_sizes]
+    original_heatmap = {
+        "name": "label_budget_h_mae_synthetic_test",
+        "title": "6×6: precisión diseñada en Test48 sintético (mapa original)",
+        "caption": (f"{protocol}. H-MAE de los modelos diseñados sobre el Test48 sintético original. "
+                    "Este mapa mide rendimiento dentro del dominio diseñado; el mapa siguiente usa MD-Test48 "
+                    "para comparar de forma común diseñado y MD."),
         "kind": "plotly", "data": [{"type": "heatmap", "x": train_sizes, "y": val_sizes,
-            "z": [[float(by_model[(n_train, n_val)]["H_MAE_meV"]) for n_train in train_sizes] for n_val in val_sizes],
-            "colorscale": "Blues", "reversescale": True, "texttemplate": "%{z:.3f}",
+            "z": [[float(by_model[(n_train, n_val)]["H_MAE_meV"]) for n_train in train_sizes]
+                  for n_val in val_sizes],
+            "colorscale": "Blues", "reversescale": True, "text": original_model_ids,
+            "customdata": original_model_ids, "texttemplate": "%{z:.3f}",
             "colorbar": {"title": "H-MAE<br>(meV)"},
-            "hovertemplate": "Ntrain=%{x}<br>Nval=%{y}<br>H-MAE=%{z:.3f} meV<extra></extra>"}],
-        "layout": {"title": "H-MAE en Test48", "height": 480,
+            "hovertemplate": "modelo %{customdata}<br>Ntrain=%{x}<br>Nval=%{y}<br>H-MAE=%{z:.3f} meV<extra></extra>"}],
+        "layout": {"title": "H-MAE en Test48 sintético original", "height": 480,
                    "xaxis": {"title": "Ntrain", "type": "category"},
                    "yaxis": {"title": "Nval", "type": "category"}},
     }
+    md_to_synthetic = {(int(row["N_train"]), int(row["N_val"])): row for row in md_model_rows
+                       if row.get("training_dataset") == "md"
+                       and row.get("evaluation_dataset") == "synthetic"
+                       and int(row.get("training_seed", -1)) == 0}
+    if set(md_to_synthetic) == expected_pairs:
+        md_to_synthetic_ids = [[md_to_synthetic[(n_train, n_val)]["model_id"]
+                                for n_train in train_sizes] for n_val in val_sizes]
+        synthetic_test_h = ([float(row["H_MAE_meV"]) for row in by_model.values()]
+                            + [float(row["H_MAE_meV"]) for row in md_to_synthetic.values()])
+        original_heatmap["title"] = "6×6: diseñado y MD sobre Test48 sintético"
+        original_heatmap["caption"] = ("Diseñado y MD evaluados sobre exactamente el mismo Test48 sintético "
+                                       "y con una escala de color común; menor H-MAE es mejor.")
+        original_heatmap["data"][0] |= {"xaxis": "x", "yaxis": "y", "zmin": min(synthetic_test_h),
+                                        "zmax": max(synthetic_test_h), "showscale": False,
+                                        "hovertemplate": "Diseñado<br>modelo %{customdata}<br>Ntrain=%{x}<br>Nval=%{y}<br>H-MAE=%{z:.3f} meV<extra></extra>"}
+        original_heatmap["data"].append({"type": "heatmap", "x": train_sizes, "y": val_sizes,
+                "z": [[float(md_to_synthetic[(n_train, n_val)]["H_MAE_meV"])
+                       for n_train in train_sizes] for n_val in val_sizes],
+                "xaxis": "x2", "yaxis": "y2",
+                "zmin": min(synthetic_test_h), "zmax": max(synthetic_test_h),
+                "colorscale": "Blues", "reversescale": True, "text": md_to_synthetic_ids,
+                "customdata": md_to_synthetic_ids, "texttemplate": "%{z:.3f}",
+                "showscale": True,
+                "colorbar": {"title": "H-MAE<br>(meV)"},
+                "hovertemplate": "MD<br>modelo %{customdata}<br>Ntrain=%{x}<br>Nval=%{y}<br>H-MAE=%{z:.3f} meV<extra></extra>"})
+        original_heatmap["layout"] = {
+            "title": "H-MAE común sobre Test48 sintético", "height": 480,
+            "xaxis": {"domain": [0, .46], "title": "Ntrain · diseñado", "type": "category"},
+            "yaxis": {"title": "Nval", "type": "category"},
+            "xaxis2": {"domain": [.54, 1], "title": "Ntrain · MD", "type": "category"},
+            "yaxis2": {"anchor": "x2", "title": "Nval", "type": "category"},
+        }
 
     lookup = {(int(row["N_train"]), int(row["N_val"]), int(row["N_test"])): row for row in cells}
     reliability_data, reliability_layout = [], {"title": "Fiabilidad empírica del tamaño de test", "height": 480}
@@ -5548,15 +5833,45 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
         reliability_data.append({"type": "heatmap", "x": train_sizes, "y": test_sizes,
             "z": [[100 * float(lookup[(n_train, n_val, n_test)]["H_P_abs_delta_le_10pct"])
                    for n_train in train_sizes] for n_test in test_sizes],
+            "customdata": [[lookup[(n_train, n_val, n_test)]["model_id"] for n_train in train_sizes]
+                           for n_test in test_sizes],
             "xaxis": xref, "yaxis": yref, "zmin": 0, "zmax": 100, "colorscale": "Viridis",
             "showscale": index == len(val_sizes) - 1,
             "colorbar": {"title": "P(|Δ|≤10%)<br>(%)"}, "texttemplate": "%{z:.0f}",
-            "hovertemplate": "Ntrain=%{x}<br>Ntest=%{y}<br>P=%{z:.1f}%<extra></extra>"})
+            "hovertemplate": "modelo %{customdata}<br>Ntrain=%{x}<br>Ntest=%{y}<br>P=%{z:.1f}%<extra></extra>"})
     reliability = {
         "name": "label_budget_test_reliability", "title": "6×6: fiabilidad de Ntest",
-        "caption": "Probabilidad de que el H-MAE del test reducido difiera menos del 10% de Test48 en 10.000 submuestreos emparejados y balanceados. Más amarillo es más fiable.",
+        "caption": f"{protocol}. El ID del modelo aparece al pasar el cursor. Probabilidad de diferir menos del 10% de Test48 en 10.000 submuestreos.",
         "kind": "plotly", "data": reliability_data, "layout": reliability_layout,
     }
+
+    md_lookup = {(int(row["N_train"]), int(row["N_val"]), int(row["N_test"])): row for row in md_cells}
+    if len(md_lookup) == len(train_sizes) * len(val_sizes) * len(test_sizes):
+        reliability_layout["height"] = 760
+        for index in range(3):
+            suffix = "" if index == 0 else str(index + 1)
+            reliability_layout[f"yaxis{suffix}"]["domain"] = [.57, 1]
+            reliability_layout["annotations"][index]["text"] += " · diseñado"
+        for index, n_val in enumerate(val_sizes, start=3):
+            suffix = str(index + 1)
+            xref, yref = f"x{suffix}", f"y{suffix}"
+            reliability_layout[f"xaxis{suffix}"] = {"domain": list(domains[index - 3]), "anchor": yref,
+                                                     "title": "Ntrain", "type": "category"}
+            reliability_layout[f"yaxis{suffix}"] = {"anchor": xref, "domain": [0, .43],
+                                                     "title": "Ntest" if index == 3 else None,
+                                                     "type": "category"}
+            reliability_layout["annotations"].append({"text": f"Nval={n_val} · MD", "xref": "paper",
+                                                       "yref": "paper", "x": sum(domains[index - 3]) / 2,
+                                                       "y": .47, "showarrow": False})
+            reliability_data.append({"type": "heatmap", "x": train_sizes, "y": test_sizes,
+                "z": [[100 * float(md_lookup[(n_train, n_val, n_test)]["H_P_abs_delta_le_10pct"])
+                       for n_train in train_sizes] for n_test in test_sizes],
+                "customdata": [[md_lookup[(n_train, n_val, n_test)]["model_id"] for n_train in train_sizes]
+                               for n_test in test_sizes], "xaxis": xref, "yaxis": yref,
+                "zmin": 0, "zmax": 100, "colorscale": "Viridis", "showscale": index == 5,
+                "colorbar": {"title": "P(|Δ|≤10%)<br>(%)"}, "texttemplate": "%{z:.0f}",
+                "hovertemplate": "MD · modelo %{customdata}<br>Ntrain=%{x}<br>Ntest=%{y}<br>P=%{z:.1f}%<extra></extra>"})
+        reliability["caption"] += " La segunda fila añade el producto cartesiano MD, estratificado por temperatura."
 
     pass_rows = [row for row in cells if row["pass"].lower() == "true"]
     fail_rows = [row for row in cells if row["pass"].lower() != "true"]
@@ -5568,6 +5883,15 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
             "marker": {"size": 9, "color": color, "opacity": .75},
             "customdata": [[row["N_train"], row["N_val"], row["N_test"], row["failure_reasons"]] for row in rows],
             "hovertemplate": "Ntotal=%{x}<br>H conservador=%{y:.3f} meV<br>Ntrain/Nval/Ntest=%{customdata[0]}/%{customdata[1]}/%{customdata[2]}<br>%{customdata[3]}<extra>%{fullData.name}</extra>"})
+    for name, passed, color in (("MD · pasa", True, "#0f766e"), ("MD · no pasa", False, "#f97316")):
+        rows = [row for row in md_cells if (str(row.get("pass", "")).lower() == "true") == passed]
+        if rows:
+            frontier_data.append({"type": "scatter", "mode": "markers", "name": name,
+                "x": [int(row["N_total"]) for row in rows],
+                "y": [float(row["H_MAE_meV"]) * (1 + float(row["H_q90_abs_delta"])) for row in rows],
+                "marker": {"size": 9, "color": color, "opacity": .75, "symbol": "diamond"},
+                "customdata": [[row["N_train"], row["N_val"], row["N_test"]] for row in rows],
+                "hovertemplate": "MD · Ntotal=%{x}<br>H conservador=%{y:.3f} meV<br>Ntrain/Nval/Ntest=%{customdata[0]}/%{customdata[1]}/%{customdata[2]}<extra>%{fullData.name}</extra>"})
     minimum_path = root / "minimum.json"
     if minimum_path.exists():
         minimum = json.loads(minimum_path.read_text(encoding="utf-8")).get("minimum")
@@ -5575,9 +5899,18 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
             frontier_data.append({"type": "scatter", "mode": "markers", "name": "mínimo",
                 "x": [minimum["N_total"]], "y": [minimum["H_MAE_conservative_meV"]],
                 "marker": {"size": 16, "symbol": "star", "color": "#f59e0b", "line": {"width": 1, "color": "#111827"}}})
+    md_minimum_path = md_root / "minimum_md.json"
+    if md_minimum_path.exists():
+        minimum = json.loads(md_minimum_path.read_text(encoding="utf-8")).get("minimum")
+        if minimum:
+            frontier_data.append({"type": "scatter", "mode": "markers", "name": "mínimo MD",
+                "x": [minimum["N_total"]],
+                "y": [float(minimum["H_MAE_meV"]) * (1 + float(minimum["H_q90_abs_delta"]))],
+                "marker": {"size": 16, "symbol": "star-diamond", "color": "#06b6d4",
+                           "line": {"width": 1, "color": "#111827"}}})
     frontier = {
         "name": "label_budget_frontier", "title": "6×6: frontera etiquetas–precisión",
-        "caption": "Ntotal suma etiquetas de train, validación y test. El eje vertical añade al H-MAE completo su q90 de error de submuestreo; la estrella es la combinación válida más barata.",
+        "caption": "Ntotal suma train, validación y test. Diseñado y MD aparecen como series del mismo producto cartesiano; cada uno conserva su test congelado y su referencia N64/V48.",
         "kind": "plotly", "data": frontier_data,
         "layout": {"title": "Coste total de etiquetas frente a precisión conservadora", "height": 520,
                    "xaxis": {"title": "Ntotal = Ntrain + Nval + Ntest"},
@@ -5596,60 +5929,65 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
             "cells": {"values": [[row[key] for row in ordered] for _, key in columns], "align": "left"}}],
         "layout": {"title": "Pass/fail de las combinaciones", "height": min(1900, 180 + 21 * len(ordered))},
     }
-    return [heatmap, reliability, frontier, table]
+    return [budget, original_heatmap, heatmap, reliability, frontier, table]
 
 
 def _dd_md_baseline_figures() -> list[dict[str, Any]]:
     root = DATASET_DESIGN_MD_BASELINE_ROOT
     models = _dd_csv(root / "model_results.csv")
     matched = _dd_csv(root / "matched_comparisons.csv")
+    per_structure = _dd_csv(root / "per_structure_results.csv")
     costs = _dd_csv(root / "cost_frontier.csv")
     subsampling = _dd_csv(root / "test_subsampling.csv")
     if not models:
         return []
     seed0_md_test = [row for row in models if row.get("evaluation_dataset") == "md"
                      and int(row.get("training_seed", -1)) == 0]
-    train_sizes = sorted({int(row["N_train"]) for row in seed0_md_test})
-    val_sizes = sorted({int(row["N_val"]) for row in seed0_md_test})
-    precision_data = []
-    for index, source in enumerate(("synthetic", "md")):
-        lookup = {(int(row["N_train"]), int(row["N_val"])): float(row["H_MAE_meV"])
-                  for row in seed0_md_test if row["training_dataset"] == source}
-        if not lookup:
-            continue
-        precision_data.append({
-            "type": "heatmap", "x": train_sizes, "y": val_sizes,
-            "z": [[lookup.get((n_train, n_val)) for n_train in train_sizes] for n_val in val_sizes],
-            "xaxis": "x" if index == 0 else "x2", "yaxis": "y" if index == 0 else "y2",
-            "colorscale": "Blues", "reversescale": True, "showscale": index == 1,
-            "texttemplate": "%{z:.3f}", "colorbar": {"title": "H-MAE<br>(meV)"},
-            "hovertemplate": f"{source}<br>Ntrain=%{{x}}<br>Nval=%{{y}}<br>H=%{{z:.3f}} meV<extra></extra>",
-        })
-    precision = {
-        "name": "md6x6_precision", "title": "6×6: precisión diseñada y MD sobre MD-Test48",
-        "caption": "Dos mapas con la misma escala: menor H-MAE es mejor. Permiten ver si añadir etiquetas de train o validación beneficia de forma distinta a datos sintéticos y MD.",
-        "kind": "plotly", "data": precision_data,
-        "layout": {"title": "H-MAE común sobre MD-Test48", "height": 500,
-                   "xaxis": {"domain": [0, .46], "title": "Ntrain · sintético", "type": "category"},
-                   "yaxis": {"title": "Nval", "type": "category"},
-                   "xaxis2": {"domain": [.54, 1], "title": "Ntrain · MD", "type": "category"},
-                   "yaxis2": {"anchor": "x2", "title": "Nval", "type": "category"}},
-    }
 
     paired_rows = [row for row in matched if row.get("comparison") == "seed_mean"
                    and row.get("temperature_K") == "all" and row.get("metric") == "H_MAE_meV"]
     paired_rows.sort(key=lambda row: (int(row["N_train"]), int(row["N_val"])))
+    synthetic_test_rows = [row for row in per_structure if row.get("evaluation_dataset") == "synthetic"
+                           and int(row.get("training_seed", -1)) == 0]
+    synthetic_paired = []
+    if synthetic_test_rows:
+        import numpy as np
+
+        rng = np.random.default_rng(20260923)
+        for n_train, n_val in sorted({(int(row["N_train"]), int(row["N_val"]))
+                                      for row in synthetic_test_rows}):
+            values = {source: {row["sample_id"]: float(row["H_MAE_meV"])
+                               for row in synthetic_test_rows
+                               if row["training_dataset"] == source
+                               and int(row["N_train"]) == n_train and int(row["N_val"]) == n_val}
+                      for source in ("synthetic", "md")}
+            sample_ids = sorted(set(values["synthetic"]) & set(values["md"]))
+            if not sample_ids:
+                continue
+            differences = np.asarray([values["synthetic"][sample_id] - values["md"][sample_id]
+                                      for sample_id in sample_ids])
+            bootstrap = differences[rng.integers(0, len(differences), size=(10_000, len(differences)))].mean(axis=1)
+            synthetic_paired.append({"N_train": n_train, "N_val": n_val,
+                                     "difference_mean": float(differences.mean()),
+                                     "difference_p05": float(np.percentile(bootstrap, 5)),
+                                     "difference_p95": float(np.percentile(bootstrap, 95))})
+    paired_data = []
+    for label, rows, color in (("sobre MD-Test48", paired_rows, "#7c3aed"),
+                               ("sobre Test48 sintético", synthetic_paired, "#059669")):
+        if rows:
+            paired_data.append({"type": "scatter", "mode": "markers+lines", "name": label,
+                "x": [f"N{row['N_train']}/V{row['N_val']}" for row in rows],
+                "y": [float(row["difference_mean"]) for row in rows],
+                "error_y": {"type": "data",
+                    "array": [float(row["difference_p95"]) - float(row["difference_mean"]) for row in rows],
+                    "arrayminus": [float(row["difference_mean"]) - float(row["difference_p05"]) for row in rows],
+                    "visible": True}, "marker": {"size": 9, "color": color},
+                "line": {"color": color},
+                "hovertemplate": "%{x}<br>ΔH=%{y:.3f} meV<extra>%{fullData.name}</extra>"})
     paired = {
         "name": "md6x6_paired_difference", "title": "6×6: diferencia emparejada diseñada−MD",
-        "caption": "Cada punto resta, estructura a estructura en MD-Test48, el error del modelo MD al sintético. Valores positivos favorecen entrenar con MD; las barras son percentiles 5–95% del bootstrap emparejado descriptivo.",
-        "kind": "plotly", "data": [{"type": "scatter", "mode": "markers+lines",
-            "x": [f"N{row['N_train']}/V{row['N_val']}" for row in paired_rows],
-            "y": [float(row["difference_mean"]) for row in paired_rows],
-            "error_y": {"type": "data",
-                "array": [float(row["difference_p95"]) - float(row["difference_mean"]) for row in paired_rows],
-                "arrayminus": [float(row["difference_mean"]) - float(row["difference_p05"]) for row in paired_rows],
-                "visible": True}, "marker": {"size": 9, "color": "#7c3aed"},
-            "hovertemplate": "%{x}<br>ΔH=%{y:.3f} meV<extra></extra>"}],
+        "caption": "Cada serie calcula H-MAE(diseñado) − H-MAE(MD) estructura a estructura sobre el test indicado. Valores positivos favorecen entrenar con MD; las barras son percentiles 5–95% de 10.000 bootstrap emparejados.",
+        "kind": "plotly", "data": paired_data,
         "layout": {"title": "H-MAE sintético − MD", "height": 480,
                    "xaxis": {"title": "Presupuesto train/val", "tickangle": -35},
                    "yaxis": {"title": "Diferencia emparejada (meV)", "zeroline": True}},
@@ -5704,7 +6042,78 @@ def _dd_md_baseline_figures() -> list[dict[str, Any]]:
                    "xaxis2": {"domain": [.57, 1], "title": "Ntest"},
                    "yaxis2": {"anchor": "x2", "title": "q90 |Δtest| (%)", "rangemode": "tozero"}},
     }
-    return [precision, paired, cost, cross]
+    return [paired, cost, cross]
+
+
+def _dd_method_amplitude_crosstest_figures() -> list[dict[str, Any]]:
+    rows = _dd_csv(DATASET_DESIGN_METHOD_CROSSTEST_ROOT / "cross_matrix.csv")
+    if not rows:
+        return []
+    methods = ("sobol_sparse", "latin_hypercube", "random_cartesian", "angular_shell_collective")
+    amplitudes = (0.03, 0.08, 0.12)
+    method_labels = {"sobol_sparse": "Sobol", "latin_hypercube": "LHS",
+                     "random_cartesian": "Random", "angular_shell_collective": "Angular colectivo"}
+    domains = [(method, amplitude) for method in methods for amplitude in amplitudes]
+    labels = [f"{method_labels[method]} · {amplitude:.2f} Å" for method, amplitude in domains]
+    grouped: dict[tuple[str, float, str, float], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[(row["train_method"], float(row["train_R"]),
+                 row["test_method"], float(row["test_R"]))].append(row)
+    figures = []
+    for metric, title, scale, template in (
+        ("H_MAE_meV", "H-MAE (meV)", 1, ".3f"),
+        ("rel_Frob", "Frobenius relativo (%)", 100, ".2f"),
+    ):
+        z, details = [], []
+        for train_method, train_r in domains:
+            z_row, detail_row = [], []
+            for test_method, test_r in domains:
+                selected = sorted(grouped.get((train_method, train_r, test_method, test_r), []),
+                                  key=lambda row: int(row["training_seed"]))
+                values = [float(row[metric]) * scale for row in selected]
+                z_row.append(sum(values) / len(values) if values else None)
+                detail_row.append(" · ".join(f"seed {row['training_seed']}: {value:{template}}"
+                                              for row, value in zip(selected, values)))
+            z.append(z_row)
+            details.append(detail_row)
+        figures.append({
+            "name": f"method_amplitude_crosstest_{metric}",
+            "title": f"6×6: transferencia método–amplitud · {title}",
+            "caption": ("Filas: dominio de entrenamiento; columnas: Test32 independiente. Cada celda es la media "
+                        "de dos semillas y el cursor muestra ambas por separado. Menor es mejor; la diagonal mide "
+                        "interpolación y las celdas fuera de ella, transferencia."),
+            "kind": "plotly", "data": [{"type": "heatmap", "x": labels, "y": labels, "z": z,
+                "customdata": details, "colorscale": "Blues", "reversescale": True,
+                "texttemplate": f"%{{z:{template}}}", "colorbar": {"title": title},
+                "hovertemplate": f"Train: %{{y}}<br>Test: %{{x}}<br>{title}: %{{z:{template}}}<br>%{{customdata}}<extra></extra>"}],
+            "layout": {"title": title, "height": 720, "xaxis": {"title": "Dominio de test", "tickangle": -40,
+                         "automargin": True}, "yaxis": {"title": "Dominio de entrenamiento", "automargin": True},
+                       "margin": {"l": 155, "r": 80, "t": 70, "b": 165}},
+        })
+    table_rows = []
+    for train_method, train_r in domains:
+        for test_method, test_r in domains:
+            selected = sorted(grouped.get((train_method, train_r, test_method, test_r), []),
+                              key=lambda row: int(row["training_seed"]))
+            if not selected:
+                continue
+            table_rows.append({
+                "Train": method_labels[train_method], "Rtrain": f"{train_r:.2f}",
+                "Test": method_labels[test_method], "Rtest": f"{test_r:.2f}",
+                "Semillas": ", ".join(row["training_seed"] for row in selected),
+                "H-MAE (meV)": f"{sum(float(row['H_MAE_meV']) for row in selected) / len(selected):.3f}",
+                "Frobenius (%)": f"{100 * sum(float(row['rel_Frob']) for row in selected) / len(selected):.2f}",
+            })
+    columns = tuple(table_rows[0])
+    figures.append({
+        "name": "method_amplitude_crosstest_table", "title": "6×6: tabla del cross-testing",
+        "caption": "Las 144 combinaciones método/amplitud; las métricas son medias descriptivas de las dos semillas.",
+        "kind": "plotly", "data": [{"type": "table",
+            "header": {"values": list(columns), "fill": {"color": "#dbeafe"}, "align": "left"},
+            "cells": {"values": [[row[column] for row in table_rows] for column in columns], "align": "left"}}],
+        "layout": {"title": "Matriz completa", "height": 800},
+    })
+    return figures
 
 
 def _dataset_design_plotly_figures() -> list[dict[str, Any]]:
@@ -5713,25 +6122,41 @@ def _dataset_design_plotly_figures() -> list[dict[str, Any]]:
     if paired:
         figures.append(paired)
     figures += _dd_generalization_figures() + _dd_seed_figures()
-    specs = (
-        ("w90_budget_physics/summary.csv", "w90_training_budget", "w90: presupuesto de entrenamiento",
-         "Compara 2000 y 4000 épocas. Menor es mejor; una mejora repetida entre semillas indica que el horizonte corto no había convergido.", "budget"),
-        ("w90_coverage_physics/summary.csv", "w90_dataset_comparison", "w90: diseño del dataset",
-         "Compara datasets sobre el test final con el mismo presupuesto. Menor es mejor y las barras son la desviación entre semillas.", "comparison"),
-        ("w90_coverage_curve/summary.csv", "w90_learning_curve", "w90: curva coste–precisión",
-         "Muestra el error frente a N. El codo indica el posible ahorro de etiquetas sin una pérdida grande de precisión.", "curve"),
-        ("coverage_6x6_physics/summary.csv", "6x6_dataset_comparison", "6×6: diseño del dataset",
-         "Compara cobertura 1D/3D y amplitud a presupuesto común. Menor es mejor; las barras muestran variabilidad entre semillas.", "comparison"),
-        ("coverage_6x6_curve/summary.csv", "6x6_learning_curve", "6×6: curva coste–precisión",
-         "Muestra la frontera entre número de etiquetas y error para la receta 6×6 seleccionada.", "curve"),
+    w90_budget = _dd_training_budget_figure(
+        DATASET_DESIGN_CURVES_ROOT / "w90_coverage_curve/summary.csv",
+        "w90_training_budget", "w90: presupuesto de entrenamiento",
+        "random 3D R=0.12 Å · elementwise_mse · 8000 updates", "Test64 común",
     )
-    for relative, name, title, caption, mode in specs:
-        figure = _dd_metric_panels(DATASET_DESIGN_CURVES_ROOT / relative, name, title, caption, mode)
+    if w90_budget:
+        figures.append(w90_budget)
+    specs = (
+        ("w90_coverage_physics/summary.csv", "w90_dataset_comparison", "w90: diseño del dataset",
+         "Todos los métodos N=64 de la campaña principal. Un hueco en bandas o DOS significa que ese observable no se evaluó para ese checkpoint.", "comparison", "w90"),
+        ("w90_coverage_curve/summary.csv", "w90_learning_curve", "w90: curva coste–precisión",
+         "Todos los métodos del test final frente a N. LHS y MD sólo tienen N=64; los huecos de bandas/DOS son observables no evaluados.", "curve", "w90"),
+        ("coverage_6x6_physics/summary.csv", "6x6_dataset_comparison", "6×6: diseño del dataset",
+         "Todos los métodos N=64 evaluados en el test final. Un hueco en bandas o DOS significa que ese observable no se calculó.", "comparison", "6x6"),
+        ("coverage_6x6_curve/summary.csv", "6x6_learning_curve", "6×6: curva coste–precisión",
+         "Todos los métodos del test final frente a N. LHS sólo tiene N=64; los huecos de bandas/DOS son observables no evaluados.", "curve", "6x6"),
+    )
+    for relative, name, title, caption, mode, system in specs:
+        figure = _dd_metric_panels(DATASET_DESIGN_CURVES_ROOT / relative, name, title, caption, mode, system)
         if figure:
             figures.append(figure)
-    figures += _dd_label_budget_figures() + _dd_md_baseline_figures()
+    figures += _dd_label_budget_figures() + _dd_md_baseline_figures() + _dd_method_amplitude_crosstest_figures()
     for figure in figures:
         figure["layout"]["uirevision"] = figure["name"]
+        if figure["name"].startswith("campaign_") or figure["name"] in {
+            "w90_dataset_comparison", "w90_learning_curve",
+            "6x6_dataset_comparison", "6x6_learning_curve",
+        }:
+            figure["layout"].setdefault("annotations", []).append({
+                "text": "<b>OBSOLETA</b>", "xref": "paper", "yref": "paper",
+                "x": .01, "y": .99, "xanchor": "left", "yanchor": "top",
+                "showarrow": False, "font": {"size": 26, "color": "#000000"},
+                "bgcolor": "#fecaca", "bordercolor": "#000000", "borderwidth": 2,
+                "borderpad": 7,
+            })
     return figures
 
 
@@ -5768,6 +6193,8 @@ def dataset_design_followup_payload() -> dict[str, Any]:
         report += "\n\n---\n\n" + DATASET_DESIGN_LABEL_BUDGET_REPORT.read_text(encoding="utf-8")
     if DATASET_DESIGN_MD_BASELINE_REPORT.exists():
         report += "\n\n---\n\n" + DATASET_DESIGN_MD_BASELINE_REPORT.read_text(encoding="utf-8")
+    if DATASET_DESIGN_METHOD_CROSSTEST_REPORT.exists():
+        report += "\n\n---\n\n" + DATASET_DESIGN_METHOD_CROSSTEST_REPORT.read_text(encoding="utf-8")
     six_results = _dataset_design_6x6_results()
     progress = {
         "6×6 · comparación de datasets": (sum(row.get("stage") == "coverage_6x6" for row in six_results), 15),
@@ -5787,6 +6214,13 @@ def dataset_design_followup_payload() -> dict[str, Any]:
     status.append({"study": "6×6 · baseline MD ab initio",
                    "state": "completo" if (md_root / "final_summary.json").exists() else
                             ("en curso" if (md_root / "run.log").exists() else "pendiente")})
+    cross_root = DATASET_DESIGN_METHOD_CROSSTEST_ROOT
+    cross_rows = _dd_csv(cross_root / "cross_matrix.csv")
+    cross_models = _dd_csv(cross_root / "model_results.csv")
+    status.append({"study": "6×6 · cross-testing método/amplitud",
+                   "state": "completo" if len(cross_rows) == 288 else
+                            (f"en curso ({len(cross_models)}/24 modelos, {len(cross_rows)}/288 celdas)"
+                             if (cross_root / "run.log").exists() else "pendiente")})
     md_models = _dd_csv(md_root / "model_results.csv")
     md_cartesian = _dd_csv(md_root / "cartesian_results.csv")
     md_costs = _dd_csv(md_root / "cost_frontier.csv") + _dd_csv(md_root / "trajectory_diagnostics.csv")
@@ -5799,7 +6233,7 @@ def dataset_design_followup_payload() -> dict[str, Any]:
         if minimum.get("reference"):
             md_minimum.append({"kind": "reference_md", **minimum["reference"]})
         confirmation = minimum.get("seed1_confirmation")
-        if confirmation:
+        if isinstance(confirmation, dict):
             md_minimum.append({"kind": "seed1_confirmation", "pass": confirmation.get("pass"),
                                "H_guard": confirmation.get("H_guard"),
                                "band_guard": confirmation.get("band_guard"),
