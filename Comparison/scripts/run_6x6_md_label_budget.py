@@ -301,25 +301,28 @@ def _set_paused(item: dict[str, Any], paused: bool, reason: str, temperature: fl
         job=item["name"], reason=reason, package_c=temperature)
 
 
-def reconcile_temperature() -> float | None:
+def reconcile_temperature(*, pause_c: float = 72, limit_c: float = 75,
+                          resume_c: float = 63) -> float | None:
     global _COOL_SINCE, _LAST_RESUME, _INCIDENT_ACTIVE
+    if not resume_c < pause_c < limit_c:
+        raise ValueError("thermal thresholds must satisfy resume_c < pause_c < limit_c")
     temperature = package_temperature()
     if temperature is None:
         return None
     now = time.monotonic()
     with _ACTIVE_LOCK:
         active = list(_ACTIVE.values())
-    if temperature >= 75:
+    if temperature >= limit_c:
         if not _INCIDENT_ACTIVE:
-            log("thermal incident", package_c=temperature)
+            log("thermal incident", package_c=temperature, limit_c=limit_c)
         _INCIDENT_ACTIVE, _COOL_SINCE = True, None
         for item in active:
-            _set_paused(item, True, "Package id 0 >= 75 C", temperature)
-    elif temperature >= 72:
+            _set_paused(item, True, f"Package id 0 >= {limit_c:g} C", temperature)
+    elif temperature >= pause_c:
         _COOL_SINCE = None
         for item in active:
-            _set_paused(item, True, "Package id 0 >= 72 C", temperature)
-    elif temperature < 63 and any(item["paused"] for item in active):
+            _set_paused(item, True, f"Package id 0 >= {pause_c:g} C", temperature)
+    elif temperature < resume_c and any(item["paused"] for item in active):
         _COOL_SINCE = _COOL_SINCE or now
         if now - _COOL_SINCE >= 120 and now - _LAST_RESUME >= 10:
             item = next(item for item in active if item["paused"])
@@ -327,7 +330,7 @@ def reconcile_temperature() -> float | None:
             _LAST_RESUME = now
             if not any(candidate["paused"] for candidate in active):
                 _INCIDENT_ACTIVE, _COOL_SINCE = False, None
-    elif temperature >= 63:
+    elif temperature >= resume_c:
         _COOL_SINCE = None
     return temperature
 
@@ -1688,6 +1691,8 @@ La frontera de coste usa CPU·h SIESTA de construcción (train+validación) y se
 ## Interpretación
 
 Los intervalos asociados a Ntest son **intervalos empíricos de submuestreo**, no intervalos de confianza de generalización. Los 15 modelos MD usan exactamente batch 16, `elementwise_mse`, 8000 actualizaciones, 2000 validaciones, scheduler cosine y mejor checkpoint por `val_loss`, como el producto cartesiano sintético.
+
+La clasificación frente a N64/V48 es un **criterio operativo de equivalencia**, no un veredicto de validez. Un resultado fuera de los márgenes H≤1.05×, bandas≤1.10× o DOS≤1.10× puede seguir siendo científicamente útil; simplemente no se usa como sustituto equivalente de la referencia al buscar el presupuesto mínimo.
 
 ## Artefactos
 

@@ -5,7 +5,7 @@ Generado el 2026-09-22 17:41 CEST. Estudio exploratorio; no se generaron etiquet
 ## Resultado ejecutivo
 
 - Combinación mínima según las reglas congeladas: **Ntrain=4, Nval=8, Ntest=16 (Ntotal=28)**.
-- Pasan **38/90** celdas del producto cartesiano.
+- Cumplen el criterio estricto de equivalencia **38/90** celdas del producto cartesiano.
 - Referencia N64/V48/Test48: H-MAE **1.433 meV**, bandas **31.56 meV**, DOS L1 **0.0691**.
 - Menor H-MAE observado: N32/V24, **1.378 meV**.
 - Ntrain=32 fue **incluido** por la regla previa basada en Test48.
@@ -16,7 +16,7 @@ Se cruzaron Ntrain=[4, 8, 16, 32, 64], Nval=[8, 24, 48] y Ntest=[4, 8, 16, 24, 3
 
 Cada modelo se evaluó una vez en Test48. Los tamaños de test se obtuvieron mediante 10.000 permutaciones emparejadas y anidadas, equilibradas por dimensionalidad. Los percentiles descritos son **intervalos empíricos de submuestreo**, no intervalos de confianza de generalización.
 
-Regla de paso: H≤1.05×referencia, bandas≤1.10×, DOS≤1.10×, q90(|Δ H|)≤10 % y ausencia de inversión sistemática (más del 50 %) entre modelos cuya diferencia completa supera el 5 %. Las diferencias menores no se usan para forzar un ranking.
+Criterio operativo de equivalencia: H≤1.05×referencia, bandas≤1.10×, DOS≤1.10×, q90(|Δ H|)≤10 % y ausencia de inversión sistemática (más del 50 %) entre modelos cuya diferencia completa supera el 5 %. Quedar fuera de estos márgenes no invalida un resultado ni significa que el modelo sea malo; solo impide considerarlo equivalente a N64/V48 para seleccionar el presupuesto mínimo. Las diferencias menores no se usan para forzar un ranking.
 
 ## Test48 por modelo
 

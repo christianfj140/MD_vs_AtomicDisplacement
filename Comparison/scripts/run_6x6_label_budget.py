@@ -410,7 +410,7 @@ Generado el {time.strftime('%Y-%m-%d %H:%M %Z')}. Estudio exploratorio; no se ge
 ## Resultado ejecutivo
 
 - Combinación mínima según las reglas congeladas: **{selected}**.
-- Pasan **{sum(row['pass'] for row in cartesian)}/{len(cartesian)}** celdas del producto cartesiano.
+- Cumplen el criterio estricto de equivalencia **{sum(row['pass'] for row in cartesian)}/{len(cartesian)}** celdas del producto cartesiano.
 - Referencia N64/V48/Test48: H-MAE **{reference['H_MAE_meV']:.3f} meV**, bandas **{reference['band_rmse_meV']:.2f} meV**, DOS L1 **{reference['dos_rel_L1']:.4f}**.
 - Menor H-MAE observado: N{best['N_train']}/V{best['N_val']}, **{best['H_MAE_meV']:.3f} meV**.
 - Ntrain=32 fue **{'incluido' if manifest['conditional_N32']['included'] else 'omitido'}** por la regla previa basada en Test48.
@@ -421,7 +421,7 @@ Se cruzaron Ntrain={manifest['train_sizes']}, Nval={manifest['validation_sizes']
 
 Cada modelo se evaluó una vez en Test48. Los tamaños de test se obtuvieron mediante 10.000 permutaciones emparejadas y anidadas, equilibradas por dimensionalidad. Los percentiles descritos son **intervalos empíricos de submuestreo**, no intervalos de confianza de generalización.
 
-Regla de paso: H≤1.05×referencia, bandas≤1.10×, DOS≤1.10×, q90(|Δ H|)≤10 % y ausencia de inversión sistemática (más del 50 %) entre modelos cuya diferencia completa supera el 5 %. Las diferencias menores no se usan para forzar un ranking.
+Criterio operativo de equivalencia: H≤1.05×referencia, bandas≤1.10×, DOS≤1.10×, q90(|Δ H|)≤10 % y ausencia de inversión sistemática (más del 50 %) entre modelos cuya diferencia completa supera el 5 %. Quedar fuera de estos márgenes no invalida un resultado ni significa que el modelo sea malo; solo impide considerarlo equivalente a N64/V48 para seleccionar el presupuesto mínimo. Las diferencias menores no se usan para forzar un ranking.
 
 ## Test48 por modelo
 

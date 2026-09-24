@@ -310,7 +310,39 @@ def record_for(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def frozen_manifest() -> dict[str, Any] | None:
+    path = ROOT / "manifest.json"
+    if not path.exists():
+        return None
+    manifest = c.read_json(path)
+    if not manifest.get("datasets_frozen"):
+        return None
+    expected = {domain(method, amplitude) for method in METHODS for amplitude in AMPLITUDES}
+    train, validation, test = manifest.get("train", {}), manifest.get("validation", []), manifest.get("test", {})
+    train_hashes = {row["hash"] for rows in train.values() for row in rows}
+    val_hashes = {row["hash"] for row in validation}
+    test_hashes = {row["hash"] for rows in test.values() for row in rows}
+    valid = (
+        set(train) == expected and set(test) == expected and
+        all(len(train[key]) == N_TRAIN and len(test[key]) == N_TEST for key in expected) and
+        len(validation) == N_VAL and len(train_hashes) == len(expected) * N_TRAIN and
+        len(val_hashes) == N_VAL and len(test_hashes) == len(expected) * N_TEST and
+        not (train_hashes & val_hashes or train_hashes & test_hashes or val_hashes & test_hashes) and
+        manifest.get("hashes") == {
+            "train": c.ids_hash(sorted(train_hashes)), "validation": c.ids_hash(sorted(val_hashes)),
+            "test": c.ids_hash(sorted(test_hashes)),
+        }
+    )
+    if not valid:
+        raise RuntimeError("frozen cross-test manifest failed its integrity gate")
+    return manifest
+
+
 def prepare_datasets() -> dict[str, Any]:
+    frozen = frozen_manifest()
+    if frozen:
+        log("reusing frozen datasets", status=frozen["status"])
+        return frozen
     self_test()
     plan = make_plan()
     preliminary = {
@@ -359,7 +391,9 @@ def prepare_datasets() -> dict[str, Any]:
     all_train_hashes = {row["hash"] for rows in train.values() for row in rows}
     all_test_hashes = {row["hash"] for rows in test.values() for row in rows}
     val_hashes = {row["hash"] for row in validation}
-    if len(all_test_hashes) != 12 * N_TEST or all_train_hashes & val_hashes or all_train_hashes & all_test_hashes or val_hashes & all_test_hashes:
+    if (len(all_train_hashes) != 12 * N_TRAIN or len(val_hashes) != N_VAL or
+            len(all_test_hashes) != 12 * N_TEST or
+            all_train_hashes & val_hashes or all_train_hashes & all_test_hashes or val_hashes & all_test_hashes):
         raise RuntimeError("dataset uniqueness/disjointness gate failed")
     physics_hash = fdf_physics_hash(REFERENCE_FDF)
     for row in [item for rows in train.values() for item in rows] + validation + [item for rows in test.values() for item in rows]:
@@ -377,7 +411,33 @@ def prepare_datasets() -> dict[str, Any]:
     return manifest
 
 
-def existing_model(method: str, amplitude: float, seed: int) -> dict[str, Any] | None:
+def training_run_matches(run_dir: Path, seed: int, train_rows: list[dict[str, Any]],
+                         val_rows: list[dict[str, Any]]) -> bool:
+    try:
+        config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
+        model = config["model"]
+        protocol = (
+            int(config["seed_everything"]) == seed and model["loss"] == "graph2mat.metrics.elementwise_mse" and
+            all(model[key] == value for key, value in c.TRAIN_KW["model_overrides"].items() if key != "loss") and
+            int(config["data"]["batch_size"]) == 16 and config["trainer"]["precision"] == c.TRAIN_KW["precision"] and
+            int(config["trainer"]["max_epochs"]) == 2000 and
+            int(config["trainer"]["check_val_every_n_epoch"]) == 1 and
+            config["lr_scheduler"]["class_path"].endswith("CosineAnnealingLR") and
+            int(config["lr_scheduler"]["init_args"]["T_max"]) == 2000 and
+            len(config["trainer"].get("callbacks", [])) == 1 and
+            config["trainer"]["callbacks"][0]["init_args"]["monitor"] == "val_loss"
+        )
+        linked_train = {path.name for path in (run_dir / "train_samples").iterdir()}
+        linked_val = {path.name for path in (run_dir / "validation_samples").iterdir()}
+        return protocol and linked_train == {row["sample_id"] for row in train_rows} and linked_val == {
+            row["sample_id"] for row in val_rows
+        }
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def existing_model(method: str, amplitude: float, seed: int,
+                   manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
     if method != "sobol_sparse" or amplitude not in (0.08, 0.12):
         return None
     recipe = (f"sobol_sparse__3D__R0.08__d64" if amplitude == 0.08 else
@@ -391,6 +451,10 @@ def existing_model(method: str, amplitude: float, seed: int) -> dict[str, Any] |
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     valid = (
         checkpoint.exists() and sha256(checkpoint) == result["checkpoint_sha256"] and
+        result.get("system") == "6x6" and result.get("family") == method and result.get("dim") == "3D" and
+        int(result.get("k", 0)) == 72 and int(result.get("N", 0)) == N_TRAIN and
+        float(result.get("R_train", -1)) == amplitude and int(result.get("training_seed", -1)) == seed and
+        c.ids_hash(sorted(item.name for item in (path.parent / "train_samples").iterdir())) == result["train_ids_hash"] and
         config["model"]["loss"] == "graph2mat.metrics.elementwise_mse" and
         int(config["data"]["batch_size"]) == 16 and int(config["trainer"]["max_epochs"]) == 2000 and
         int(config["trainer"]["check_val_every_n_epoch"]) == 1 and
@@ -399,6 +463,9 @@ def existing_model(method: str, amplitude: float, seed: int) -> dict[str, Any] |
         len(config["trainer"].get("callbacks", [])) == 1 and
         config["trainer"]["callbacks"][0]["init_args"]["monitor"] == "val_loss"
     )
+    if manifest is not None:
+        valid = valid and training_run_matches(path.parent, seed, manifest["train"][domain(method, amplitude)],
+                                               manifest["validation"])
     if not valid:
         raise RuntimeError(f"reusable checkpoint failed current-protocol audit: {path}")
     return {
@@ -441,6 +508,7 @@ def train_process(config: Path, run_dir: Path, name: str) -> tuple[Path, float, 
         try:
             while process.poll() is None:
                 peak = max(peak, c.gpu_mib(process.pid))
+                thermal.reconcile_temperature()
                 time.sleep(10)
         finally:
             with thermal._ACTIVE_LOCK:
@@ -454,7 +522,8 @@ def train_process(config: Path, run_dir: Path, name: str) -> tuple[Path, float, 
 
 
 def train_one(method: str, amplitude: float, seed: int, manifest: dict[str, Any]) -> dict[str, Any]:
-    reused = existing_model(method, amplitude, seed)
+    train_rows, val_rows = manifest["train"][domain(method, amplitude)], manifest["validation"]
+    reused = existing_model(method, amplitude, seed, manifest)
     if reused:
         return reused
     model_id = f"cross6x6__{domain(method, amplitude)}__seed{seed}"
@@ -462,14 +531,20 @@ def train_one(method: str, amplitude: float, seed: int, manifest: dict[str, Any]
     if result_path.exists():
         saved = c.read_json(result_path)
         checkpoint = Path(saved["checkpoint"])
-        if checkpoint.exists() and sha256(checkpoint) == saved["checkpoint_sha256"]:
+        provenance_ok = (
+            saved.get("train_ids_sha256") == c.ids_hash([row["sample_id"] for row in train_rows]) and
+            saved.get("validation_ids_sha256") == c.ids_hash([row["sample_id"] for row in val_rows]) and
+            training_run_matches(run_dir, seed, train_rows, val_rows)
+        )
+        if checkpoint.exists() and sha256(checkpoint) == saved["checkpoint_sha256"] and provenance_ok:
             return saved
-    train_rows, val_rows = manifest["train"][domain(method, amplitude)], manifest["validation"]
+        raise RuntimeError(f"completed training failed provenance audit: {result_path}")
     if done_path.exists():
         done = c.read_json(done_path)
         checkpoint = Path(done["checkpoint"])
         seconds, peak = float(done["seconds"]), int(done["peak_gpu_mib"])
-        if not checkpoint.exists() or sha256(checkpoint) != done["checkpoint_sha256"]:
+        if (not checkpoint.exists() or sha256(checkpoint) != done["checkpoint_sha256"] or
+                not training_run_matches(run_dir, seed, train_rows, val_rows)):
             raise RuntimeError(f"invalid completion marker: {done_path}")
     else:
         if run_dir.exists():
@@ -510,8 +585,8 @@ def gpu_free_mib() -> int:
 def train_models(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     thermal.log = log
     jobs = [(method, amplitude, seed) for method in METHODS for amplitude in AMPLITUDES for seed in TRAIN_SEEDS
-            if existing_model(method, amplitude, seed) is None]
-    completed = [existing_model(method, amplitude, seed) for method in METHODS for amplitude in AMPLITUDES
+            if existing_model(method, amplitude, seed, manifest) is None]
+    completed = [existing_model(method, amplitude, seed, manifest) for method in METHODS for amplitude in AMPLITUDES
                  for seed in TRAIN_SEEDS]
     output = [row for row in completed if row]
     pending, futures = list(jobs), {}
@@ -576,7 +651,8 @@ def evaluate_models(manifest: dict[str, Any], models: list[dict[str, Any]]) -> l
     for model in models:
         previous = [row for row in stored if row["model_id"] == model["model_id"]]
         found = {(row["test_method"], f"{float(row['test_R']):.2f}", row["sample_id"]) for row in previous}
-        if found == expected_keys:
+        checkpoint_matches = {row.get("checkpoint_sha256") for row in previous} == {model["checkpoint_sha256"]}
+        if found == expected_keys and checkpoint_matches:
             continue
         stored = [row for row in stored if row["model_id"] != model["model_id"]]
         test_rows = [row for _method, _amplitude, row in tests]
@@ -587,6 +663,7 @@ def evaluate_models(manifest: dict[str, Any], models: list[dict[str, Any]]) -> l
             stored.append({
                 "model_id": model["model_id"], "train_method": model["train_method"],
                 "train_R": model["train_R"], "training_seed": model["training_seed"],
+                "checkpoint_sha256": model["checkpoint_sha256"],
                 "test_method": test_method, "test_R": test_r, "sample_id": sample["sample_id"],
                 **metrics[sample["sample_id"]],
             })
@@ -605,6 +682,7 @@ def evaluate_models(manifest: dict[str, Any], models: list[dict[str, Any]]) -> l
 
 
 def analyze(matrix: list[dict[str, Any]]) -> None:
+    manifest = c.read_json(ROOT / "manifest.json")
     averaged: dict[tuple[str, float, str, float], dict[str, float]] = {}
     for train_method in METHODS:
         for train_r in AMPLITUDES:
@@ -662,6 +740,9 @@ def analyze(matrix: list[dict[str, Any]]) -> None:
         "Doce dominios (cuatro métodos × tres amplitudes), Train64, Validation48 común, Test32 por dominio y dos semillas. "
         "Todos los modelos usan `elementwise_mse`, batch 16, 8000 actualizaciones, 2000 evaluaciones de validación, "
         "scheduler coseno y el mejor checkpoint por `val_loss`. Los intervalos no se interpretan inferencialmente con n=2.", "",
+        "**Nota de interpretación:** `R` es la escala o envolvente propia de cada generador, no un RMS de desplazamiento "
+        "igualado entre métodos. Por tanto, la comparación entre métodos incluye también diferencias en su distribución "
+        "radial efectiva; la comparación entre amplitudes dentro de un método sí está emparejada por patrón normalizado.", "",
         "## Resultados principales", "",
         f"- Mejor método medio: **{best_mean['method']}**, H-MAE media {best_mean['mean']:.3f} meV.",
         f"- Mejor peor caso: **{best_worst['method']} R={best_worst['R']:.2f} Å**, peor H-MAE {best_worst['worst']:.3f} meV.",
@@ -687,9 +768,14 @@ def analyze(matrix: list[dict[str, Any]]) -> None:
                for row in largest_asymmetries]
     report += ["", "Los CSV conservan ambas semillas y las 32 estructuras de cada test. Menor H-MAE y menor Frobenius relativo son mejores."]
     (REPO_ROOT / "docs/dataset_design_method_amplitude_crosstest_6x6.md").write_text("\n".join(report) + "\n", encoding="utf-8")
-    manifest = c.read_json(ROOT / "manifest.json")
     manifest["status"] = "complete"
-    manifest["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    manifest.setdefault("campaign_completed_at", manifest.get("completed_at"))
+    manifest["analysis_regenerated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    manifest["provenance"] = {
+        "analysis_script_sha256": sha256(Path(__file__)),
+        "campaign_runtime_script_sha256": "not_recorded",
+        "note": "Analysis regenerated from frozen cross_matrix.csv; no SIESTA, training, or prediction was rerun.",
+    }
     manifest["summary"] = {"best_mean": best_mean, "best_worst_case": best_worst,
                            "mean_diagonal_H_MAE_meV": float(np.mean(diagonal)),
                            "mean_off_diagonal_H_MAE_meV": float(np.mean(off_diagonal)),

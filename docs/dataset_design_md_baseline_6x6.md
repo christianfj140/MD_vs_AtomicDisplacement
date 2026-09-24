@@ -60,6 +60,8 @@ La frontera de coste usa CPU·h SIESTA de construcción (train+validación) y se
 
 Los intervalos asociados a Ntest son **intervalos empíricos de submuestreo**, no intervalos de confianza de generalización. Los 15 modelos MD usan exactamente batch 16, `elementwise_mse`, 8000 actualizaciones, 2000 validaciones, scheduler cosine y mejor checkpoint por `val_loss`, como el producto cartesiano sintético.
 
+La clasificación frente a N64/V48 es un **criterio operativo de equivalencia**, no un veredicto de validez. Un resultado fuera de los márgenes H≤1.05×, bandas≤1.10× o DOS≤1.10× puede seguir siendo científicamente útil; simplemente no se usa como sustituto equivalente de la referencia al buscar el presupuesto mínimo.
+
 ## Artefactos
 
 Todos los artefactos están en `Comparison/results/dataset_design_curves_v1/md_label_budget_6x6/`; la UI Dataset Design consume directamente esos CSV/JSON.

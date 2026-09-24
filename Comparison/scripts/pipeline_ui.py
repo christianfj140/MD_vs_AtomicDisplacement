@@ -4654,6 +4654,8 @@ DATASET_DESIGN_MD_BASELINE_ROOT = DATASET_DESIGN_CURVES_ROOT / "md_label_budget_
 DATASET_DESIGN_MD_BASELINE_REPORT = REPO_ROOT / "docs" / "dataset_design_md_baseline_6x6.md"
 DATASET_DESIGN_METHOD_CROSSTEST_ROOT = DATASET_DESIGN_CURVES_ROOT / "method_amplitude_crosstest_6x6"
 DATASET_DESIGN_METHOD_CROSSTEST_REPORT = REPO_ROOT / "docs" / "dataset_design_method_amplitude_crosstest_6x6.md"
+DATASET_DESIGN_ACTIVE_K_ROOT = DATASET_DESIGN_CURVES_ROOT / "active_atom_sweep_6x6"
+DATASET_DESIGN_ACTIVE_K_REPORT = REPO_ROOT / "docs" / "dataset_design_active_atom_sweep_6x6.md"
 DATASET_DESIGN_FOLLOWUP_FIGURES = {
     "campaign_learning_curves": (
         DATASET_DESIGN_CURVES_ROOT / "figures/fig1_learning_curves.png",
@@ -5233,6 +5235,23 @@ def _dd_float(row: dict[str, str], key: str) -> float | None:
         return value if math.isfinite(value) else None
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _dd_equivalence(row: dict[str, Any]) -> tuple[str, str]:
+    guards = (
+        ("H_guard", "H-MAE supera 1.05× la referencia"),
+        ("band_guard", "Band RMSE supera 1.10× la referencia"),
+        ("DOS_guard", "DOS L1 supera 1.10× la referencia"),
+        ("test_reliability", "q90(|ΔH|) supera 10 %"),
+        ("ranking_guard", "ordenación no estable"),
+    )
+    failed = [(key, label) for key, label in guards if str(row.get(key, "")).lower() != "true"]
+    if not failed:
+        return "Equivalente a N64/V48", "Cumple todos los umbrales operativos"
+    detail = "; ".join(label for _, label in failed)
+    if any(key in {"test_reliability", "ranking_guard"} for key, _ in failed):
+        return "Estimación no robusta", detail
+    return "Fuera del umbral estricto", detail
 
 
 DD_PLOT_COLORS = {
@@ -5873,25 +5892,31 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
                 "hovertemplate": "MD · modelo %{customdata}<br>Ntrain=%{x}<br>Ntest=%{y}<br>P=%{z:.1f}%<extra></extra>"})
         reliability["caption"] += " La segunda fila añade el producto cartesiano MD, estratificado por temperatura."
 
-    pass_rows = [row for row in cells if row["pass"].lower() == "true"]
-    fail_rows = [row for row in cells if row["pass"].lower() != "true"]
     frontier_data = []
-    for name, rows, color in (("pasa", pass_rows, "#16a34a"), ("no pasa", fail_rows, "#dc2626")):
-        frontier_data.append({"type": "scatter", "mode": "markers", "name": name,
-            "x": [int(row["N_total"]) for row in rows],
-            "y": [float(row["H_MAE_conservative_meV"]) for row in rows],
-            "marker": {"size": 9, "color": color, "opacity": .75},
-            "customdata": [[row["N_train"], row["N_val"], row["N_test"], row["failure_reasons"]] for row in rows],
-            "hovertemplate": "Ntotal=%{x}<br>H conservador=%{y:.3f} meV<br>Ntrain/Nval/Ntest=%{customdata[0]}/%{customdata[1]}/%{customdata[2]}<br>%{customdata[3]}<extra>%{fullData.name}</extra>"})
-    for name, passed, color in (("MD · pasa", True, "#0f766e"), ("MD · no pasa", False, "#f97316")):
-        rows = [row for row in md_cells if (str(row.get("pass", "")).lower() == "true") == passed]
-        if rows:
-            frontier_data.append({"type": "scatter", "mode": "markers", "name": name,
-                "x": [int(row["N_total"]) for row in rows],
-                "y": [float(row["H_MAE_meV"]) * (1 + float(row["H_q90_abs_delta"])) for row in rows],
-                "marker": {"size": 9, "color": color, "opacity": .75, "symbol": "diamond"},
-                "customdata": [[row["N_train"], row["N_val"], row["N_test"]] for row in rows],
-                "hovertemplate": "MD · Ntotal=%{x}<br>H conservador=%{y:.3f} meV<br>Ntrain/Nval/Ntest=%{customdata[0]}/%{customdata[1]}/%{customdata[2]}<extra>%{fullData.name}</extra>"})
+    categories = (
+        ("Equivalente a N64/V48", "equivalente", "#16a34a"),
+        ("Fuera del umbral estricto", "fuera del umbral", "#f59e0b"),
+        ("Estimación no robusta", "Ntest/ordenación no robustos", "#64748b"),
+    )
+    for source, source_rows, symbol in (("Diseñado", cells, "circle"), ("MD", md_cells, "cross")):
+        for status, label, color in categories:
+            rows = [row for row in source_rows if _dd_equivalence(row)[0] == status]
+            if not rows:
+                continue
+            conservative = [float(row.get("H_MAE_conservative_meV") or
+                                  float(row["H_MAE_meV"]) * (1 + float(row["H_q90_abs_delta"])))
+                            for row in rows]
+            explanations = [_dd_equivalence(row) for row in rows]
+            frontier_data.append({"type": "scatter", "mode": "markers", "name": f"{source} · {label}",
+                "x": [int(row["N_total"]) for row in rows], "y": conservative,
+                "marker": {"size": 9, "color": color, "opacity": .8, "symbol": symbol,
+                           **({"line": {"color": "#111827", "width": 1}} if source == "MD" else {})},
+                "customdata": [[row["N_train"], row["N_val"], row["N_test"], state, detail]
+                               for row, (state, detail) in zip(rows, explanations)],
+                "hovertemplate": (f"{source} · Ntotal=%{{x}}<br>H conservador=%{{y:.3f}} meV"
+                                  "<br>Ntrain/Nval/Ntest=%{customdata[0]}/%{customdata[1]}/%{customdata[2]}"
+                                  "<br>Clasificación=%{customdata[3]}<br>%{customdata[4]}"
+                                  "<extra>%{fullData.name}</extra>")})
     minimum_path = root / "minimum.json"
     if minimum_path.exists():
         minimum = json.loads(minimum_path.read_text(encoding="utf-8")).get("minimum")
@@ -5906,28 +5931,34 @@ def _dd_label_budget_figures() -> list[dict[str, Any]]:
             frontier_data.append({"type": "scatter", "mode": "markers", "name": "mínimo MD",
                 "x": [minimum["N_total"]],
                 "y": [float(minimum["H_MAE_meV"]) * (1 + float(minimum["H_q90_abs_delta"]))],
-                "marker": {"size": 16, "symbol": "star-diamond", "color": "#06b6d4",
+                "marker": {"size": 16, "symbol": "cross-open", "color": "#06b6d4",
                            "line": {"width": 1, "color": "#111827"}}})
     frontier = {
-        "name": "label_budget_frontier", "title": "6×6: frontera etiquetas–precisión",
-        "caption": "Ntotal suma train, validación y test. Diseñado y MD aparecen como series del mismo producto cartesiano; cada uno conserva su test congelado y su referencia N64/V48.",
+        "name": "label_budget_frontier", "title": "6×6: etiquetas, precisión y equivalencia",
+        "caption": ("Ntotal suma train, validación y test. Verde indica equivalencia con N64/V48; naranja, "
+                    "un resultado válido fuera de los márgenes estrictos; gris, que Ntest no estima Test48 de "
+                    "forma robusta. La clasificación también usa bandas y DOS, no solo el H-MAE del eje. "
+                    "Diseñado y MD conservan cada uno su test congelado y su propia referencia N64/V48."),
         "kind": "plotly", "data": frontier_data,
-        "layout": {"title": "Coste total de etiquetas frente a precisión conservadora", "height": 520,
+        "layout": {"title": "Coste total de etiquetas frente a H-MAE conservador", "height": 520,
                    "xaxis": {"title": "Ntotal = Ntrain + Nval + Ntest"},
                    "yaxis": {"title": "H-MAE conservador (meV)"}},
     }
 
     ordered = sorted(cells, key=lambda row: (int(row["N_total"]), int(row["N_train"]), int(row["N_val"]), int(row["N_test"])))
+    display_rows = [row | {"equivalence_status": _dd_equivalence(row)[0],
+                           "equivalence_detail": _dd_equivalence(row)[1]} for row in ordered]
     columns = (("Ntrain", "N_train"), ("Nval", "N_val"), ("Ntest", "N_test"), ("Ntotal", "N_total"),
                ("H (meV)", "H_MAE_meV"), ("q90 |ΔH|", "H_q90_abs_delta"), ("P(|Δ|≤10%)", "H_P_abs_delta_le_10pct"),
-               ("Pasa", "pass"), ("Razón", "failure_reasons"))
+               ("Clasificación", "equivalence_status"), ("Detalle", "equivalence_detail"))
     table = {
-        "name": "label_budget_decisions", "title": "6×6: decisión por combinación",
-        "caption": "Tabla completa del producto cartesiano. 'none' significa que cumple H, bandas, DOS y fiabilidad del test; las demás celdas indican la salvaguarda que falla.",
+        "name": "label_budget_decisions", "title": "6×6: equivalencia por combinación",
+        "caption": ("Clasificación operativa frente a N64/V48. Estar fuera del umbral no invalida el resultado: "
+                    "solo indica que no cumple simultáneamente los márgenes estrictos de H, bandas y DOS."),
         "kind": "plotly", "data": [{"type": "table",
             "header": {"values": [label for label, _ in columns], "fill": {"color": "#dbeafe"}, "align": "left"},
-            "cells": {"values": [[row[key] for row in ordered] for _, key in columns], "align": "left"}}],
-        "layout": {"title": "Pass/fail de las combinaciones", "height": min(1900, 180 + 21 * len(ordered))},
+            "cells": {"values": [[row[key] for row in display_rows] for _, key in columns], "align": "left"}}],
+        "layout": {"title": "Equivalencia de las combinaciones", "height": min(1900, 180 + 21 * len(ordered))},
     }
     return [budget, original_heatmap, heatmap, reliability, frontier, table]
 
@@ -6060,6 +6091,7 @@ def _dd_method_amplitude_crosstest_figures() -> list[dict[str, Any]]:
         grouped[(row["train_method"], float(row["train_R"]),
                  row["test_method"], float(row["test_R"]))].append(row)
     figures = []
+    h_color_limits: tuple[float, float] | None = None
     for metric, title, scale, template in (
         ("H_MAE_meV", "H-MAE (meV)", 1, ".3f"),
         ("rel_Frob", "Frobenius relativo (%)", 100, ".2f"),
@@ -6076,19 +6108,63 @@ def _dd_method_amplitude_crosstest_figures() -> list[dict[str, Any]]:
                                               for row, value in zip(selected, values)))
             z.append(z_row)
             details.append(detail_row)
+        color_values = [value for row in z for value in row if value is not None]
+        color_ticks = ([1.2, 1.5, 2, 3, 5, 10, 20, 35] if metric == "H_MAE_meV"
+                       else [.5, .75, 1, 2, 5, 10, 17])
+        color_factor = 1 if metric == "H_MAE_meV" else 2.5  # 2 % Frobenius ↔ 5 meV H-MAE
+        color_z = [[math.log10(value * color_factor) if value is not None else None for value in row] for row in z]
+        if metric == "H_MAE_meV":
+            h_color_limits = (math.log10(min(color_values)), math.log10(max(color_values)))
+        assert h_color_limits is not None
+        colorbar = {"title": f"{title}<br>escala log", "tickmode": "array",
+                    "tickvals": [math.log10(value * color_factor) for value in color_ticks],
+                    "ticktext": [f"{value:g}" for value in color_ticks]}
+        heatmap_data = [{"type": "heatmap", "x": labels, "y": labels, "z": color_z,
+            "text": z, "customdata": details, "colorscale": "Inferno",
+            "zmin": h_color_limits[0], "zmax": h_color_limits[1],
+            "texttemplate": f"%{{text:{template}}}", "colorbar": colorbar,
+            "hovertemplate": f"Train: %{{y}}<br>Test: %{{x}}<br>{title}: %{{text:{template}}}<br>%{{customdata}}<extra></extra>"}]
+        heatmap_layout = {"title": title, "height": 720,
+            "xaxis": {"title": "Dominio de test", "tickangle": -40, "automargin": True},
+            "yaxis": {"title": "Dominio de entrenamiento", "automargin": True},
+            "shapes": [{"type": "rect", "xref": "x", "yref": "y",
+                        "x0": index - .5, "x1": index + .5, "y0": index - .5, "y1": index + .5,
+                        "line": {"color": "#111827", "width": 1.5}, "fillcolor": "rgba(0,0,0,0)"}
+                       for index in range(len(labels))],
+            "margin": {"l": 155, "r": 80, "t": 70, "b": 165}}
+        surface_details = [[[labels[y_index], labels[x_index], details[y_index][x_index]]
+                            for x_index in range(len(labels))] for y_index in range(len(labels))]
+        surface_data = [
+            {"type": "surface", "x": list(range(len(labels))), "y": list(range(len(labels))),
+             "z": z, "surfacecolor": color_z, "customdata": surface_details, "colorscale": "Inferno",
+             "cmin": h_color_limits[0], "cmax": h_color_limits[1], "colorbar": colorbar,
+             "hovertemplate": (f"Train: %{{customdata[0]}}<br>Test: %{{customdata[1]}}"
+                               f"<br>{title}: %{{z:{template}}}<br>%{{customdata[2]}}<extra></extra>")},
+            {"type": "scatter3d", "mode": "lines+markers", "name": "Diagonal train=test",
+             "x": list(range(len(labels))), "y": list(range(len(labels))),
+             "z": [z[index][index] for index in range(len(labels))],
+             "line": {"color": "#111827", "width": 6},
+             "marker": {"color": "#111827", "size": 3}, "hoverinfo": "skip", "showlegend": False},
+        ]
+        surface_layout = {"title": f"{title} · superficie 3D", "height": 720,
+            "scene": {"xaxis": {"title": "Dominio de test", "tickmode": "array",
+                                  "tickvals": list(range(len(labels))), "ticktext": labels},
+                      "yaxis": {"title": "Dominio de entrenamiento", "tickmode": "array",
+                                  "tickvals": list(range(len(labels))), "ticktext": labels},
+                      "zaxis": {"title": title}, "camera": {"eye": {"x": 1.55, "y": 1.55, "z": 1.15}}},
+            "margin": {"l": 20, "r": 50, "t": 70, "b": 20}}
         figures.append({
             "name": f"method_amplitude_crosstest_{metric}",
             "title": f"6×6: transferencia método–amplitud · {title}",
             "caption": ("Filas: dominio de entrenamiento; columnas: Test32 independiente. Cada celda es la media "
-                        "de dos semillas y el cursor muestra ambas por separado. Menor es mejor; la diagonal mide "
-                        "interpolación y las celdas fuera de ella, transferencia."),
-            "kind": "plotly", "data": [{"type": "heatmap", "x": labels, "y": labels, "z": z,
-                "customdata": details, "colorscale": "Blues", "reversescale": True,
-                "texttemplate": f"%{{z:{template}}}", "colorbar": {"title": title},
-                "hovertemplate": f"Train: %{{y}}<br>Test: %{{x}}<br>{title}: %{{z:{template}}}<br>%{{customdata}}<extra></extra>"}],
-            "layout": {"title": title, "height": 720, "xaxis": {"title": "Dominio de test", "tickangle": -40,
-                         "automargin": True}, "yaxis": {"title": "Dominio de entrenamiento", "automargin": True},
-                       "margin": {"l": 155, "r": 80, "t": 70, "b": 165}},
+                        "de dos semillas y el cursor muestra ambas por separado. Inferno usa una escala logarítmica "
+                        "para distinguir mejor la mayoría por debajo de 5 meV o 2 %; texto, tooltip y marcas de la "
+                        "barra conservan los valores originales. En Frobenius, 2 % recibe el mismo color que 5 meV "
+                        "en H-MAE. Menor es mejor; la diagonal de interpolación está "
+                        "resaltada con borde negro. Las flechas cambian entre el heatmap y su superficie 3D."),
+            "kind": "plotly", "data": heatmap_data, "layout": heatmap_layout,
+            "views": [{"label": "Heatmap", "data": heatmap_data, "layout": heatmap_layout},
+                      {"label": "Superficie 3D", "data": surface_data, "layout": surface_layout}],
         })
     table_rows = []
     for train_method, train_r in domains:
@@ -6097,23 +6173,75 @@ def _dd_method_amplitude_crosstest_figures() -> list[dict[str, Any]]:
                               key=lambda row: int(row["training_seed"]))
             if not selected:
                 continue
+            seeds = {int(row["training_seed"]): row for row in selected}
             table_rows.append({
                 "Train": method_labels[train_method], "Rtrain": f"{train_r:.2f}",
                 "Test": method_labels[test_method], "Rtest": f"{test_r:.2f}",
-                "Semillas": ", ".join(row["training_seed"] for row in selected),
-                "H-MAE (meV)": f"{sum(float(row['H_MAE_meV']) for row in selected) / len(selected):.3f}",
-                "Frobenius (%)": f"{100 * sum(float(row['rel_Frob']) for row in selected) / len(selected):.2f}",
+                "H media": f"{sum(float(row['H_MAE_meV']) for row in selected) / len(selected):.3f}",
+                "H seed 0": f"{float(seeds[0]['H_MAE_meV']):.3f}",
+                "H seed 1": f"{float(seeds[1]['H_MAE_meV']):.3f}",
+                "Frob. media (%)": f"{100 * sum(float(row['rel_Frob']) for row in selected) / len(selected):.2f}",
+                "Frob. seed 0 (%)": f"{100 * float(seeds[0]['rel_Frob']):.2f}",
+                "Frob. seed 1 (%)": f"{100 * float(seeds[1]['rel_Frob']):.2f}",
             })
     columns = tuple(table_rows[0])
     figures.append({
         "name": "method_amplitude_crosstest_table", "title": "6×6: tabla del cross-testing",
-        "caption": "Las 144 combinaciones método/amplitud; las métricas son medias descriptivas de las dos semillas.",
+        "caption": "Las 144 combinaciones método/amplitud; se muestran la media descriptiva y las dos semillas por separado.",
         "kind": "plotly", "data": [{"type": "table",
             "header": {"values": list(columns), "fill": {"color": "#dbeafe"}, "align": "left"},
             "cells": {"values": [[row[column] for row in table_rows] for column in columns], "align": "left"}}],
         "layout": {"title": "Matriz completa", "height": 800},
     })
     return figures
+
+
+def _dd_active_atom_sweep_figures() -> list[dict[str, Any]]:
+    rows = _dd_csv(DATASET_DESIGN_ACTIVE_K_ROOT / "summary.csv")
+    if not rows:
+        return []
+    rows.sort(key=lambda row: int(row["k"]))
+    k = [int(row["k"]) for row in rows]
+    figure = {
+        "name": "active_atom_sweep_6x6", "title": "6×6: influencia del número de átomos desplazados",
+        "caption": ("Todos los modelos se evalúan sobre el mismo Test32 colectivo con k=72. Los puntos pequeños "
+                    "son las dos semillas y los grandes, su media ± desviación estándar descriptiva; menor es mejor."),
+        "kind": "plotly", "data": [
+            {"type": "scatter", "mode": "markers", "x": [value for value in k for _ in range(2)],
+             "y": [float(row[key]) for row in rows for key in ("H_MAE_seed0_meV", "H_MAE_seed1_meV")],
+             "name": "H-MAE · semillas", "marker": {"size": 7, "opacity": .65, "color": DD_H_COLOR},
+             "hovertemplate": "k=%{x}<br>H-MAE=%{y:.3f} meV<extra>semilla</extra>"},
+            {"type": "scatter", "mode": "lines+markers", "x": k,
+             "y": [float(row["H_MAE_meV"]) for row in rows], "name": "H-MAE · media",
+             "marker": {"size": 10, "color": DD_H_COLOR},
+             "error_y": {"type": "data", "array": [float(row["H_MAE_sd_meV"]) for row in rows], "visible": True}},
+            {"type": "scatter", "mode": "markers", "x": [value for value in k for _ in range(2)], "yaxis": "y2",
+             "y": [100 * float(row[key]) for row in rows for key in ("rel_Frob_seed0", "rel_Frob_seed1")],
+             "name": "Frobenius · semillas", "marker": {"size": 7, "opacity": .65, "color": DD_FROB_COLOR},
+             "hovertemplate": "k=%{x}<br>Frobenius=%{y:.3f}%<extra>semilla</extra>"},
+            {"type": "scatter", "mode": "lines+markers", "x": k, "yaxis": "y2",
+             "y": [100 * float(row["rel_Frob"]) for row in rows], "name": "Frobenius · media",
+             "marker": {"size": 10, "color": DD_FROB_COLOR},
+             "error_y": {"type": "data", "array": [100 * float(row["rel_Frob_sd"]) for row in rows], "visible": True}},
+        ],
+        "layout": {"title": "Precisión en Test32 k=72", "height": 500,
+                   "xaxis": {"title": "Átomos desplazados en Train64 (k)", "tickvals": k},
+                   "yaxis": _dd_yaxis("H-MAE (meV)", DD_H_COLOR, rangemode="tozero"),
+                   "yaxis2": _dd_yaxis("Frobenius relativo (%)", DD_FROB_COLOR,
+                                        overlaying="y", side="right", rangemode="tozero"),
+                   "legend": DD_LEGEND_BELOW, "margin": {"l": 80, "r": 90, "t": 70, "b": 120}},
+    }
+    columns = ("k", "k_over_72", "H_MAE_meV", "H_MAE_sd_meV", "rel_Frob", "rel_Frob_sd",
+               "H_ratio_vs_k72", "within_5pct_H_and_10pct_Frob")
+    table = {
+        "name": "active_atom_sweep_6x6_table", "title": "6×6: resultados por k",
+        "caption": "Resumen de las dos semillas; la última columna aplica los márgenes preregistrados frente a k=72.",
+        "kind": "plotly", "data": [{"type": "table",
+            "header": {"values": list(columns), "fill": {"color": "#dbeafe"}, "align": "left"},
+            "cells": {"values": [[row[column] for row in rows] for column in columns], "align": "left"}}],
+        "layout": {"title": "Barrido del número de átomos activos", "height": 500},
+    }
+    return [figure, table]
 
 
 def _dataset_design_plotly_figures() -> list[dict[str, Any]]:
@@ -6143,9 +6271,12 @@ def _dataset_design_plotly_figures() -> list[dict[str, Any]]:
         figure = _dd_metric_panels(DATASET_DESIGN_CURVES_ROOT / relative, name, title, caption, mode, system)
         if figure:
             figures.append(figure)
-    figures += _dd_label_budget_figures() + _dd_md_baseline_figures() + _dd_method_amplitude_crosstest_figures()
+    figures += (_dd_label_budget_figures() + _dd_md_baseline_figures()
+                + _dd_method_amplitude_crosstest_figures() + _dd_active_atom_sweep_figures())
     for figure in figures:
         figure["layout"]["uirevision"] = figure["name"]
+        for view_index, view in enumerate(figure.get("views", [])):
+            view["layout"]["uirevision"] = f"{figure['name']}__view{view_index}"
         if figure["name"].startswith("campaign_") or figure["name"] in {
             "w90_dataset_comparison", "w90_learning_curve",
             "6x6_dataset_comparison", "6x6_learning_curve",
@@ -6195,6 +6326,8 @@ def dataset_design_followup_payload() -> dict[str, Any]:
         report += "\n\n---\n\n" + DATASET_DESIGN_MD_BASELINE_REPORT.read_text(encoding="utf-8")
     if DATASET_DESIGN_METHOD_CROSSTEST_REPORT.exists():
         report += "\n\n---\n\n" + DATASET_DESIGN_METHOD_CROSSTEST_REPORT.read_text(encoding="utf-8")
+    if DATASET_DESIGN_ACTIVE_K_REPORT.exists():
+        report += "\n\n---\n\n" + DATASET_DESIGN_ACTIVE_K_REPORT.read_text(encoding="utf-8")
     six_results = _dataset_design_6x6_results()
     progress = {
         "6×6 · comparación de datasets": (sum(row.get("stage") == "coverage_6x6" for row in six_results), 15),
@@ -6221,6 +6354,13 @@ def dataset_design_followup_payload() -> dict[str, Any]:
                    "state": "completo" if len(cross_rows) == 288 else
                             (f"en curso ({len(cross_models)}/24 modelos, {len(cross_rows)}/288 celdas)"
                              if (cross_root / "run.log").exists() else "pendiente")})
+    k_root = DATASET_DESIGN_ACTIVE_K_ROOT
+    k_rows = _dd_csv(k_root / "summary.csv")
+    k_models = _dd_csv(k_root / "model_results.csv")
+    status.append({"study": "6×6 · influencia del número de átomos desplazados",
+                   "state": "completo" if len(k_rows) == 8 else
+                            (f"en curso ({len(k_models)}/16 modelos)" if (k_root / "run.log").exists()
+                             else "preparado")})
     md_models = _dd_csv(md_root / "model_results.csv")
     md_cartesian = _dd_csv(md_root / "cartesian_results.csv")
     md_costs = _dd_csv(md_root / "cost_frontier.csv") + _dd_csv(md_root / "trajectory_diagnostics.csv")
@@ -6249,10 +6389,11 @@ def dataset_design_followup_payload() -> dict[str, Any]:
         "curve_table": curves,
         "campaign_table": campaign,
         "md_model_table": md_models,
-        "md_cartesian_table": md_cartesian,
-        "md_passfail_table": [{key: row.get(key, "") for key in
-                                ("N_train", "N_val", "N_test", "N_total", "H_guard", "band_guard",
-                                 "DOS_guard", "test_reliability", "ranking_guard", "pass")}
+        "md_cartesian_table": [{key: value for key, value in row.items() if key != "pass"}
+                               for row in md_cartesian],
+        "md_passfail_table": [{"Ntrain": row.get("N_train", ""), "Nval": row.get("N_val", ""),
+                                "Ntest": row.get("N_test", ""), "Ntotal": row.get("N_total", ""),
+                                "Clasificación": _dd_equivalence(row)[0], "Detalle": _dd_equivalence(row)[1]}
                                for row in md_cartesian],
         "md_cost_table": md_costs,
         "md_minimum_table": md_minimum,

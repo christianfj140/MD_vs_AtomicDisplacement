@@ -9,6 +9,7 @@ assuming N==2, and reuse-existing must read the S4/S7 artifacts verbatim.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -158,6 +159,34 @@ def test_followup_real_figures_expose_all_methods_and_model_ids():
     assert figures["label_budget_h_mae_synthetic_test"]["data"][1]["customdata"][0][0].startswith("md__N4__V8")
     assert figures["label_budget_h_mae"]["data"][0]["customdata"][0][0].startswith("synthetic__N4__V8")
     assert figures["label_budget_test_reliability"]["data"][0]["customdata"][0][0].startswith("N4__V8")
+    frontier = figures["label_budget_frontier"]
+    assert "fuera de los márgenes estrictos" in frontier["caption"]
+    assert not any("no pasa" in trace["name"] for trace in frontier["data"])
+    assert {"Diseñado · equivalente", "Diseñado · fuera del umbral", "Diseñado · Ntest/ordenación no robustos"} <= {
+        trace["name"] for trace in frontier["data"]}
+    decisions = figures["label_budget_decisions"]
+    assert "Equivalencia" in decisions["layout"]["title"]
+    assert "Clasificación" in decisions["data"][0]["header"]["values"]
+    heatmaps = []
+    for name in ("method_amplitude_crosstest_H_MAE_meV", "method_amplitude_crosstest_rel_Frob"):
+        boxes = figures[name]["layout"]["shapes"]
+        assert len(boxes) == 12
+        assert all(box["x0"] == box["y0"] and box["x1"] == box["y1"] for box in boxes)
+        heatmap = figures[name]["data"][0]
+        heatmaps.append(heatmap)
+        assert heatmap["colorscale"] == "Inferno"
+        views = figures[name]["views"]
+        assert [view["label"] for view in views] == ["Heatmap", "Superficie 3D"]
+        assert views[1]["data"][0]["type"] == "surface"
+        assert views[1]["data"][0]["z"] == heatmap["text"]
+        assert views[1]["data"][0]["surfacecolor"] == heatmap["z"]
+        assert views[1]["data"][1]["type"] == "scatter3d"
+        assert views[1]["data"][1]["line"]["color"] == "#111827"
+    assert heatmaps[0]["z"][0][0] == pytest.approx(math.log10(heatmaps[0]["text"][0][0]))
+    assert heatmaps[1]["z"][0][0] == pytest.approx(math.log10(2.5 * heatmaps[1]["text"][0][0]))
+    assert (heatmaps[0]["zmin"], heatmaps[0]["zmax"]) == (heatmaps[1]["zmin"], heatmaps[1]["zmax"])
+    cross_table = figures["method_amplitude_crosstest_table"]["data"][0]
+    assert {"H seed 0", "H seed 1", "Frob. seed 0 (%)", "Frob. seed 1 (%)"} <= set(cross_table["header"]["values"])
     assert {trace["name"] for trace in figures["md6x6_paired_difference"]["data"]} == {
         "sobre MD-Test48", "sobre Test48 sintético"}
     for name in ("w90_training_budget", "6x6_training_budget"):
@@ -197,6 +226,8 @@ def test_followup_payload_exposes_available_tables_figures_and_report(tmp_path, 
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_LABEL_BUDGET_REPORT", budget_report)
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_MD_BASELINE_ROOT", tmp_path / "missing-md")
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_MD_BASELINE_REPORT", tmp_path / "missing-md-report.md")
+    monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_METHOD_CROSSTEST_REPORT", tmp_path / "missing-cross-report.md")
+    monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_ACTIVE_K_REPORT", tmp_path / "missing-k-report.md")
     monkeypatch.setattr(pipeline_ui, "DATASET_DESIGN_FOLLOWUP_FIGURES",
                         {"result": (figure, "Resultado", "Descripción")})
 

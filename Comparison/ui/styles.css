@@ -1446,6 +1446,53 @@ pre {
   min-height: 420px;
 }
 
+.dd-figure-carousel {
+  position: relative;
+}
+
+.dd-carousel-viewport {
+  overflow: hidden;
+}
+
+.dd-carousel-track {
+  display: flex;
+  transition: transform 280ms ease;
+}
+
+.dd-carousel-slide {
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+.dd-carousel-arrow {
+  position: absolute;
+  top: 50%;
+  z-index: 12;
+  width: 38px;
+  height: 52px;
+  transform: translateY(-50%);
+  border: 1px solid #111827;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  color: #111827;
+  box-shadow: 0 3px 12px rgb(15 23 42 / 20%);
+  cursor: pointer;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.dd-carousel-prev { left: 10px; }
+.dd-carousel-next { right: 10px; }
+.dd-carousel-arrow:disabled { opacity: .25; cursor: default; }
+
+.dd-carousel-status {
+  margin-top: -4px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .dataset-design-figures figcaption {
   margin-top: 6px;
   font-size: 12px;

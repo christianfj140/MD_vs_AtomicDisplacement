@@ -17171,7 +17171,7 @@ async function ddRenderFollowup(payload) {
   ddRenderTableRows(payload.campaign_table, "dd-followup-campaign-head", "dd-followup-campaign-body", "Campaña principal no disponible.");
   ddRenderTableRows(payload.md_model_table, "dd-md-model-head", "dd-md-model-body", "Modelos MD todavía no disponibles.");
   ddRenderTableRows(payload.md_cartesian_table, "dd-md-cartesian-head", "dd-md-cartesian-body", "Producto cartesiano MD todavía no disponible.");
-  ddRenderTableRows(payload.md_passfail_table, "dd-md-passfail-head", "dd-md-passfail-body", "Decisiones MD todavía no disponibles.");
+  ddRenderTableRows(payload.md_passfail_table, "dd-md-passfail-head", "dd-md-passfail-body", "Clasificación de equivalencia MD todavía no disponible.");
   ddRenderTableRows(payload.md_cost_table, "dd-md-cost-head", "dd-md-cost-body", "Costes MD todavía no disponibles.");
   ddRenderTableRows(payload.md_minimum_table, "dd-md-minimum-head", "dd-md-minimum-body", "Mínimo MD todavía no disponible.");
   ddRenderTableRows(payload.coverage_table, "dd-followup-coverage-head", "dd-followup-coverage-body", "Comparaciones todavía en cálculo.");
@@ -17181,19 +17181,55 @@ async function ddRenderFollowup(payload) {
   if (figures) {
     const rows = payload.figures || [];
     figures.classList.toggle("muted-text", rows.length === 0);
-    figures.innerHTML = rows.length ? rows.map((row) => `<figure>
-      ${ddFigureHelp(row.title, row.caption)}
-      <div id="dd-followup-interactive-${escapeHtml(row.name)}" class="dd-interactive-figure" role="img" aria-label="${escapeHtml(row.title)}"></div>
-      <figcaption><strong>${escapeHtml(row.title)}</strong><br />${escapeHtml(row.caption)}</figcaption>
-    </figure>`).join("") : "Todavía no hay figuras.";
+    figures.innerHTML = rows.length ? rows.map((row) => {
+      const views = row.views?.length ? row.views : [{ label: row.title, data: row.data, layout: row.layout }];
+      const plot = views.length === 1
+        ? `<div id="dd-followup-interactive-${escapeHtml(row.name)}" class="dd-interactive-figure" role="img" aria-label="${escapeHtml(row.title)}"></div>`
+        : `<div id="dd-carousel-${escapeHtml(row.name)}" class="dd-figure-carousel">
+            <button class="dd-carousel-arrow dd-carousel-prev" type="button" aria-label="Vista anterior" disabled>&lsaquo;</button>
+            <div class="dd-carousel-viewport"><div class="dd-carousel-track">
+              ${views.map((view, index) => `<div class="dd-carousel-slide">
+                <div id="dd-followup-interactive-${escapeHtml(row.name)}-${index}" class="dd-interactive-figure" role="img" aria-label="${escapeHtml(`${row.title}: ${view.label}`)}"></div>
+              </div>`).join("")}
+            </div></div>
+            <button class="dd-carousel-arrow dd-carousel-next" type="button" aria-label="Vista siguiente">&rsaquo;</button>
+            <div class="dd-carousel-status" aria-live="polite">${escapeHtml(views[0].label)} · 1/${views.length}</div>
+          </div>`;
+      return `<figure>${ddFigureHelp(row.title, row.caption)}${plot}
+        <figcaption><strong>${escapeHtml(row.title)}</strong><br />${escapeHtml(row.caption)}</figcaption></figure>`;
+    }).join("") : "Todavía no hay figuras.";
     for (const row of rows) {
-      const host = document.getElementById(`dd-followup-interactive-${row.name}`);
-      if (!host) continue;
-      await window.Plotly.react(host, row.data || [], {
-        margin: { l: 70, r: 30, t: 70, b: 80 },
-        paper_bgcolor: "transparent", plot_bgcolor: "transparent",
-        ...row.layout,
-      }, { responsive: true, displaylogo: false });
+      const views = row.views?.length ? row.views : [{ label: row.title, data: row.data, layout: row.layout }];
+      const hosts = [];
+      for (const [index, view] of views.entries()) {
+        const suffix = views.length === 1 ? "" : `-${index}`;
+        const host = document.getElementById(`dd-followup-interactive-${row.name}${suffix}`);
+        if (!host) continue;
+        hosts.push(host);
+        await window.Plotly.react(host, view.data || [], {
+          margin: { l: 70, r: 30, t: 70, b: 80 },
+          paper_bgcolor: "transparent", plot_bgcolor: "transparent",
+          ...view.layout,
+        }, { responsive: true, displaylogo: false });
+      }
+      if (views.length > 1) {
+        const carousel = document.getElementById(`dd-carousel-${row.name}`);
+        const track = carousel?.querySelector(".dd-carousel-track");
+        const previous = carousel?.querySelector(".dd-carousel-prev");
+        const next = carousel?.querySelector(".dd-carousel-next");
+        const status = carousel?.querySelector(".dd-carousel-status");
+        let active = 0;
+        const show = (index) => {
+          active = Math.max(0, Math.min(views.length - 1, index));
+          if (track) track.style.transform = `translateX(-${active * 100}%)`;
+          if (previous) previous.disabled = active === 0;
+          if (next) next.disabled = active === views.length - 1;
+          if (status) status.textContent = `${views[active].label} · ${active + 1}/${views.length}`;
+          window.setTimeout(() => window.Plotly.Plots.resize(hosts[active]), 320);
+        };
+        previous?.addEventListener("click", () => show(active - 1));
+        next?.addEventListener("click", () => show(active + 1));
+      }
     }
   }
   const report = document.getElementById("dd-followup-report");

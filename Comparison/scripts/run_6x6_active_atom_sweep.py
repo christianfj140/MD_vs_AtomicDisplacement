@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import shlex
+import subprocess
 import sys
 import time
 from typing import Any
@@ -24,6 +27,8 @@ if str(SCRIPT_DIR) not in sys.path:
 import dataset_design_curves_v1 as c  # noqa: E402
 import dataset_design_w90_001_s9_s3_design_generation as s3  # noqa: E402
 import run_6x6_method_amplitude_crosstest as cross  # noqa: E402
+import run_6x6_md_label_budget as thermal  # noqa: E402
+import run_hamiltonian_derivative_siesta_references as siesta_refs  # noqa: E402
 import w90_displacement_sampler_family as sampler  # noqa: E402
 
 
@@ -37,6 +42,11 @@ N_TRAIN, N_VAL, N_TEST = 64, 48, 32
 AMPLITUDE = 0.12
 SAMPLER_SEED = 0
 MAX_TRAININGS = 3
+SIESTA_WORKERS = 6
+THERMAL_PAUSE_C, THERMAL_LIMIT_C, THERMAL_RESUME_C = 78.0, 80.0, 70.0
+ENV = os.environ | {
+    "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1",
+}
 
 
 def log(message: str, **fields: Any) -> None:
@@ -46,6 +56,99 @@ def log(message: str, **fields: Any) -> None:
     print(line, flush=True)
     with (ROOT / "run.log").open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def reconcile_temperature() -> float | None:
+    return thermal.reconcile_temperature(
+        pause_c=THERMAL_PAUSE_C, limit_c=THERMAL_LIMIT_C, resume_c=THERMAL_RESUME_C,
+    )
+
+
+def wait_for_thermal_headroom() -> None:
+    while (temperature := reconcile_temperature()) is not None and temperature >= THERMAL_PAUSE_C:
+        time.sleep(10)
+
+
+def thermal_run_siesta(reference_dir: Path, *, command: str, use_shell: bool = False) -> dict[str, Any]:
+    wait_for_thermal_headroom()
+    run_fdf, run_out = reference_dir / "RUN.fdf", reference_dir / "RUN.out"
+    command_args: str | list[str] = command if use_shell else shlex.split(command)
+    with run_fdf.open("r", encoding="utf-8") as stdin, run_out.open("w", encoding="utf-8") as stdout:
+        process = subprocess.Popen(command_args, cwd=reference_dir, stdin=stdin, stdout=stdout,
+                                   stderr=subprocess.STDOUT, shell=use_shell, text=True,
+                                   env=ENV, start_new_session=True)
+        item = {"process": process, "name": reference_dir.name, "started": time.monotonic(), "paused": False}
+        with thermal._ACTIVE_LOCK:
+            thermal._ACTIVE[process.pid] = item
+        try:
+            while process.poll() is None:
+                reconcile_temperature()
+                time.sleep(10)
+        finally:
+            with thermal._ACTIVE_LOCK:
+                thermal._ACTIVE.pop(process.pid, None)
+    return {"command": command if use_shell else command_args, "shell": use_shell,
+            "returncode": process.returncode, "stdout_path": str(run_out)}
+
+
+def thermal_run_training(config_path: Path, run_dir: Path) -> tuple[Path, float, int]:
+    wait_for_thermal_headroom()
+    env = ENV | {
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(c.s4.TORCH_COMPAT_DIR), ENV.get("PYTHONPATH", "")]))
+    }
+    peak, start = 0, time.perf_counter()
+    with (run_dir / "train.log").open("w", encoding="utf-8") as handle:
+        process = subprocess.Popen([str(c.s4.GRAPH2MAT_BIN), "models", "mace", "main", "fit", "-c", config_path.name],
+                                   cwd=run_dir, stdout=handle, stderr=subprocess.STDOUT, env=env,
+                                   start_new_session=True)
+        item = {"process": process, "name": run_dir.name, "started": time.monotonic(), "paused": False}
+        with thermal._ACTIVE_LOCK:
+            thermal._ACTIVE[process.pid] = item
+        try:
+            while process.poll() is None:
+                peak = max(peak, c.gpu_mib(process.pid))
+                reconcile_temperature()
+                time.sleep(10)
+        finally:
+            with thermal._ACTIVE_LOCK:
+                thermal._ACTIVE.pop(process.pid, None)
+    seconds = time.perf_counter() - start
+    if process.returncode:
+        raise RuntimeError(f"Graph2Mat training failed (rc={process.returncode}); see {run_dir / 'train.log'}")
+    checkpoints = sorted(run_dir.rglob("best-*.ckpt"))
+    if len(checkpoints) != 1:
+        raise RuntimeError(f"expected exactly one best-val_loss checkpoint under {run_dir}, found {checkpoints}")
+    return checkpoints[0], seconds, peak
+
+
+def thermal_run_prediction(checkpoint: Path, manifest_path: Path, output_dir: Path,
+                           accelerator: str) -> Path:
+    wait_for_thermal_headroom()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(c.s4.PYTHON), str(c.s4.SCRIPT_DIR / "predict_model_on_dataset.py"),
+        "--checkpoint", str(checkpoint), "--train-method", "md",
+        "--test-set", "w90_s4_validation", "--test-manifest", str(manifest_path),
+        "--output-dir", str(output_dir), "--basis-files", c.s4.DEFAULT_BASIS_GLOB,
+        "--matrix-component-policy", "h_only", "--n-matrix-components", "1",
+        "--accelerator", accelerator, "--no-store-in-memory",
+    ]
+    with (output_dir / "predict.log").open("w", encoding="utf-8") as handle:
+        process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=handle, stderr=subprocess.STDOUT,
+                                   text=True, env=ENV, start_new_session=True)
+        item = {"process": process, "name": output_dir.name, "started": time.monotonic(), "paused": False}
+        with thermal._ACTIVE_LOCK:
+            thermal._ACTIVE[process.pid] = item
+        try:
+            while process.poll() is None:
+                reconcile_temperature()
+                time.sleep(10)
+        finally:
+            with thermal._ACTIVE_LOCK:
+                thermal._ACTIVE.pop(process.pid, None)
+    if process.returncode:
+        raise RuntimeError(f"predict_model_on_dataset.py failed (rc={process.returncode}); see {output_dir / 'predict.log'}")
+    return output_dir / "predicted_hamiltonians"
 
 
 def paired_configs() -> dict[int, list[sampler.Configuration]]:
@@ -139,6 +242,7 @@ def _manifest_is_frozen(manifest: dict[str, Any]) -> bool:
 
 
 def prepare_datasets() -> dict[str, Any]:
+    thermal.log = log
     path = ROOT / "manifest.json"
     if path.exists() and _manifest_is_frozen(manifest := c.read_json(path)):
         return manifest
@@ -154,10 +258,11 @@ def prepare_datasets() -> dict[str, Any]:
         "training": {"loss": "graph2mat.metrics.elementwise_mse", "batch_size": 16,
                      "optimizer_updates": 8000, "validation_evaluations": 2000,
                      "scheduler": "cosine", "checkpoint": "best val_loss"},
-        "audit": plan,
+        "audit": plan, "siesta_workers": SIESTA_WORKERS,
     }
     c.write_json(path, preliminary)
-    references = c.label_structures(entries, WORK, cross.CANONICAL, workers=2)
+    siesta_refs.run_siesta = thermal_run_siesta
+    references = c.label_structures(entries, WORK, cross.CANONICAL, workers=SIESTA_WORKERS)
     train: dict[str, list[dict[str, Any]]] = {}
     for k in K_VALUES[:-1]:
         train[str(k)] = [c.labelled_sample(
@@ -197,6 +302,8 @@ def matrix_metrics(sample: c.s4.Sample, predicted_root: Path) -> dict[str, float
 
 
 def evaluate_samples(checkpoint: Path, rows: list[dict[str, Any]], out_dir: Path) -> list[dict[str, Any]]:
+    thermal.log = log
+    c.s4.run_prediction = thermal_run_prediction
     samples = [c.sample_from_dict(row) for row in rows]
     predicted_root = c.predict(checkpoint, samples, out_dir, "gpu")
     output = [{"sample_id": sample.sample_id, **matrix_metrics(sample, predicted_root)} for sample in samples]
@@ -233,7 +340,7 @@ def train_one(k: int, seed: int, manifest: dict[str, Any]) -> dict[str, Any]:
         config = c.s4.build_graph2mat_config(run_dir, train, validation, run_name=model_id,
                                              accelerator="gpu", training_seed=seed, **c.TRAIN_KW)
         c.apply_config_patch(config, c.fixed_update_elemmse_patch("6x6", N_TRAIN))
-        checkpoint, seconds, peak = c.run_training(config, run_dir)
+        checkpoint, seconds, peak = thermal_run_training(config, run_dir)
         c.write_json(done_path, {"checkpoint": str(checkpoint), "checkpoint_sha256": c.sha256_file(checkpoint),
                                  "seconds": seconds, "peak_gpu_mib": peak})
     validation_metrics = evaluate_samples(checkpoint, manifest["validation"], run_dir / "validation_eval")
@@ -278,7 +385,8 @@ def _reused_k72_metrics(seed: int, expected_ids: set[str]) -> list[dict[str, Any
 
 
 def evaluate_models(manifest: dict[str, Any], models: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    path, stored = ROOT / "per_structure_results.csv", c.read_csv(ROOT / "per_structure_results.csv")
+    path = ROOT / "per_structure_results.csv"
+    stored = c.read_csv(path) if path.exists() else []
     expected_ids = {row["sample_id"] for row in manifest["test"]}
     for model in models:
         previous = [row for row in stored if row["model_id"] == model["model_id"]]
